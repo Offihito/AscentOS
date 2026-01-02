@@ -1,3 +1,3 @@
 # AscentOS
 
-Just a hobby project for now.
+64 bit Hobby Operating system with file system
