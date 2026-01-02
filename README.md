@@ -1,41 +1,65 @@
 # 🚀 AscentOS
 
-**64-bit Açık Kaynak Hobi İşletim Sistemi**  
-Dosya sistemi desteğiyle geliştirilen eğlenceli bir hobi proje.
+> A modern 64-bit hobby operating system with integrated file system support
 
-## 📋 Özellikler
+## ✨ Features
 
-- 64-bit x86 mimari
-- Kendi dosya sistemi implementasyonu
-- Metin modu çalıştırma desteği
-- Basit Grafiksel Arayüz (GUI) modu
-- QEMU emülatörü ile hızlı test
+- **64-bit Architecture** - Built for modern hardware
+- **Custom File System** - Native file management capabilities
+- **Dual Mode Support** - Text and GUI interfaces
+- **Open Source** - Community-driven development
 
-## 🛠️ Nasıl Derlenir ve Çalıştırılır?
+## 🛠️ Building from Source
 
-### Gereksinimler
-- Git
-- Make
-- QEMU
-- x86_64 çapraz derleyici (genellikle repo ile uyumlu toolchain)
+### Prerequisites
 
-### Adımlar
+Ensure you have the necessary build tools installed on your system.
 
-1. Repoyu klonlayın:
+### Quick Start
+
+1. **Clone the repository**
    ```bash
    git clone https://github.com/Offihito/AscentOS
-2. Klasöre girin:
- ```bash
- cd AscentOS
-Çalıştırma seçenekleri:
+   ```
 
-Metin modu için:
-make run
+2. **Navigate to the project directory**
+   ```bash
+   cd AscentOS
+   ```
 
-GUI modu için:
-make run-gui
+3. **Build and run**
+   
+   For text mode:
+   ```bash
+   make run
+   ```
+   
+   For GUI mode:
+   ```bash
+   make run-gui
+   ```
 
-Ek komutlar:
-Sadece derlemek için: make
-Temizlik için: make clean
- 
+## 🎯 Usage Modes
+
+| Mode | Command | Description |
+|------|---------|-------------|
+| Text | `make run` | Launches AscentOS in text-based interface |
+| GUI | `make run-gui` | Launches AscentOS with graphical interface |
+
+## 📝 License
+
+This project is a hobby operating system development project.
+
+## 🤝 Contributing
+
+Contributions, issues, and feature requests are welcome!
+
+## 📧 Contact
+
+Project Link: [https://github.com/Offihito/AscentOS](https://github.com/Offihito/AscentOS)
+
+---
+
+<div align="center">
+Made with ❤️ by Offihito
+</div>
