@@ -1,3 +1,0 @@
-nasm -f elf64 kernel/boot64.asm -o boot64.o
-kernel/boot64.asm:218: error: invalid combination of opcode and operands
-make: *** [Makefile:34: boot64.o] Error 1
