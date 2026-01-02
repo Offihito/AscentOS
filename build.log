@@ -1,0 +1,24 @@
+nasm -f elf64 kernel/boot64_gui.asm -o boot64_gui.o
+gcc -m64 -ffreestanding -nostdlib -mno-red-zone -mcmodel=kernel -mno-mmx -mno-sse -mno-sse2 -fno-stack-protector -fno-pic -Wall -Wextra -O2 -c kernel/kernel64_gui.c -o kernel64_gui.o
+nasm -f elf64 kernel/interrupts64_gui.asm -o interrupts64_gui.o
+ld -n -nostdlib -T kernel/linker64.ld boot64_gui.o kernel64_gui.o interrupts64_gui.o -o kernel64_gui.elf
+ld: warning: interrupts64_gui.o: missing .note.GNU-stack section implies executable stack
+ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+ld: warning: kernel64_gui.elf has a LOAD segment with RWX permissions
+GUI Mode ISO oluşturuluyor...
+mkdir -p isodir-gui/boot/grub
+cp kernel64_gui.elf isodir-gui/boot/
+cp grub64_gui.cfg isodir-gui/boot/grub/grub.cfg
+grub-mkrescue -o AscentOS-GUI.iso isodir-gui 2>&1 | grep -v "xorriso" || true
+
+Drive current: -outdev 'stdio:AscentOS-GUI.iso'
+Media current: stdio file, overwriteable
+Media status : is blank
+Media summary: 0 sessions, 0 data blocks, 0 data,  377g free
+Added to ISO image: directory '/'='/tmp/grub.SSL1RV'
+Added to ISO image: directory '/'='/home/offihito/myos/isodir-gui'
+ISO image produced: 6023 sectors
+Written to medium : 6023 sectors at LBA 0
+Writing to 'stdio:AscentOS-GUI.iso' completed successfully.
+
+✓ GUI Mode ISO hazır!

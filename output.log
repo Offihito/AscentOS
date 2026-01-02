@@ -1,0 +1,9 @@
+▶ VBE GUI Mode başlatılıyor (1024x768x32)...
+qemu-system-x86_64 \
+  -cdrom AscentOS64-GUI.iso \
+  -drive file=disk.img,format=raw,if=ide,cache=writeback \
+  -m 512M \
+  -cpu qemu64 \
+  -boot d \
+  -serial stdio \
+  -vga std
