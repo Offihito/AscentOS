@@ -37,6 +37,8 @@ static IDTPointer idtp;
 extern void isr_keyboard(void);
 extern void isr_mouse(void);
 extern void load_idt64(IDTPointer* ptr);
+extern void isr_timer(void);
+extern void isr_scheduler(void);
 
 // IDT entry ayarla
 static void idt_set_gate(uint8_t num, uint64_t handler, uint16_t sel, uint8_t flags) {
@@ -99,11 +101,17 @@ void init_interrupts64(void) {
     // PIC'i yeniden programla
     pic_remap();
     
+    // Timer interrupt'ı ayarla (IRQ0 -> INT 32)
+    idt_set_gate(32, (uint64_t)isr_timer, 0x08, 0x8E);
+    
     // Keyboard interrupt'ı ayarla (IRQ1 -> INT 33)
     idt_set_gate(33, (uint64_t)isr_keyboard, 0x08, 0x8E);
     
     // Mouse interrupt'ı ayarla (IRQ12 -> INT 44)
     idt_set_gate(44, (uint64_t)isr_mouse, 0x08, 0x8E);
+    
+    // Scheduler interrupt (INT 0x80) - Software interrupt
+    idt_set_gate(0x80, (uint64_t)isr_scheduler, 0x08, 0x8E);
     
     // IDT pointer'ı ayarla
     idtp.limit = sizeof(idt) - 1;
@@ -112,12 +120,18 @@ void init_interrupts64(void) {
     // IDT'yi yükle
     load_idt64(&idtp);
     
-    // IRQ1 (Keyboard) ve IRQ12 (Mouse) etkinleştir
+    // IRQ'ları etkinleştir
+    irq_enable(0);   // Timer (CRITICAL for multitasking!)
     irq_enable(1);   // Keyboard
     irq_enable(12);  // Mouse (Slave PIC'te IRQ4)
+    irq_enable(2);   // Slave PIC cascade
     
-    // IRQ2'yi de etkinleştir (Slave PIC cascade)
-    irq_enable(2);
+    // Timer'ı yapılandır (PIT - Programmable Interval Timer)
+    // 1000 Hz (1ms per tick)
+    uint32_t divisor = 1193182 / 1000;  // 1000 Hz
+    outb(0x43, 0x36);  // Channel 0, mode 3 (square wave)
+    outb(0x40, divisor & 0xFF);
+    outb(0x40, (divisor >> 8) & 0xFF);
     
     // Interrupt'ları etkinleştir
     __asm__ volatile ("sti");

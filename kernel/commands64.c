@@ -5,6 +5,11 @@
 #include "script64.h"  // ADD THIS LINE
 #include "accounts64.h"
 #include "wallpaper64.h"
+#include "network64.h"
+#include "icmp64.h"
+#include "arp64.h"
+#include "udp64.h"
+#include "task64.h"
 
 extern void println64(const char* str, uint8_t color);
 extern void print_str64(const char* str, uint8_t color);
@@ -943,6 +948,1375 @@ void cmd_pwd(const char* args, CommandOutput* output) {
     const char* cwd = fs_getcwd64();
     output_add_line(output, cwd, VGA_CYAN);
 }
+void cmd_ifconfig(const char* args, CommandOutput* output) {
+    if (str_len(args) == 0) {
+        // Show current network configuration
+        output_add_line(output, "Network Interface Configuration:", VGA_CYAN);
+        output_add_line(output, "========================================", VGA_CYAN);
+        output_add_empty_line(output);
+        
+        // Network card info
+        const char* card_type = network_get_card_type_string();
+        char line[MAX_LINE_LENGTH];
+        
+        str_cpy(line, "Network Card: ");
+        str_concat(line, card_type);
+        output_add_line(output, line, VGA_YELLOW);
+        
+        // Status
+        if (network_is_initialized()) {
+            output_add_line(output, "Status: Initialized", VGA_GREEN);
+        } else {
+            output_add_line(output, "Status: Not initialized", VGA_RED);
+        }
+        
+        if (network_link_up()) {
+            output_add_line(output, "Link: UP", VGA_GREEN);
+        } else {
+            output_add_line(output, "Link: DOWN", VGA_RED);
+        }
+        
+        output_add_empty_line(output);
+        
+        // MAC Address
+        MACAddress mac;
+        network_get_mac(&mac);
+        char mac_str[18];
+        mac_to_string(&mac, mac_str);
+        
+        str_cpy(line, "MAC Address: ");
+        str_concat(line, mac_str);
+        output_add_line(output, line, VGA_WHITE);
+        
+        output_add_empty_line(output);
+        
+        // IP Configuration
+        NetworkConfig config;
+        network_get_config(&config);
+        
+        char ip_str[16];
+        ip_to_string(&config.ip, ip_str);
+        str_cpy(line, "IPv4 Address: ");
+        str_concat(line, ip_str);
+        output_add_line(output, line, VGA_WHITE);
+        
+        ip_to_string(&config.subnet, ip_str);
+        str_cpy(line, "Subnet Mask:  ");
+        str_concat(line, ip_str);
+        output_add_line(output, line, VGA_WHITE);
+        
+        ip_to_string(&config.gateway, ip_str);
+        str_cpy(line, "Gateway:      ");
+        str_concat(line, ip_str);
+        output_add_line(output, line, VGA_WHITE);
+        
+        ip_to_string(&config.dns, ip_str);
+        str_cpy(line, "DNS Server:   ");
+        str_concat(line, ip_str);
+        output_add_line(output, line, VGA_WHITE);
+        
+        output_add_empty_line(output);
+        
+        // DHCP Status
+        if (config.dhcp_enabled) {
+            output_add_line(output, "DHCP: Enabled", VGA_GREEN);
+        } else {
+            output_add_line(output, "DHCP: Disabled (Static IP)", VGA_YELLOW);
+        }
+        
+        output_add_empty_line(output);
+        
+        // Statistics
+        uint64_t sent, received, errors;
+        network_get_stats(&sent, &received, &errors);
+        
+        output_add_line(output, "Statistics:", VGA_CYAN);
+        
+        char temp[32];
+        uint64_to_string(sent, temp);
+        str_cpy(line, "  Packets Sent:     ");
+        str_concat(line, temp);
+        output_add_line(output, line, VGA_WHITE);
+        
+        uint64_to_string(received, temp);
+        str_cpy(line, "  Packets Received: ");
+        str_concat(line, temp);
+        output_add_line(output, line, VGA_WHITE);
+        
+        uint64_to_string(errors, temp);
+        str_cpy(line, "  Errors:           ");
+        str_concat(line, temp);
+        output_add_line(output, line, errors > 0 ? VGA_RED : VGA_WHITE);
+        
+        return;
+    }
+    
+    // Parse subcommand
+    char subcmd[32];
+    int i = 0;
+    while (args[i] && args[i] != ' ' && i < 31) {
+        subcmd[i] = args[i];
+        i++;
+    }
+    subcmd[i] = '\0';
+    
+    while (args[i] == ' ') i++;
+    const char* value = &args[i];
+    
+    // Set IP address
+    if (str_cmp(subcmd, "ip") == 0) {
+        if (str_len(value) == 0) {
+            output_add_line(output, "Usage: ifconfig ip <address>", VGA_RED);
+            output_add_line(output, "Example: ifconfig ip 192.168.1.100", VGA_CYAN);
+            return;
+        }
+        
+        IPv4Address new_ip;
+        if (ip_from_string(value, &new_ip)) {
+            NetworkConfig config;
+            network_get_config(&config);
+            config.ip = new_ip;
+            network_set_config(&config);
+            
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "IP address set to: ");
+            str_concat(msg, value);
+            output_add_line(output, msg, VGA_GREEN);
+        } else {
+            output_add_line(output, "Invalid IP address format", VGA_RED);
+        }
+        return;
+    }
+    
+    // Set subnet mask
+    if (str_cmp(subcmd, "subnet") == 0) {
+        if (str_len(value) == 0) {
+            output_add_line(output, "Usage: ifconfig subnet <mask>", VGA_RED);
+            output_add_line(output, "Example: ifconfig subnet 255.255.255.0", VGA_CYAN);
+            return;
+        }
+        
+        IPv4Address new_subnet;
+        if (ip_from_string(value, &new_subnet)) {
+            NetworkConfig config;
+            network_get_config(&config);
+            config.subnet = new_subnet;
+            network_set_config(&config);
+            
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "Subnet mask set to: ");
+            str_concat(msg, value);
+            output_add_line(output, msg, VGA_GREEN);
+        } else {
+            output_add_line(output, "Invalid subnet mask format", VGA_RED);
+        }
+        return;
+    }
+    
+    // Set gateway
+    if (str_cmp(subcmd, "gateway") == 0) {
+        if (str_len(value) == 0) {
+            output_add_line(output, "Usage: ifconfig gateway <address>", VGA_RED);
+            output_add_line(output, "Example: ifconfig gateway 192.168.1.1", VGA_CYAN);
+            return;
+        }
+        
+        IPv4Address new_gateway;
+        if (ip_from_string(value, &new_gateway)) {
+            NetworkConfig config;
+            network_get_config(&config);
+            config.gateway = new_gateway;
+            network_set_config(&config);
+            
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "Gateway set to: ");
+            str_concat(msg, value);
+            output_add_line(output, msg, VGA_GREEN);
+        } else {
+            output_add_line(output, "Invalid gateway address format", VGA_RED);
+        }
+        return;
+    }
+    
+    // Set DNS
+    if (str_cmp(subcmd, "dns") == 0) {
+        if (str_len(value) == 0) {
+            output_add_line(output, "Usage: ifconfig dns <address>", VGA_RED);
+            output_add_line(output, "Example: ifconfig dns 8.8.8.8", VGA_CYAN);
+            return;
+        }
+        
+        IPv4Address new_dns;
+        if (ip_from_string(value, &new_dns)) {
+            NetworkConfig config;
+            network_get_config(&config);
+            config.dns = new_dns;
+            network_set_config(&config);
+            
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "DNS server set to: ");
+            str_concat(msg, value);
+            output_add_line(output, msg, VGA_GREEN);
+        } else {
+            output_add_line(output, "Invalid DNS address format", VGA_RED);
+        }
+        return;
+    }
+    
+    output_add_line(output, "Unknown subcommand", VGA_RED);
+    output_add_line(output, "Available: ip, subnet, gateway, dns", VGA_CYAN);
+}
+
+void cmd_ping(const char* args, CommandOutput* output) {
+    if (str_len(args) == 0) {
+        output_add_line(output, "Usage: ping <ip_address> [count]", VGA_RED);
+        output_add_line(output, "Example: ping 8.8.8.8", VGA_CYAN);
+        output_add_line(output, "Example: ping 8.8.8.8 5", VGA_CYAN);
+        return;
+    }
+    
+    // Parse IP address
+    char ip_str[32];
+    int i = 0;
+    while (args[i] && args[i] != ' ' && i < 31) {
+        ip_str[i] = args[i];
+        i++;
+    }
+    ip_str[i] = '\0';
+    
+    IPv4Address target;
+    if (!ip_from_string(ip_str, &target)) {
+        output_add_line(output, "Invalid IP address", VGA_RED);
+        return;
+    }
+    
+    // Parse count (default 4)
+    uint8_t count = 4;
+    if (args[i] == ' ') {
+        i++;
+        int count_val = 0;
+        while (args[i] >= '0' && args[i] <= '9') {
+            count_val = count_val * 10 + (args[i] - '0');
+            i++;
+        }
+        if (count_val > 0 && count_val <= 10) {
+            count = count_val;
+        }
+    }
+    
+    if (!network_is_initialized()) {
+        output_add_line(output, "Network not initialized", VGA_RED);
+        return;
+    }
+    
+    // Show ping header
+    char msg[MAX_LINE_LENGTH];
+    str_cpy(msg, "PING ");
+    str_concat(msg, ip_str);
+    
+    char temp[64];
+    str_concat(msg, " (");
+    str_concat(msg, ip_str);
+    str_concat(msg, ") ");
+    int_to_str(PING_DATA_SIZE, temp);
+    str_concat(msg, temp);
+    str_concat(msg, " bytes of data");
+    output_add_line(output, msg, VGA_CYAN);
+    output_add_empty_line(output);
+    
+    // Initialize ICMP
+    icmp_init();
+    
+    // Perform ping
+    PingStats stats;
+    bool success = ping_host(&target, count, &stats);
+    
+    // Display results for each ping
+    for (uint8_t i = 0; i < count; i++) {
+        if (i < stats.received) {
+            // Success - show reply
+            str_cpy(msg, "64 bytes from ");
+            str_concat(msg, ip_str);
+            str_concat(msg, ": icmp_seq=");
+            int_to_str(i + 1, temp);
+            str_concat(msg, temp);
+            str_concat(msg, " ttl=64 time=");
+            
+            // Calculate time for this packet (approximate)
+            uint32_t time_ms = stats.avg_rtt + ((i % 3) - 1) * 2;
+            int_to_str(time_ms, temp);
+            str_concat(msg, temp);
+            str_concat(msg, ".");
+            int_to_str((time_ms % 10) * 10, temp);
+            str_concat(msg, temp);
+            str_concat(msg, " ms");
+            
+            output_add_line(output, msg, VGA_GREEN);
+        } else {
+            // Timeout
+            str_cpy(msg, "Request timeout for icmp_seq ");
+            int_to_str(i + 1, temp);
+            str_concat(msg, temp);
+            output_add_line(output, msg, VGA_RED);
+        }
+    }
+    
+    output_add_empty_line(output);
+    
+    // Show statistics
+    str_cpy(msg, "--- ");
+    str_concat(msg, ip_str);
+    str_concat(msg, " ping statistics ---");
+    output_add_line(output, msg, VGA_CYAN);
+    
+    // Packets transmitted/received
+    str_cpy(msg, "");
+    int_to_str(stats.sent, temp);
+    str_concat(msg, temp);
+    str_concat(msg, " packets transmitted, ");
+    int_to_str(stats.received, temp);
+    str_concat(msg, temp);
+    str_concat(msg, " received, ");
+    
+    // Calculate packet loss percentage
+    uint32_t loss_percent = 0;
+    if (stats.sent > 0) {
+        loss_percent = (stats.lost * 100) / stats.sent;
+    }
+    int_to_str(loss_percent, temp);
+    str_concat(msg, temp);
+    str_concat(msg, "% packet loss");
+    
+    output_add_line(output, msg, stats.lost > 0 ? VGA_YELLOW : VGA_GREEN);
+    
+    // RTT statistics (only if we got replies)
+    if (stats.received > 0 && success) {
+        str_cpy(msg, "rtt min/avg/max = ");
+        int_to_str(stats.min_rtt, temp);
+        str_concat(msg, temp);
+        str_concat(msg, "/");
+        int_to_str(stats.avg_rtt, temp);
+        str_concat(msg, temp);
+        str_concat(msg, "/");
+        int_to_str(stats.max_rtt, temp);
+        str_concat(msg, temp);
+        str_concat(msg, " ms");
+        output_add_line(output, msg, VGA_WHITE);
+    }
+    
+    output_add_empty_line(output);
+    
+    // Implementation note
+    if (success) {
+        output_add_line(output, "Note: Real ICMP implementation active!", VGA_GREEN);
+        output_add_line(output, "Packets are being built with IP/ICMP headers", VGA_CYAN);
+    } else {
+        output_add_line(output, "Note: All packets lost or timed out", VGA_YELLOW);
+    }
+}
+
+void cmd_netstat(const char* args, CommandOutput* output) {
+    (void)args;
+    
+    output_add_line(output, "Network Statistics:", VGA_CYAN);
+    output_add_line(output, "========================================", VGA_CYAN);
+    output_add_empty_line(output);
+    
+    uint64_t sent, received, errors;
+    network_get_stats(&sent, &received, &errors);
+    
+    char line[MAX_LINE_LENGTH];
+    char temp[32];
+    
+    output_add_line(output, "Packet Statistics:", VGA_YELLOW);
+    
+    uint64_to_string(sent, temp);
+    str_cpy(line, "  Packets Sent:     ");
+    str_concat(line, temp);
+    output_add_line(output, line, VGA_WHITE);
+    
+    uint64_to_string(received, temp);
+    str_cpy(line, "  Packets Received: ");
+    str_concat(line, temp);
+    output_add_line(output, line, VGA_WHITE);
+    
+    uint64_to_string(errors, temp);
+    str_cpy(line, "  Errors:           ");
+    str_concat(line, temp);
+    output_add_line(output, line, errors > 0 ? VGA_RED : VGA_WHITE);
+    
+    output_add_empty_line(output);
+    
+    // Connection status
+    output_add_line(output, "Active Connections:", VGA_YELLOW);
+    output_add_line(output, "  None (TCP/UDP not yet implemented)", VGA_DARK_GRAY);
+    
+    output_add_empty_line(output);
+    output_add_line(output, "Note: Full network stack coming soon!", VGA_CYAN);
+}
+void cmd_udp(const char* args, CommandOutput* output) {
+    if (str_len(args) == 0) {
+        output_add_line(output, "UDP Protocol Commands:", VGA_CYAN);
+        output_add_line(output, "========================================", VGA_CYAN);
+        output_add_empty_line(output);
+        output_add_line(output, "Usage:", VGA_YELLOW);
+        output_add_line(output, "  udp send <ip> <port> <message>  - Send UDP packet", VGA_WHITE);
+        output_add_line(output, "  udp listen <port>               - Listen on port", VGA_WHITE);
+        output_add_line(output, "  udp sockets                     - List active sockets", VGA_WHITE);
+        output_add_line(output, "  udp stats                       - Show statistics", VGA_WHITE);
+        output_add_line(output, "  udp close <socket_id>           - Close socket", VGA_WHITE);
+        output_add_empty_line(output);
+        output_add_line(output, "Examples:", VGA_YELLOW);
+        output_add_line(output, "  udp send 10.0.2.2 8888 Hello!", VGA_GREEN);
+        output_add_line(output, "  udp listen 9999", VGA_GREEN);
+        return;
+    }
+    
+    // Parse subcommand
+    char subcmd[32];
+    int i = 0;
+    while (args[i] && args[i] != ' ' && i < 31) {
+        subcmd[i] = args[i];
+        i++;
+    }
+    subcmd[i] = '\0';
+    
+    while (args[i] == ' ') i++;
+    const char* subcmd_args = &args[i];
+    
+    // SEND command
+    if (str_cmp(subcmd, "send") == 0) {
+        // Parse: ip port message
+        char ip_str[32];
+        char port_str[16];
+        
+        int j = 0;
+        while (subcmd_args[j] && subcmd_args[j] != ' ' && j < 31) {
+            ip_str[j] = subcmd_args[j];
+            j++;
+        }
+        ip_str[j] = '\0';
+        
+        while (subcmd_args[j] == ' ') j++;
+        
+        int k = 0;
+        while (subcmd_args[j] && subcmd_args[j] != ' ' && k < 15) {
+            port_str[k++] = subcmd_args[j++];
+        }
+        port_str[k] = '\0';
+        
+        while (subcmd_args[j] == ' ') j++;
+        const char* message = &subcmd_args[j];
+        
+        if (str_len(ip_str) == 0 || str_len(port_str) == 0 || str_len(message) == 0) {
+            output_add_line(output, "Usage: udp send <ip> <port> <message>", VGA_RED);
+            output_add_line(output, "Example: udp send 10.0.2.2 8888 Hello World!", VGA_CYAN);
+            return;
+        }
+        
+        // Parse IP
+        IPv4Address dst_ip;
+        if (!ip_from_string(ip_str, &dst_ip)) {
+            output_add_line(output, "Invalid IP address", VGA_RED);
+            return;
+        }
+        
+        // Parse port
+        uint16_t port = 0;
+        for (int m = 0; port_str[m]; m++) {
+            if (port_str[m] >= '0' && port_str[m] <= '9') {
+                port = port * 10 + (port_str[m] - '0');
+            } else {
+                output_add_line(output, "Invalid port number", VGA_RED);
+                return;
+            }
+        }
+        
+        if (port == 0 || port > 65535) {
+            output_add_line(output, "Port must be between 1 and 65535", VGA_RED);
+            return;
+        }
+        
+        // Send UDP packet
+        char msg[MAX_LINE_LENGTH];
+        str_cpy(msg, "Sending UDP packet to ");
+        str_concat(msg, ip_str);
+        str_concat(msg, ":");
+        str_concat(msg, port_str);
+        output_add_line(output, msg, VGA_YELLOW);
+        
+        uint16_t src_port = udp_allocate_port();
+        int message_len = str_len(message);
+        
+        if (udp_send_packet(&dst_ip, port, src_port, (const uint8_t*)message, message_len)) {
+            str_cpy(msg, "UDP packet sent successfully! (");
+            char len_str[16];
+            int_to_str(message_len, len_str);
+            str_concat(msg, len_str);
+            str_concat(msg, " bytes)");
+            output_add_line(output, msg, VGA_GREEN);
+            
+            str_cpy(msg, "Message: ");
+            str_concat(msg, message);
+            output_add_line(output, msg, VGA_CYAN);
+        } else {
+            output_add_line(output, "Failed to send UDP packet", VGA_RED);
+        }
+        
+        return;
+    }
+    
+    // LISTEN command
+    if (str_cmp(subcmd, "listen") == 0) {
+        if (str_len(subcmd_args) == 0) {
+            output_add_line(output, "Usage: udp listen <port>", VGA_RED);
+            output_add_line(output, "Example: udp listen 9999", VGA_CYAN);
+            return;
+        }
+        
+        // Parse port
+        uint16_t port = 0;
+        for (int j = 0; subcmd_args[j] >= '0' && subcmd_args[j] <= '9'; j++) {
+            port = port * 10 + (subcmd_args[j] - '0');
+        }
+        
+        if (port == 0 || port > 65535) {
+            output_add_line(output, "Invalid port number (1-65535)", VGA_RED);
+            return;
+        }
+        
+        // Create socket
+        int socket_id = udp_socket_create();
+        if (socket_id < 0) {
+            output_add_line(output, "Failed to create socket (limit reached)", VGA_RED);
+            return;
+        }
+        
+        // Bind to port
+        if (!udp_socket_bind(socket_id, port)) {
+            udp_socket_close(socket_id);
+            output_add_line(output, "Failed to bind to port (already in use?)", VGA_RED);
+            return;
+        }
+        
+        char msg[MAX_LINE_LENGTH];
+        str_cpy(msg, "UDP socket created: ID=");
+        char id_str[16];
+        int_to_str(socket_id, id_str);
+        str_concat(msg, id_str);
+        output_add_line(output, msg, VGA_GREEN);
+        
+        str_cpy(msg, "Listening on port ");
+        char port_str[16];
+        int_to_str(port, port_str);
+        str_concat(msg, port_str);
+        output_add_line(output, msg, VGA_CYAN);
+        
+        output_add_empty_line(output);
+        output_add_line(output, "Note: Socket will receive packets automatically", VGA_YELLOW);
+        output_add_line(output, "Use 'udp recv <socket_id>' to read data (future)", VGA_YELLOW);
+        
+        return;
+    }
+    
+    // SOCKETS command
+    if (str_cmp(subcmd, "sockets") == 0) {
+        output_add_line(output, "Active UDP Sockets:", VGA_CYAN);
+        output_add_line(output, "========================================", VGA_CYAN);
+        output_add_line(output, "ID  State       Port   Sent    Recv", VGA_YELLOW);
+        output_add_line(output, "--  ----------  -----  ------  ------", VGA_DARK_GRAY);
+        
+        int active_count = 0;
+        for (int sid = 0; sid < MAX_UDP_SOCKETS; sid++) {
+            UDPSocket* sock = udp_get_socket(sid);
+            if (!sock) continue;
+            
+            active_count++;
+            
+            char line[MAX_LINE_LENGTH];
+            char temp[32];
+            
+            // Socket ID
+            int_to_str(sid, temp);
+            str_cpy(line, temp);
+            while (str_len(line) < 4) str_concat(line, " ");
+            
+            // State
+            const char* state_str;
+            if (sock->state == UDP_SOCKET_CLOSED) state_str = "CLOSED";
+            else if (sock->state == UDP_SOCKET_BOUND) state_str = "BOUND";
+            else state_str = "CONNECTED";
+            
+            str_concat(line, state_str);
+            while (str_len(line) < 16) str_concat(line, " ");
+            
+            // Port
+            int_to_str(sock->local_port, temp);
+            str_concat(line, temp);
+            while (str_len(line) < 23) str_concat(line, " ");
+            
+            // Packets sent
+            uint64_to_string(sock->packets_sent, temp);
+            str_concat(line, temp);
+            while (str_len(line) < 31) str_concat(line, " ");
+            
+            // Packets received
+            uint64_to_string(sock->packets_received, temp);
+            str_concat(line, temp);
+            
+            output_add_line(output, line, VGA_WHITE);
+        }
+        
+        if (active_count == 0) {
+            output_add_line(output, "  (no active sockets)", VGA_DARK_GRAY);
+        }
+        
+        output_add_empty_line(output);
+        
+        char msg[MAX_LINE_LENGTH];
+        str_cpy(msg, "Total: ");
+        char count_str[16];
+        int_to_str(active_count, count_str);
+        str_concat(msg, count_str);
+        str_concat(msg, " / ");
+        int_to_str(MAX_UDP_SOCKETS, count_str);
+        str_concat(msg, count_str);
+        str_concat(msg, " sockets");
+        output_add_line(output, msg, VGA_GREEN);
+        
+        return;
+    }
+    
+    // STATS command
+    if (str_cmp(subcmd, "stats") == 0) {
+        output_add_line(output, "UDP Protocol Statistics:", VGA_CYAN);
+        output_add_line(output, "========================================", VGA_CYAN);
+        
+        uint64_t sent, received, errors;
+        udp_get_stats(&sent, &received, &errors);
+        
+        char line[MAX_LINE_LENGTH];
+        char temp[32];
+        
+        str_cpy(line, "  Packets Sent:     ");
+        uint64_to_string(sent, temp);
+        str_concat(line, temp);
+        output_add_line(output, line, VGA_WHITE);
+        
+        str_cpy(line, "  Packets Received: ");
+        uint64_to_string(received, temp);
+        str_concat(line, temp);
+        output_add_line(output, line, VGA_WHITE);
+        
+        str_cpy(line, "  Errors:           ");
+        uint64_to_string(errors, temp);
+        str_concat(line, temp);
+        output_add_line(output, line, errors > 0 ? VGA_RED : VGA_WHITE);
+        
+        output_add_empty_line(output);
+        
+        int active = udp_get_active_sockets();
+        str_cpy(line, "  Active Sockets:   ");
+        int_to_str(active, temp);
+        str_concat(line, temp);
+        output_add_line(output, line, VGA_GREEN);
+        
+        return;
+    }
+    
+    // CLOSE command
+    if (str_cmp(subcmd, "close") == 0) {
+        if (str_len(subcmd_args) == 0) {
+            output_add_line(output, "Usage: udp close <socket_id>", VGA_RED);
+            output_add_line(output, "Example: udp close 0", VGA_CYAN);
+            return;
+        }
+        
+        int socket_id = 0;
+        for (int j = 0; subcmd_args[j] >= '0' && subcmd_args[j] <= '9'; j++) {
+            socket_id = socket_id * 10 + (subcmd_args[j] - '0');
+        }
+        
+        if (udp_socket_close(socket_id)) {
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "Socket ");
+            char id_str[16];
+            int_to_str(socket_id, id_str);
+            str_concat(msg, id_str);
+            str_concat(msg, " closed");
+            output_add_line(output, msg, VGA_GREEN);
+        } else {
+            output_add_line(output, "Failed to close socket (invalid ID?)", VGA_RED);
+        }
+        
+        return;
+    }
+    
+    output_add_line(output, "Unknown UDP command", VGA_RED);
+    output_add_line(output, "Type 'udp' for usage information", VGA_CYAN);
+}
+void cmd_arp(const char* args, CommandOutput* output) {
+    if (str_len(args) == 0) {
+        // Show ARP cache
+        output_add_line(output, "ARP Cache:", VGA_CYAN);
+        output_add_line(output, "========================================", VGA_CYAN);
+        output_add_line(output, "IP Address        MAC Address           Type", VGA_YELLOW);
+        output_add_line(output, "------------      -----------------     ----", VGA_DARK_GRAY);
+        
+        ARPCacheEntry entries[ARP_CACHE_SIZE];
+        int count = arp_cache_get_entries(entries, ARP_CACHE_SIZE);
+        
+        if (count == 0) {
+            output_add_line(output, "  (no entries)", VGA_DARK_GRAY);
+        } else {
+            for (int i = 0; i < count; i++) {
+                char ip_str[16];
+                char mac_str[18];
+                ip_to_string(&entries[i].ip, ip_str);
+                mac_to_string(&entries[i].mac, mac_str);
+                
+                char line[MAX_LINE_LENGTH];
+                str_cpy(line, ip_str);
+                
+                // Pad IP to 18 chars
+                while (str_len(line) < 18) {
+                    str_concat(line, " ");
+                }
+                
+                str_concat(line, mac_str);
+                str_concat(line, "     ");
+                
+                if (entries[i].static_entry) {
+                    str_concat(line, "Static");
+                } else {
+                    str_concat(line, "Dynamic");
+                }
+                
+                output_add_line(output, line, VGA_WHITE);
+            }
+        }
+        
+        output_add_empty_line(output);
+        
+        // Show statistics
+        char msg[MAX_LINE_LENGTH];
+        str_cpy(msg, "Total entries: ");
+        char count_str[16];
+        int_to_str(count, count_str);
+        str_concat(msg, count_str);
+        str_concat(msg, " / ");
+        int_to_str(ARP_CACHE_SIZE, count_str);
+        str_concat(msg, count_str);
+        output_add_line(output, msg, VGA_GREEN);
+        
+        output_add_empty_line(output);
+        output_add_line(output, "Commands:", VGA_YELLOW);
+        output_add_line(output, "  arp              - Show ARP cache", VGA_WHITE);
+        output_add_line(output, "  arp request <ip> - Send ARP request", VGA_WHITE);
+        output_add_line(output, "  arp add <ip> <mac> - Add static entry", VGA_WHITE);
+        output_add_line(output, "  arp del <ip>     - Delete entry", VGA_WHITE);
+        output_add_line(output, "  arp clear        - Clear dynamic entries", VGA_WHITE);
+        
+        return;
+    }
+    
+    // Parse subcommand
+    char subcmd[32];
+    int i = 0;
+    while (args[i] && args[i] != ' ' && i < 31) {
+        subcmd[i] = args[i];
+        i++;
+    }
+    subcmd[i] = '\0';
+    
+    while (args[i] == ' ') i++;
+    const char* subcmd_args = &args[i];
+    
+    // ARP request
+    if (str_cmp(subcmd, "request") == 0) {
+        if (str_len(subcmd_args) == 0) {
+            output_add_line(output, "Usage: arp request <ip_address>", VGA_RED);
+            output_add_line(output, "Example: arp request 10.0.2.2", VGA_CYAN);
+            return;
+        }
+        
+        IPv4Address target_ip;
+        if (!ip_from_string(subcmd_args, &target_ip)) {
+            output_add_line(output, "Invalid IP address", VGA_RED);
+            return;
+        }
+        
+        output_add_line(output, "Sending ARP request...", VGA_YELLOW);
+        
+        if (arp_send_request(&target_ip)) {
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "ARP request sent to ");
+            str_concat(msg, subcmd_args);
+            output_add_line(output, msg, VGA_GREEN);
+            output_add_line(output, "Check cache in a moment with 'arp'", VGA_CYAN);
+        } else {
+            output_add_line(output, "Failed to send ARP request", VGA_RED);
+        }
+        
+        return;
+    }
+    
+    // Add static ARP entry
+    if (str_cmp(subcmd, "add") == 0) {
+        // Parse IP and MAC
+        char ip_str[32];
+        int j = 0;
+        while (subcmd_args[j] && subcmd_args[j] != ' ' && j < 31) {
+            ip_str[j] = subcmd_args[j];
+            j++;
+        }
+        ip_str[j] = '\0';
+        
+        while (subcmd_args[j] == ' ') j++;
+        const char* mac_str = &subcmd_args[j];
+        
+        if (str_len(ip_str) == 0 || str_len(mac_str) == 0) {
+            output_add_line(output, "Usage: arp add <ip> <mac>", VGA_RED);
+            output_add_line(output, "Example: arp add 192.168.1.1 00:11:22:33:44:55", VGA_CYAN);
+            return;
+        }
+        
+        IPv4Address ip;
+        MACAddress mac;
+        
+        if (!ip_from_string(ip_str, &ip)) {
+            output_add_line(output, "Invalid IP address", VGA_RED);
+            return;
+        }
+        
+        if (!mac_from_string(mac_str, &mac)) {
+            output_add_line(output, "Invalid MAC address", VGA_RED);
+            output_add_line(output, "Format: XX:XX:XX:XX:XX:XX", VGA_CYAN);
+            return;
+        }
+        
+        if (arp_cache_add(&ip, &mac, true)) {
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "Static ARP entry added: ");
+            str_concat(msg, ip_str);
+            str_concat(msg, " -> ");
+            str_concat(msg, mac_str);
+            output_add_line(output, msg, VGA_GREEN);
+        } else {
+            output_add_line(output, "Failed to add ARP entry (cache full?)", VGA_RED);
+        }
+        
+        return;
+    }
+    
+    // Delete ARP entry
+    if (str_cmp(subcmd, "del") == 0 || str_cmp(subcmd, "delete") == 0) {
+        if (str_len(subcmd_args) == 0) {
+            output_add_line(output, "Usage: arp del <ip_address>", VGA_RED);
+            output_add_line(output, "Example: arp del 192.168.1.1", VGA_CYAN);
+            return;
+        }
+        
+        IPv4Address ip;
+        if (!ip_from_string(subcmd_args, &ip)) {
+            output_add_line(output, "Invalid IP address", VGA_RED);
+            return;
+        }
+        
+        if (arp_cache_remove(&ip)) {
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "ARP entry deleted: ");
+            str_concat(msg, subcmd_args);
+            output_add_line(output, msg, VGA_GREEN);
+        } else {
+            output_add_line(output, "Failed to delete entry (not found or static)", VGA_RED);
+        }
+        
+        return;
+    }
+    
+    // Clear ARP cache
+    if (str_cmp(subcmd, "clear") == 0) {
+        arp_cache_clear();
+        output_add_line(output, "Dynamic ARP entries cleared", VGA_GREEN);
+        output_add_line(output, "Static entries preserved", VGA_CYAN);
+        return;
+    }
+    
+    output_add_line(output, "Unknown ARP command", VGA_RED);
+    output_add_line(output, "Type 'arp' for usage information", VGA_CYAN);
+}
+// ===========================================
+// MULTITASKING COMMANDS
+// ===========================================
+
+// PS command - Show process list
+void cmd_ps(const char* args, CommandOutput* output) {
+    (void)args;
+    
+    output_add_line(output, "Process List:", VGA_CYAN);
+    output_add_line(output, "========================================", VGA_CYAN);
+    output_add_line(output, "PID   STATE      PRI  CPU%  TIME   NAME", VGA_YELLOW);
+    output_add_line(output, "----  ---------  ---  ----  -----  ----", VGA_DARK_GRAY);
+    
+    Task* tasks[MAX_TASKS];
+    int count = task_get_all(tasks, MAX_TASKS);
+    
+    for (int i = 0; i < count; i++) {
+        Task* task = tasks[i];
+        
+        // Skip terminated tasks
+        if (task->state == TASK_STATE_TERMINATED) continue;
+        
+        char line[MAX_LINE_LENGTH];
+        char temp[32];
+        
+        // PID
+        int_to_str(task->pid, temp);
+        str_cpy(line, temp);
+        while (str_len(line) < 6) str_concat(line, " ");
+        
+        // State
+        const char* state_str;
+        uint8_t state_color = VGA_WHITE;
+        switch (task->state) {
+            case TASK_STATE_READY:
+                state_str = "READY";
+                state_color = VGA_GREEN;
+                break;
+            case TASK_STATE_RUNNING:
+                state_str = "RUNNING";
+                state_color = VGA_GREEN;
+                break;
+            case TASK_STATE_BLOCKED:
+                state_str = "BLOCKED";
+                state_color = VGA_YELLOW;
+                break;
+            case TASK_STATE_SLEEPING:
+                state_str = "SLEEPING";
+                state_color = VGA_CYAN;
+                break;
+            case TASK_STATE_TERMINATED:
+                state_str = "TERM";
+                state_color = VGA_RED;
+                break;
+            default:
+                state_str = "UNKNOWN";
+                state_color = VGA_DARK_GRAY;
+        }
+        
+        str_concat(line, state_str);
+        while (str_len(line) < 17) str_concat(line, " ");
+        
+        // Priority
+        int_to_str(task->priority, temp);
+        str_concat(line, temp);
+        while (str_len(line) < 22) str_concat(line, " ");
+        
+        // CPU usage
+        uint32_t cpu_usage = task_get_cpu_usage(task);
+        int_to_str(cpu_usage, temp);
+        str_concat(line, temp);
+        str_concat(line, "%");
+        while (str_len(line) < 28) str_concat(line, " ");
+        
+        // CPU time (in ticks)
+        uint64_to_string(task->cpu_time, temp);
+        str_concat(line, temp);
+        while (str_len(line) < 35) str_concat(line, " ");
+        
+        // Name
+        str_concat(line, task->name);
+        
+        output_add_line(output, line, state_color);
+    }
+    
+    output_add_empty_line(output);
+    
+    char msg[MAX_LINE_LENGTH];
+    str_cpy(msg, "Total processes: ");
+    char count_str[16];
+    int_to_str(count, count_str);
+    str_concat(msg, count_str);
+    output_add_line(output, msg, VGA_GREEN);
+    
+    Task* current = task_get_current();
+    if (current) {
+        str_cpy(msg, "Current: ");
+        str_concat(msg, current->name);
+        str_concat(msg, " (PID ");
+        int_to_str(current->pid, count_str);
+        str_concat(msg, count_str);
+        str_concat(msg, ")");
+        output_add_line(output, msg, VGA_CYAN);
+    }
+}
+
+// TOP command - Interactive process monitor (single update for now)
+void cmd_top(const char* args, CommandOutput* output) {
+    (void)args;
+    
+    output_add_line(output, "╔════════════════════════════════════════════════════════╗", VGA_CYAN);
+    output_add_line(output, "║          AscentOS Task Monitor v1.0                    ║", VGA_GREEN);
+    output_add_line(output, "╚════════════════════════════════════════════════════════╝", VGA_CYAN);
+    output_add_empty_line(output);
+    
+    // System info
+    int total_tasks = task_count();
+    Task* current = task_get_current();
+    uint64_t uptime = get_system_ticks();
+    
+    char line[MAX_LINE_LENGTH];
+    char temp[32];
+    
+    str_cpy(line, "System Uptime: ");
+    uint64_to_string(uptime / 1000, temp);
+    str_concat(line, temp);
+    str_concat(line, " seconds");
+    output_add_line(output, line, VGA_WHITE);
+    
+    str_cpy(line, "Total Tasks: ");
+    int_to_str(total_tasks, temp);
+    str_concat(line, temp);
+    output_add_line(output, line, VGA_WHITE);
+    
+    if (current) {
+        str_cpy(line, "Current Task: ");
+        str_concat(line, current->name);
+        str_concat(line, " (PID ");
+        int_to_str(current->pid, temp);
+        str_concat(line, temp);
+        str_concat(line, ")");
+        output_add_line(output, line, VGA_GREEN);
+    }
+    
+    output_add_empty_line(output);
+    
+    // Task list header
+    output_add_line(output, "PID   NAME              STATE      PRI  CPU%   TIME", VGA_YELLOW);
+    output_add_line(output, "---   ----              -----      ---  ----   ----", VGA_DARK_GRAY);
+    
+    // Get all tasks
+    Task* tasks[MAX_TASKS];
+    int count = task_get_all(tasks, MAX_TASKS);
+    
+    // Sort by CPU usage (simple bubble sort)
+    for (int i = 0; i < count - 1; i++) {
+        for (int j = 0; j < count - i - 1; j++) {
+            uint32_t usage1 = task_get_cpu_usage(tasks[j]);
+            uint32_t usage2 = task_get_cpu_usage(tasks[j + 1]);
+            
+            if (usage1 < usage2) {
+                Task* temp_task = tasks[j];
+                tasks[j] = tasks[j + 1];
+                tasks[j + 1] = temp_task;
+            }
+        }
+    }
+    
+    // Display tasks
+    for (int i = 0; i < count && i < 20; i++) {
+        Task* task = tasks[i];
+        
+        if (task->state == TASK_STATE_TERMINATED) continue;
+        
+        str_cpy(line, "");
+        
+        // PID
+        int_to_str(task->pid, temp);
+        str_concat(line, temp);
+        while (str_len(line) < 6) str_concat(line, " ");
+        
+        // Name
+        str_concat(line, task->name);
+        while (str_len(line) < 24) str_concat(line, " ");
+        
+        // State
+        const char* state_str = "???";
+        switch (task->state) {
+            case TASK_STATE_READY: state_str = "READY"; break;
+            case TASK_STATE_RUNNING: state_str = "RUN"; break;
+            case TASK_STATE_BLOCKED: state_str = "BLOCK"; break;
+            case TASK_STATE_SLEEPING: state_str = "SLEEP"; break;
+            case TASK_STATE_TERMINATED: state_str = "TERM"; break;
+        }
+        str_concat(line, state_str);
+        while (str_len(line) < 35) str_concat(line, " ");
+        
+        // Priority
+        int_to_str(task->priority, temp);
+        str_concat(line, temp);
+        while (str_len(line) < 40) str_concat(line, " ");
+        
+        // CPU usage
+        uint32_t cpu = task_get_cpu_usage(task);
+        int_to_str(cpu, temp);
+        str_concat(line, temp);
+        str_concat(line, "%");
+        while (str_len(line) < 47) str_concat(line, " ");
+        
+        // CPU time
+        uint64_to_string(task->cpu_time, temp);
+        str_concat(line, temp);
+        
+        uint8_t color = VGA_WHITE;
+        if (task == current) color = VGA_GREEN;
+        else if (cpu > 50) color = VGA_RED;
+        else if (cpu > 20) color = VGA_YELLOW;
+        else if (task->state == TASK_STATE_SLEEPING) color = VGA_CYAN;
+        
+        output_add_line(output, line, color);
+    }
+    
+    output_add_empty_line(output);
+    output_add_line(output, "Legend: Green=Current, Red=High CPU, Yellow=Medium CPU", VGA_DARK_GRAY);
+    output_add_line(output, "Commands: ps (list), kill <pid> (terminate)", VGA_DARK_GRAY);
+}
+
+// KILL command - Terminate a process
+void cmd_kill(const char* args, CommandOutput* output) {
+    if (str_len(args) == 0) {
+        output_add_line(output, "Usage: kill <pid>", VGA_RED);
+        output_add_line(output, "Example: kill 5", VGA_CYAN);
+        output_add_line(output, "Use 'ps' to see process IDs", VGA_CYAN);
+        return;
+    }
+    
+    // Parse PID
+    uint32_t pid = 0;
+    for (int i = 0; args[i] >= '0' && args[i] <= '9'; i++) {
+        pid = pid * 10 + (args[i] - '0');
+    }
+    
+    if (pid == 0) {
+        output_add_line(output, "Error: Cannot kill idle task (PID 0)", VGA_RED);
+        return;
+    }
+    
+    // Get current task
+    Task* current = task_get_current();
+    if (current && current->pid == pid) {
+        output_add_line(output, "Error: Cannot kill current task", VGA_RED);
+        output_add_line(output, "Task will terminate itself when done", VGA_YELLOW);
+        return;
+    }
+    
+    // Find task
+    Task* task = task_get_by_pid(pid);
+    if (!task) {
+        char msg[MAX_LINE_LENGTH];
+        str_cpy(msg, "Error: No such process: PID ");
+        char pid_str[16];
+        int_to_str(pid, pid_str);
+        str_concat(msg, pid_str);
+        output_add_line(output, msg, VGA_RED);
+        return;
+    }
+    
+    if (task->state == TASK_STATE_TERMINATED) {
+        output_add_line(output, "Task is already terminated", VGA_YELLOW);
+        return;
+    }
+    
+    // Terminate task
+    task_terminate(task, -1);
+    
+    char msg[MAX_LINE_LENGTH];
+    str_cpy(msg, "Task terminated: ");
+    str_concat(msg, task->name);
+    str_concat(msg, " (PID ");
+    char pid_str[16];
+    int_to_str(pid, pid_str);
+    str_concat(msg, pid_str);
+    str_concat(msg, ")");
+    output_add_line(output, msg, VGA_GREEN);
+}
+
+// DEMO command - Create demo tasks
+void cmd_demo(const char* args, CommandOutput* output) {
+    if (str_len(args) == 0) {
+        output_add_line(output, "Multitasking Demo Commands:", VGA_CYAN);
+        output_add_line(output, "========================================", VGA_CYAN);
+        output_add_empty_line(output);
+        output_add_line(output, "Usage:", VGA_YELLOW);
+        output_add_line(output, "  demo start      - Start all demo tasks", VGA_WHITE);
+        output_add_line(output, "  demo counter    - Start counter task", VGA_WHITE);
+        output_add_line(output, "  demo spinner    - Start spinner task", VGA_WHITE);
+        output_add_line(output, "  demo calc       - Start calculator task", VGA_WHITE);
+        output_add_line(output, "  demo status     - Show demo task status", VGA_WHITE);
+        output_add_empty_line(output);
+        output_add_line(output, "After starting demos, use 'ps' or 'top' to monitor", VGA_GREEN);
+        output_add_line(output, "Use 'kill <pid>' to stop demo tasks", VGA_GREEN);
+        return;
+    }
+    
+    // Parse subcommand
+    char subcmd[32];
+    int i = 0;
+    while (args[i] && args[i] != ' ' && i < 31) {
+        subcmd[i] = args[i];
+        i++;
+    }
+    subcmd[i] = '\0';
+    
+    if (str_cmp(subcmd, "start") == 0) {
+        output_add_line(output, "Starting demo tasks...", VGA_YELLOW);
+        output_add_empty_line(output);
+        
+        // Create demo tasks
+        Task* t1 = task_create("demo_counter", demo_task_counter, 10);
+        Task* t2 = task_create("demo_spinner", demo_task_spinner, 15);
+        Task* t3 = task_create("demo_calc", demo_task_calculator, 20);
+        
+        if (t1) {
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "✓ Counter task started (PID ");
+            char pid_str[16];
+            int_to_str(t1->pid, pid_str);
+            str_concat(msg, pid_str);
+            str_concat(msg, ")");
+            output_add_line(output, msg, VGA_GREEN);
+        }
+        
+        if (t2) {
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "✓ Spinner task started (PID ");
+            char pid_str[16];
+            int_to_str(t2->pid, pid_str);
+            str_concat(msg, pid_str);
+            str_concat(msg, ")");
+            output_add_line(output, msg, VGA_GREEN);
+        }
+        
+        if (t3) {
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "✓ Calculator task started (PID ");
+            char pid_str[16];
+            int_to_str(t3->pid, pid_str);
+            str_concat(msg, pid_str);
+            str_concat(msg, ")");
+            output_add_line(output, msg, VGA_GREEN);
+        }
+        
+        output_add_empty_line(output);
+        output_add_line(output, "Demo tasks are now running in the background!", VGA_CYAN);
+        output_add_line(output, "Use 'top' or 'ps' to monitor their activity", VGA_YELLOW);
+        
+        return;
+    }
+    
+    if (str_cmp(subcmd, "counter") == 0) {
+        Task* t = task_create("demo_counter", demo_task_counter, 10);
+        if (t) {
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "Counter task started (PID ");
+            char pid_str[16];
+            int_to_str(t->pid, pid_str);
+            str_concat(msg, pid_str);
+            str_concat(msg, ")");
+            output_add_line(output, msg, VGA_GREEN);
+        } else {
+            output_add_line(output, "Failed to create task", VGA_RED);
+        }
+        return;
+    }
+    
+    if (str_cmp(subcmd, "spinner") == 0) {
+        Task* t = task_create("demo_spinner", demo_task_spinner, 15);
+        if (t) {
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "Spinner task started (PID ");
+            char pid_str[16];
+            int_to_str(t->pid, pid_str);
+            str_concat(msg, pid_str);
+            str_concat(msg, ")");
+            output_add_line(output, msg, VGA_GREEN);
+        } else {
+            output_add_line(output, "Failed to create task", VGA_RED);
+        }
+        return;
+    }
+    
+    if (str_cmp(subcmd, "calc") == 0) {
+        Task* t = task_create("demo_calc", demo_task_calculator, 20);
+        if (t) {
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "Calculator task started (PID ");
+            char pid_str[16];
+            int_to_str(t->pid, pid_str);
+            str_concat(msg, pid_str);
+            str_concat(msg, ")");
+            output_add_line(output, msg, VGA_GREEN);
+        } else {
+            output_add_line(output, "Failed to create task", VGA_RED);
+        }
+        return;
+    }
+    
+    if (str_cmp(subcmd, "status") == 0) {
+        output_add_line(output, "Demo Task Status:", VGA_CYAN);
+        output_add_empty_line(output);
+        
+        Task* tasks[MAX_TASKS];
+        int count = task_get_all(tasks, MAX_TASKS);
+        int demo_count = 0;
+        
+        for (int j = 0; j < count; j++) {
+            Task* task = tasks[j];
+            
+            // Check if it's a demo task
+            if (task->name[0] == 'd' && task->name[1] == 'e' && 
+                task->name[2] == 'm' && task->name[3] == 'o') {
+                
+                if (task->state != TASK_STATE_TERMINATED) {
+                    demo_count++;
+                    
+                    char line[MAX_LINE_LENGTH];
+                    str_cpy(line, "  ");
+                    str_concat(line, task->name);
+                    str_concat(line, " (PID ");
+                    char pid_str[16];
+                    int_to_str(task->pid, pid_str);
+                    str_concat(line, pid_str);
+                    str_concat(line, ") - ");
+                    
+                    const char* state = "UNKNOWN";
+                    if (task->state == TASK_STATE_READY) state = "READY";
+                    else if (task->state == TASK_STATE_RUNNING) state = "RUNNING";
+                    else if (task->state == TASK_STATE_SLEEPING) state = "SLEEPING";
+                    
+                    str_concat(line, state);
+                    str_concat(line, " - CPU: ");
+                    
+                    uint32_t cpu = task_get_cpu_usage(task);
+                    int_to_str(cpu, pid_str);
+                    str_concat(line, pid_str);
+                    str_concat(line, "%");
+                    
+                    output_add_line(output, line, VGA_GREEN);
+                }
+            }
+        }
+        
+        if (demo_count == 0) {
+            output_add_line(output, "  No demo tasks running", VGA_YELLOW);
+            output_add_line(output, "  Use 'demo start' to launch demos", VGA_CYAN);
+        } else {
+            output_add_empty_line(output);
+            char msg[MAX_LINE_LENGTH];
+            str_cpy(msg, "Total demo tasks: ");
+            char count_str[16];
+            int_to_str(demo_count, count_str);
+            str_concat(msg, count_str);
+            output_add_line(output, msg, VGA_GREEN);
+        }
+        
+        return;
+    }
+    
+    output_add_line(output, "Unknown demo command", VGA_RED);
+    output_add_line(output, "Use 'demo' for help", VGA_CYAN);
+}
 // ===========================================
 // WALLPAPER COMMAND - Wallpaper management
 // ===========================================
@@ -1747,6 +3121,15 @@ static Command command_table[] = {
     {"su", "Switch user", cmd_su},
     
     // Special commands
+    {"ifconfig", "Network configuration", cmd_ifconfig},
+    {"ping", "Ping a host", cmd_ping},
+    {"udp", "UDP protocol operations", cmd_udp},
+    {"netstat", "Network statistics", cmd_netstat},
+    {"arp", "ARP cache", cmd_arp},
+    {"ps", "List processes", cmd_ps},
+    {"top", "Task monitor", cmd_top},
+    {"kill", "Terminate process", cmd_kill},
+    {"demo", "Multitasking demo", cmd_demo},
     {"cmatrix", "Matrix digital rain", cmd_cmatrix},
     {"reboot", "Reboot the system", cmd_reboot},
     {"wallpaper", "Wallpaper management", cmd_wallpaper},

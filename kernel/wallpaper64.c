@@ -12,6 +12,7 @@ extern void* memcpy64(void* dest, const void* src, size_t n);
 
 // Global wallpaper state
 static Wallpaper current_wallpaper = {0};
+static bool wallpaper_changed = false;
 
 // Memory allocator (simple bump allocator for wallpaper data)
 static uint8_t wallpaper_memory[800 * 600 * 4]; // Max 800x600 image
@@ -63,6 +64,15 @@ void wallpaper_init(void) {
     current_wallpaper.loaded = false;
     current_wallpaper.filename[0] = '\0';
     wallpaper_memory_used = 0;
+    wallpaper_changed = false;
+}
+
+bool wallpaper_has_changed(void) {
+    return wallpaper_changed;
+}
+
+void wallpaper_clear_changed_flag(void) {
+    wallpaper_changed = false;
 }
 
 bool wallpaper_load_bmp(const char* filename) {
@@ -135,6 +145,7 @@ bool wallpaper_load_bmp(const char* filename) {
     current_wallpaper.height = height;
     current_wallpaper.loaded = true;
     str_cpy(current_wallpaper.filename, filename);
+    wallpaper_changed = true; // Mark as changed
     
     return true;
 }
@@ -161,12 +172,16 @@ bool wallpaper_load_raw(uint32_t* pixels, uint32_t width, uint32_t height) {
     current_wallpaper.height = height;
     current_wallpaper.loaded = true;
     str_cpy(current_wallpaper.filename, "(generated)");
+    wallpaper_changed = true; // Mark as changed
     
     return true;
 }
 
 void wallpaper_set_mode(WallpaperMode mode) {
-    current_wallpaper.mode = mode;
+    if (current_wallpaper.mode != mode) {
+        current_wallpaper.mode = mode;
+        wallpaper_changed = true; // Mark as changed
+    }
 }
 
 WallpaperMode wallpaper_get_mode(void) {
@@ -274,6 +289,7 @@ void wallpaper_unload(void) {
         current_wallpaper.height = 0;
         current_wallpaper.loaded = false;
         current_wallpaper.filename[0] = '\0';
+        wallpaper_changed = true; // Mark as changed
     }
 }
 
@@ -364,6 +380,7 @@ void wallpaper_set_gradient_blue(void) {
     current_wallpaper.loaded = true;
     current_wallpaper.mode = WALLPAPER_MODE_STRETCH;
     str_cpy(current_wallpaper.filename, "(blue gradient)");
+    wallpaper_changed = true; // Mark as changed
 }
 
 void wallpaper_set_gradient_purple(void) {
@@ -389,6 +406,7 @@ void wallpaper_set_gradient_purple(void) {
     current_wallpaper.loaded = true;
     current_wallpaper.mode = WALLPAPER_MODE_STRETCH;
     str_cpy(current_wallpaper.filename, "(purple gradient)");
+    wallpaper_changed = true; // Mark as changed
 }
 
 void wallpaper_set_gradient_green(void) {
@@ -413,6 +431,7 @@ void wallpaper_set_gradient_green(void) {
     current_wallpaper.loaded = true;
     current_wallpaper.mode = WALLPAPER_MODE_STRETCH;
     str_cpy(current_wallpaper.filename, "(green gradient)");
+    wallpaper_changed = true; // Mark as changed
 }
 
 void wallpaper_set_solid_color(uint32_t color) {
@@ -434,4 +453,5 @@ void wallpaper_set_solid_color(uint32_t color) {
     current_wallpaper.loaded = true;
     current_wallpaper.mode = WALLPAPER_MODE_STRETCH;
     str_cpy(current_wallpaper.filename, "(solid color)");
+    wallpaper_changed = true; // Mark as changed
 }

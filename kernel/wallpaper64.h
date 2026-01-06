@@ -55,4 +55,8 @@ void wallpaper_set_gradient_purple(void);
 void wallpaper_set_gradient_green(void);
 void wallpaper_set_solid_color(uint32_t color);
 
+// Wallpaper change notification
+bool wallpaper_has_changed(void);
+void wallpaper_clear_changed_flag(void);
+
 #endif // WALLPAPER64_H

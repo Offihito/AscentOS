@@ -218,7 +218,7 @@ static void taskbar_draw_clock_text(const Taskbar* taskbar, int clock_x, int clo
     gui_draw_string(text_x, text_y, time_str, CLOCK_TEXT, 0);
     
     // Tarih
-    gui_draw_string(text_x + 70, text_y, "27/12/25", RGB(180, 200, 220), 0);
+    gui_draw_string(text_x + 70, text_y, "04/01/26", RGB(180, 200, 220), 0);
 }
 
 // Taskbar başlat
