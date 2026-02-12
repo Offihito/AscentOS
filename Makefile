@@ -1,4 +1,4 @@
-# AscentOS 64-bit Makefile - With Network + ARP + Start Menu
+# AscentOS 64-bit Makefile - Unified Boot & Unified Keyboard Version
 
 CC = gcc
 AS = nasm
@@ -15,75 +15,73 @@ LDFLAGS = -n -T kernel/linker64.ld -nostdlib
 # Main target
 all: AscentOS-Text.iso AscentOS-GUI.iso
 	@echo "╔═══════════════════════════════════════════════════╗"
-	@echo "║  ✓ AscentOS 64-bit with Start Menu!              ║"
+	@echo "║  ✓ AscentOS 64-bit (Unified Boot + Keyboard)     ║"
 	@echo "║                                                   ║"
 	@echo "║  Text Mode:   make run-text                      ║"
 	@echo "║  GUI Mode:    make run-gui                       ║"
 	@echo "║                                                   ║"
-	@echo "║  🌐 Network: RTL8139 + ARP + ICMP                ║"
-	@echo "║  🎯 GUI: Start Menu + Taskbar + Terminal         ║"
+	@echo "║  🎯 Single keyboard driver for both modes        ║"
+	@echo "║  🔧 Single unified bootloader for both modes     ║"
 	@echo "╚═══════════════════════════════════════════════════╝"
 
 # ============================================================================
-# NETWORK MODULE
+# SHARED COMPONENTS
 # ============================================================================
 
-network64.o: kernel/network64.c kernel/network64.h
-	$(CC) $(CFLAGS) -c kernel/network64.c -o network64.o
+# Shared files compiled once - accounts64.o REMOVED
 
-icmp64.o: kernel/icmp64.c kernel/icmp64.h kernel/network64.h
-	$(CC) $(CFLAGS) -c kernel/icmp64.c -o icmp64.o
+files64.o: fs/files64.c
+	$(CC) $(CFLAGS) -c fs/files64.c -o files64.o
 
-arp64.o: kernel/arp64.c kernel/arp64.h kernel/network64.h
-	$(CC) $(CFLAGS) -c kernel/arp64.c -o arp64.o
+disk64.o: kernel/disk64.c
+	$(CC) $(CFLAGS) -c kernel/disk64.c -o disk64.o
+
+memory_unified.o: kernel/memory_unified.c kernel/memory_unified.h
+	$(CC) $(CFLAGS) -c kernel/memory_unified.c -o memory_unified.o
+
+page_fault.o: kernel/page_fault_handler.c 
+	$(CC) $(CFLAGS) -c kernel/page_fault_handler.c -o page_fault.o
+
+vmm64.o: kernel/vmm64.c kernel/vmm64.h kernel/memory_unified.h
+	$(CC) $(CFLAGS) -c kernel/vmm64.c -o vmm64.o
+
+timer.o: kernel/timer.c kernel/timer.h
+	$(CC) $(CFLAGS) -c kernel/timer.c -o timer.o
+
+task.o: kernel/task.c kernel/task.h
+	$(CC) $(CFLAGS) -c kernel/task.c -o task.o
+
+scheduler.o: kernel/scheduler.c kernel/scheduler.h kernel/task.h
+	$(CC) $(CFLAGS) -c kernel/scheduler.c -o scheduler.o
+
+nano64.o: apps/nano64.c apps/nano64.h
+	$(CC) $(CFLAGS) -c apps/nano64.c -o nano64.o
+
+vga64.o: kernel/vga64.c
+	$(CC) $(CFLAGS) -c kernel/vga64.c -o vga64.o
 
 # ============================================================================
 # TEXT MODE BUILD
 # ============================================================================
 
-boot64.o: kernel/boot64.asm
-	$(AS) $(ASFLAGS) kernel/boot64.asm -o boot64.o
+boot64_text.o: boot/boot64_unified.asm
+	$(AS) $(ASFLAGS) boot/boot64_unified.asm -o boot64_text.o
 
-interrupts64_text.o: kernel/interrupts64.asm
-	$(AS) $(ASFLAGS) -DTEXT_MODE_BUILD kernel/interrupts64.asm -o interrupts64_text.o
+interrupts64_text.o: arch/x86_64/interrupts64.asm
+	$(AS) $(ASFLAGS) -DTEXT_MODE_BUILD arch/x86_64/interrupts64.asm -o interrupts64_text.o
 
-vga64.o: kernel/vga64.c
-	$(CC) $(CFLAGS) -c kernel/vga64.c -o vga64.o
+keyboard_text.o: kernel/keyboard_unified.c
+	$(CC) $(CFLAGS) -c kernel/keyboard_unified.c -o keyboard_text.o
 
-keyboard64.o: kernel/keyboard64.c
-	$(CC) $(CFLAGS) -c kernel/keyboard64.c -o keyboard64.o
-
-accounts64.o: kernel/accounts64.c kernel/accounts64.h
-	$(CC) $(CFLAGS) -c kernel/accounts64.c -o accounts64.o
-
-commands64_text.o: kernel/commands64.c kernel/commands64.h kernel/script64.h kernel/accounts64.h kernel/network64.h kernel/icmp64.h kernel/arp64.h
-	$(CC) $(CFLAGS) -c kernel/commands64.c -o commands64_text.o
-
-script64.o: kernel/script64.c kernel/script64.h
-	$(CC) $(CFLAGS) -c kernel/script64.c -o script64.o
-
-udp64.o: kernel/udp64.c kernel/udp64.h kernel/network64.h
-	$(CC) $(CFLAGS) -c kernel/udp64.c -o udp64.o
-
-files64.o: kernel/files64.c
-	$(CC) $(CFLAGS) -c kernel/files64.c -o files64.o
-
-disk64.o: kernel/disk64.c
-	$(CC) $(CFLAGS) -c kernel/disk64.c -o disk64.o
-
-memory64.o: kernel/memory64.c
-	$(CC) $(CFLAGS) -c kernel/memory64.c -o memory64.o
+commands64_text.o: apps/commands64.c apps/commands64.h
+	$(CC) $(CFLAGS) -c apps/commands64.c -o commands64_text.o
 
 kernel64_text.o: kernel/kernel64.c
 	$(CC) $(CFLAGS) -DTEXT_MODE -c kernel/kernel64.c -o kernel64_text.o
 
-nano64.o: kernel/nano64.c kernel/nano64.h
-	$(CC) $(CFLAGS) -c kernel/nano64.c -o nano64.o
-
-TEXT_OBJS = boot64.o interrupts64_text.o vga64.o keyboard64.o \
-            commands64_text.o script64.o files64.o disk64.o memory64.o nano64.o \
-            accounts64.o network64.o icmp64.o arp64.o udp64.o \
-            task64.o task_switch.o kernel64_text.o
+TEXT_OBJS = boot64_text.o interrupts64_text.o vga64.o keyboard_text.o \
+            commands64_text.o files64.o disk64.o memory_unified.o vmm64.o nano64.o \
+            timer.o task.o scheduler.o kernel64_text.o page_fault.o
 
 kernel64_text.elf: $(TEXT_OBJS)
 	$(LD) $(LDFLAGS) $(TEXT_OBJS) -o kernel64_text.elf
@@ -105,20 +103,14 @@ AscentOS-Text.iso: kernel64_text.elf grub64.cfg disk.img
 # GUI MODE BUILD
 # ============================================================================
 
-boot64_gui.o: kernel/boot64_gui.asm
-	$(AS) $(ASFLAGS) kernel/boot64_gui.asm -o boot64_gui.o
+boot64_gui.o: boot/boot64_unified.asm
+	$(AS) $(ASFLAGS) -DGUI_MODE boot/boot64_unified.asm -o boot64_gui.o
 
-interrupts64_gui.o: kernel/interrupts64.asm
-	$(AS) $(ASFLAGS) kernel/interrupts64.asm -o interrupts64_gui.o
+interrupts64_gui.o: arch/x86_64/interrupts64.asm
+	$(AS) $(ASFLAGS) arch/x86_64/interrupts64.asm -o interrupts64_gui.o
 
-interrupts_setup.o: kernel/interrupts_setup.c
-	$(CC) $(CFLAGS) -c kernel/interrupts_setup.c -o interrupts_setup.o
-
-task64.o: kernel/task64.c kernel/task64.h
-	$(CC) $(CFLAGS) -c kernel/task64.c -o task64.o
-
-task_switch.o: kernel/task_switch.asm
-	$(AS) $(ASFLAGS) kernel/task_switch.asm -o task_switch.o
+interrupts_setup.o: arch/x86_64/interrupts_setup.c
+	$(CC) $(CFLAGS) -c arch/x86_64/interrupts_setup.c -o interrupts_setup.o
 
 gui64.o: kernel/gui64.c kernel/gui64.h
 	$(CC) $(CFLAGS) -c kernel/gui64.c -o gui64.o
@@ -126,14 +118,11 @@ gui64.o: kernel/gui64.c kernel/gui64.h
 mouse64.o: kernel/mouse64.c kernel/mouse64.h
 	$(CC) $(CFLAGS) -c kernel/mouse64.c -o mouse64.o
 
-keyboard_gui.o: kernel/keyboard_gui.c
-	$(CC) $(CFLAGS) -c kernel/keyboard_gui.c -o keyboard_gui.o
+keyboard_gui.o: kernel/keyboard_unified.c
+	$(CC) $(CFLAGS) -DGUI_MODE -c kernel/keyboard_unified.c -o keyboard_gui.o
 
 taskbar.o: kernel/taskbar64.c kernel/taskbar64.h
 	$(CC) $(CFLAGS) -c kernel/taskbar64.c -o taskbar.o
-
-startmenu.o: kernel/startmenu64.c kernel/startmenu64.h
-	$(CC) $(CFLAGS) -c kernel/startmenu64.c -o startmenu.o
 
 terminal64.o: kernel/terminal64.c kernel/terminal64.h kernel/gui64.h kernel/commands_gui.h
 	$(CC) $(CFLAGS) -c kernel/terminal64.c -o terminal64.o
@@ -141,35 +130,30 @@ terminal64.o: kernel/terminal64.c kernel/terminal64.h kernel/gui64.h kernel/comm
 commands_gui.o: kernel/commands_gui.c kernel/commands_gui.h kernel/terminal64.h
 	$(CC) $(CFLAGS) -DGUI_MODE -c kernel/commands_gui.c -o commands_gui.o
 
-memory_gui.o: kernel/memory_gui.c kernel/memory_gui.h
-	$(CC) $(CFLAGS) -c kernel/memory_gui.c -o memory_gui.o
 
-wallpaper64.o: kernel/wallpaper64.c kernel/wallpaper64.h
-	$(CC) $(CFLAGS) -c kernel/wallpaper64.c -o wallpaper64.o
 
-commands64_gui.o: kernel/commands64.c kernel/commands64.h kernel/script64.h kernel/accounts64.h kernel/network64.h kernel/icmp64.h kernel/arp64.h
-	$(CC) $(CFLAGS) -DGUI_MODE -c kernel/commands64.c -o commands64_gui.o
+commands64_gui.o: apps/commands64.c apps/commands64.h
+	$(CC) $(CFLAGS) -DGUI_MODE -c apps/commands64.c -o commands64_gui.o
 
-kernel64_gui.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h kernel/terminal64.h kernel/wallpaper64.h kernel/startmenu64.h
+kernel64_gui.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h kernel/terminal64.h 
 	$(CC) $(CFLAGS) -DGUI_MODE -c kernel/kernel64.c -o kernel64_gui.o
 
 GUI_OBJS = boot64_gui.o interrupts64_gui.o interrupts_setup.o gui64.o \
-           mouse64.o keyboard_gui.o kernel64_gui.o taskbar.o startmenu.o terminal64.o \
-           commands_gui.o memory_gui.o wallpaper64.o \
-           commands64_gui.o script64.o files64.o disk64.o memory64.o nano64.o vga64.o \
-           accounts64.o network64.o icmp64.o arp64.o udp64.o \
-           task64.o task_switch.o
+           mouse64.o keyboard_gui.o kernel64_gui.o taskbar.o terminal64.o \
+           commands_gui.o memory_unified.o vmm64.o \
+           commands64_gui.o files64.o disk64.o nano64.o vga64.o \
+           timer.o task.o scheduler.o page_fault.o
 		   
 kernel64_gui.elf: $(GUI_OBJS)
 	$(LD) $(LDFLAGS) $(GUI_OBJS) -o kernel64_gui.elf
 
 AscentOS-GUI.iso: kernel64_gui.elf grub64.cfg
-	@echo "📦 Building GUI Mode ISO with Start Menu..."
+	@echo "📦 Building GUI Mode ISO..."
 	mkdir -p isodir_gui/boot/grub
 	cp kernel64_gui.elf isodir_gui/boot/kernel64.elf
 	cp grub64.cfg isodir_gui/boot/grub/grub.cfg
 	grub-mkrescue -o AscentOS-GUI.iso isodir_gui 2>&1 | grep -v "xorriso"
-	@echo "✓ GUI Mode ISO ready with Start Menu!"
+	@echo "✓ GUI Mode ISO ready!"
 
 # ============================================================================
 # RUN TARGETS
@@ -177,50 +161,32 @@ AscentOS-GUI.iso: kernel64_gui.elf grub64.cfg
 
 run-text: AscentOS-Text.iso disk.img
 	@echo "╔════════════════════════════════════════════╗"
-	@echo "║   AscentOS Text Mode + Network             ║"
+	@echo "║   AscentOS Text Mode (Unified)            ║"
 	@echo "╚════════════════════════════════════════════╝"
 	@echo ""
-	@echo "🌐 Network Features:"
-	@echo "  • MAC address detection"
-	@echo "  • IP configuration"
-	@echo "  • ARP protocol (address resolution)"
-	@echo "  • ICMP/Ping support"
-	@echo ""
-	@echo "📡 Network Commands:"
-	@echo "  ifconfig       - Show/configure network"
-	@echo "  ping <ip>      - Ping a host"
-	@echo "  arp            - ARP cache management"
-	@echo "  netstat        - Network statistics"
 	@echo ""
 	qemu-system-x86_64 \
 	  -cdrom AscentOS-Text.iso \
 	  -drive file=disk.img,format=raw,if=ide,cache=writeback \
-	  -m 512M \
+	  -m 1024M \
 	  -cpu qemu64 \
 	  -boot d \
 	  -serial stdio \
-	  -display gtk \
-	  -netdev user,id=net0 \
-	  -device rtl8139,netdev=net0 \
-	  -no-reboot
+	  -display gtk 
 
 run-gui: AscentOS-GUI.iso disk.img
 	@echo "╔════════════════════════════════════════════╗"
-	@echo "║   AscentOS GUI Mode + Start Menu           ║"
+	@echo "║   AscentOS GUI Mode (Unified)             ║"
 	@echo "╚════════════════════════════════════════════╝"
+	@echo ""
+	@echo "🎹 Using unified keyboard driver"
+	@echo "🔧 Using unified bootloader (4GB mapped)"
 	@echo ""
 	@echo "🎯 GUI Features:"
 	@echo "  • Windows 7 style Start Menu"
 	@echo "  • Taskbar with clock"
 	@echo "  • Terminal window"
 	@echo "  • Desktop icons"
-	@echo ""
-	@echo "🌐 Network Support:"
-	@echo "  • Complete network stack"
-	@echo "  • ARP + ICMP protocols"
-	@echo ""
-	@echo "📡 Try these in terminal:"
-	@echo "  ifconfig, ping, arp, netstat"
 	@echo ""
 	qemu-system-x86_64 \
 	  -cdrom AscentOS-GUI.iso \
@@ -229,10 +195,7 @@ run-gui: AscentOS-GUI.iso disk.img
 	  -cpu qemu64 \
 	  -boot d \
 	  -serial stdio \
-	  -vga std \
-	  -netdev user,id=net0 \
-	  -device rtl8139,netdev=net0 \
-	  -no-reboot
+	  -vga std 
 
 run: run-text
 
@@ -242,35 +205,26 @@ run: run-text
 
 info:
 	@echo "╔════════════════════════════════════════════════════════════╗"
-	@echo "║        AscentOS Build Information - Start Menu Edition    ║"
+	@echo "║   AscentOS Build Information - Unified Edition            ║"
 	@echo "╠════════════════════════════════════════════════════════════╣"
+	@echo "║                                                            ║"
+	@echo "║  🎹 Unified Keyboard Driver:                               ║"
+	@echo "║    • Single source file for both modes                     ║"
+	@echo "║    • Conditional compilation (GUI_MODE flag)               ║"
+	@echo "║    • Full nano editor support in text mode                 ║"
+	@echo "║    • Terminal support in GUI mode                          ║"
+	@echo "║                                                            ║"
+	@echo "║  🔧 Bootloader:                                            ║"
+	@echo "║    • Single unified bootloader for both modes              ║"
+	@echo "║    • 4GB memory mapping (identity mapped)                  ║"
+	@echo "║    • VESA framebuffer support                              ║"
+	@echo "║    • Serial debug output                                   ║"
 	@echo "║                                                            ║"
 	@echo "║  📦 Build Targets:                                         ║"
 	@echo "║    make              - Build both modes                    ║"
 	@echo "║    make run-text     - Run Text mode                       ║"
 	@echo "║    make run-gui      - Run GUI mode                        ║"
 	@echo "║    make clean        - Clean all build files               ║"
-	@echo "║                                                            ║"
-	@echo "║  🎯 GUI Features:                                          ║"
-	@echo "║    • Windows 7 style Start Menu                            ║"
-	@echo "║    • Taskbar with clock and system tray                    ║"
-	@echo "║    • Terminal with network commands                        ║"
-	@echo "║    • Desktop icons and window management                   ║"
-	@echo "║    • Smooth animations and gradients                       ║"
-	@echo "║                                                            ║"
-	@echo "║  🌐 Network System:                                        ║"
-	@echo "║    • Network card detection (RTL8139, E1000)               ║"
-	@echo "║    • MAC address support                                   ║"
-	@echo "║    • IP configuration (IPv4)                               ║"
-	@echo "║    • ARP Protocol (Address Resolution)                     ║"
-	@echo "║    • ICMP Protocol (Ping)                                  ║"
-	@echo "║    • UDP Protocol                                          ║"
-	@echo "║                                                            ║"
-	@echo "║  📡 Network Commands:                                      ║"
-	@echo "║    ifconfig          - Network configuration               ║"
-	@echo "║    ping <ip>         - Ping a host                         ║"
-	@echo "║    arp               - Show ARP cache                      ║"
-	@echo "║    netstat           - Show network stats                  ║"
 	@echo "║                                                            ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
 
@@ -279,20 +233,18 @@ info:
 # ============================================================================
 
 debug-text: AscentOS-Text.iso disk.img
-	@echo "🐛 Starting debug mode (Text)..."
+	@echo "🐛 Starting debug mode (Text - Unified)..."
 	qemu-system-x86_64 \
 	  -cdrom AscentOS-Text.iso \
 	  -drive file=disk.img,format=raw,if=ide,cache=writeback \
 	  -m 512M -cpu qemu64 -boot d -serial stdio \
-	  -netdev user,id=net0 -device rtl8139,netdev=net0 \
 	  -s -S
 
 debug-gui: AscentOS-GUI.iso
-	@echo "🐛 Starting debug mode (GUI)..."
+	@echo "🐛 Starting debug mode (GUI - Unified)..."
 	qemu-system-x86_64 \
 	  -cdrom AscentOS-GUI.iso \
 	  -m 512M -cpu qemu64 -boot d -serial stdio -vga std \
-	  -netdev user,id=net0 -device rtl8139,netdev=net0 \
 	  -s -S
 
 # ============================================================================
@@ -313,7 +265,7 @@ clean:
 
 help:
 	@echo "╔════════════════════════════════════════════════════════════╗"
-	@echo "║          AscentOS Makefile Help - Start Menu Edition      ║"
+	@echo "║     AscentOS Makefile Help - Unified Edition              ║"
 	@echo "╠════════════════════════════════════════════════════════════╣"
 	@echo "║                                                            ║"
 	@echo "║  Available targets:                                        ║"
@@ -330,8 +282,9 @@ help:
 	@echo "║  make debug-text   Start text mode with GDB support        ║"
 	@echo "║  make debug-gui    Start GUI mode with GDB support         ║"
 	@echo "║                                                            ║"
+	@echo "║  🎹 Unified Keyboard: Single driver for both modes         ║"
+	@echo "║  🔧 Unified Boot: Single bootloader for both modes         ║"
 	@echo "║  🎯 GUI: Start Menu + Taskbar + Terminal                   ║"
-	@echo "║  🌐 Network: RTL8139 + ARP + ICMP + UDP                    ║"
 	@echo "║                                                            ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
 

@@ -1,5 +1,5 @@
 #include "commands_gui.h"
-#include "commands64.h"
+#include "../apps/commands64.h"
 #include <stdint.h>
 
 // CommandOutput'u Terminal'e render eden yardımcı fonksiyon

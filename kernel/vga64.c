@@ -4,9 +4,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// Extended text mode - Maximum compatibility size
-#define VGA_WIDTH 132
-#define VGA_HEIGHT 80
+// Standard VGA text mode - 80x25
+#define VGA_WIDTH 80
+#define VGA_HEIGHT 25
 #define VGA_MEMORY 0xB8000
 
 static uint16_t* vga_buffer = (uint16_t*)VGA_MEMORY;
@@ -31,6 +31,82 @@ static inline uint8_t inb(uint16_t port) {
     return ret;
 }
 void refresh_screen(void);
+
+// VGA'yı standart 80x25 text mode'a döndür
+void reset_to_standard_mode(void) {
+    // BIOS Mode 3 (80x25 16 color text) ayarları
+    
+    // Miscellaneous Output Register - standart mod
+    outb(0x3C2, 0x63);
+    
+    // Sequencer registers - standart ayarlar
+    outb(0x3C4, 0x00);
+    outb(0x3C5, 0x03);
+    
+    outb(0x3C4, 0x01);
+    outb(0x3C5, 0x00);  // Clocking mode
+    
+    outb(0x3C4, 0x02);
+    outb(0x3C5, 0x03);  // Map mask
+    
+    outb(0x3C4, 0x03);
+    outb(0x3C5, 0x00);  // Character map select
+    
+    outb(0x3C4, 0x04);
+    outb(0x3C5, 0x02);  // Memory mode
+    
+    // CRT Controller - unlock
+    outb(0x3D4, 0x11);
+    uint8_t val = inb(0x3D5) & 0x7F;
+    outb(0x3D5, val);
+    
+    // CRT Controller registers - 80x25 standart timing
+    const uint8_t crtc_regs[][2] = {
+        {0x00, 0x5F}, {0x01, 0x4F}, {0x02, 0x50}, {0x03, 0x82},
+        {0x04, 0x55}, {0x05, 0x81}, {0x06, 0xBF}, {0x07, 0x1F},
+        {0x08, 0x00}, {0x09, 0x4F}, {0x0A, 0x0D}, {0x0B, 0x0E},
+        {0x0C, 0x00}, {0x0D, 0x00}, {0x0E, 0x00}, {0x0F, 0x00},
+        {0x10, 0x9C}, {0x11, 0x8E}, {0x12, 0x8F}, {0x13, 0x28},
+        {0x14, 0x1F}, {0x15, 0x96}, {0x16, 0xB9}, {0x17, 0xA3}
+    };
+    
+    for (int i = 0; i < 24; i++) {
+        outb(0x3D4, crtc_regs[i][0]);
+        outb(0x3D5, crtc_regs[i][1]);
+    }
+    
+    // Graphics Controller - standart ayarlar
+    const uint8_t gc_regs[][2] = {
+        {0x00, 0x00}, {0x01, 0x00}, {0x02, 0x00}, {0x03, 0x00},
+        {0x04, 0x00}, {0x05, 0x10}, {0x06, 0x0E}, {0x07, 0x00},
+        {0x08, 0xFF}
+    };
+    
+    for (int i = 0; i < 9; i++) {
+        outb(0x3CE, gc_regs[i][0]);
+        outb(0x3CF, gc_regs[i][1]);
+    }
+    
+    // Attribute Controller - standart ayarlar
+    inb(0x3DA);  // Reset flip-flop
+    
+    const uint8_t ac_regs[][2] = {
+        {0x00, 0x00}, {0x01, 0x01}, {0x02, 0x02}, {0x03, 0x03},
+        {0x04, 0x04}, {0x05, 0x05}, {0x06, 0x14}, {0x07, 0x07},
+        {0x08, 0x38}, {0x09, 0x39}, {0x0A, 0x3A}, {0x0B, 0x3B},
+        {0x0C, 0x3C}, {0x0D, 0x3D}, {0x0E, 0x3E}, {0x0F, 0x3F},
+        {0x10, 0x0C}, {0x11, 0x00}, {0x12, 0x0F}, {0x13, 0x08},
+        {0x14, 0x00}
+    };
+    
+    for (int i = 0; i < 21; i++) {
+        outb(0x3C0, ac_regs[i][0]);
+        outb(0x3C0, ac_regs[i][1]);
+    }
+    
+    outb(0x3C0, 0x20);  // Enable display
+}
+
 // VGA modunu ayarla (132x80 text mode)
 void set_extended_text_mode(void) {
     // Mode 0x54 (132x80) için doğrudan VGA register'larını programlayacağız
@@ -284,8 +360,8 @@ void println64(const char* str, uint8_t color) {
 
 // VGA'yı başlat
 void init_vga64(void) {
-    // Extended text mode'a geç
-    set_extended_text_mode();
+    // Standart 80x25 text mode'a geç
+    reset_to_standard_mode();
     
     // Cursor'u göster
     outb(0x3D4, 0x0A);

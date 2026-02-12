@@ -1,6 +1,19 @@
-// kernel64.c - AscentOS 64-bit Kernel with Network Support + Start Menu
+// kernel64_higher_half.c - AscentOS 64-bit Higher Half Kernel
+// Kernel 0xFFFFFFFF80000000 adresinde çalışır
+
 #include <stdint.h>
 #include <stddef.h>
+#include "memory_unified.h"
+#include "vmm64.h"
+
+// Higher half kernel base adresi
+#define KERNEL_VMA      0xFFFFFFFF80000000ULL
+#define KERNEL_PHYS     0x100000ULL
+
+// Fiziksel adresi sanal adrese çevir
+#define PHYS_TO_VIRT(addr) ((void*)((uint64_t)(addr) + KERNEL_VMA - KERNEL_PHYS))
+// Sanal adresi fiziksel adrese çevir
+#define VIRT_TO_PHYS(addr) ((uint64_t)(addr) - KERNEL_VMA + KERNEL_PHYS)
 
 // I/O & Serial
 #define COM1 0x3F8
@@ -45,6 +58,17 @@ void* memcpy64(void* dest, const void* src, size_t n) {
     return dest;
 }
 
+// Number to string helper
+void uint64_to_hex(uint64_t num, char* buf) {
+    const char* hex = "0123456789ABCDEF";
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (int i = 0; i < 16; i++) {
+        buf[2 + i] = hex[(num >> (60 - i * 4)) & 0xF];
+    }
+    buf[18] = '\0';
+}
+
 // CPU Info
 void get_cpu_info(char* vendor) {
     uint32_t eax, ebx, ecx, edx;
@@ -57,13 +81,6 @@ void get_cpu_info(char* vendor) {
 
 // ============ TEXT MODE ============
 #ifdef TEXT_MODE
-
-#include "accounts64.h"
-#include "network64.h"
-#include "arp64.h"
-#include "udp64.h"
-#include "task64.h" 
-
 void init_vga64(void);
 void print_str64(const char* str, uint8_t color);
 void println64(const char* str, uint8_t color);
@@ -72,98 +89,89 @@ void init_keyboard64(void);
 void init_memory64(void);
 void init_commands64(void);
 void show_prompt64(void);
+void task_init(void);
+void scheduler_init(void);
 
 #define VGA_GREEN 0x02
 #define VGA_CYAN 0x03
 #define VGA_YELLOW 0x0E
 #define VGA_LIGHT_GREEN 0x0A
 #define VGA_RED 0x04
+#define VGA_MAGENTA 0x05
 
 void kernel_main(uint64_t multiboot_info) {
+    // Multiboot info fiziksel adreste, kullanmadan önce dönüştürülmeli
     (void)multiboot_info;
-    serial_print("\n=== AscentOS 64-bit (TEXT) - Network Edition ===\n");
+    
+    serial_print("\n");
+    serial_print("=== AscentOS 64-bit Higher Half Kernel ===\n");
+    
+    // Kernel adres bilgilerini göster
+    char addr_buf[19];
+    
+    serial_print("Kernel virtual base: ");
+    uint64_to_hex(KERNEL_VMA, addr_buf);
+    serial_print(addr_buf);
+    serial_print("\n");
+    
+    serial_print("Kernel physical base: ");
+    uint64_to_hex(KERNEL_PHYS, addr_buf);
+    serial_print(addr_buf);
+    serial_print("\n");
+    
+    // kernel_main fonksiyonunun adresi (higher half'te olmalı)
+    serial_print("kernel_main address: ");
+    uint64_to_hex((uint64_t)kernel_main, addr_buf);
+    serial_print(addr_buf);
+    serial_print("\n\n");
     
     init_vga64();
-    println64("╔═══════════════════════════════════════════════════════════════╗", VGA_CYAN);
-    println64("║                    ASCENTOS 64-BIT v1.0                       ║", VGA_LIGHT_GREEN);
-    println64("║                 Now in 64-bit Long Mode!                      ║", VGA_YELLOW);
-    println64("║                   + Network Support 🌐                        ║", VGA_GREEN);
-    println64("╚═══════════════════════════════════════════════════════════════╝", VGA_CYAN);
+    println64("===============================================================", VGA_CYAN);
+    println64("===         ASCENTOS 64-BIT HIGHER HALF v1.1              ===", VGA_LIGHT_GREEN);
+    println64("===         Kernel @ 0xFFFFFFFF80000000                   ===", VGA_YELLOW);
+    println64("===            Now in 64-bit Long Mode!                   ===", VGA_MAGENTA);
+    println64("===============================================================", VGA_CYAN);
     
     char cpu_vendor[13];
     get_cpu_info(cpu_vendor);
-    print_str64("  [✓] CPU: ", VGA_GREEN);
+    print_str64("  OK CPU: ", VGA_GREEN);
     println64(cpu_vendor, VGA_YELLOW);
     
+    // Adres bilgilerini ekranda da göster
+    print_str64("  OK Higher Half Kernel @ ", VGA_GREEN);
+    println64("0xFFFFFFFF80000000", VGA_CYAN);
+    
     init_memory64();
+    
+    // Initialize PMM with a simple memory map
+    // In a real system, this would come from multiboot info
+    struct memory_map_entry memory_map[] = {
+        {0x0, 0x9FC00, 1, 0},              // Usable: 0-639KB
+        {0x9FC00, 0x400, 2, 0},            // Reserved: 639-640KB
+        {0xF0000, 0x10000, 2, 0},          // Reserved: BIOS ROM
+        {0x100000, 0x1FF00000, 1, 0},      // Usable: 1MB-512MB
+    };
+    pmm_init(memory_map, 4);
+    println64("  OK Physical Memory Manager initialized", VGA_GREEN);
+    
+    // Initialize VMM
+    vmm_init();
+    println64("  OK Virtual Memory Manager initialized", VGA_GREEN);
+    
+    // Initialize multitasking
+    task_init();
+    println64("  OK Task system initialized", VGA_GREEN);
+    scheduler_init();
+    println64("  OK Scheduler initialized", VGA_GREEN);
+    
     init_interrupts64();
     init_keyboard64();
-    
-    // Initialize account system
-    accounts_init();
-    println64("  [✓] Account system initialized", VGA_GREEN);
-    
-    // Initialize network
-    serial_print("Initializing network...\n");
-    network_init();
-    
-    if (network_is_initialized()) {
-        print_str64("  [✓] Network card: ", VGA_GREEN);
-        println64(network_get_card_type_string(), VGA_YELLOW);
-        
-        // Show MAC address
-        MACAddress mac;
-        network_get_mac(&mac);
-        char mac_str[18];
-        mac_to_string(&mac, mac_str);
-        
-        print_str64("  [✓] MAC Address: ", VGA_GREEN);
-        println64(mac_str, VGA_CYAN);
-        
-        // Show IP
-        NetworkConfig config;
-        network_get_config(&config);
-        char ip_str[16];
-        ip_to_string(&config.ip, ip_str);
-        
-        print_str64("  [✓] IP Address: ", VGA_GREEN);
-        println64(ip_str, VGA_CYAN);
-        
-        serial_print("Network initialized successfully\n");
-        
-        // Initialize ARP
-        serial_print("Initializing ARP protocol...\n");
-        arp_init();
-        println64("  [✓] ARP protocol initialized", VGA_GREEN);
-        serial_print("Initializing UDP protocol...\n");
-        udp_init();
-        println64("  [✓] UDP protocol initialized", VGA_GREEN);
-        
-        char gw_str[16];
-        ip_to_string(&config.gateway, gw_str);
-        print_str64("  [✓] Gateway in ARP cache: ", VGA_GREEN);
-        println64(gw_str, VGA_CYAN);
-        
-    } else {
-        println64("  [!] Network card not detected (using defaults)", VGA_YELLOW);
-        serial_print("No network card detected\n");
-    }
     
     println64("", VGA_GREEN);
     
     init_commands64();
     
-    serial_print("Initializing multitasking system...\n");
-    scheduler_init();
-    println64("  [✓] Multitasking system initialized", VGA_GREEN);
-    println64("  [✓] Scheduler running (1000 Hz)", VGA_CYAN);
-    println64("", VGA_GREEN);
-    
     println64("AscentOS ready! Type 'help' for commands", VGA_LIGHT_GREEN);
-    println64("Network commands: ifconfig, ping, arp, netstat", 0x0B);
-    println64("ARP commands: arp, arp request <ip>", 0x0B);
-    println64("Default users: root/root, guest/guest", 0x08);
-    println64("Use 'login' command to authenticate", 0x08);
     println64("", VGA_GREEN);
     
     show_prompt64();
@@ -178,304 +186,167 @@ void kernel_main(uint64_t multiboot_info) {
 #include "gui64.h"
 #include "mouse64.h"
 #include "taskbar64.h"
-#include "startmenu64.h"
-#include "terminal64.h"
-#include "accounts64.h"
-#include "wallpaper64.h"
-#include "network64.h"
-#include "arp64.h"
-#include "udp64.h"
-#include "task64.h" 
 
 void init_interrupts64(void);
-void keyboard_set_terminal(Terminal* term);
-
-// Desktop icon structure
-typedef struct {
-    int x, y;
-    int width, height;
-    char label[32];
-} DesktopIcon;
+void init_commands64(void);
+void task_init(void);
+void scheduler_init(void);
 
 bool needs_full_redraw = false;
 
-// Helper to draw desktop icon
-static void draw_desktop_icon(DesktopIcon* icon) {
-    wallpaper_draw();
-    
-    for (int sy = 0; sy < 16; sy++) {
-        for (int sx = 0; sx < 16; sx++) {
-            Color icon_color = COLOR_BLACK;
-            
-            if (sx == 0 || sx == 15 || sy == 0 || sy == 15) {
-                icon_color = RGB(50, 50, 60);
-            }
-            else if (sy >= 1 && sy <= 3) {
-                icon_color = RGB(30, 30, 35);
-            }
-            else if (sx >= 1 && sx <= 14 && sy >= 4 && sy <= 14) {
-                icon_color = RGB(12, 12, 18);
-                
-                if ((sy == 6 || sy == 8) && (sx == 3 || sx == 4)) {
-                    icon_color = RGB(0, 255, 0);
-                }
-                if (sy == 7 && (sx >= 3 && sx <= 5)) {
-                    icon_color = RGB(0, 255, 0);
-                }
-                if ((sx == 7 || sx == 8) && (sy >= 7 && sy <= 9)) {
-                    icon_color = RGB(0, 255, 0);
-                }
-                if (sy == 7 && (sx == 10 || sx == 12)) {
-                    icon_color = RGB(0, 255, 0);
-                }
-            }
-            
-            for (int dy = 0; dy < 3; dy++) {
-                for (int dx = 0; dx < 3; dx++) {
-                    gui_put_pixel(icon->x + sx * 3 + dx, icon->y + sy * 3 + dy, icon_color);
-                }
-            }
+static void redraw_all(Color bg_color, Taskbar* tbar, int screen_h) {
+    // Basit arkaplan çiz (desktop_color kullan)
+    int screen_w = gui_get_width();
+    for (int y = 0; y < screen_h - 40; y++) {
+        for (int x = 0; x < screen_w; x++) {
+            gui_put_pixel(x, y, bg_color);
         }
     }
-    
-    gui_draw_string(icon->x + 2, icon->y + 52, icon->label, COLOR_WHITE, COLOR_BLACK);
-}
-
-// Redraw everything
-static void redraw_all(const Color desktop_color, DesktopIcon* icon, 
-                      Terminal* term, Taskbar* taskbar, StartMenu* startmenu, int screen_height) {
-    wallpaper_draw();
-    draw_desktop_icon(icon);
-    
-    if (term->window.visible) {
-        terminal_draw(term);
-    }
-    
-    taskbar_draw(taskbar);
-    startmenu_draw(startmenu);
+    taskbar_draw(tbar);
 }
 
 void kernel_main(uint64_t multiboot_info) {
     (void)multiboot_info;
-    serial_print("\n=== AscentOS GUI - Network Edition + Start Menu ===\n");
     
-    extern void init_memory_gui(void);
-    init_memory_gui();
+    serial_print("\n=== AscentOS 64-bit Higher Half Kernel (GUI) ===\n");
     
+    // Kernel adres bilgilerini göster
+    char addr_buf[19];
+    
+    serial_print("Kernel virtual base: ");
+    uint64_to_hex(KERNEL_VMA, addr_buf);
+    serial_print(addr_buf);
+    serial_print("\n");
+    
+    serial_print("Kernel physical base: ");
+    uint64_to_hex(KERNEL_PHYS, addr_buf);
+    serial_print(addr_buf);
+    serial_print("\n");
+    
+    serial_print("kernel_main address: ");
+    uint64_to_hex((uint64_t)kernel_main, addr_buf);
+    serial_print(addr_buf);
+    serial_print("\n\n");
+    
+    // Initialize graphics mode first
     gui_init();
-    wallpaper_init();
+    serial_print("Graphics mode initialized successfully\n");
     
-    // Initialize account system
-    accounts_init();
-    serial_print("Account system initialized\n");
+    int screen_width = gui_get_width();
+    int screen_height = gui_get_height();
     
-    // Initialize network
-    serial_print("Initializing network...\n");
-    network_init();
-    
-    if (network_is_initialized()) {
-        serial_print("Network card: ");
-        serial_print(network_get_card_type_string());
-        serial_print("\n");
-        
-        MACAddress mac;
-        network_get_mac(&mac);
-        char mac_str[18];
-        mac_to_string(&mac, mac_str);
-        serial_print("MAC Address: ");
-        serial_print(mac_str);
-        serial_print("\n");
-    } else {
-        serial_print("No network card detected\n");
+    serial_print("Screen resolution: ");
+    char width_str[10];
+    int w = screen_width;
+    int i = 0;
+    do {
+        width_str[i++] = '0' + (w % 10);
+        w /= 10;
+    } while (w > 0);
+    width_str[i] = '\0';
+    // Reverse
+    for (int j = 0; j < i/2; j++) {
+        char tmp = width_str[j];
+        width_str[j] = width_str[i-1-j];
+        width_str[i-1-j] = tmp;
     }
+    serial_print(width_str);
+    serial_print("x");
     
-    init_commands64();
+    // Initialize interrupts and keyboard
     init_interrupts64();
-    init_mouse64();
+    serial_print("\nInterrupts initialized\n");
     
-    serial_print("Initializing multitasking system...\n");
+    char cpu_vendor[13];
+    get_cpu_info(cpu_vendor);
+    serial_print("CPU: ");
+    serial_print(cpu_vendor);
+    serial_print("\n");
+    
+    // Initialize PMM
+    struct memory_map_entry memory_map[] = {
+        {0x0, 0x9FC00, 1, 0},              // Usable: 0-639KB
+        {0x9FC00, 0x400, 2, 0},            // Reserved: 639-640KB
+        {0xF0000, 0x10000, 2, 0},          // Reserved: BIOS ROM
+        {0x100000, 0x1F400000, 1, 0},      // Usable: 1MB-500MB
+    };
+    pmm_init(memory_map, 4);
+    serial_print("PMM initialized\n");
+    
+    // Initialize VMM
+    vmm_init();
+    serial_print("VMM initialized\n");
+    
+    // Initialize multitasking
+    task_init();
+    serial_print("Task system initialized\n");
     scheduler_init();
+    serial_print("Scheduler initialized\n");
     
-    const int screen_width = gui_get_width();
-    const int screen_height = gui_get_height();
+    // Initialize mouse
+    init_mouse64();
+    serial_print("Mouse initialized\n");
     
+    // Initialize taskbar
     Taskbar taskbar;
     taskbar_init(&taskbar, screen_width, screen_height);
+    serial_print("Taskbar initialized\n");
     
-    StartMenu startmenu;
-    startmenu_init(&startmenu);
+    // Desktop color (fallback)
+    Color desktop_color = 0x2C2C2C;  // RGB olarak gri renk
     
-    const Color desktop_color = RGB(0, 120, 215);
-    wallpaper_draw();
-    
-    Terminal terminal;
-    terminal_init(&terminal, 100, 100, 650, 400);
-    terminal.window.visible = false;
-    
-    keyboard_set_terminal(&terminal);
-    
-    DesktopIcon term_icon;
-    term_icon.x = 20;
-    term_icon.y = 20;
-    term_icon.width = 64;
-    term_icon.height = 80;
-    
-    const char* label = "Terminal";
-    int i;
-    for (i = 0; label[i] && i < 31; i++) {
-        term_icon.label[i] = label[i];
+    // Initial draw - basit arkaplan
+    for (int y = 0; y < screen_height - 40; y++) {
+        for (int x = 0; x < screen_width; x++) {
+            gui_put_pixel(x, y, desktop_color);
+        }
     }
-    term_icon.label[i] = '\0';
+    taskbar_draw(&taskbar);
+    serial_print("Initial GUI draw complete\n");
+    serial_print("Higher Half Kernel GUI initialized successfully!\n");
     
-    draw_desktop_icon(&term_icon);
+    // Mouse state tracking
+    MouseState mouse;
+    int last_mouse_x = -1;
+    int last_mouse_y = -1;
+    bool last_left_button = false;
     
-    terminal_println(&terminal, "AscentOS Terminal v1.0 + Network");
-    terminal_println(&terminal, "");
-    
-    if (network_is_initialized()) {
-        terminal_println(&terminal, "Network: Initialized");
-        
-        char net_line[128];
-        const char* card = network_get_card_type_string();
-        int j = 0;
-        const char* prefix = "Card: ";
-        while (*prefix) net_line[j++] = *prefix++;
-        while (*card) net_line[j++] = *card++;
-        net_line[j] = '\0';
-        terminal_println(&terminal, net_line);
-        
-        MACAddress mac;
-        network_get_mac(&mac);
-        char mac_str[18];
-        mac_to_string(&mac, mac_str);
-        
-        j = 0;
-        prefix = "MAC: ";
-        while (*prefix) net_line[j++] = *prefix++;
-        for (int k = 0; mac_str[k]; k++) net_line[j++] = mac_str[k];
-        net_line[j] = '\0';
-        terminal_println(&terminal, net_line);
-        
-        terminal_println(&terminal, "");
-    }
-    
-    terminal_println(&terminal, "Default users: root/root, guest/guest");
-    terminal_println(&terminal, "Use 'login' to authenticate");
-    terminal_println(&terminal, "Try: ifconfig, ping, netstat");
-    terminal_println(&terminal, "");
-    terminal_show_prompt(&terminal);
-    
-    static Color cursor_buffer[18 * 20];
-    int prev_x = -100, prev_y = -100;
+    // Cursor buffer for restoration
+    Color cursor_buffer[20 * 18];
+    int prev_x = -100;
+    int prev_y = -100;
     bool cursor_needs_restore = false;
     
-    uint32_t frame_counter = 0;
+    // Clock tracking
     uint8_t last_seconds = 0xFF;
     
-    bool needs_full_redraw = false;
-    
-    taskbar_draw(&taskbar);
-    
-    serial_print("System ready with network support + Start Menu\n");
+    serial_print("Entering main GUI loop\n");
     
     while (1) {
-        MouseState mouse;
+        // Get current mouse state
         mouse_get_state(&mouse);
         
-        if (wallpaper_has_changed()) {
-            serial_print("Wallpaper changed, redrawing screen\n");
-            wallpaper_clear_changed_flag();
-            needs_full_redraw = true;
+        // Update clock
+        uint8_t hours, minutes, seconds;
+        gui_get_rtc_time(&hours, &minutes, &seconds);
+        
+        if (seconds != last_seconds) {
+            uint8_t old_hours = taskbar.current_hours;
+            uint8_t old_minutes = taskbar.current_minutes;
+            
+            taskbar.current_hours = hours;
+            taskbar.current_minutes = minutes;
+            taskbar.current_seconds = seconds;
+            last_seconds = seconds;
+            
+            bool time_changed = (old_hours != hours || old_minutes != minutes);
+            taskbar_update_clock_display(&taskbar, time_changed);
         }
         
-        frame_counter++;
-        if (frame_counter >= 60) {
-            frame_counter = 0;
-            
-            uint8_t hours, minutes, seconds;
-            gui_get_rtc_time(&hours, &minutes, &seconds);
-            
-            if (seconds != last_seconds) {
-                uint8_t old_hours = taskbar.current_hours;
-                uint8_t old_minutes = taskbar.current_minutes;
-                
-                taskbar.current_hours = hours;
-                taskbar.current_minutes = minutes;
-                taskbar.current_seconds = seconds;
-                last_seconds = seconds;
-                
-                bool time_changed = (old_hours != hours || old_minutes != minutes);
-                taskbar_update_clock_display(&taskbar, time_changed);
-            }
-        }
-        
-        static int last_mouse_x = 0, last_mouse_y = 0;
         bool mouse_moved = (mouse.x != last_mouse_x || mouse.y != last_mouse_y);
         
         if (mouse_moved) {
-            // Start menu mouse handling
-            if (startmenu.visible) {
-                startmenu_handle_mouse_move(&startmenu, mouse.x, mouse.y);
-                
-                static int last_startmenu_hover = -1;
-                if (startmenu.hovered_item != last_startmenu_hover) {
-                    startmenu_draw(&startmenu);
-                    last_startmenu_hover = startmenu.hovered_item;
-                }
-            }
-            
-            if (terminal.is_dragging || terminal.is_resizing) {
-                if (cursor_needs_restore && prev_x >= 0) {
-                    for (int row = 0; row < 20; row++) {
-                        for (int col = 0; col < 18; col++) {
-                            int px = prev_x + col;
-                            int py = prev_y + row;
-                            if (gui_is_valid_coord(px, py)) {
-                                gui_put_pixel(px, py, cursor_buffer[row * 18 + col]);
-                            }
-                        }
-                    }
-                    cursor_needs_restore = false;
-                }
-                
-                int old_x = terminal.window.x;
-                int old_y = terminal.window.y;
-                int old_width = terminal.window.width;
-                int old_height = terminal.window.height;
-                
-                terminal_handle_mouse_move(&terminal, mouse.x, mouse.y, 
-                                          screen_width, screen_height - 40);
-                
-                if (old_x != terminal.window.x || old_y != terminal.window.y ||
-                    old_width != terminal.window.width || old_height != terminal.window.height) {
-                    
-                    gui_fill_rect(old_x, old_y, 
-                                old_width + 6, 
-                                old_height + 6, 
-                                desktop_color);
-                    
-                    if ((old_x < term_icon.x + term_icon.width + 10) &&
-                        (old_x + old_width > term_icon.x) &&
-                        (old_y < term_icon.y + term_icon.height + 10) &&
-                        (old_y + old_height > term_icon.y)) {
-                        draw_desktop_icon(&term_icon);
-                    }
-                    
-                    if (old_y + old_height + 6 > screen_height - 45) {
-                        taskbar_draw(&taskbar);
-                    }
-                    
-                    terminal_draw(&terminal);
-                    
-                    if (startmenu.visible) {
-                        startmenu_draw(&startmenu);
-                    }
-                    
-                    prev_x = -100;
-                    prev_y = -100;
-                }
-            }
-            else if (mouse.y >= screen_height - 40) {
+            if (mouse.y >= screen_height - 40) {
                 int old_hovered = taskbar.hovered_button;
                 taskbar_handle_mouse_move(&taskbar, mouse.x, mouse.y);
                 
@@ -488,71 +359,13 @@ void kernel_main(uint64_t multiboot_info) {
             last_mouse_y = mouse.y;
         }
         
-        static bool last_left_button = false;
-        
         if (mouse.left_button && !last_left_button) {
-            // Start menu handling
-            if (startmenu.visible) {
-                int clicked_item = startmenu_handle_mouse_click(&startmenu, mouse.x, mouse.y);
-                
-                if (clicked_item == -2) {
-                    // Menu kapandı
-                    needs_full_redraw = true;
-                } else if (clicked_item == 0) {
-                    // Terminal aç
-                    terminal.window.visible = true;
-                    needs_full_redraw = true;
-                } else if (clicked_item == 100) {
-                    // Shutdown
-                    serial_print("Shutdown requested from Start Menu\n");
-                } else if (clicked_item == 101) {
-                    // Restart
-                    serial_print("Restart requested from Start Menu\n");
-                }
-            }
-            else if (terminal.window.visible && 
-                terminal_handle_mouse_down(&terminal, mouse.x, mouse.y)) {
-                if (terminal.is_dragging) {
-                    serial_print("Drag started\n");
-                } else if (terminal.is_resizing) {
-                    serial_print("Resize started\n");
-                }
-            }
-            else if (mouse.x >= term_icon.x && mouse.x < term_icon.x + term_icon.width &&
-                     mouse.y >= term_icon.y && mouse.y < term_icon.y + term_icon.height) {
-                terminal.window.visible = !terminal.window.visible;
-                needs_full_redraw = true;
-            }
-            else {
-                int clicked_id = taskbar_handle_mouse_click(&taskbar, mouse.x, mouse.y);
-                
-                if (clicked_id == -2) {
-    // Start button clicked
-    if (startmenu.visible) {
-        // Menü açıksa kapat -> sadece menü alanını eski haline getir (wallpaper çiz)
-    } else {
-        // Menü kapalıysa aç -> menüyü çiz
-        startmenu_show(&startmenu, taskbar.y);
-        startmenu_draw(&startmenu);
-    }
-    // needs_full_redraw = true; -> KALDIR! Artık gerek yok
-}
-            }
+            int clicked_id = taskbar_handle_mouse_click(&taskbar, mouse.x, mouse.y);
+            (void)clicked_id;
         }
         
         if (!mouse.left_button && last_left_button) {
-            if (terminal.is_dragging) {
-                terminal_handle_mouse_up(&terminal);
-                serial_print("Drag ended\n");
-                prev_x = -100;
-                cursor_needs_restore = false;
-            }
-            else if (terminal.is_resizing) {
-                terminal_handle_mouse_up(&terminal);
-                serial_print("Resize ended\n");
-                prev_x = -100;
-                cursor_needs_restore = false;
-            }
+            // Mouse released
         }
         
         last_left_button = mouse.left_button;
@@ -570,7 +383,7 @@ void kernel_main(uint64_t multiboot_info) {
                 }
             }
             
-            redraw_all(desktop_color, &term_icon, &terminal, &taskbar, &startmenu, screen_height);
+            redraw_all(desktop_color, &taskbar, screen_height);
             needs_full_redraw = false;
             prev_x = -100;
             prev_y = -100;
@@ -590,22 +403,21 @@ void kernel_main(uint64_t multiboot_info) {
                 }
             }
             
-            if (!terminal.is_dragging && !terminal.is_resizing) {
-                for (int row = 0; row < 20; row++) {
-                    for (int col = 0; col < 18; col++) {
-                        int px = mouse.x + col;
-                        int py = mouse.y + row;
-                        if (gui_is_valid_coord(px, py)) {
-                            cursor_buffer[row * 18 + col] = gui_get_pixel(px, py);
-                        }
+            // Always draw cursor
+            for (int row = 0; row < 20; row++) {
+                for (int col = 0; col < 18; col++) {
+                    int px = mouse.x + col;
+                    int py = mouse.y + row;
+                    if (gui_is_valid_coord(px, py)) {
+                        cursor_buffer[row * 18 + col] = gui_get_pixel(px, py);
                     }
                 }
-                
-                gui_draw_cursor(mouse.x, mouse.y);
-                prev_x = mouse.x;
-                prev_y = mouse.y;
-                cursor_needs_restore = true;
             }
+            
+            gui_draw_cursor(mouse.x, mouse.y);
+            prev_x = mouse.x;
+            prev_y = mouse.y;
+            cursor_needs_restore = true;
         }
         
         __asm__ volatile ("pause;");
