@@ -257,6 +257,7 @@ void kernel_main(uint64_t multiboot_info) {
 #include "gui64.h"
 #include "mouse64.h"
 #include "taskbar64.h"
+#include "compositor64.h"
 
 void init_interrupts64(void);
 void init_commands64(void);
@@ -265,14 +266,37 @@ void scheduler_init(void);
 
 bool needs_full_redraw = false;
 
+// Compositor global state
+static Compositor g_compositor;
+static int desktop_layer_idx = -1;
+static int taskbar_layer_idx = -1;
+
+// Demo windows for Phase 2 effects
+static int demo_window1_idx = -1;  // Semi-transparent window
+static int demo_window2_idx = -1;  // Window with shadow
+static int demo_window3_idx = -1;  // Glass effect window
+
 static void redraw_all(Color bg_color, Taskbar* tbar, int screen_h) {
-    // Basit arkaplan çiz (desktop_color kullan)
-    int screen_w = gui_get_width();
-    for (int y = 0; y < screen_h - 40; y++) {
-        for (int x = 0; x < screen_w; x++) {
-            gui_put_pixel(x, y, bg_color);
-        }
+    // Use compositor for rendering
+    (void)bg_color;
+    (void)screen_h;
+    
+    // Desktop layer is already filled with bg_color in compositor_init
+    // Just mark desktop as dirty
+    if (desktop_layer_idx >= 0) {
+        compositor_mark_layer_dirty(&g_compositor, desktop_layer_idx);
     }
+    
+    // Mark taskbar layer as dirty
+    if (taskbar_layer_idx >= 0) {
+        compositor_mark_layer_dirty(&g_compositor, taskbar_layer_idx);
+    }
+    
+    // Render all layers using compositor
+    compositor_render(&g_compositor);
+    
+    // NOW draw taskbar content on top of compositor output
+    // (This is temporary until we move taskbar drawing to layer buffer)
     taskbar_draw(tbar);
 }
 
@@ -358,23 +382,203 @@ void kernel_main(uint64_t multiboot_info) {
     init_mouse64();
     serial_print("Mouse initialized\n");
     
+    // Initialize compositor
+    Color desktop_color = RGB(44, 44, 44);
+    compositor_init(&g_compositor, screen_width, screen_height, desktop_color);
+    serial_print("Compositor initialized\n");
+    
+    // Desktop layer is already created (index 0) in compositor_init
+    desktop_layer_idx = 0;
+    
+    // Create taskbar layer
+    taskbar_layer_idx = compositor_create_layer(&g_compositor, LAYER_TYPE_TASKBAR,
+                                                0, screen_height - 40,
+                                                screen_width, 40);
+    if (taskbar_layer_idx >= 0) {
+        serial_print("Taskbar layer created\n");
+        Layer* tb_layer = &g_compositor.layers[taskbar_layer_idx];
+        
+        // Fill taskbar with dark color
+        for (int i = 0; i < screen_width * 40; i++) {
+            tb_layer->buffer[i] = RGB(30, 30, 30);
+        }
+        
+        compositor_mark_layer_dirty(&g_compositor, taskbar_layer_idx);
+    }
+    
+    // Initial compositor render
+    compositor_render(&g_compositor);
+    serial_print("Compositor initial render complete\n");
+    
     // Initialize taskbar
     Taskbar taskbar;
     taskbar_init(&taskbar, screen_width, screen_height);
     serial_print("Taskbar initialized\n");
     
-    // Desktop color (fallback)
-    Color desktop_color = 0x2C2C2C;  // RGB olarak gri renk
+    // Update clock before initial draw
+    uint8_t hours, minutes, seconds;
+    gui_get_rtc_time(&hours, &minutes, &seconds);
+    taskbar.current_hours = hours;
+    taskbar.current_minutes = minutes;
+    taskbar.current_seconds = seconds;
     
-    // Initial draw - basit arkaplan
-    for (int y = 0; y < screen_height - 40; y++) {
-        for (int x = 0; x < screen_width; x++) {
-            gui_put_pixel(x, y, desktop_color);
-        }
-    }
+    // Draw taskbar on top of compositor output (temporary)
     taskbar_draw(&taskbar);
     serial_print("Initial GUI draw complete\n");
     serial_print("Higher Half Kernel GUI initialized successfully!\n");
+    
+    // ========================================================================
+    // PHASE 2 DEMO: Create demo windows with alpha blending & shadows
+    // ========================================================================
+    serial_print("Creating Phase 2 demo windows...\n");
+    
+    // Demo Window 1: Semi-transparent overlay (50% opacity)
+    demo_window1_idx = compositor_create_layer(&g_compositor, LAYER_TYPE_WINDOW,
+                                              100, 100, 350, 250);
+    if (demo_window1_idx >= 0) {
+        Layer* win1 = &g_compositor.layers[demo_window1_idx];
+        
+        // Light gray background
+        layer_fill_rect(win1, 0, 0, 350, 250, RGB(220, 220, 220));
+        
+        // Blue title bar
+        layer_fill_rect(win1, 0, 0, 350, 24, RGB(50, 100, 200));
+        
+        // Set 50% transparency for glass effect
+        compositor_set_layer_alpha(&g_compositor, demo_window1_idx, 128);
+        
+        // Add soft shadow
+        compositor_set_layer_shadow(&g_compositor, demo_window1_idx,
+                                   true, 6, 6, 100, 6);
+        
+        compositor_mark_layer_dirty(&g_compositor, demo_window1_idx);
+        serial_print("Demo Window 1 created (50% transparent)\n");
+    }
+    
+    // Demo Window 2: Opaque window with prominent shadow
+    demo_window2_idx = compositor_create_layer(&g_compositor, LAYER_TYPE_WINDOW,
+                                              250, 150, 400, 280);
+    if (demo_window2_idx >= 0) {
+        Layer* win2 = &g_compositor.layers[demo_window2_idx];
+        
+        // White background
+        layer_fill_rect(win2, 0, 0, 400, 280, RGB(240, 240, 240));
+        
+        // Dark blue title bar
+        layer_fill_rect(win2, 0, 0, 400, 24, RGB(30, 60, 150));
+        
+        // Inner content area (slightly darker)
+        layer_fill_rect(win2, 10, 34, 380, 236, RGB(250, 250, 250));
+        
+        // Fully opaque
+        compositor_set_layer_alpha(&g_compositor, demo_window2_idx, 255);
+        
+        // Larger, darker shadow
+        compositor_set_layer_shadow(&g_compositor, demo_window2_idx,
+                                   true, 8, 8, 120, 8);
+        
+        compositor_mark_layer_dirty(&g_compositor, demo_window2_idx);
+        serial_print("Demo Window 2 created (opaque with shadow)\n");
+    }
+    
+    // Demo Window 3: Glass/Aero style (95% opacity)
+    demo_window3_idx = compositor_create_layer(&g_compositor, LAYER_TYPE_WINDOW,
+                                              180, 280, 380, 220);
+    if (demo_window3_idx >= 0) {
+        Layer* win3 = &g_compositor.layers[demo_window3_idx];
+        
+        // Very light background
+        layer_fill_rect(win3, 0, 0, 380, 220, RGB(255, 255, 255));
+        
+        // Semi-transparent aqua title bar (Aero glass effect)
+        layer_fill_rect(win3, 0, 0, 380, 24, RGB(100, 180, 240));
+        
+        // 95% opacity for subtle transparency
+        compositor_set_layer_alpha(&g_compositor, demo_window3_idx, 242);
+        
+        // Soft, subtle shadow
+        compositor_set_layer_shadow(&g_compositor, demo_window3_idx,
+                                   true, 4, 4, 80, 5);
+        
+        compositor_mark_layer_dirty(&g_compositor, demo_window3_idx);
+        serial_print("Demo Window 3 created (Aero glass style)\n");
+    }
+    
+    // Render all demo windows - MANUAL RENDER FOR DEBUG
+    serial_print("Rendering layers manually...\n");
+    
+    // Don't use compositor_render() - manually render each layer for testing
+    // 1. Desktop layer (already filled during compositor_init)
+    
+    // 2. Window layers - render directly
+    if (demo_window1_idx >= 0) {
+        Layer* win1 = &g_compositor.layers[demo_window1_idx];
+        serial_print("Rendering Window 1...\n");
+        for (int y = 0; y < win1->bounds.height && y < 250; y++) {
+            for (int x = 0; x < win1->bounds.width && x < 350; x++) {
+                int screen_x = win1->bounds.x + x;
+                int screen_y = win1->bounds.y + y;
+                if (screen_x >= 0 && screen_x < gui_get_width() &&
+                    screen_y >= 0 && screen_y < gui_get_height()) {
+                    Color pixel = win1->buffer[y * win1->bounds.width + x];
+                    
+                    // Apply alpha blending
+                    if (win1->alpha < 255) {
+                        Color bg = gui_get_pixel(screen_x, screen_y);
+                        pixel = alpha_blend(pixel, bg, win1->alpha);
+                    }
+                    
+                    gui_put_pixel(screen_x, screen_y, pixel);
+                }
+            }
+        }
+        serial_print("Window 1 rendered\n");
+    }
+    
+    if (demo_window2_idx >= 0) {
+        Layer* win2 = &g_compositor.layers[demo_window2_idx];
+        serial_print("Rendering Window 2...\n");
+        for (int y = 0; y < win2->bounds.height && y < 280; y++) {
+            for (int x = 0; x < win2->bounds.width && x < 400; x++) {
+                int screen_x = win2->bounds.x + x;
+                int screen_y = win2->bounds.y + y;
+                if (screen_x >= 0 && screen_x < gui_get_width() &&
+                    screen_y >= 0 && screen_y < gui_get_height()) {
+                    gui_put_pixel(screen_x, screen_y, win2->buffer[y * win2->bounds.width + x]);
+                }
+            }
+        }
+        serial_print("Window 2 rendered\n");
+    }
+    
+    if (demo_window3_idx >= 0) {
+        Layer* win3 = &g_compositor.layers[demo_window3_idx];
+        serial_print("Rendering Window 3...\n");
+        for (int y = 0; y < win3->bounds.height && y < 220; y++) {
+            for (int x = 0; x < win3->bounds.width && x < 380; x++) {
+                int screen_x = win3->bounds.x + x;
+                int screen_y = win3->bounds.y + y;
+                if (screen_x >= 0 && screen_x < gui_get_width() &&
+                    screen_y >= 0 && screen_y < gui_get_height()) {
+                    Color pixel = win3->buffer[y * win3->bounds.width + x];
+                    
+                    // Apply alpha blending for glass effect
+                    if (win3->alpha < 255) {
+                        Color bg = gui_get_pixel(screen_x, screen_y);
+                        pixel = alpha_blend(pixel, bg, win3->alpha);
+                    }
+                    
+                    gui_put_pixel(screen_x, screen_y, pixel);
+                }
+            }
+        }
+        serial_print("Window 3 rendered\n");
+    }
+    
+    taskbar_draw(&taskbar);  // Redraw taskbar on top
+    serial_print("Phase 2 demo windows rendered!\n");
+    
+    // ========================================================================
     
     // Mouse state tracking
     MouseState mouse;
@@ -387,6 +591,22 @@ void kernel_main(uint64_t multiboot_info) {
     int prev_x = -100;
     int prev_y = -100;
     bool cursor_needs_restore = false;
+    
+    // CRITICAL: Initialize mouse position and save initial cursor buffer AFTER rendering windows
+    mouse_get_state(&mouse);
+    for (int row = 0; row < 20; row++) {
+        for (int col = 0; col < 18; col++) {
+            int px = mouse.x + col;
+            int py = mouse.y + row;
+            if (gui_is_valid_coord(px, py)) {
+                cursor_buffer[row * 18 + col] = gui_get_pixel(px, py);
+            }
+        }
+    }
+    gui_draw_cursor(mouse.x, mouse.y);
+    prev_x = mouse.x;
+    prev_y = mouse.y;
+    cursor_needs_restore = true;
     
     // Clock tracking
     uint8_t last_seconds = 0xFF;
@@ -454,7 +674,7 @@ void kernel_main(uint64_t multiboot_info) {
                 }
             }
             
-            redraw_all(desktop_color, &taskbar, screen_height);
+            redraw_all(RGB(44, 44, 44), &taskbar, screen_height);
             needs_full_redraw = false;
             prev_x = -100;
             prev_y = -100;

@@ -119,7 +119,8 @@ interrupts_setup.o: arch/x86_64/interrupts_setup.c
 gui64.o: kernel/gui64.c kernel/gui64.h
 	$(CC) $(CFLAGS) -c kernel/gui64.c -o gui64.o
 
-
+compositor64.o: kernel/compositor64.c kernel/compositor64.h kernel/gui64.h
+	$(CC) $(CFLAGS) -c kernel/compositor64.c -o compositor64.o
 
 mouse64.o: kernel/mouse64.c kernel/mouse64.h
 	$(CC) $(CFLAGS) -c kernel/mouse64.c -o mouse64.o
@@ -139,7 +140,7 @@ commands64_gui.o: apps/commands64.c apps/commands64.h
 kernel64_gui.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h
 	$(CC) $(CFLAGS) -DGUI_MODE -c kernel/kernel64.c -o kernel64_gui.o
 
-GUI_OBJS = boot64_gui.o interrupts64_gui.o interrupts_setup.o gui64.o  \
+GUI_OBJS = boot64_gui.o interrupts64_gui.o interrupts_setup.o gui64.o compositor64.o \
            mouse64.o keyboard_gui.o kernel64_gui.o taskbar.o \
            commands_gui.o memory_unified.o vmm64.o \
            commands64_gui.o files64.o disk64.o nano64.o vga64.o \
