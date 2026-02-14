@@ -36,6 +36,9 @@ files64.o: fs/files64.c
 disk64.o: kernel/disk64.c
 	$(CC) $(CFLAGS) -c kernel/disk64.c -o disk64.o
 
+elf64.o: kernel/elf64.c kernel/elf64.h
+	$(CC) $(CFLAGS) -c kernel/elf64.c -o elf64.o
+
 memory_unified.o: kernel/memory_unified.c kernel/memory_unified.h
 	$(CC) $(CFLAGS) -c kernel/memory_unified.c -o memory_unified.o
 
@@ -80,7 +83,7 @@ kernel64_text.o: kernel/kernel64.c
 	$(CC) $(CFLAGS) -DTEXT_MODE -c kernel/kernel64.c -o kernel64_text.o
 
 TEXT_OBJS = boot64_text.o interrupts64_text.o vga64.o keyboard_text.o \
-            commands64_text.o files64.o disk64.o memory_unified.o vmm64.o nano64.o \
+            commands64_text.o files64.o disk64.o elf64.o memory_unified.o vmm64.o nano64.o \
             timer.o task.o scheduler.o kernel64_text.o page_fault.o
 
 kernel64_text.elf: $(TEXT_OBJS)
@@ -146,7 +149,7 @@ kernel64_gui.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h kernel/wm64.h
 GUI_OBJS = boot64_gui.o interrupts64_gui.o interrupts_setup.o gui64.o compositor64.o \
            wm64.o mouse64.o keyboard_gui.o kernel64_gui.o taskbar.o \
            commands_gui.o memory_unified.o vmm64.o \
-           commands64_gui.o files64.o disk64.o nano64.o vga64.o \
+           commands64_gui.o files64.o disk64.o elf64.o nano64.o vga64.o \
            timer.o task.o scheduler.o page_fault.o
 		   
 kernel64_gui.elf: $(GUI_OBJS)

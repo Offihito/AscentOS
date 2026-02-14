@@ -88,6 +88,10 @@ void cmd_test(void);
 // VMM test command
 void cmd_vmm(const char* args, CommandOutput* output);
 
+// ELF loader commands
+void cmd_exec(const char* args, CommandOutput* output);
+void cmd_elfinfo(const char* args, CommandOutput* output);
+
 // Multitasking commands
 void cmd_ps(const char* args, CommandOutput* output);
 void cmd_taskinfo(const char* args, CommandOutput* output);

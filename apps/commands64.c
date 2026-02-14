@@ -6,6 +6,8 @@
 #include "../kernel/memory_unified.h"
 #include "../kernel/task.h"
 #include "../kernel/scheduler.h"
+#include "../kernel/disk64.h"    // fat32_file_size, fat32_read_file
+#include "../kernel/elf64.h"         // ELF-64 loader
 
 extern void println64(const char* str, uint8_t color);
 extern void print_str64(const char* str, uint8_t color);
@@ -265,6 +267,10 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_line(output, " neofetch  - Show system info", VGA_WHITE);
     output_add_line(output, " pmm       - Physical Memory Manager stats", VGA_WHITE);
     output_add_line(output, " vmm       - Virtual Memory Manager test", VGA_WHITE);
+    output_add_empty_line(output);
+    output_add_line(output, "ELF Loader Commands:", VGA_YELLOW);
+    output_add_line(output, " exec      - Load ELF64 binary from FAT32", VGA_WHITE);
+    output_add_line(output, " elfinfo   - Show ELF64 header (no load)", VGA_WHITE);
     output_add_empty_line(output);
     output_add_line(output, "Multitasking Commands:", VGA_YELLOW);
     output_add_line(output, " ps        - List all tasks", VGA_WHITE);
@@ -1375,6 +1381,138 @@ void cmd_offihito(const char* args, CommandOutput* output) {
 }
 
 // ===========================================
+// ELF LOADER COMMANDS
+// ===========================================
+
+// cmd_elfinfo <DOSYA.ELF>
+// FAT32'deki bir ELF dosyasının başlık bilgilerini gösterir,
+// yüklemez. Test/tanı amaçlı.
+void cmd_elfinfo(const char* args, CommandOutput* output) {
+    if (!args || str_len(args) == 0) {
+        output_add_line(output, "Usage: elfinfo <FILE.ELF>", VGA_YELLOW);
+        output_add_line(output, "  Shows ELF header info without loading.", VGA_DARK_GRAY);
+        output_add_line(output, "  File must be in 8.3 uppercase format on FAT32.", VGA_DARK_GRAY);
+        output_add_line(output, "  Example: elfinfo HELLO.ELF", VGA_DARK_GRAY);
+        return;
+    }
+
+    // Dosya boyutunu kontrol et
+    uint32_t fsize = fat32_file_size(args);
+    if (fsize == 0) {
+        char line[96];
+        str_cpy(line, "File not found on FAT32: ");
+        str_concat(line, args);
+        output_add_line(output, line, VGA_RED);
+        return;
+    }
+
+    // Sadece ilk 512 byte'ı oku (başlık için yeterli)
+    static uint8_t hdr_buf[512];
+    int n = fat32_read_file(args, hdr_buf, 512);
+    if (n < 64) {
+        output_add_line(output, "Read failed or file too small for ELF header", VGA_RED);
+        return;
+    }
+
+    // Dosya boyutunu göster
+    char line[96];
+    char tmp[24];
+    uint64_to_string(fsize, tmp);
+    str_cpy(line, "File: "); str_concat(line, args);
+    str_concat(line, "  Size: "); str_concat(line, tmp); str_concat(line, " bytes");
+    output_add_line(output, line, VGA_CYAN);
+
+    // Başlık dökümü
+    elf64_dump_header(hdr_buf, output);
+
+    // Hızlı doğrulama
+    int rc = elf64_validate(hdr_buf, (uint32_t)n);
+    str_cpy(line, "Validation: ");
+    str_concat(line, elf64_strerror(rc));
+    output_add_line(output, line, rc == ELF_OK ? VGA_GREEN : VGA_RED);
+}
+
+// cmd_exec <DOSYA.ELF> [load_base_hex]
+// FAT32'deki ELF64 dosyasını belleğe yükler.
+// ET_DYN (PIE) için opsiyonel 0x... base adresi alınabilir.
+// Çekirdek task sistemi geliştiğinde buraya task_create_from_elf() eklenir.
+void cmd_exec(const char* args, CommandOutput* output) {
+    if (!args || str_len(args) == 0) {
+        output_add_line(output, "Usage: exec <FILE.ELF> [base_hex]", VGA_YELLOW);
+        output_add_line(output, "  Loads an ELF64 binary from FAT32 into memory.", VGA_DARK_GRAY);
+        output_add_line(output, "  base_hex: optional load base for PIE (ET_DYN) files.", VGA_DARK_GRAY);
+        output_add_line(output, "  Example: exec HELLO.ELF", VGA_DARK_GRAY);
+        output_add_line(output, "  Example: exec MYAPP.ELF 0x400000", VGA_DARK_GRAY);
+        return;
+    }
+
+    // Argümanları ayrıştır: <dosya> [hex_base]
+    char filename[64];
+    uint64_t load_base = 0x400000ULL; // Varsayılan kullanıcı alanı tabanı
+
+    int i = 0;
+    while (args[i] && args[i] != ' ' && i < 63) {
+        filename[i] = args[i];
+        i++;
+    }
+    filename[i] = '\0';
+
+    // Opsiyonel base adresini ayrıştır (0x... formatı)
+    if (args[i] == ' ') {
+        i++;
+        const char* base_str = &args[i];
+        if (base_str[0] == '0' && (base_str[1] == 'x' || base_str[1] == 'X')) {
+            base_str += 2;
+            uint64_t parsed = 0;
+            while (*base_str) {
+                char c = *base_str++;
+                uint64_t digit;
+                if (c >= '0' && c <= '9')      digit = c - '0';
+                else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+                else break;
+                parsed = (parsed << 4) | digit;
+            }
+            if (parsed != 0) load_base = parsed;
+        }
+    }
+
+    // Dosya adını ve base'i göster
+    char line[96];
+    char tmp[24];
+    output_add_line(output, "=== ELF Loader ===", VGA_CYAN);
+    str_cpy(line, "File      : "); str_concat(line, filename);
+    output_add_line(output, line, VGA_WHITE);
+
+    // uint64_to_hex yerine kendi küçük hex formatlayıcımızı kullanıyoruz
+    // (kernel64.c'deki uint64_to_hex burada extern değil)
+    // Basit 16-bit hex çıktısı:
+    const char* hexc = "0123456789ABCDEF";
+    tmp[0]='0'; tmp[1]='x';
+    for(int k=0;k<16;k++) tmp[2+k]=hexc[(load_base>>(60-k*4))&0xF];
+    tmp[18]='\0';
+    str_cpy(line, "Load base : "); str_concat(line, tmp);
+    output_add_line(output, line, VGA_WHITE);
+    output_add_empty_line(output);
+
+    // Yükle
+    ElfImage image;
+    int rc = elf64_exec_from_fat32(filename, load_base, &image, output);
+
+    if (rc == ELF_OK) {
+        output_add_empty_line(output);
+        output_add_line(output, "Binary loaded into kernel address space.", VGA_GREEN);
+        output_add_line(output, "WARNING: No user-mode isolation yet!", VGA_RED);
+        output_add_line(output, "Use task_create_from_elf() to run safely.", VGA_YELLOW);
+
+        // Gelecekte entegrasyon için seri porta da yaz
+        // (serial_print extern edilmeden derlenebilir)
+    } else {
+        output_add_line(output, "Exec failed.", VGA_RED);
+    }
+}
+
+// ===========================================
 // ADVANCED FILE SYSTEM COMMANDS
 // ===========================================
 
@@ -1453,6 +1591,10 @@ static Command command_table[] = {
     {"tree", "Show directory tree", cmd_tree},
     {"find", "Find files by pattern", cmd_find},
     {"du", "Show disk usage", cmd_du},
+
+    // ELF loader commands
+    {"exec",    "Load and execute ELF64 binary from FAT32", cmd_exec},
+    {"elfinfo", "Show ELF64 header info (no load)",         cmd_elfinfo},
 };
 static int command_count = sizeof(command_table) / sizeof(Command);
 
