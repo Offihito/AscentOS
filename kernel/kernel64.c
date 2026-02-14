@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include "memory_unified.h"
 #include "vmm64.h"
-
+#include "disk64.h"
 // Higher half kernel base adresi
 #define KERNEL_VMA      0xFFFFFFFF80000000ULL
 #define KERNEL_PHYS     0x100000ULL
@@ -78,7 +78,71 @@ void get_cpu_info(char* vendor) {
     *(uint32_t*)(vendor + 8) = ecx;
     vendor[12] = '\0';
 }
+static void test_fat32(void) {
+    serial_print("[FAT32 TEST] Starting...\n");
 
+    // Mount veya format
+    if (!fat32_mount()) {
+        serial_print("[FAT32 TEST] Mount failed, formatting...\n");
+        if (!fat32_format()) {
+            serial_print("[FAT32 TEST] FAIL: format failed!\n");
+            return;
+        }
+        serial_print("[FAT32 TEST] Format OK\n");
+    } else {
+        serial_print("[FAT32 TEST] Mount OK\n");
+    }
+
+    // --- Test 1: Dosya oluştur ---
+    int r = fat32_create_file("TEST.TXT");
+    serial_print(r ? "[FAT32 TEST] create OK\n" : "[FAT32 TEST] FAIL: create\n");
+
+    // --- Test 2: Yaz ---
+    const char* msg = "Merhaba FAT32! Bu 512 byte'dan uzun bir test metnidir. "
+                      "Artık dosya boyutu sınırsız!";
+    r = fat32_write_file("TEST.TXT", (const uint8_t*)msg, strlen64(msg));
+    serial_print(r ? "[FAT32 TEST] write OK\n" : "[FAT32 TEST] FAIL: write\n");
+
+    // --- Test 3: Boyut kontrol ---
+    uint32_t sz = fat32_file_size("TEST.TXT");
+    // sz'yi seri porta yaz
+    char buf[32]; uint64_to_hex(sz, buf);
+    serial_print("[FAT32 TEST] file size = "); serial_print(buf); serial_print("\n");
+
+    // --- Test 4: Oku ---
+    uint8_t readbuf[256];
+    int n = fat32_read_file("TEST.TXT", readbuf, 255);
+    if (n > 0) {
+        readbuf[n] = '\0';
+        serial_print("[FAT32 TEST] read OK: ");
+        serial_print((char*)readbuf);
+        serial_print("\n");
+    } else {
+        serial_print("[FAT32 TEST] FAIL: read\n");
+    }
+
+    // --- Test 5: Büyük dosya (512 byte'ın üzeri) ---
+    static uint8_t big[4096];
+    for (int i = 0; i < 4096; i++) big[i] = (uint8_t)(i & 0xFF);
+    fat32_create_file("BIG.BIN");
+    r = fat32_write_file("BIG.BIN", big, 4096);
+    serial_print(r ? "[FAT32 TEST] 4KB write OK\n" : "[FAT32 TEST] FAIL: 4KB write\n");
+
+    uint32_t big_sz = fat32_file_size("BIG.BIN");
+    serial_print(big_sz == 4096 ? "[FAT32 TEST] 4KB size OK\n"
+                                : "[FAT32 TEST] FAIL: 4KB size\n");
+
+    // --- Test 6: Sil ---
+    r = fat32_delete_file("TEST.TXT");
+    serial_print(r ? "[FAT32 TEST] delete OK\n" : "[FAT32 TEST] FAIL: delete\n");
+
+    // Silindikten sonra okunamaz mı?
+    n = fat32_read_file("TEST.TXT", readbuf, 255);
+    serial_print(n < 0 ? "[FAT32 TEST] post-delete read correctly failed OK\n"
+                       : "[FAT32 TEST] FAIL: deleted file still readable!\n");
+
+    serial_print("[FAT32 TEST] Done.\n");
+}
 // ============ TEXT MODE ============
 #ifdef TEXT_MODE
 void init_vga64(void);
@@ -163,7 +227,7 @@ void kernel_main(uint64_t multiboot_info) {
     println64("  OK Task system initialized", VGA_GREEN);
     scheduler_init();
     println64("  OK Scheduler initialized", VGA_GREEN);
-    
+    test_fat32();
     init_interrupts64();
     init_keyboard64();
     
@@ -176,7 +240,14 @@ void kernel_main(uint64_t multiboot_info) {
     
     show_prompt64();
     
-    while (1) __asm__ volatile ("hlt");
+    // Main kernel loop - process keyboard input
+    // This ensures the shell remains responsive even when tasks are running
+    extern void process_keyboard_buffer(void);
+    while (1) {
+        // Enable interrupts and halt until next interrupt
+        __asm__ volatile ("sti; hlt");
+        // When interrupt wakes us up, continue (keyboard/timer handlers did their work)
+    }
 }
 #endif
 

@@ -87,9 +87,13 @@ kernel64_text.elf: $(TEXT_OBJS)
 	$(LD) $(LDFLAGS) $(TEXT_OBJS) -o kernel64_text.elf
 
 disk.img:
-	@echo "📀 Creating disk image..."
-	qemu-img create -f raw disk.img 100M
-	@echo "✓ Disk image ready!"
+	@echo "📀 Creating 2GB disk image..."
+	@if [ ! -f disk.img ]; then \
+		qemu-img create -f raw disk.img 2G; \
+		echo "✓ 2GB Disk image created!"; \
+	else \
+		echo "✓ Disk image already exists (preserving data)"; \
+	fi
 
 AscentOS-Text.iso: kernel64_text.elf grub64.cfg disk.img
 	@echo "📦 Building Text Mode ISO..."
@@ -115,6 +119,8 @@ interrupts_setup.o: arch/x86_64/interrupts_setup.c
 gui64.o: kernel/gui64.c kernel/gui64.h
 	$(CC) $(CFLAGS) -c kernel/gui64.c -o gui64.o
 
+
+
 mouse64.o: kernel/mouse64.c kernel/mouse64.h
 	$(CC) $(CFLAGS) -c kernel/mouse64.c -o mouse64.o
 
@@ -124,22 +130,17 @@ keyboard_gui.o: kernel/keyboard_unified.c
 taskbar.o: kernel/taskbar64.c kernel/taskbar64.h
 	$(CC) $(CFLAGS) -c kernel/taskbar64.c -o taskbar.o
 
-terminal64.o: kernel/terminal64.c kernel/terminal64.h kernel/gui64.h kernel/commands_gui.h
-	$(CC) $(CFLAGS) -c kernel/terminal64.c -o terminal64.o
-
-commands_gui.o: kernel/commands_gui.c kernel/commands_gui.h kernel/terminal64.h
+commands_gui.o: kernel/commands_gui.c kernel/commands_gui.h
 	$(CC) $(CFLAGS) -DGUI_MODE -c kernel/commands_gui.c -o commands_gui.o
-
-
 
 commands64_gui.o: apps/commands64.c apps/commands64.h
 	$(CC) $(CFLAGS) -DGUI_MODE -c apps/commands64.c -o commands64_gui.o
 
-kernel64_gui.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h kernel/terminal64.h 
+kernel64_gui.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h
 	$(CC) $(CFLAGS) -DGUI_MODE -c kernel/kernel64.c -o kernel64_gui.o
 
-GUI_OBJS = boot64_gui.o interrupts64_gui.o interrupts_setup.o gui64.o \
-           mouse64.o keyboard_gui.o kernel64_gui.o taskbar.o terminal64.o \
+GUI_OBJS = boot64_gui.o interrupts64_gui.o interrupts_setup.o gui64.o  \
+           mouse64.o keyboard_gui.o kernel64_gui.o taskbar.o \
            commands_gui.o memory_unified.o vmm64.o \
            commands64_gui.o files64.o disk64.o nano64.o vga64.o \
            timer.o task.o scheduler.o page_fault.o

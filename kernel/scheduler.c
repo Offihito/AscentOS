@@ -23,8 +23,8 @@ static uint32_t time_quantum = DEFAULT_TIME_QUANTUM;
 
 static scheduler_stats_t stats;
 
-// Current task tracking
-static task_t* previous_task = NULL;
+// Current task tracking (non-static so task.c can set it during exit)
+task_t* previous_task = NULL;
 
 // ===========================================
 // SCHEDULER INITIALIZATION
@@ -94,6 +94,22 @@ void scheduler_tick(void) {
     
     // Get current task
     task_t* current = task_get_current();
+    
+    // Clean up terminated tasks
+    if (previous_task && previous_task->state == TASK_STATE_TERMINATED) {
+        serial_print("[SCHEDULER] Cleaning up terminated task: ");
+        serial_print(previous_task->name);
+        serial_print("\n");
+        
+        // Free the task's resources
+        if (previous_task->kernel_stack_base) {
+            extern void kfree(void* ptr);
+            kfree((void*)previous_task->kernel_stack_base);
+        }
+        kfree(previous_task);
+        previous_task = NULL;
+    }
+    
     if (!current) {
         // No current task, pick one
         task_t* next = scheduler_pick_next_task();
@@ -114,16 +130,21 @@ void scheduler_tick(void) {
     
     // Check if time slice expired
     if (current->time_used >= time_quantum) {
+        // Special case: if current task is idle, don't switch
+        // Idle should stay active when there are no other tasks
+        if (current->pid == 0) {  // Idle task
+            current->time_used = 0;
+            return;
+        }
+        
         // Time slice expired, switch to next task
         task_t* next = scheduler_pick_next_task();
         
         if (next && next != current) {
-            // Put current task back in ready queue (if not idle)
-            if (current->pid != 0) {  // Not idle task
-                current->time_used = 0;
-                current->state = TASK_STATE_READY;
-                scheduler_add_task(current);
-            }
+            // Put current task back in ready queue
+            current->time_used = 0;
+            current->state = TASK_STATE_READY;
+            scheduler_add_task(current);
             
             // Switch to next task
             previous_task = current;

@@ -135,14 +135,21 @@ void task_init(void) {
     // Ready queue'yu başlat
     task_queue_init(&ready_queue);
     
+    // IMPORTANT: Set initialized flag BEFORE creating idle task
+    // because task_create_idle calls task_create which checks this flag
+    task_system_initialized = 1;
+    
     // Idle task oluştur
     idle_task = task_create_idle();
     if (idle_task) {
         serial_print("[TASK] Idle task created (PID=0)\n");
+    } else {
+        serial_print("[TASK ERROR] Failed to create idle task!\n");
+        task_system_initialized = 0;  // Reset on failure
+        return;
     }
     
     current_task = idle_task;
-    task_system_initialized = 1;
     
     serial_print("[TASK] Task system initialized\n");
 }
@@ -286,14 +293,57 @@ void task_terminate(task_t* task) {
 
 void task_exit(void) {
     // Mevcut task kendini sonlandırır
-    if (current_task && current_task != idle_task) {
-        serial_print("[TASK] Current task exiting\n");
-        task_terminate(current_task);
-        current_task = NULL;
-        
-        // Scheduler'a geç (bir sonraki task'ı çalıştır)
-        // Bu, scheduler_tick() tarafından yapılacak
+    if (!current_task || current_task == idle_task) {
+        serial_print("[TASK ERROR] Cannot exit idle task!\n");
+        return;
     }
+    
+    serial_print("[TASK] Current task exiting - switching immediately\n");
+    
+    // Mark task as terminated
+    current_task->state = TASK_STATE_TERMINATED;
+    
+    // Get next task to run
+    task_t* next = task_get_next();
+    if (!next) {
+        serial_print("[TASK] No next task, returning to kernel main\n");
+        next = idle_task;
+    }
+    
+    serial_print("[TASK] Switching to: ");
+    serial_print(next->name);
+    serial_print("\n");
+    
+    // Store old task for scheduler cleanup
+    extern task_t* previous_task;
+    previous_task = current_task;
+    
+    // Set new current task
+    current_task = next;
+    next->state = TASK_STATE_RUNNING;
+    next->last_run_time = get_system_ticks();
+    
+    // Special case: if switching to idle, don't use context switch
+    // Just return from this function - we're in a task that's exiting
+    // The interrupt will return us to kernel main's HLT loop
+    if (next == idle_task) {
+        serial_print("[TASK] Returning to kernel main\n");
+        // Return to wherever we were called from
+        // Since tasks call task_exit() from their own code, we need to
+        // jump to a safe return point - kernel main
+        extern void kernel_return_point(void);
+        // Actually, we can't just return - we need to jump to kernel main
+        // For now, just enter the idle loop here
+        idle_task_entry();  // This never returns
+    }
+    
+    // For normal tasks, use context switch
+    extern void task_load_and_jump_context(cpu_context_t* ctx);
+    task_load_and_jump_context(&next->context);
+    
+    // Should never reach here
+    serial_print("[TASK ERROR] task_exit returned - this should never happen!\n");
+    while(1) __asm__ volatile("hlt");
 }
 
 void task_set_state(task_t* task, uint32_t new_state) {
@@ -355,6 +405,10 @@ extern void task_switch_context(cpu_context_t* old_ctx, cpu_context_t* new_ctx);
 void task_switch(task_t* from, task_t* to) {
     if (!to) return;
     
+    serial_print("[TASK] Switching to task: ");
+    serial_print(to->name);
+    serial_print("\n");
+    
     // İstatistikleri güncelle
     if (from) {
         from->context_switches++;
@@ -366,13 +420,19 @@ void task_switch(task_t* from, task_t* to) {
     
     current_task = to;
     
+    // Special case: switching TO idle task
+    // Don't use context switch - idle doesn't have a valid saved context
+    // Just return to kernel main loop which is already in HLT loop
+    if (to == idle_task) {
+        serial_print("[TASK] Returning to kernel main (idle)\n");
+        // Just return - we're already in an interrupt context
+        // When we return from the interrupt, we'll be back in kernel main's HLT loop
+        return;
+    }
+    
     // GERÇEK CONTEXT SWITCH - Assembly fonksiyonunu çağır
     cpu_context_t* old_ctx = from ? &from->context : NULL;
     cpu_context_t* new_ctx = &to->context;
-    
-    serial_print("[TASK] Switching to task: ");
-    serial_print(to->name);
-    serial_print("\n");
     
     task_switch_context(old_ctx, new_ctx);
     

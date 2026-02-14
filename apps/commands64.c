@@ -1282,17 +1282,40 @@ void cmd_createtask(const char* args, CommandOutput* output) {
     
     // Create test tasks
     task_t* task_a = task_create("TestA", test_task_a, 10);
-    task_t* task_b = task_create("TestB", test_task_b, 10);
-    
-    if (task_a && task_b) {
-        task_start(task_a);
-        task_start(task_b);
-        
-        output_add_line(output, "Created and started 2 test tasks", VGA_GREEN);
-        output_add_line(output, "Check serial output for task messages", VGA_YELLOW);
-    } else {
-        output_add_line(output, "Failed to create tasks", VGA_RED);
+    if (!task_a) {
+        output_add_line(output, "Failed to create task A - task system may not be initialized", VGA_RED);
+        return;
     }
+    
+    task_t* task_b = task_create("TestB", test_task_b, 10);
+    if (!task_b) {
+        output_add_line(output, "Failed to create task B - task system may not be initialized", VGA_RED);
+        // Clean up task_a if it was created
+        if (task_a) {
+            task_terminate(task_a);
+        }
+        return;
+    }
+    
+    // Both tasks created successfully, now start them
+    if (task_start(task_a) != 0) {
+        output_add_line(output, "Failed to start task A", VGA_RED);
+        task_terminate(task_a);
+        task_terminate(task_b);
+        return;
+    }
+    
+    if (task_start(task_b) != 0) {
+        output_add_line(output, "Failed to start task B", VGA_RED);
+        task_terminate(task_a);
+        task_terminate(task_b);
+        return;
+    }
+    
+    output_add_line(output, "Created and started 2 test tasks", VGA_GREEN);
+    output_add_line(output, "  - TestA (PID varies)", VGA_WHITE);
+    output_add_line(output, "  - TestB (PID varies)", VGA_WHITE);
+    output_add_line(output, "Check serial output for task messages", VGA_YELLOW);
 }
 
 void cmd_schedinfo(const char* args, CommandOutput* output) {
@@ -1334,15 +1357,21 @@ void cmd_offihito(const char* args, CommandOutput* output) {
     // Create Offihito task
     task_t* offihito = task_create("Offihito", offihito_task, 10);
     
-    if (offihito) {
-        task_start(offihito);
-        
-        output_add_line(output, "Offihito task created and started!", VGA_GREEN);
-        output_add_line(output, "It will print 'Offihito' every 2 seconds", VGA_YELLOW);
-        output_add_line(output, "Check both VGA screen and serial output", VGA_YELLOW);
-    } else {
+    if (!offihito) {
         output_add_line(output, "Failed to create Offihito task", VGA_RED);
+        output_add_line(output, "Task system may not be initialized", VGA_YELLOW);
+        return;
     }
+    
+    if (task_start(offihito) != 0) {
+        output_add_line(output, "Failed to start Offihito task", VGA_RED);
+        task_terminate(offihito);
+        return;
+    }
+    
+    output_add_line(output, "Offihito task created and started!", VGA_GREEN);
+    output_add_line(output, "It will print 'Offihito' every 2 seconds", VGA_YELLOW);
+    output_add_line(output, "Check both VGA screen and serial output", VGA_YELLOW);
 }
 
 // ===========================================

@@ -1,5 +1,5 @@
 // keyboard_unified.c - Unified Keyboard Driver for Text and GUI modes
-// Supports both text mode terminal and GUI mode terminal window
+// Supports both text mode terminal and GUI mode (without terminal window)
 
 #include <stdint.h>
 #include <stddef.h>
@@ -8,21 +8,6 @@
 #ifndef GUI_MODE
     #include "../apps/commands64.h"
     #include "../apps/nano64.h"
-#endif
-
-#ifdef GUI_MODE
-    // GUI mode declarations
-    typedef struct Terminal Terminal;
-    extern void terminal_handle_key(Terminal* term, char c);
-    extern void terminal_draw_incremental(Terminal* term);
-    static Terminal* active_terminal = NULL;
-#else
-    // Text mode declarations
-    extern void putchar64(char c, uint8_t color);
-    extern void print_str64(const char* str, uint8_t color);
-    extern void println64(const char* str, uint8_t color);
-    extern void set_position64(size_t row, size_t col);
-    extern void clear_screen64(void);
 #endif
 
 // ============================================================================
@@ -120,18 +105,6 @@ static char scancode_to_char(uint8_t scancode) {
 }
 
 // ============================================================================
-// GUI MODE FUNCTIONS
-// ============================================================================
-
-#ifdef GUI_MODE
-
-void keyboard_set_terminal(Terminal* term) {
-    active_terminal = term;
-}
-
-#endif
-
-// ============================================================================
 // TEXT MODE FUNCTIONS
 // ============================================================================
 
@@ -142,6 +115,13 @@ void keyboard_set_terminal(Terminal* term) {
 #define VGA_GREEN  0x0A
 #define VGA_CYAN   0x0B
 #define VGA_YELLOW 0x0E
+
+// External functions from kernel
+extern void putchar64(char c, uint8_t color);
+extern void print_str64(const char* str, uint8_t color);
+extern void println64(const char* str, uint8_t color);
+extern void set_position64(size_t row, size_t col);
+extern void clear_screen64(void);
 
 // Show command prompt (simplified without user info)
 void show_prompt64(void) {
@@ -275,7 +255,7 @@ void keyboard_handler64(void) {
     
 #ifdef GUI_MODE
     // ========================================================================
-    // GUI MODE HANDLER
+    // GUI MODE HANDLER - Simple key handling without terminal
     // ========================================================================
     
     // Handle shift keys
@@ -303,12 +283,14 @@ void keyboard_handler64(void) {
         return;
     }
     
-    // Convert to ASCII and send to terminal
+    // Convert to ASCII (for future use - maybe log to serial)
     char c = scancode_to_char(scancode);
     
-    if (c != 0 && active_terminal) {
-        terminal_handle_key(active_terminal, c);
-        terminal_draw_incremental(active_terminal);
+    // In GUI mode without terminal, we can log key presses to serial for debugging
+    if (c != 0) {
+        extern void serial_write(char c);
+        // Optionally log keypress to serial
+        // serial_write(c);
     }
     
     outb(0x20, 0x20);
@@ -525,6 +507,13 @@ void keyboard_handler64(void) {
     // Handle Enter key
     if (c == '\n') {
         input_buffer[buffer_pos] = '\0';
+        
+        // Debug: print to serial to verify keyboard is working
+        extern void serial_print(const char* str);
+        serial_print("[KEYBOARD] Enter pressed, command: ");
+        serial_print(input_buffer);
+        serial_print("\n");
+        
         process_command64(input_buffer);
         buffer_pos = 0;
         outb(0x20, 0x20);
