@@ -179,6 +179,13 @@ void gui_draw_string(int x, int y, const char* str, Color fg, Color bg) {
     while (*str) { gui_draw_char(x, y, *str, fg, bg); x+=8; str++; }
 }
 
+uint8_t gui_font_row(char c, int row) {
+    unsigned char uc = (unsigned char)c;
+    if (uc < 32 || uc > 127) uc = ' ';
+    if (row < 0 || row >= 8) return 0;
+    return font_8x14[uc - 32][row];
+}
+
 void gui_draw_cursor(int x, int y) {
     static const int cursor_data[17][2] = {
         {2,0},{3,0},{4,0},{5,0},{6,0},{7,0},{8,0},{9,0},{10,0},

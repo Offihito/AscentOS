@@ -258,6 +258,7 @@ void kernel_main(uint64_t multiboot_info) {
 #include "mouse64.h"
 #include "taskbar64.h"
 #include "compositor64.h"
+#include "wm64.h"
 
 void init_interrupts64(void);
 void init_commands64(void);
@@ -266,15 +267,16 @@ void scheduler_init(void);
 
 bool needs_full_redraw = false;
 
+// Klavye: O tuşu ile yeni pencere isteği (keyboard_unified.c set eder)
+volatile int gui_request_new_window = 0;
+
 // Compositor global state
 static Compositor g_compositor;
 static int desktop_layer_idx = -1;
 static int taskbar_layer_idx = -1;
 
-// Demo windows for Phase 2 effects
-static int demo_window1_idx = -1;  // Semi-transparent window
-static int demo_window2_idx = -1;  // Window with shadow
-static int demo_window3_idx = -1;  // Glass effect window
+// Pencere yöneticisi
+static WindowManager g_wm;
 
 static void redraw_all(Color bg_color, Taskbar* tbar, int screen_h) {
     // Use compositor for rendering
@@ -427,164 +429,25 @@ void kernel_main(uint64_t multiboot_info) {
     serial_print("Initial GUI draw complete\n");
     serial_print("Higher Half Kernel GUI initialized successfully!\n");
     
-    // ========================================================================
-    // PHASE 2 DEMO: Create demo windows with alpha blending & shadows
-    // ========================================================================
-    serial_print("Creating Phase 2 demo windows...\n");
-    
-    // Demo Window 1: Semi-transparent overlay (50% opacity)
-    demo_window1_idx = compositor_create_layer(&g_compositor, LAYER_TYPE_WINDOW,
-                                              100, 100, 350, 250);
-    if (demo_window1_idx >= 0) {
-        Layer* win1 = &g_compositor.layers[demo_window1_idx];
-        
-        // Light gray background
-        layer_fill_rect(win1, 0, 0, 350, 250, RGB(220, 220, 220));
-        
-        // Blue title bar
-        layer_fill_rect(win1, 0, 0, 350, 24, RGB(50, 100, 200));
-        
-        // Set 50% transparency for glass effect
-        compositor_set_layer_alpha(&g_compositor, demo_window1_idx, 128);
-        
-        // Add soft shadow
-        compositor_set_layer_shadow(&g_compositor, demo_window1_idx,
-                                   true, 6, 6, 100, 6);
-        
-        compositor_mark_layer_dirty(&g_compositor, demo_window1_idx);
-        serial_print("Demo Window 1 created (50% transparent)\n");
-    }
-    
-    // Demo Window 2: Opaque window with prominent shadow
-    demo_window2_idx = compositor_create_layer(&g_compositor, LAYER_TYPE_WINDOW,
-                                              250, 150, 400, 280);
-    if (demo_window2_idx >= 0) {
-        Layer* win2 = &g_compositor.layers[demo_window2_idx];
-        
-        // White background
-        layer_fill_rect(win2, 0, 0, 400, 280, RGB(240, 240, 240));
-        
-        // Dark blue title bar
-        layer_fill_rect(win2, 0, 0, 400, 24, RGB(30, 60, 150));
-        
-        // Inner content area (slightly darker)
-        layer_fill_rect(win2, 10, 34, 380, 236, RGB(250, 250, 250));
-        
-        // Fully opaque
-        compositor_set_layer_alpha(&g_compositor, demo_window2_idx, 255);
-        
-        // Larger, darker shadow
-        compositor_set_layer_shadow(&g_compositor, demo_window2_idx,
-                                   true, 8, 8, 120, 8);
-        
-        compositor_mark_layer_dirty(&g_compositor, demo_window2_idx);
-        serial_print("Demo Window 2 created (opaque with shadow)\n");
-    }
-    
-    // Demo Window 3: Glass/Aero style (95% opacity)
-    demo_window3_idx = compositor_create_layer(&g_compositor, LAYER_TYPE_WINDOW,
-                                              180, 280, 380, 220);
-    if (demo_window3_idx >= 0) {
-        Layer* win3 = &g_compositor.layers[demo_window3_idx];
-        
-        // Very light background
-        layer_fill_rect(win3, 0, 0, 380, 220, RGB(255, 255, 255));
-        
-        // Semi-transparent aqua title bar (Aero glass effect)
-        layer_fill_rect(win3, 0, 0, 380, 24, RGB(100, 180, 240));
-        
-        // 95% opacity for subtle transparency
-        compositor_set_layer_alpha(&g_compositor, demo_window3_idx, 242);
-        
-        // Soft, subtle shadow
-        compositor_set_layer_shadow(&g_compositor, demo_window3_idx,
-                                   true, 4, 4, 80, 5);
-        
-        compositor_mark_layer_dirty(&g_compositor, demo_window3_idx);
-        serial_print("Demo Window 3 created (Aero glass style)\n");
-    }
-    
-    // Render all demo windows - MANUAL RENDER FOR DEBUG
-    serial_print("Rendering layers manually...\n");
-    
-    // Don't use compositor_render() - manually render each layer for testing
-    // 1. Desktop layer (already filled during compositor_init)
-    
-    // 2. Window layers - render directly
-    if (demo_window1_idx >= 0) {
-        Layer* win1 = &g_compositor.layers[demo_window1_idx];
-        serial_print("Rendering Window 1...\n");
-        for (int y = 0; y < win1->bounds.height && y < 250; y++) {
-            for (int x = 0; x < win1->bounds.width && x < 350; x++) {
-                int screen_x = win1->bounds.x + x;
-                int screen_y = win1->bounds.y + y;
-                if (screen_x >= 0 && screen_x < gui_get_width() &&
-                    screen_y >= 0 && screen_y < gui_get_height()) {
-                    Color pixel = win1->buffer[y * win1->bounds.width + x];
-                    
-                    // Apply alpha blending
-                    if (win1->alpha < 255) {
-                        Color bg = gui_get_pixel(screen_x, screen_y);
-                        pixel = alpha_blend(pixel, bg, win1->alpha);
-                    }
-                    
-                    gui_put_pixel(screen_x, screen_y, pixel);
-                }
-            }
-        }
-        serial_print("Window 1 rendered\n");
-    }
-    
-    if (demo_window2_idx >= 0) {
-        Layer* win2 = &g_compositor.layers[demo_window2_idx];
-        serial_print("Rendering Window 2...\n");
-        for (int y = 0; y < win2->bounds.height && y < 280; y++) {
-            for (int x = 0; x < win2->bounds.width && x < 400; x++) {
-                int screen_x = win2->bounds.x + x;
-                int screen_y = win2->bounds.y + y;
-                if (screen_x >= 0 && screen_x < gui_get_width() &&
-                    screen_y >= 0 && screen_y < gui_get_height()) {
-                    gui_put_pixel(screen_x, screen_y, win2->buffer[y * win2->bounds.width + x]);
-                }
-            }
-        }
-        serial_print("Window 2 rendered\n");
-    }
-    
-    if (demo_window3_idx >= 0) {
-        Layer* win3 = &g_compositor.layers[demo_window3_idx];
-        serial_print("Rendering Window 3...\n");
-        for (int y = 0; y < win3->bounds.height && y < 220; y++) {
-            for (int x = 0; x < win3->bounds.width && x < 380; x++) {
-                int screen_x = win3->bounds.x + x;
-                int screen_y = win3->bounds.y + y;
-                if (screen_x >= 0 && screen_x < gui_get_width() &&
-                    screen_y >= 0 && screen_y < gui_get_height()) {
-                    Color pixel = win3->buffer[y * win3->bounds.width + x];
-                    
-                    // Apply alpha blending for glass effect
-                    if (win3->alpha < 255) {
-                        Color bg = gui_get_pixel(screen_x, screen_y);
-                        pixel = alpha_blend(pixel, bg, win3->alpha);
-                    }
-                    
-                    gui_put_pixel(screen_x, screen_y, pixel);
-                }
-            }
-        }
-        serial_print("Window 3 rendered\n");
-    }
-    
-    taskbar_draw(&taskbar);  // Redraw taskbar on top
-    serial_print("Phase 2 demo windows rendered!\n");
-    
-    // ========================================================================
+    // Pencere yöneticisi ve tek test penceresi
+    wm_init(&g_wm, screen_width, screen_height);
+    int test_win_id = wm_create_window(&g_compositor, &g_wm, &taskbar,
+                                       120, 80, 400, 300, "Pencere 1");
+    (void)test_win_id;
+    serial_print("Window manager: one test window created\n");
+
+    compositor_render(&g_compositor);
+    taskbar_draw(&taskbar);
     
     // Mouse state tracking
     MouseState mouse;
     int last_mouse_x = -1;
     int last_mouse_y = -1;
     bool last_left_button = false;
+    // Sürükleme: başlıktan tutulunca
+    int dragging_win_id = -1;
+    int drag_anchor_mouse_x = 0, drag_anchor_mouse_y = 0;
+    int drag_anchor_win_x = 0, drag_anchor_win_y = 0;
     
     // Cursor buffer for restoration
     Color cursor_buffer[20 * 18];
@@ -637,26 +500,83 @@ void kernel_main(uint64_t multiboot_info) {
         bool mouse_moved = (mouse.x != last_mouse_x || mouse.y != last_mouse_y);
         
         if (mouse_moved) {
-            if (mouse.y >= screen_height - 40) {
+            if (dragging_win_id >= 0) {
+                int layer_idx = wm_get_layer_index(&g_wm, dragging_win_id);
+                if (layer_idx >= 0) {
+                    int new_x = drag_anchor_win_x + (mouse.x - drag_anchor_mouse_x);
+                    int new_y = drag_anchor_win_y + (mouse.y - drag_anchor_mouse_y);
+                    compositor_move_layer(&g_compositor, layer_idx, new_x, new_y);
+                    compositor_render_dirty(&g_compositor);
+                    prev_x = -100;
+                    prev_y = -100;
+                }
+            } else if (mouse.y >= screen_height - 40) {
                 int old_hovered = taskbar.hovered_button;
                 taskbar_handle_mouse_move(&taskbar, mouse.x, mouse.y);
-                
                 if (old_hovered != taskbar.hovered_button) {
                     taskbar_draw(&taskbar);
                 }
             }
-            
             last_mouse_x = mouse.x;
             last_mouse_y = mouse.y;
         }
         
         if (mouse.left_button && !last_left_button) {
-            int clicked_id = taskbar_handle_mouse_click(&taskbar, mouse.x, mouse.y);
-            (void)clicked_id;
+            if (mouse.y >= screen_height - 40) {
+                int clicked_id = taskbar_handle_mouse_click(&taskbar, mouse.x, mouse.y);
+                if (clicked_id >= 0) {
+                    wm_restore_window(&g_compositor, &g_wm, clicked_id);
+                    needs_full_redraw = true;
+                }
+            } else {
+                int local_x, local_y;
+                int win_id = wm_get_window_at(&g_compositor, &g_wm,
+                                              mouse.x, mouse.y, &local_x, &local_y);
+                if (win_id >= 0) {
+                    int layer_idx = wm_get_layer_index(&g_wm, win_id);
+                    Layer* layer = (layer_idx >= 0) ? &g_compositor.layers[layer_idx] : NULL;
+                    WMHitResult hit = layer ? wm_hit_test(layer->bounds.width, layer->bounds.height, local_x, local_y) : WMHIT_NONE;
+                    if (hit == WMHIT_TITLE) {
+                        dragging_win_id = win_id;
+                        drag_anchor_mouse_x = mouse.x;
+                        drag_anchor_mouse_y = mouse.y;
+                        drag_anchor_win_x = layer->bounds.x;
+                        drag_anchor_win_y = layer->bounds.y;
+                    } else {
+                        wm_handle_click(&g_compositor, &g_wm, &taskbar, win_id, local_x, local_y);
+                        needs_full_redraw = true;
+                    }
+                }
+            }
         }
         
         if (!mouse.left_button && last_left_button) {
-            // Mouse released
+            dragging_win_id = -1;
+        }
+        
+        if (gui_request_new_window) {
+            gui_request_new_window = 0;
+            int n = g_wm.count + 1;
+            char title[32];
+            title[0] = 'P'; title[1] = 'e'; title[2] = 'n'; title[3] = 'c';
+            title[4] = 'e'; title[5] = 'r'; title[6] = 'e'; title[7] = ' ';
+            int idx = 8;
+            if (n >= 100) {
+                title[idx++] = '0' + (n / 100);
+                title[idx++] = '0' + ((n / 10) % 10);
+                title[idx++] = '0' + (n % 10);
+            } else if (n >= 10) {
+                title[idx++] = '0' + (n / 10);
+                title[idx++] = '0' + (n % 10);
+            } else {
+                title[idx++] = '0' + n;
+            }
+            title[idx] = '\0';
+            int x = 120 + (g_wm.count * 30) % 180;
+            int y = 80 + (g_wm.count * 28) % 120;
+            if (wm_create_window(&g_compositor, &g_wm, &taskbar, x, y, 400, 300, title) >= 0) {
+                needs_full_redraw = true;
+            }
         }
         
         last_left_button = mouse.left_button;

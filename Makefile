@@ -131,17 +131,20 @@ keyboard_gui.o: kernel/keyboard_unified.c
 taskbar.o: kernel/taskbar64.c kernel/taskbar64.h
 	$(CC) $(CFLAGS) -c kernel/taskbar64.c -o taskbar.o
 
+wm64.o: kernel/wm64.c kernel/wm64.h kernel/compositor64.h kernel/taskbar64.h
+	$(CC) $(CFLAGS) -c kernel/wm64.c -o wm64.o
+
 commands_gui.o: kernel/commands_gui.c kernel/commands_gui.h
 	$(CC) $(CFLAGS) -DGUI_MODE -c kernel/commands_gui.c -o commands_gui.o
 
 commands64_gui.o: apps/commands64.c apps/commands64.h
 	$(CC) $(CFLAGS) -DGUI_MODE -c apps/commands64.c -o commands64_gui.o
 
-kernel64_gui.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h
+kernel64_gui.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h kernel/wm64.h
 	$(CC) $(CFLAGS) -DGUI_MODE -c kernel/kernel64.c -o kernel64_gui.o
 
 GUI_OBJS = boot64_gui.o interrupts64_gui.o interrupts_setup.o gui64.o compositor64.o \
-           mouse64.o keyboard_gui.o kernel64_gui.o taskbar.o \
+           wm64.o mouse64.o keyboard_gui.o kernel64_gui.o taskbar.o \
            commands_gui.o memory_unified.o vmm64.o \
            commands64_gui.o files64.o disk64.o nano64.o vga64.o \
            timer.o task.o scheduler.o page_fault.o

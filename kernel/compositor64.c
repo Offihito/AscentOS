@@ -146,6 +146,7 @@ int compositor_create_layer(Compositor* comp, LayerType type, int x, int y,
         layer->buffer[i] = 0x00000000;
     }
     
+    compositor_rebuild_z_order(comp);
     return idx;
 }
 
@@ -197,18 +198,45 @@ void compositor_move_layer(Compositor* comp, int layer_index, int x, int y) {
     if (!comp->layers[layer_index].active) return;
     
     Layer* layer = &comp->layers[layer_index];
+    int w = layer->bounds.width;
+    int h = layer->bounds.height;
+    int ox = layer->bounds.x;
+    int oy = layer->bounds.y;
     
-    // Mark old position as dirty
-    compositor_add_global_dirty_rect(comp, layer->bounds.x, layer->bounds.y,
-                                    layer->bounds.width, layer->bounds.height);
+    /* Eski konum: pencere + gölge alanı (iz bırakmaması için) */
+    int dirty_x1 = ox;
+    int dirty_y1 = oy;
+    int dirty_x2 = ox + w;
+    int dirty_y2 = oy + h;
+    if (layer->has_shadow) {
+        int sx = ox + layer->shadow_offset_x;
+        int sy = oy + layer->shadow_offset_y;
+        if (sx < dirty_x1) dirty_x1 = sx;
+        if (sy < dirty_y1) dirty_y1 = sy;
+        if (sx + w > dirty_x2) dirty_x2 = sx + w;
+        if (sy + h > dirty_y2) dirty_y2 = sy + h;
+    }
+    compositor_add_global_dirty_rect(comp, dirty_x1, dirty_y1,
+                                     dirty_x2 - dirty_x1, dirty_y2 - dirty_y1);
     
-    // Update position
     layer->bounds.x = x;
     layer->bounds.y = y;
     
-    // Mark new position as dirty
-    compositor_add_global_dirty_rect(comp, x, y,
-                                    layer->bounds.width, layer->bounds.height);
+    /* Yeni konum: pencere + gölge */
+    dirty_x1 = x;
+    dirty_y1 = y;
+    dirty_x2 = x + w;
+    dirty_y2 = y + h;
+    if (layer->has_shadow) {
+        int sx = x + layer->shadow_offset_x;
+        int sy = y + layer->shadow_offset_y;
+        if (sx < dirty_x1) dirty_x1 = sx;
+        if (sy < dirty_y1) dirty_y1 = sy;
+        if (sx + w > dirty_x2) dirty_x2 = sx + w;
+        if (sy + h > dirty_y2) dirty_y2 = sy + h;
+    }
+    compositor_add_global_dirty_rect(comp, dirty_x1, dirty_y1,
+                                     dirty_x2 - dirty_x1, dirty_y2 - dirty_y1);
 }
 
 void compositor_resize_layer(Compositor* comp, int layer_index, int width, int height) {
@@ -594,14 +622,25 @@ void layer_fill_rect(Layer* layer, int x, int y, int width, int height, Color co
 }
 
 void layer_draw_string(Layer* layer, int x, int y, const char* str, Color fg, Color bg) {
-    // Simple implementation - would use font rendering
-    // For now, just mark as dirty
-    (void)layer;
-    (void)x;
-    (void)y;
-    (void)str;
-    (void)fg;
-    (void)bg;
+    int w = layer->bounds.width;
+    int h = layer->bounds.height;
+    int cur_x = x;
+    while (*str) {
+        char c = *str++;
+        for (int row = 0; row < 8; row++) {
+            uint8_t glyph = gui_font_row(c, row);
+            int py = y + row;
+            if (py < 0 || py >= h) continue;
+            for (int col = 0; col < 8; col++) {
+                int px = cur_x + col;
+                if (px >= 0 && px < w) {
+                    Color color = (glyph & (1 << (7 - col))) ? fg : bg;
+                    layer->buffer[py * w + px] = color;
+                }
+            }
+        }
+        cur_x += 8;
+    }
 }
 
 void layer_blit(Layer* layer, int x, int y, const uint32_t* pixels,

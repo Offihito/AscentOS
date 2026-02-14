@@ -257,6 +257,7 @@ void keyboard_handler64(void) {
     // ========================================================================
     // GUI MODE HANDLER - Simple key handling without terminal
     // ========================================================================
+    extern volatile int gui_request_new_window;
     
     // Handle shift keys
     if (scancode == 0x2A || scancode == 0x36) {
@@ -286,11 +287,8 @@ void keyboard_handler64(void) {
     // Convert to ASCII (for future use - maybe log to serial)
     char c = scancode_to_char(scancode);
     
-    // In GUI mode without terminal, we can log key presses to serial for debugging
-    if (c != 0) {
-        extern void serial_write(char c);
-        // Optionally log keypress to serial
-        // serial_write(c);
+    if (c == 'o' || c == 'O') {
+        gui_request_new_window = 1;
     }
     
     outb(0x20, 0x20);

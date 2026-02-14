@@ -38,6 +38,8 @@ void gui_draw_line(int x1, int y1, int x2, int y2, Color color);
 void gui_fill_rect(int x, int y, int w, int h, Color color);
 void gui_draw_char(int x, int y, char c, Color fg, Color bg);
 void gui_draw_string(int x, int y, const char* str, Color fg, Color bg);
+// Layer buffer'a yazı çizmek için font satırı (row 0..7)
+uint8_t gui_font_row(char c, int row);
 void gui_draw_cursor(int x, int y);
 Color gui_blend_colors(Color fg, Color bg, uint8_t alpha);
 Color gui_darken_color(Color color, float factor);
