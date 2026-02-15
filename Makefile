@@ -175,7 +175,8 @@ GUI_OBJS = boot64_gui.o interrupts64_gui.o interrupts_setup.o gui64.o compositor
            commands_gui.o memory_unified.o vmm64.o \
            commands64_gui.o files64.o disk64.o elf64.o nano64.o vga64.o \
            timer.o task.o scheduler.o page_fault.o \
-           syscall64.o syscall.o syscall_setup.o syscall_test.o
+           syscall64.o syscall.o syscall_setup.o syscall_test.o \
+		   usermode_transition.o
 		   
 kernel64_gui.elf: $(GUI_OBJS)
 	$(LD) $(LDFLAGS) $(GUI_OBJS) -o kernel64_gui.elf
