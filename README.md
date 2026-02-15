@@ -5,7 +5,7 @@
 ## ✨ Features
 
 - **64-bit Architecture** - Built for modern hardware
-- **Custom File System** - Native file management capabilities
+- **FAT32 File System** - Native file management capabilities
 - **Dual Mode Support** - Text and GUI interfaces
 - **Open Source** - Community-driven development
 
