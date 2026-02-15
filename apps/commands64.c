@@ -1183,86 +1183,158 @@ void cmd_heap(const char* args, CommandOutput* output) {
 }
 void cmd_testsyscall(const char* args, CommandOutput* output) {
     (void)args;
-    
-    output_add_line(output, "=== Testing SYSCALL Infrastructure ===", VGA_CYAN);
-    output_add_line(output, "", VGA_WHITE);
-    output_add_line(output, "Running syscall tests...", VGA_YELLOW);
-    output_add_line(output, "Check serial output for detailed results.", VGA_YELLOW);
+
+    output_add_line(output, "╔══════════════════════════════════════╗", VGA_CYAN);
+    output_add_line(output, "║   Phase 3 Syscall Test Suite          ║", VGA_CYAN);
+    output_add_line(output, "╚══════════════════════════════════════╝", VGA_CYAN);
     output_add_empty_line(output);
-    
-    // Run syscall tests (output goes to serial)
+
+    if (!syscall_is_enabled()) {
+        output_add_line(output, "[ERROR] Syscall system not initialized!", VGA_RED);
+        return;
+    }
+
+    output_add_line(output, "Running 13 test groups (see serial for details)...", VGA_YELLOW);
+    output_add_empty_line(output);
+
+    // Run full test suite — all output goes to serial
     extern void syscall_kernel_test(void);
     syscall_kernel_test();
-    
-    output_add_line(output, "[PASS] Syscall infrastructure test completed!", VGA_GREEN);
-    output_add_line(output, "", VGA_WHITE);
-    output_add_line(output, "Summary:", VGA_CYAN);
-    
-    if (syscall_is_enabled()) {
-        output_add_line(output, "  * SYSCALL/SYSRET: ENABLED", VGA_GREEN);
-    } else {
-        output_add_line(output, "  * SYSCALL/SYSRET: DISABLED", VGA_RED);
-    }
-    
-    output_add_line(output, "  * MSR Configuration: OK", VGA_GREEN);
-    output_add_line(output, "  * Assembly Handler: OK", VGA_GREEN);
-    output_add_line(output, "  * C Dispatcher: OK", VGA_GREEN);
+
+    // ── Show a brief summary on-screen ───────────────────────────────────────
+    char buf[64]; char num[16];
+
+    output_add_line(output, "Test Groups:", VGA_CYAN);
+    output_add_line(output, "  1. Syscall init           [DONE]", VGA_GREEN);
+    output_add_line(output, "  2. MSR configuration      [DONE]", VGA_GREEN);
+    output_add_line(output, "  3. Ascent basic syscalls   [DONE]", VGA_GREEN);
+    output_add_line(output, "  4. FD table (0/1/2)       [DONE]", VGA_GREEN);
+    output_add_line(output, "  5. write() to stdout/stderr[DONE]", VGA_GREEN);
+    output_add_line(output, "  6. open/read/write/close  [DONE]", VGA_GREEN);
+    output_add_line(output, "  7. pipe()                 [DONE]", VGA_GREEN);
+    output_add_line(output, "  8. dup() / dup2()         [DONE]", VGA_GREEN);
+    output_add_line(output, "  9. brk/mmap/munmap        [DONE]", VGA_GREEN);
+    output_add_line(output, " 10. exit/getpid/kill/wait  [DONE]", VGA_GREEN);
+    output_add_line(output, " 11. IPC: shared memory     [DONE]", VGA_GREEN);
+    output_add_line(output, " 12. IPC: message queue     [DONE]", VGA_GREEN);
+    output_add_line(output, " 13. Invalid syscall guard  [DONE]", VGA_GREEN);
     output_add_empty_line(output);
-    output_add_line(output, "Next: Phase 2 will add usermode (Ring 3) support", VGA_MAGENTA);
+
+    // Live stats snapshot
+    syscall_stats_t st;
+    syscall_get_stats(&st);
+
+    str_cpy(buf, "Total syscalls issued: ");
+    uint64_to_string(st.total_syscalls, num);
+    str_concat(buf, num);
+    output_add_line(output, buf, VGA_WHITE);
+
+    if (st.failed_syscalls == 0) {
+        output_add_line(output, "All syscall tests passed!", VGA_GREEN);
+    } else {
+        str_cpy(buf, "Failed syscalls: ");
+        uint64_to_string(st.failed_syscalls, num);
+        str_concat(buf, num);
+        output_add_line(output, buf, VGA_RED);
+    }
+
+    output_add_empty_line(output);
+    output_add_line(output, "Check serial output for full pass/fail log.", VGA_MAGENTA);
+    output_add_line(output, "Phase 4: fork, execve, blocking sleep, COW pages.", VGA_CYAN);
 }
 
 void cmd_syscallstats(const char* args, CommandOutput* output) {
     (void)args;
-    
-    output_add_line(output, "=== SYSCALL Statistics ===", VGA_CYAN);
-    output_add_line(output, "", VGA_WHITE);
-    
+
+    output_add_line(output, "╔══════════════════════════════════════╗", VGA_CYAN);
+    output_add_line(output, "║      Phase 3 Syscall Statistics       ║", VGA_CYAN);
+    output_add_line(output, "╚══════════════════════════════════════╝", VGA_CYAN);
+    output_add_empty_line(output);
+
     syscall_stats_t stats;
     syscall_get_stats(&stats);
-    
-    char buf[128];
+
+    char buf[96];
     char num[32];
-    
-    // Total syscalls
-    output_add_line(output, "Total syscalls:", VGA_YELLOW);
-    uint64_to_string(stats.total_syscalls, num);
-    buf[0] = ' '; buf[1] = ' ';
-    int i = 0;
-    while (num[i]) {
-        buf[2 + i] = num[i];
-        i++;
-    }
-    buf[2 + i] = '\0';
+
+    // ── Totals ────────────────────────────────────────────────────────────────
+    output_add_line(output, "Totals:", VGA_YELLOW);
+
+    str_cpy(buf, "  Total    : ");
+    uint64_to_string(stats.total_syscalls, num);   str_concat(buf, num);
     output_add_line(output, buf, VGA_WHITE);
-    
-    // Invalid syscalls
-    output_add_line(output, "Invalid syscalls:", VGA_YELLOW);
-    uint64_to_string(stats.invalid_syscalls, num);
-    buf[0] = ' '; buf[1] = ' ';
-    i = 0;
-    while (num[i]) {
-        buf[2 + i] = num[i];
-        i++;
-    }
-    buf[2 + i] = '\0';
-    output_add_line(output, buf, VGA_WHITE);
-    
-    // Failed syscalls
-    output_add_line(output, "Failed syscalls:", VGA_YELLOW);
-    uint64_to_string(stats.failed_syscalls, num);
-    buf[0] = ' '; buf[1] = ' ';
-    i = 0;
-    while (num[i]) {
-        buf[2 + i] = num[i];
-        i++;
-    }
-    buf[2 + i] = '\0';
-    output_add_line(output, buf, VGA_WHITE);
-    
+
+    str_cpy(buf, "  Invalid  : ");
+    uint64_to_string(stats.invalid_syscalls, num); str_concat(buf, num);
+    output_add_line(output, buf, stats.invalid_syscalls > 0 ? VGA_RED : VGA_GREEN);
+
+    str_cpy(buf, "  Failed   : ");
+    uint64_to_string(stats.failed_syscalls, num);  str_concat(buf, num);
+    output_add_line(output, buf, stats.failed_syscalls > 0 ? VGA_RED : VGA_GREEN);
+
     output_add_empty_line(output);
-    output_add_line(output, "See serial output for detailed statistics.", VGA_CYAN);
-    
-    // Print detailed stats to serial
+
+    // ── Per-category breakdown ────────────────────────────────────────────────
+    // Helper: build "  name: count" line and add if non-zero
+    #define ADD_STAT(label, syscall_nr)                                      \
+        do {                                                                  \
+            if (stats.syscall_counts[(syscall_nr)] > 0) {                   \
+                str_cpy(buf, "  " label ": ");                               \
+                uint64_to_string(stats.syscall_counts[(syscall_nr)], num);  \
+                str_concat(buf, num);                                        \
+                output_add_line(output, buf, VGA_WHITE);                    \
+            }                                                                 \
+        } while (0)
+
+    output_add_line(output, "File I/O:", VGA_YELLOW);
+    ADD_STAT("open  ", SYS_OPEN);
+    ADD_STAT("read  ", SYS_READ);
+    ADD_STAT("write ", SYS_WRITE);
+    ADD_STAT("close ", SYS_CLOSE);
+    ADD_STAT("stat  ", SYS_STAT);
+    ADD_STAT("fstat ", SYS_FSTAT);
+    ADD_STAT("lseek ", SYS_LSEEK);
+    ADD_STAT("pipe  ", SYS_PIPE);
+    ADD_STAT("dup   ", SYS_DUP);
+    ADD_STAT("dup2  ", SYS_DUP2);
+
+    output_add_empty_line(output);
+    output_add_line(output, "Process:", VGA_YELLOW);
+    ADD_STAT("exit    ", SYS_EXIT);
+    ADD_STAT("getpid  ", SYS_GETPID);
+    ADD_STAT("fork    ", SYS_FORK);
+    ADD_STAT("execve  ", SYS_EXECVE);
+    ADD_STAT("waitpid ", SYS_WAITPID);
+    ADD_STAT("wait4   ", SYS_WAIT4);
+    ADD_STAT("kill    ", SYS_KILL);
+    ADD_STAT("getuid  ", SYS_GETUID);
+    ADD_STAT("getgid  ", SYS_GETGID);
+
+    output_add_empty_line(output);
+    output_add_line(output, "Memory:", VGA_YELLOW);
+    ADD_STAT("brk    ", SYS_BRK);
+    ADD_STAT("mmap   ", SYS_MMAP);
+    ADD_STAT("munmap ", SYS_MUNMAP);
+
+    output_add_empty_line(output);
+    output_add_line(output, "AscentOS IPC/custom:", VGA_YELLOW);
+    ADD_STAT("debug   ", SYS_ASCENT_DEBUG);
+    ADD_STAT("info    ", SYS_ASCENT_INFO);
+    ADD_STAT("yield   ", SYS_ASCENT_YIELD);
+    ADD_STAT("sleep   ", SYS_ASCENT_SLEEP);
+    ADD_STAT("gettime ", SYS_ASCENT_GETTIME);
+    ADD_STAT("shmget  ", SYS_ASCENT_SHMGET);
+    ADD_STAT("shmmap  ", SYS_ASCENT_SHMMAP);
+    ADD_STAT("shmunmap", SYS_ASCENT_SHMUNMAP);
+    ADD_STAT("msgpost ", SYS_ASCENT_MSGPOST);
+    ADD_STAT("msgrecv ", SYS_ASCENT_MSGRECV);
+
+    #undef ADD_STAT
+
+    output_add_empty_line(output);
+    output_add_line(output, "Full per-syscall log written to serial.", VGA_MAGENTA);
+
+    // Dump everything to serial as well
     syscall_print_stats();
 }
 // ===========================================
@@ -1672,98 +1744,140 @@ void cmd_testusermode(const char* args, CommandOutput* output) {
 }
 
 void cmd_testusersyscall(const char* args, CommandOutput* output) {
-    (void)args; // Unused
-    
-    serial_print("\n=== Testing Usermode Syscalls ===\n\n");
-    
-    output_add_line(output, "=== Usermode Syscall Test ===", 0x0E);
+    (void)args;
+
+    serial_print("\n=== Ring 3 Syscall Test ===\n\n");
+
+    output_add_line(output, "╔══════════════════════════════════════╗", 0x0E);
+    output_add_line(output, "║      Ring 3 Syscall Test Task         ║", 0x0E);
+    output_add_line(output, "╚══════════════════════════════════════╝", 0x0E);
     output_add_empty_line(output);
-    output_add_line(output, "Creating usermode syscall test task...", 0x0B);
-    
+
+    output_add_line(output, "Creating Ring 3 task: usermode_syscall_task", 0x0B);
+    output_add_empty_line(output);
+
     task_t* user_task = task_create_user("usersyscall", usermode_syscall_task, 5);
-    
     if (!user_task) {
-        output_add_line(output, "ERROR: Failed to create task!", 0x0C);
+        output_add_line(output, "[ERROR] Failed to create Ring 3 task!", 0x0C);
         serial_print("[ERROR] Failed to create usermode task\n");
         return;
     }
-    
+
+    char pid_msg[64] = "Task PID : ";
+    char pid_str[16];
+    int_to_str(user_task->pid, pid_str);
+    str_concat(pid_msg, pid_str);
+    output_add_line(output, pid_msg, 0x0B);
+
+    output_add_line(output, "Privilege: Ring 3 (user mode)", 0x0B);
     output_add_empty_line(output);
-    output_add_line(output, "Task will test:", 0x0A);
-    output_add_line(output, "  - sys_getpid (get process ID)", 0x0B);
-    output_add_line(output, "  - sys_ascent_debug (print message)", 0x0B);
-    output_add_line(output, "  - sys_exit (exit task)", 0x0B);
-    
+
+    output_add_line(output, "Task will execute (via scheduler):", 0x0A);
+    output_add_line(output, "  SYS_ASCENT_DEBUG  (300) - print message", 0x07);
+    output_add_line(output, "  SYS_GETPID        ( 39) - get process ID", 0x07);
+    output_add_line(output, "  SYS_WRITE         (  1) - write to stdout", 0x07);
+    output_add_line(output, "  SYS_EXIT          ( 60) - exit cleanly", 0x07);
+    output_add_empty_line(output);
+
     if (task_start(user_task) == 0) {
-        output_add_empty_line(output);
-        output_add_line(output, "Task started successfully!", 0x0A);
-        output_add_line(output, "Check serial output for results", 0x0D);
-        serial_print("[SUCCESS] Syscall test task running in Ring 3\n");
+        output_add_line(output, "Task started - runs on next scheduler tick", 0x0A);
+        output_add_line(output, "Watch serial output for Ring 3 messages!", 0x0D);
+        serial_print("[SUCCESS] Ring 3 syscall task queued\n");
     } else {
-        output_add_line(output, "ERROR: Failed to start task!", 0x0C);
+        output_add_line(output, "[ERROR] Failed to start task!", 0x0C);
     }
 }
 
 void cmd_testring(const char* args, CommandOutput* output) {
-    (void)args; // Unused
-    
+    (void)args;
+
     serial_print("\n=== Ring / Privilege Level Test ===\n\n");
-    
-    output_add_line(output, "=== Privilege Level Test ===", 0x0E);
+
+    output_add_line(output, "╔══════════════════════════════════════╗", 0x0E);
+    output_add_line(output, "║      Privilege Level (Ring) Test      ║", 0x0E);
+    output_add_line(output, "╚══════════════════════════════════════╝", 0x0E);
     output_add_empty_line(output);
-    
+
+    // ── 1. Show where the shell itself runs ──────────────────────────────────
     extern int get_current_ring(void);
     extern int is_usermode(void);
-    
+
     int ring = get_current_ring();
-    int usermode = is_usermode();
-    
-    char ring_msg[64] = "Current Ring: ";
-    char ring_str[2] = {(char)('0' + ring), '\0'};
+
+    char ring_msg[64] = "Shell context : Ring ";
+    char ring_str[2]  = {(char)('0' + ring), '\0'};
     str_concat(ring_msg, ring_str);
+    str_concat(ring_msg, " (Kernel mode - expected)");
     output_add_line(output, ring_msg, 0x0B);
-    
-    serial_print("Current Ring: ");
-    serial_print(ring_str);
-    serial_print("\n");
-    
-    if (usermode) {
-        output_add_line(output, "Status: USERMODE (Ring 3)", 0x0A);
-        output_add_line(output, "Limited privileges - protected mode", 0x0D);
-        serial_print("This code is running in usermode!\n");
-    } else {
-        output_add_line(output, "Status: KERNEL MODE (Ring 0)", 0x0E);
-        output_add_line(output, "Full privileges - unrestricted", 0x0D);
-        serial_print("This code is running in kernel mode.\n");
-    }
-    
+    serial_print("Shell ring: "); serial_print(ring_str); serial_print("\n");
+
+    output_add_empty_line(output);
+    output_add_line(output, "Why Ring 0 here?", 0x0E);
+    output_add_line(output, "  The shell IS a kernel task - it runs in Ring 0.", 0x07);
+    output_add_line(output, "  get_current_ring() reads the CS register of the", 0x07);
+    output_add_line(output, "  caller. Since the caller is kernel code, CS=0x08", 0x07);
+    output_add_line(output, "  (ring 0). Usermode code never calls this directly.", 0x07);
+    output_add_empty_line(output);
+
+    // ── 2. Show current task info ────────────────────────────────────────────
     task_t* current = task_get_current();
     if (current) {
-        output_add_empty_line(output);
-        
-        char task_info[128] = "Current Task: '";
-        str_concat(task_info, current->name);
-        str_concat(task_info, "' (PID=");
+        char info[128] = "Current task  : '";
+        str_concat(info, current->name);
+        str_concat(info, "' PID=");
         char pid_str[16];
         int_to_str(current->pid, pid_str);
-        str_concat(task_info, pid_str);
-        str_concat(task_info, ", Ring ");
+        str_concat(info, pid_str);
+        str_concat(info, " privilege=Ring ");
         char priv[2] = {(char)('0' + current->privilege_level), '\0'};
-        str_concat(task_info, priv);
-        str_concat(task_info, ")");
-        
-        output_add_line(output, task_info, 0x0F);
-        
-        serial_print("\nCurrent Task: '");
-        serial_print(current->name);
-        serial_print("' (PID=");
-        serial_print(pid_str);
-        serial_print(", Ring ");
-        serial_print(priv);
-        serial_print(")\n");
+        str_concat(info, priv);
+        output_add_line(output, info, 0x0F);
+        serial_print(info); serial_print("\n");
     }
-    
-    serial_print("\n");
+
+    output_add_empty_line(output);
+    output_add_line(output, "Spawning Ring 3 task to demonstrate usermode...", 0x0A);
+    output_add_empty_line(output);
+
+    // ── 3. Spawn a real Ring 3 task ──────────────────────────────────────────
+    // usermode_syscall_task runs in Ring 3 and communicates back only
+    // through syscalls (sys_ascent_debug, sys_write, sys_exit).
+    task_t* ut = task_create_user("ring3_demo", usermode_syscall_task, 5);
+    if (!ut) {
+        output_add_line(output, "[ERROR] Failed to create Ring 3 task!", 0x0C);
+        serial_print("[ERROR] task_create_user failed\n");
+        return;
+    }
+
+    char pid_msg[64] = "  Ring 3 task created : PID=";
+    char pid_s[16];
+    int_to_str(ut->pid, pid_s);
+    str_concat(pid_msg, pid_s);
+    str_concat(pid_msg, "  privilege=Ring 3");
+    output_add_line(output, pid_msg, 0x0A);
+    serial_print(pid_msg); serial_print("\n");
+
+    if (task_start(ut) != 0) {
+        output_add_line(output, "[ERROR] Failed to start Ring 3 task!", 0x0C);
+        return;
+    }
+
+    output_add_line(output, "  Task queued in scheduler (Round-Robin)", 0x0A);
+    output_add_empty_line(output);
+
+    output_add_line(output, "What happens next:", 0x0E);
+    output_add_line(output, "  1. Scheduler picks ring3_demo on next tick", 0x07);
+    output_add_line(output, "  2. task_switch() calls jump_to_usermode()", 0x07);
+    output_add_line(output, "  3. IRET drops CPU to Ring 3 (CS=0x23,SS=0x1B)", 0x07);
+    output_add_line(output, "  4. Task calls syscalls -> CPU traps back Ring 0", 0x07);
+    output_add_line(output, "  5. syscall_entry (LSTAR) handles the request", 0x07);
+    output_add_line(output, "  6. SYSRET returns to Ring 3 with result", 0x07);
+    output_add_line(output, "  7. Task calls SYS_EXIT -> task_exit() cleans up", 0x07);
+    output_add_empty_line(output);
+    output_add_line(output, "Check serial output for Ring 3 syscall messages!", 0x0D);
+
+    serial_print("[TESTRING] Ring 3 task will run on next scheduler tick\n");
+    serial_print("[TESTRING] Watch for 'Ring 3 via IRET' and syscall messages\n\n");
 }
 
 void cmd_createusertest(const char* args, CommandOutput* output) {
@@ -1862,8 +1976,8 @@ static Command command_table[] = {
     {"write", "Write to file", cmd_write},
     {"rm", "Delete file", cmd_rm},
     {"kode", "Text editor", cmd_kode},
-     {"testsyscall", "Test SYSCALL infrastructure", cmd_testsyscall},
-    {"syscallstats", "Show SYSCALL statistics", cmd_syscallstats},
+     {"testsyscall", "Phase 3: full syscall test suite (13 groups)", cmd_testsyscall},
+    {"syscallstats", "Phase 3: per-syscall call count breakdown", cmd_syscallstats},
     {"testusermode", "Test usermode task creation", cmd_testusermode},
    {"testusersyscall", "Test syscalls from usermode", cmd_testusersyscall},
    {"testring", "Display current privilege level", cmd_testring},

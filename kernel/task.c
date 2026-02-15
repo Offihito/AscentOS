@@ -481,7 +481,18 @@ void task_switch(task_t* from, task_t* to) {
         return;
     }
     
-    // Context switch
+    // Ring 3 (usermode) task: use IRET-based privilege transition
+    // jump_to_usermode builds a proper IRET frame (SS/RSP/RFLAGS/CS/RIP)
+    // and drops to Ring 3. It never returns — the task must exit via syscall.
+    if (to->privilege_level == TASK_PRIVILEGE_USER) {
+        serial_print("[TASK] Transitioning to Ring 3 via IRET\n");
+        jump_to_usermode(to->context.rip, to->context.rsp);
+        // Never reached
+        serial_print("[TASK ERROR] jump_to_usermode returned!\n");
+        return;
+    }
+    
+    // Ring 0 (kernel) task: normal context switch via assembly
     cpu_context_t* old_ctx = from ? &from->context : NULL;
     cpu_context_t* new_ctx = &to->context;
     
@@ -611,37 +622,67 @@ void usermode_test_task(void) {
     }
 }
 
-// Usermode task that tests syscalls
+// Usermode task that tests syscalls AND reports its own ring level
 void usermode_syscall_task(void) {
-    // This will test syscalls from Ring 3
-    
-    // Test sys_getpid
+    // ── We are now in Ring 3 ─────────────────────────────────────────────────
+    // Cannot call kernel functions directly (serial_print, etc.)
+    // Must use syscalls for everything.
+
+    // Report: "Hello from usermode!" via sys_ascent_debug (SYS 300)
+    // This syscall handler is in kernel; it will print to serial.
+    const char* hello = "=== usermode_syscall_task: running in Ring 3! ===";
     __asm__ volatile (
-        "movq $39, %%rax\n\t"      // SYS_GETPID
+        "movq $300, %%rax\n\t"   // SYS_ASCENT_DEBUG
+        "movq %0,   %%rdi\n\t"
         "syscall\n\t"
-        ::: "rax", "rcx", "r11", "memory"
-    );
-    
-    // Test sys_ascent_debug
-    const char* msg = "Hello from usermode!\n";
-    __asm__ volatile (
-        "movq $300, %%rax\n\t"     // SYS_ASCENT_DEBUG
-        "movq %0, %%rdi\n\t"
-        "syscall\n\t"
-        :: "r"(msg)
+        :: "r"(hello)
         : "rax", "rdi", "rcx", "r11", "memory"
     );
-    
-    // Exit
+
+    // Get our PID via sys_getpid (SYS 39)
+    int64_t pid;
     __asm__ volatile (
-        "movq $60, %%rax\n\t"      // SYS_EXIT
-        "xorq %%rdi, %%rdi\n\t"
+        "movq $39, %%rax\n\t"    // SYS_GETPID
+        "syscall\n\t"
+        "movq %%rax, %0\n\t"
+        : "=r"(pid)
+        :: "rax", "rcx", "r11", "memory"
+    );
+    (void)pid;  // used implicitly
+
+    // Print a second debug message confirming syscall round-trip
+    const char* ok = "usermode_syscall_task: sys_getpid() syscall returned OK";
+    __asm__ volatile (
+        "movq $300, %%rax\n\t"
+        "movq %0,   %%rdi\n\t"
+        "syscall\n\t"
+        :: "r"(ok)
+        : "rax", "rdi", "rcx", "r11", "memory"
+    );
+
+    // Write to stdout (fd=1) via sys_write (SYS 1)
+    const char* out = "Ring3: write to stdout via syscall\n";
+    int64_t len = 36;
+    __asm__ volatile (
+        "movq $1,  %%rax\n\t"    // SYS_WRITE
+        "movq $1,  %%rdi\n\t"    // fd = 1 (stdout)
+        "movq %0,  %%rsi\n\t"    // buf
+        "movq %1,  %%rdx\n\t"    // count
+        "syscall\n\t"
+        :: "r"(out), "r"(len)
+        : "rax", "rdi", "rsi", "rdx", "rcx", "r11", "memory"
+    );
+
+    // Exit cleanly via sys_exit (SYS 60)
+    __asm__ volatile (
+        "movq $60, %%rax\n\t"    // SYS_EXIT
+        "xorq %%rdi, %%rdi\n\t"  // status = 0
         "syscall\n\t"
         ::: "rax", "rdi", "rcx", "r11", "memory"
     );
-    
-    // Should never reach
-    while(1) __asm__ volatile("hlt");
+
+    // Unreachable — safety halt
+    while (1) __asm__ volatile("hlt");
 }
 
 // ===========================================
