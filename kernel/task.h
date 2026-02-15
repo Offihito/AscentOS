@@ -129,6 +129,9 @@ int task_queue_is_empty(task_queue_t* queue);
 // Şu anda çalışan task'ı al
 task_t* task_get_current(void);
 
+// Şu anda çalışan task'ı ayarla (scheduler kullanır)
+void task_set_current(task_t* task);
+
 // Bir sonraki task'ı seç (scheduler kullanır)
 task_t* task_get_next(void);
 
@@ -150,6 +153,19 @@ void task_load_context(cpu_context_t* context);
 
 // İki task arasında geçiş yap
 void task_switch(task_t* from, task_t* to);
+
+// ===========================================
+// ASSEMBLY CONTEXT SWITCH FUNCTIONS
+// ===========================================
+
+// Perform actual context switch (implemented in interrupts64.asm)
+extern void task_switch_context(cpu_context_t* old_ctx, cpu_context_t* new_ctx);
+
+// Save current context (implemented in interrupts64.asm)
+extern void task_save_current_context(cpu_context_t* ctx);
+
+// Load and jump to context (implemented in interrupts64.asm)
+extern void task_load_and_jump_context(cpu_context_t* ctx);
 
 // ===========================================
 // USERMODE TRANSITION - NEW FOR PHASE 2

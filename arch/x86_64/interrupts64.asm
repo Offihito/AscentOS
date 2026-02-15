@@ -1,7 +1,8 @@
-; 64-bit Interrupt Descriptor Table - WITH CONDITIONAL MOUSE SUPPORT
+; interrupts64.asm - WITH PROPER CONTEXT SAVE/RESTORE
 
 global load_idt64
 global isr_keyboard
+global isr_timer
 
 %ifndef TEXT_MODE_BUILD
 global isr_mouse
@@ -9,18 +10,20 @@ extern mouse_handler64
 %endif
 
 extern keyboard_handler64
+extern scheduler_tick
+extern task_needs_switch
+extern task_get_current_context
+extern task_save_current_stack
+extern task_get_next_context
 
 section .text
 bits 64
 
-; IDT'yi yükle
 load_idt64:
     lidt [rdi]
     ret
 
-; Keyboard interrupt handler (IRQ1)
 isr_keyboard:
-    ; Register'ları sakla
     push rax
     push rbx
     push rcx
@@ -37,14 +40,11 @@ isr_keyboard:
     push r14
     push r15
     
-    ; C handler'ı çağır
     call keyboard_handler64
     
-    ; PIC'e EOI gönder
     mov al, 0x20
     out 0x20, al
     
-    ; Register'ları geri yükle
     pop r15
     pop r14
     pop r13
@@ -64,9 +64,7 @@ isr_keyboard:
     iretq
 
 %ifndef TEXT_MODE_BUILD
-; Mouse interrupt handler (IRQ12) - Only for GUI mode
 isr_mouse:
-    ; Register'ları sakla
     push rax
     push rbx
     push rcx
@@ -83,15 +81,12 @@ isr_mouse:
     push r14
     push r15
     
-    ; C handler'ı çağır
     call mouse_handler64
     
-    ; PIC'e EOI gönder (slave PIC için)
     mov al, 0x20
-    out 0xA0, al  ; Slave PIC
-    out 0x20, al  ; Master PIC
+    out 0xA0, al
+    out 0x20, al
     
-    ; Register'ları geri yükle
     pop r15
     pop r14
     pop r13
@@ -111,23 +106,229 @@ isr_mouse:
     iretq
 %endif
 
-; IDT entry'si oluşturma makrosu
+; ===========================================================================
+; TIMER INTERRUPT WITH PROPER CONTEXT SAVE
+; ===========================================================================
+
+isr_timer:
+    ; Save all registers on current task's stack
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    
+    ; Call scheduler tick
+    call scheduler_tick
+    
+    ; Check if context switch needed
+    call task_needs_switch
+    test rax, rax
+    jz .no_switch
+    
+    ; IMPORTANT: Save current task's stack pointer
+    mov rdi, rsp
+    call task_save_current_stack
+    
+    ; Get new task's context
+    call task_get_next_context
+    test rax, rax
+    jz .no_switch
+    
+    ; Switch to new task's stack
+    mov rsp, [rax + 56]  ; Load RSP from context
+    
+.no_switch:
+    ; Send EOI
+    mov al, 0x20
+    out 0x20, al
+    
+    ; Restore registers (from current stack - might be different task now!)
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    
+    iretq
+
+; ===========================================================================
+; CONTEXT SWITCH FUNCTIONS
+; ===========================================================================
+
+global task_switch_context
+task_switch_context:
+    test rdi, rdi
+    jz .load_new
+    
+    mov [rdi + 0], rax
+    mov [rdi + 8], rbx
+    mov [rdi + 16], rcx
+    mov [rdi + 24], rdx
+    mov [rdi + 32], rsi
+    mov [rdi + 40], rdi
+    mov [rdi + 48], rbp
+    mov [rdi + 56], rsp
+    mov [rdi + 64], r8
+    mov [rdi + 72], r9
+    mov [rdi + 80], r10
+    mov [rdi + 88], r11
+    mov [rdi + 96], r12
+    mov [rdi + 104], r13
+    mov [rdi + 112], r14
+    mov [rdi + 120], r15
+    
+    mov rax, [rsp]
+    mov [rdi + 128], rax
+    
+    pushfq
+    pop rax
+    mov [rdi + 136], rax
+    
+.load_new:
+    mov rax, [rsi + 0]
+    mov rbx, [rsi + 8]
+    mov rcx, [rsi + 16]
+    mov rdx, [rsi + 24]
+    mov rdi, [rsi + 40]
+    mov rbp, [rsi + 48]
+    mov rsp, [rsi + 56]
+    mov r8, [rsi + 64]
+    mov r9, [rsi + 72]
+    mov r10, [rsi + 80]
+    mov r11, [rsi + 88]
+    mov r12, [rsi + 96]
+    mov r13, [rsi + 104]
+    mov r14, [rsi + 112]
+    mov r15, [rsi + 120]
+    
+    mov r10, [rsi + 136]
+    push r10
+    popfq
+    
+    mov r10, [rsi + 128]
+    push r10
+    
+    mov rsi, [rsi + 32]
+    ret
+
+global task_save_current_context
+task_save_current_context:
+    mov [rdi + 0], rax
+    mov [rdi + 8], rbx
+    mov [rdi + 16], rcx
+    mov [rdi + 24], rdx
+    mov [rdi + 32], rsi
+    mov [rdi + 40], rdi
+    mov [rdi + 48], rbp
+    mov [rdi + 56], rsp
+    mov [rdi + 64], r8
+    mov [rdi + 72], r9
+    mov [rdi + 80], r10
+    mov [rdi + 88], r11
+    mov [rdi + 96], r12
+    mov [rdi + 104], r13
+    mov [rdi + 112], r14
+    mov [rdi + 120], r15
+    
+    mov rax, [rsp]
+    mov [rdi + 128], rax
+    
+    pushfq
+    pop rax
+    mov [rdi + 136], rax
+    ret
+
+global task_load_and_jump_context
+task_load_and_jump_context:
+    mov rax, [rdi + 0]
+    mov rbx, [rdi + 8]
+    mov rcx, [rdi + 16]
+    mov rdx, [rdi + 24]
+    mov rsi, [rdi + 32]
+    mov rbp, [rdi + 48]
+    mov rsp, [rdi + 56]
+    mov r8, [rdi + 64]
+    mov r9, [rdi + 72]
+    mov r10, [rdi + 80]
+    mov r11, [rdi + 88]
+    mov r12, [rdi + 96]
+    mov r13, [rdi + 104]
+    mov r14, [rdi + 112]
+    mov r15, [rdi + 120]
+    
+    mov r10, [rdi + 136]
+    push r10
+    popfq
+    
+    mov r10, [rdi + 128]
+    push r10
+    
+    mov rdi, [rdi + 40]
+    ret
+
+global jump_to_usermode
+jump_to_usermode:
+    cli
+    push 0x23
+    push rsi
+    pushfq
+    pop rax
+    or rax, 0x200
+    push rax
+    push 0x1B
+    push rdi
+    mov ax, 0x23
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    iretq
+    ud2
+
+global get_current_ring
+get_current_ring:
+    mov ax, cs
+    and ax, 0x3
+    movzx rax, ax
+    ret
+
+; CPU Exceptions
 %macro ISR_NOERRCODE 1
 global isr%1
 isr%1:
-    push 0              ; Dummy error code
-    push %1             ; Interrupt number
+    push 0
+    push %1
     jmp isr_common
 %endmacro
 
 %macro ISR_ERRCODE 1
 global isr%1
 isr%1:
-    push %1             ; Interrupt number
+    push %1
     jmp isr_common
 %endmacro
 
-; Ortak interrupt handler
 isr_common:
     push rax
     push rbx
@@ -144,10 +345,7 @@ isr_common:
     push r13
     push r14
     push r15
-    
     mov rdi, rsp
-    ; C handler çağrılabilir (şimdilik yok)
-    
     pop r15
     pop r14
     pop r13
@@ -163,239 +361,38 @@ isr_common:
     pop rcx
     pop rbx
     pop rax
-    
-    add rsp, 16  ; Error code ve interrupt number'ı temizle
+    add rsp, 16
     iretq
 
-; CPU exception'ları
-ISR_NOERRCODE 0   ; Divide by zero
-ISR_NOERRCODE 1   ; Debug
-ISR_NOERRCODE 2   ; NMI
-ISR_NOERRCODE 3   ; Breakpoint
-ISR_NOERRCODE 4   ; Overflow
-ISR_NOERRCODE 5   ; Bound range exceeded
-ISR_NOERRCODE 6   ; Invalid opcode
-ISR_NOERRCODE 7   ; Device not available
-ISR_ERRCODE   8   ; Double fault
-ISR_NOERRCODE 9   ; Coprocessor segment overrun
-ISR_ERRCODE   10  ; Invalid TSS
-ISR_ERRCODE   11  ; Segment not present
-ISR_ERRCODE   12  ; Stack fault
-ISR_ERRCODE   13  ; General protection fault
-ISR_ERRCODE   14  ; Page fault
-ISR_NOERRCODE 15  ; Reserved
-ISR_NOERRCODE 16  ; x87 FPU error
-ISR_ERRCODE   17  ; Alignment check
-ISR_NOERRCODE 18  ; Machine check
-ISR_NOERRCODE 19  ; SIMD floating point
-ISR_NOERRCODE 20  ; Virtualization
-ISR_NOERRCODE 21  ; Reserved
-ISR_NOERRCODE 22  ; Reserved
-ISR_NOERRCODE 23  ; Reserved
-ISR_NOERRCODE 24  ; Reserved
-ISR_NOERRCODE 25  ; Reserved
-ISR_NOERRCODE 26  ; Reserved
-ISR_NOERRCODE 27  ; Reserved
-ISR_NOERRCODE 28  ; Reserved
-ISR_NOERRCODE 29  ; Reserved
-ISR_ERRCODE   30  ; Security exception
-ISR_NOERRCODE 31  ; Reserved
-
-; External fonksiyonlar
-extern scheduler_tick
-
-; Global export
-global isr_timer
-
-; Timer interrupt handler (IRQ0 -> INT 32)
-isr_timer:
-    ; Save all registers
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
-    
-    ; Call scheduler tick to update system time
-    call scheduler_tick
-    
-    ; Send EOI to PIC
-    mov al, 0x20
-    out 0x20, al
-    
-    ; Restore registers
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-    
-    iretq
-; ===========================================================================
-; CONTEXT SWITCHING FUNCTIONS FOR MULTITASKING
-; ===========================================================================
-
-; task_switch_context(cpu_context_t* old_ctx, cpu_context_t* new_ctx)
-; Switch from one task to another
-global task_switch_context
-task_switch_context:
-    ; RDI = old_ctx (can be NULL for first task)
-    ; RSI = new_ctx
-    
-    ; If old_ctx is not NULL, save current context
-    test rdi, rdi
-    jz .load_new_context
-    
-    ; Save registers to old_ctx
-    mov [rdi + 0], rax
-    mov [rdi + 8], rbx
-    mov [rdi + 16], rcx
-    mov [rdi + 24], rdx
-    mov [rdi + 32], rsi
-    mov [rdi + 40], rdi
-    mov [rdi + 48], rbp
-    mov [rdi + 56], rsp
-    mov [rdi + 64], r8
-    mov [rdi + 72], r9
-    mov [rdi + 80], r10
-    mov [rdi + 88], r11
-    mov [rdi + 96], r12
-    mov [rdi + 104], r13
-    mov [rdi + 112], r14
-    mov [rdi + 120], r15
-    
-    ; Save RIP (return address from stack)
-    mov rax, [rsp]
-    mov [rdi + 128], rax
-    
-    ; Save RFLAGS
-    pushfq
-    pop rax
-    mov [rdi + 136], rax
-    
-.load_new_context:
-    ; Load new context from new_ctx (RSI)
-    mov rax, [rsi + 0]
-    mov rbx, [rsi + 8]
-    mov rcx, [rsi + 16]
-    mov rdx, [rsi + 24]
-    ; Skip RSI for now
-    mov rdi, [rsi + 40]
-    mov rbp, [rsi + 48]
-    mov rsp, [rsi + 56]
-    mov r8, [rsi + 64]
-    mov r9, [rsi + 72]
-    mov r10, [rsi + 80]
-    mov r11, [rsi + 88]
-    mov r12, [rsi + 96]
-    mov r13, [rsi + 104]
-    mov r14, [rsi + 112]
-    mov r15, [rsi + 120]
-    
-    ; Load RIP to stack for return
-    mov r10, [rsi + 128]
-    push r10
-    
-    ; Load RFLAGS
-    mov r10, [rsi + 136]
-    push r10
-    popfq
-    
-    ; Finally load RSI
-    mov rsi, [rsi + 32]
-    
-    ret
-
-; task_save_current_context(cpu_context_t* ctx)
-; Save current CPU context to structure
-global task_save_current_context
-task_save_current_context:
-    ; RDI = ctx pointer
-    
-    ; Save general purpose registers
-    mov [rdi + 0], rax
-    mov [rdi + 8], rbx
-    mov [rdi + 16], rcx
-    mov [rdi + 24], rdx
-    mov [rdi + 32], rsi
-    mov [rdi + 40], rdi
-    mov [rdi + 48], rbp
-    mov [rdi + 56], rsp
-    mov [rdi + 64], r8
-    mov [rdi + 72], r9
-    mov [rdi + 80], r10
-    mov [rdi + 88], r11
-    mov [rdi + 96], r12
-    mov [rdi + 104], r13
-    mov [rdi + 112], r14
-    mov [rdi + 120], r15
-    
-    ; Save return address as RIP
-    mov rax, [rsp]
-    mov [rdi + 128], rax
-    
-    ; Save RFLAGS
-    pushfq
-    pop rax
-    mov [rdi + 136], rax
-    
-    ret
-
-; task_load_and_jump_context(cpu_context_t* ctx)
-; Load context and jump to it (doesn't return)
-global task_load_and_jump_context
-task_load_and_jump_context:
-    ; RDI = ctx pointer
-    
-    ; Load all registers from context
-    mov rax, [rdi + 0]
-    mov rbx, [rdi + 8]
-    mov rcx, [rdi + 16]
-    mov rdx, [rdi + 24]
-    mov rsi, [rdi + 32]
-    ; Skip RDI for now
-    mov rbp, [rdi + 48]
-    mov rsp, [rdi + 56]
-    mov r8, [rdi + 64]
-    mov r9, [rdi + 72]
-    mov r10, [rdi + 80]
-    mov r11, [rdi + 88]
-    mov r12, [rdi + 96]
-    mov r13, [rdi + 104]
-    mov r14, [rdi + 112]
-    mov r15, [rdi + 120]
-    
-    ; Load RFLAGS
-    mov r10, [rdi + 136]
-    push r10
-    popfq
-    
-    ; Load RIP to stack for return
-    mov r10, [rdi + 128]
-    push r10
-    
-    ; Finally load RDI
-    mov rdi, [rdi + 40]
-    
-    ; Jump to RIP
-    ret
+ISR_NOERRCODE 0
+ISR_NOERRCODE 1
+ISR_NOERRCODE 2
+ISR_NOERRCODE 3
+ISR_NOERRCODE 4
+ISR_NOERRCODE 5
+ISR_NOERRCODE 6
+ISR_NOERRCODE 7
+ISR_ERRCODE   8
+ISR_NOERRCODE 9
+ISR_ERRCODE   10
+ISR_ERRCODE   11
+ISR_ERRCODE   12
+ISR_ERRCODE   13
+ISR_ERRCODE   14
+ISR_NOERRCODE 15
+ISR_NOERRCODE 16
+ISR_ERRCODE   17
+ISR_NOERRCODE 18
+ISR_NOERRCODE 19
+ISR_NOERRCODE 20
+ISR_NOERRCODE 21
+ISR_NOERRCODE 22
+ISR_NOERRCODE 23
+ISR_NOERRCODE 24
+ISR_NOERRCODE 25
+ISR_NOERRCODE 26
+ISR_NOERRCODE 27
+ISR_NOERRCODE 28
+ISR_NOERRCODE 29
+ISR_ERRCODE   30
+ISR_NOERRCODE 31

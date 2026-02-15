@@ -189,15 +189,50 @@ task_t* task_create(const char* name, void (*entry_point)(void), uint32_t priori
     // Stack'i sıfırla
     memset_task((void*)task->kernel_stack_base, 0, KERNEL_STACK_SIZE);
     
-    // CPU context ayarla
-    // Stack yukarıdan aşağıya büyür
-    task->context.rsp = task->kernel_stack_base + KERNEL_STACK_SIZE - 16;
-    task->context.rip = (uint64_t)entry_point;
-    task->context.rflags = 0x202;  // IF (Interrupt Flag) set
+    // Setup stack with IRET frame for first run
+    uint64_t* stack_top = (uint64_t*)(task->kernel_stack_base + KERNEL_STACK_SIZE);
     
-    // Segment registers (kernel mode)
-    task->context.cs = 0x08;  // Kernel code segment
-    task->context.ss = 0x10;  // Kernel stack segment
+    serial_print("[TASK] Stack base: 0x");
+    char addr_str[20];
+    uint64_to_string(task->kernel_stack_base, addr_str);
+    serial_print(addr_str);
+    serial_print("\n");
+    
+    serial_print("[TASK] Stack top: 0x");
+    uint64_to_string((uint64_t)stack_top, addr_str);
+    serial_print(addr_str);
+    serial_print("\n");
+    
+    // Build IRET frame
+    *(--stack_top) = 0x10;  // SS
+    *(--stack_top) = (uint64_t)(stack_top - 10);  // RSP
+    *(--stack_top) = 0x202; // RFLAGS
+    *(--stack_top) = 0x08;  // CS
+    *(--stack_top) = (uint64_t)entry_point;  // RIP
+    
+    serial_print("[TASK] Entry point: 0x");
+    uint64_to_string((uint64_t)entry_point, addr_str);
+    serial_print(addr_str);
+    serial_print("\n");
+    
+    // Add space for 15 registers (r15-rax)
+    for (int i = 0; i < 15; i++) {
+        *(--stack_top) = 0;
+    }
+    
+    serial_print("[TASK] Stack prepared at: 0x");
+    uint64_to_string((uint64_t)stack_top, addr_str);
+    serial_print(addr_str);
+    serial_print("\n");
+    
+    // CPU context setup
+    task->context.rsp = (uint64_t)stack_top;
+    task->context.rip = (uint64_t)entry_point;
+    task->context.rflags = 0x202;
+    
+    // Segment registers
+    task->context.cs = 0x08;
+    task->context.ss = 0x10;
     task->context.ds = 0x10;
     task->context.es = 0x10;
     
@@ -281,21 +316,45 @@ task_t* task_create_user(const char* name, void (*entry_point)(void), uint32_t p
     serial_print(addr_str);
     serial_print("\n");
     
+    // Setup USER stack with IRET frame for first run
+    // Usermode tasks return via IRETQ which expects specific stack layout
+    uint64_t* stack_top = (uint64_t*)(task->user_stack_base + USER_STACK_SIZE);
+    
+    // Build IRET frame (from high to low address)
+    *(--stack_top) = 0x23;  // SS (User DS)
+    *(--stack_top) = (uint64_t)(stack_top - 10);  // RSP (will adjust)
+    *(--stack_top) = 0x202; // RFLAGS (IF set)
+    *(--stack_top) = 0x1B;  // CS (User CS)
+    *(--stack_top) = (uint64_t)entry_point;  // RIP
+    
+    serial_print("[TASK] User entry point: 0x");
+    uint64_to_string((uint64_t)entry_point, addr_str);
+    serial_print(addr_str);
+    serial_print("\n");
+    
+    // Add space for 15 registers (will be popped by interrupt handler)
+    for (int i = 0; i < 15; i++) {
+        *(--stack_top) = 0;
+    }
+    
+    serial_print("[TASK] User stack prepared at: 0x");
+    uint64_to_string((uint64_t)stack_top, addr_str);
+    serial_print(addr_str);
+    serial_print("\n");
+    
     // CPU context ayarla - USERMODE!
-    // RSP points to USER stack
-    task->context.rsp = task->user_stack_base + USER_STACK_SIZE - 16;
+    // RSP points to prepared stack (not user_stack_base!)
+    task->context.rsp = (uint64_t)stack_top;  // Point to prepared stack
     task->context.rip = (uint64_t)entry_point;
-    task->context.rflags = 0x202;  // IF set
+    task->context.rflags = 0x202;
     
-    // Segment registers (USER MODE - Ring 3)
-    // GDT layout: 0x00=null, 0x08=kernel_code, 0x10=kernel_data, 
-    //             0x18=user_data, 0x20=user_code
-    task->context.cs = 0x20 | 3;  // User code segment | RPL=3
-    task->context.ss = 0x18 | 3;  // User stack segment | RPL=3
-    task->context.ds = 0x18 | 3;  // User data segment | RPL=3
-    task->context.es = 0x18 | 3;
+    // Segment registers (USER mode - Ring 3)
+    task->context.cs = 0x1B;  // User code segment
+    task->context.ss = 0x23;  // User data segment
+    task->context.ds = 0x23;
+    task->context.es = 0x23;
     
-    // CR3 - Kernel page table (şimdilik)
+    // CR3 - Kernel page table (for now, later can be per-process)
     task->context.cr3 = 0;
     
     // Zamanlama bilgileri
@@ -305,14 +364,13 @@ task_t* task_create_user(const char* name, void (*entry_point)(void), uint32_t p
     task->context_switches = 0;
     task->total_runtime = 0;
     
-    // Debug
     serial_print("[TASK] Created usermode task '");
     serial_print(name);
     serial_print("' (PID=");
     char pid_str[16];
     int_to_str(task->pid, pid_str);
     serial_print(pid_str);
-    serial_print(", Ring 3)\n");
+    serial_print(") Ring 3\n");
     
     return task;
 }
@@ -324,12 +382,16 @@ task_t* task_create_user(const char* name, void (*entry_point)(void), uint32_t p
 int task_start(task_t* task) {
     if (!task) return -1;
     
+    // Only log if this is the first time (context_switches == 0)
+    if (task->context_switches == 0) {
+        serial_print("[TASK] Starting task '");
+        serial_print(task->name);
+        serial_print("'\n");
+    }
+    
     task->state = TASK_STATE_READY;
     task_queue_push(&ready_queue, task);
     
-    serial_print("[TASK] Task '");
-    serial_print(task->name);
-    serial_print("' added to ready queue\n");
     return 0;
 }
 
@@ -342,10 +404,8 @@ void task_terminate(task_t* task) {
     
     task->state = TASK_STATE_TERMINATED;
     
-    // Queue'dan çıkar
-    if (task != current_task) {
-        task_queue_remove(&ready_queue, task);
-    }
+    // Remove from queue if present
+    task_queue_remove(&ready_queue, task);
     
     // Belleği temizle
     if (task->kernel_stack_base) {
@@ -414,11 +474,30 @@ task_t* task_get_current(void) {
     return current_task;
 }
 
+void task_set_current(task_t* task) {
+    if (!task) return;
+    current_task = task;
+    task->last_run_time = get_system_ticks();
+}
+
 task_t* task_get_next(void) {
     task_t* next = task_queue_pop(&ready_queue);
     if (!next) {
         return idle_task;
     }
+    
+    serial_print("[TASK] Getting next: ");
+    serial_print(next->name);
+    serial_print(" (context_switches=");
+    char num[16];
+    int_to_str((int)next->context_switches, num);
+    serial_print(num);
+    serial_print(", RSP=0x");
+    char addr[20];
+    uint64_to_string(next->context.rsp, addr);
+    serial_print(addr);
+    serial_print(")\n");
+    
     return next;
 }
 
@@ -450,33 +529,41 @@ task_t* task_find_by_pid(uint32_t pid) {
 // CONTEXT SWITCHING
 // ===========================================
 
-extern void task_switch_context(cpu_context_t* old_ctx, cpu_context_t* new_ctx);
+void task_save_context(cpu_context_t* context) {
+    // Assembly fonksiyonunu çağır
+    extern void task_save_current_context(cpu_context_t* ctx);
+    task_save_current_context(context);
+}
+
+void task_load_context(cpu_context_t* context) {
+    // Assembly fonksiyonunu çağır
+    extern void task_load_and_jump_context(cpu_context_t* ctx);
+    task_load_and_jump_context(context);
+}
 
 void task_switch(task_t* from, task_t* to) {
-    if (!to) return;
-    
-    serial_print("[TASK] Switching to '");
-    serial_print(to->name);
-    serial_print("' (Ring ");
-    char ring[2];
-    ring[0] = '0' + to->privilege_level;
-    ring[1] = '\0';
-    serial_print(ring);
-    serial_print(")\n");
-    
-    // Update stats
-    if (from) {
-        from->context_switches++;
-        from->total_runtime += (get_system_ticks() - from->last_run_time);
+    if (!to) {
+        serial_print("[TASK ERROR] Cannot switch to NULL task!\n");
+        return;
     }
     
-    to->last_run_time = get_system_ticks();
-    to->state = TASK_STATE_RUNNING;
+    serial_print("[TASK] Switching from '");
+    serial_print(from ? from->name : "NULL");
+    serial_print("' to '");
+    serial_print(to->name);
+    serial_print("'\n");
     
+    // Update current task
     current_task = to;
+    to->state = TASK_STATE_RUNNING;
+    to->last_run_time = get_system_ticks();
+    to->context_switches++;
     
-    // Special case: idle
-    if (to == idle_task) {
+    // Special case: first task or switching to idle
+    if (!from || from == idle_task) {
+        serial_print("[TASK] Jumping to task\n");
+        extern void task_load_and_jump_context(cpu_context_t* ctx);
+        task_load_and_jump_context(&to->context);
         serial_print("[TASK] Returning to idle\n");
         return;
     }

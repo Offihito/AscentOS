@@ -42,6 +42,20 @@ int scheduler_is_running(void);
 void scheduler_tick(void);
 
 // ===========================================
+// INTERRUPT-BASED CONTEXT SWITCHING
+// ===========================================
+
+// Check if context switch is pending (called from assembly interrupt handler)
+int task_needs_switch(void);
+
+// Save current task's stack pointer before switching (called from assembly)
+void task_save_current_stack(uint64_t stack_pointer);
+
+// Get next task's context for interrupt-based switch (called from assembly)
+// Returns pointer to cpu_context_t of next task, or NULL if no switch needed
+cpu_context_t* task_get_next_context(void);
+
+// ===========================================
 // TASK SCHEDULING
 // ===========================================
 
