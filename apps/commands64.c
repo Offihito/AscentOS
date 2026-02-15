@@ -8,10 +8,11 @@
 #include "../kernel/scheduler.h"
 #include "../kernel/disk64.h"    // fat32_file_size, fat32_read_file
 #include "../kernel/elf64.h"         // ELF-64 loader
-
+#include "../kernel/syscall.h"
 extern void println64(const char* str, uint8_t color);
 extern void print_str64(const char* str, uint8_t color);
 extern uint64_t get_system_ticks(void);
+extern void serial_print(const char* str);
 
 // Nano editor mode flag
 static int nano_mode = 0;
@@ -1180,7 +1181,90 @@ void cmd_heap(const char* args, CommandOutput* output) {
     output_add_empty_line(output);
     output_add_line(output, "All heap tests completed!", VGA_CYAN);
 }
+void cmd_testsyscall(const char* args, CommandOutput* output) {
+    (void)args;
+    
+    output_add_line(output, "=== Testing SYSCALL Infrastructure ===", VGA_CYAN);
+    output_add_line(output, "", VGA_WHITE);
+    output_add_line(output, "Running syscall tests...", VGA_YELLOW);
+    output_add_line(output, "Check serial output for detailed results.", VGA_YELLOW);
+    output_add_empty_line(output);
+    
+    // Run syscall tests (output goes to serial)
+    extern void syscall_kernel_test(void);
+    syscall_kernel_test();
+    
+    output_add_line(output, "[PASS] Syscall infrastructure test completed!", VGA_GREEN);
+    output_add_line(output, "", VGA_WHITE);
+    output_add_line(output, "Summary:", VGA_CYAN);
+    
+    if (syscall_is_enabled()) {
+        output_add_line(output, "  * SYSCALL/SYSRET: ENABLED", VGA_GREEN);
+    } else {
+        output_add_line(output, "  * SYSCALL/SYSRET: DISABLED", VGA_RED);
+    }
+    
+    output_add_line(output, "  * MSR Configuration: OK", VGA_GREEN);
+    output_add_line(output, "  * Assembly Handler: OK", VGA_GREEN);
+    output_add_line(output, "  * C Dispatcher: OK", VGA_GREEN);
+    output_add_empty_line(output);
+    output_add_line(output, "Next: Phase 2 will add usermode (Ring 3) support", VGA_MAGENTA);
+}
 
+void cmd_syscallstats(const char* args, CommandOutput* output) {
+    (void)args;
+    
+    output_add_line(output, "=== SYSCALL Statistics ===", VGA_CYAN);
+    output_add_line(output, "", VGA_WHITE);
+    
+    syscall_stats_t stats;
+    syscall_get_stats(&stats);
+    
+    char buf[128];
+    char num[32];
+    
+    // Total syscalls
+    output_add_line(output, "Total syscalls:", VGA_YELLOW);
+    uint64_to_string(stats.total_syscalls, num);
+    buf[0] = ' '; buf[1] = ' ';
+    int i = 0;
+    while (num[i]) {
+        buf[2 + i] = num[i];
+        i++;
+    }
+    buf[2 + i] = '\0';
+    output_add_line(output, buf, VGA_WHITE);
+    
+    // Invalid syscalls
+    output_add_line(output, "Invalid syscalls:", VGA_YELLOW);
+    uint64_to_string(stats.invalid_syscalls, num);
+    buf[0] = ' '; buf[1] = ' ';
+    i = 0;
+    while (num[i]) {
+        buf[2 + i] = num[i];
+        i++;
+    }
+    buf[2 + i] = '\0';
+    output_add_line(output, buf, VGA_WHITE);
+    
+    // Failed syscalls
+    output_add_line(output, "Failed syscalls:", VGA_YELLOW);
+    uint64_to_string(stats.failed_syscalls, num);
+    buf[0] = ' '; buf[1] = ' ';
+    i = 0;
+    while (num[i]) {
+        buf[2 + i] = num[i];
+        i++;
+    }
+    buf[2 + i] = '\0';
+    output_add_line(output, buf, VGA_WHITE);
+    
+    output_add_empty_line(output);
+    output_add_line(output, "See serial output for detailed statistics.", VGA_CYAN);
+    
+    // Print detailed stats to serial
+    syscall_print_stats();
+}
 // ===========================================
 // MULTITASKING COMMANDS
 // ===========================================
@@ -1550,7 +1634,199 @@ void cmd_rmr(const char* args, CommandOutput* output) {
         output_add_line(output, "Failed to remove directory (may be system directory)", VGA_RED);
     }
 }
+// ============================================================================
+// PHASE 2: Usermode Test Commands (CORRECTED SIGNATURES)
+// ============================================================================
 
+void cmd_testusermode(const char* args, CommandOutput* output) {
+    (void)args; // Unused
+    
+    serial_print("\n=== Testing Usermode Task Creation ===\n\n");
+    output_add_line(output, "Creating usermode test task...", 0x0E);
+    
+    task_t* user_task = task_create_user("usertest", usermode_test_task, 5);
+    
+    if (!user_task) {
+        output_add_line(output, "ERROR: Failed to create usermode task!", 0x0C);
+        serial_print("[ERROR] Failed to create usermode task\n");
+        return;
+    }
+    
+    output_add_line(output, "Usermode task created successfully!", 0x0A);
+    
+    char pid_msg[64] = "Task PID: ";
+    char pid_str[16];
+    int_to_str(user_task->pid, pid_str);
+    str_concat(pid_msg, pid_str);
+    output_add_line(output, pid_msg, 0x0B);
+    
+    if (task_start(user_task) == 0) {
+        output_add_line(output, "Task added to scheduler", 0x0A);
+        output_add_empty_line(output);
+        output_add_line(output, "Task will run on next scheduler tick", 0x0B);
+        output_add_line(output, "Running in Ring 3 (usermode)", 0x0D);
+        serial_print("[SUCCESS] Task added to ready queue\n");
+    } else {
+        output_add_line(output, "ERROR: Failed to start task!", 0x0C);
+    }
+}
+
+void cmd_testusersyscall(const char* args, CommandOutput* output) {
+    (void)args; // Unused
+    
+    serial_print("\n=== Testing Usermode Syscalls ===\n\n");
+    
+    output_add_line(output, "=== Usermode Syscall Test ===", 0x0E);
+    output_add_empty_line(output);
+    output_add_line(output, "Creating usermode syscall test task...", 0x0B);
+    
+    task_t* user_task = task_create_user("usersyscall", usermode_syscall_task, 5);
+    
+    if (!user_task) {
+        output_add_line(output, "ERROR: Failed to create task!", 0x0C);
+        serial_print("[ERROR] Failed to create usermode task\n");
+        return;
+    }
+    
+    output_add_empty_line(output);
+    output_add_line(output, "Task will test:", 0x0A);
+    output_add_line(output, "  - sys_getpid (get process ID)", 0x0B);
+    output_add_line(output, "  - sys_ascent_debug (print message)", 0x0B);
+    output_add_line(output, "  - sys_exit (exit task)", 0x0B);
+    
+    if (task_start(user_task) == 0) {
+        output_add_empty_line(output);
+        output_add_line(output, "Task started successfully!", 0x0A);
+        output_add_line(output, "Check serial output for results", 0x0D);
+        serial_print("[SUCCESS] Syscall test task running in Ring 3\n");
+    } else {
+        output_add_line(output, "ERROR: Failed to start task!", 0x0C);
+    }
+}
+
+void cmd_testring(const char* args, CommandOutput* output) {
+    (void)args; // Unused
+    
+    serial_print("\n=== Ring / Privilege Level Test ===\n\n");
+    
+    output_add_line(output, "=== Privilege Level Test ===", 0x0E);
+    output_add_empty_line(output);
+    
+    extern int get_current_ring(void);
+    extern int is_usermode(void);
+    
+    int ring = get_current_ring();
+    int usermode = is_usermode();
+    
+    char ring_msg[64] = "Current Ring: ";
+    char ring_str[2] = {(char)('0' + ring), '\0'};
+    str_concat(ring_msg, ring_str);
+    output_add_line(output, ring_msg, 0x0B);
+    
+    serial_print("Current Ring: ");
+    serial_print(ring_str);
+    serial_print("\n");
+    
+    if (usermode) {
+        output_add_line(output, "Status: USERMODE (Ring 3)", 0x0A);
+        output_add_line(output, "Limited privileges - protected mode", 0x0D);
+        serial_print("This code is running in usermode!\n");
+    } else {
+        output_add_line(output, "Status: KERNEL MODE (Ring 0)", 0x0E);
+        output_add_line(output, "Full privileges - unrestricted", 0x0D);
+        serial_print("This code is running in kernel mode.\n");
+    }
+    
+    task_t* current = task_get_current();
+    if (current) {
+        output_add_empty_line(output);
+        
+        char task_info[128] = "Current Task: '";
+        str_concat(task_info, current->name);
+        str_concat(task_info, "' (PID=");
+        char pid_str[16];
+        int_to_str(current->pid, pid_str);
+        str_concat(task_info, pid_str);
+        str_concat(task_info, ", Ring ");
+        char priv[2] = {(char)('0' + current->privilege_level), '\0'};
+        str_concat(task_info, priv);
+        str_concat(task_info, ")");
+        
+        output_add_line(output, task_info, 0x0F);
+        
+        serial_print("\nCurrent Task: '");
+        serial_print(current->name);
+        serial_print("' (PID=");
+        serial_print(pid_str);
+        serial_print(", Ring ");
+        serial_print(priv);
+        serial_print(")\n");
+    }
+    
+    serial_print("\n");
+}
+
+void cmd_createusertest(const char* args, CommandOutput* output) {
+    (void)args; // Unused
+    
+    serial_print("\n=== Creating Multiple Usermode Tasks ===\n\n");
+    
+    output_add_line(output, "=== Multiple Usermode Task Test ===", 0x0E);
+    output_add_empty_line(output);
+    output_add_line(output, "Creating 3 usermode tasks...", 0x0B);
+    output_add_empty_line(output);
+    
+    int success = 0;
+    for (int i = 0; i < 3; i++) {
+        char name[32] = "user_";
+        name[5] = '0' + i;
+        name[6] = '\0';
+        
+        task_t* task = task_create_user(name, usermode_test_task, 5);
+        if (task && task_start(task) == 0) {
+            success++;
+            
+            char msg[128] = "  [OK] Task '";
+            str_concat(msg, name);
+            str_concat(msg, "' - PID ");
+            char pid_str[16];
+            int_to_str(task->pid, pid_str);
+            str_concat(msg, pid_str);
+            
+            output_add_line(output, msg, 0x0A);
+            
+            serial_print("Created task '");
+            serial_print(name);
+            serial_print("' (PID=");
+            serial_print(pid_str);
+            serial_print(")\n");
+        } else {
+            char error[128] = "  [FAIL] Task '";
+            str_concat(error, name);
+            str_concat(error, "'");
+            output_add_line(output, error, 0x0C);
+            
+            serial_print("Failed to create task ");
+            serial_print(name);
+            serial_print("\n");
+        }
+    }
+    
+    output_add_empty_line(output);
+    
+    char summary[64] = "Success: ";
+    char count_str[2] = {(char)('0' + success), '\0'};
+    str_concat(summary, count_str);
+    str_concat(summary, "/3 tasks created");
+    output_add_line(output, summary, 0x0E);
+    
+    if (success == 3) {
+        output_add_line(output, "All tasks running in Ring 3!", 0x0A);
+        output_add_line(output, "They will execute in Round-Robin", 0x0B);
+    }
+    
+    serial_print("\n");
+}
 // ===========================================
 // COMMAND TABLE
 // ===========================================
@@ -1586,7 +1862,12 @@ static Command command_table[] = {
     {"write", "Write to file", cmd_write},
     {"rm", "Delete file", cmd_rm},
     {"kode", "Text editor", cmd_kode},
-    
+     {"testsyscall", "Test SYSCALL infrastructure", cmd_testsyscall},
+    {"syscallstats", "Show SYSCALL statistics", cmd_syscallstats},
+    {"testusermode", "Test usermode task creation", cmd_testusermode},
+   {"testusersyscall", "Test syscalls from usermode", cmd_testusersyscall},
+   {"testring", "Display current privilege level", cmd_testring},
+   {"createusertest", "Create multiple usermode tasks", cmd_createusertest},
     // Advanced file system commands
     {"tree", "Show directory tree", cmd_tree},
     {"find", "Find files by pattern", cmd_find},

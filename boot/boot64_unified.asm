@@ -1,6 +1,7 @@
 ; boot64_higher_half.asm - 64-bit Higher Half Kernel Bootloader
 ; Kernel'i 0xFFFFFFFF80000000 adresinde çalıştırır
 ; Identity mapping (0-4GB) + Higher half mapping
+; UPDATED: Added Ring 3 segments - WORKING VERSION
 
 global _start
 extern kernel_main
@@ -98,53 +99,28 @@ _start:
     mov esi, msg_boot_start
     call serial_print_32
     
-    ; Multiboot bilgilerini parse et (framebuffer bilgisi)
+    ; Multiboot2 info'dan framebuffer bilgisini al
     call parse_multiboot_info
     
-    ; Framebuffer bilgisini göster
-    mov esi, msg_fb_addr
-    call serial_print_32
-    mov eax, [framebuffer_addr]
-    call serial_print_hex_32
-    mov al, 0x0A
-    call serial_write_32
-    
-    mov esi, msg_fb_size
-    call serial_print_32
-    mov eax, [framebuffer_width]
-    call serial_print_hex_32
-    mov al, 'x'
-    call serial_write_32
-    mov eax, [framebuffer_height]
-    call serial_print_hex_32
-    mov al, 0x0A
-    call serial_write_32
-    
-    ; Sistem kontrolleri
-    call check_cpuid
-    call check_long_mode
-    
-    ; Higher half için sayfa tablolarını hazırla
-    call setup_page_tables_higher_half
+    ; Paging'i ayarla
+    call setup_page_tables
     call enable_paging
     
-    mov esi, msg_entering_long
-    call serial_print_32
-    
-    ; GDT yükle ve 64-bit moda geç
+    ; Long mode'a geç
     lgdt [gdt64.pointer]
     jmp gdt64.code:long_mode_start
 
 ; ----------------------------------------------------------------------------
-; Multiboot2 magic number kontrolü
+; Multiboot magic number kontrolü
 ; ----------------------------------------------------------------------------
 check_multiboot:
     cmp eax, 0x36d76289
-    jne .error
+    jne .no_multiboot
     ret
-.error:
-    mov al, '0'
-    jmp error
+.no_multiboot:
+    mov al, 'M'
+    call serial_write_32
+    hlt
 
 ; ----------------------------------------------------------------------------
 ; Serial port başlat (32-bit)
@@ -248,31 +224,52 @@ parse_multiboot_info:
     cmp eax, 8                              ; Framebuffer tag?
     je .found_framebuffer
     
-    ; Sonraki tag
+    ; Sonraki tag'e git
     mov ecx, [esi + 4]                      ; Tag size
-    add ecx, 7
-    and ecx, ~7
     add esi, ecx
+    add esi, 7
+    and esi, ~7                             ; 8-byte align
     jmp .tag_loop
 
 .found_framebuffer:
-    ; Framebuffer bilgilerini al
-    mov eax, [esi + 8]
+    mov eax, [esi + 8]                      ; Framebuffer address (low)
     mov [framebuffer_addr], eax
-    mov eax, [esi + 12]
+    mov eax, [esi + 12]                     ; Framebuffer address (high)
     mov [framebuffer_addr + 4], eax
     
-    mov eax, [esi + 16]
+    mov eax, [esi + 16]                     ; Pitch
     mov [framebuffer_pitch], eax
     
-    mov eax, [esi + 20]
+    mov eax, [esi + 20]                     ; Width
     mov [framebuffer_width], eax
     
-    mov eax, [esi + 24]
+    mov eax, [esi + 24]                     ; Height
     mov [framebuffer_height], eax
     
-    mov al, [esi + 28]
+    mov al, [esi + 28]                      ; BPP
     mov [framebuffer_bpp], al
+    
+    ; Debug: framebuffer adresini yazdır
+    mov esi, msg_fb_addr
+    call serial_print_32
+    mov eax, [framebuffer_addr]
+    call serial_print_hex_32
+    mov al, 0x0A
+    call serial_write_32
+    
+    ; Resolution'ı yazdır
+    mov esi, msg_fb_size
+    call serial_print_32
+    mov eax, [framebuffer_width]
+    call serial_print_hex_32
+    mov al, 'x'
+    call serial_write_32
+    mov eax, [framebuffer_height]
+    call serial_print_hex_32
+    mov al, 0x0A
+    call serial_write_32
+    
+    jmp .done
 
 .done:
     pop esi
@@ -282,167 +279,135 @@ parse_multiboot_info:
     ret
 
 ; ----------------------------------------------------------------------------
-; CPUID desteği kontrolü
+; Page tabloları ayarla (Identity + Higher Half)
 ; ----------------------------------------------------------------------------
-check_cpuid:
-    pushfd
-    pop eax
-    mov ecx, eax
-    xor eax, 1 << 21
-    push eax
-    popfd
-    pushfd
-    pop eax
-    push ecx
-    popfd
-    xor eax, ecx
-    jz .error
-    ret
-.error:
-    mov al, '1'
-    jmp error
-
-; ----------------------------------------------------------------------------
-; Long mode desteği kontrolü
-; ----------------------------------------------------------------------------
-check_long_mode:
-    mov eax, 0x80000000
-    cpuid
-    cmp eax, 0x80000001
-    jb .error
-    
-    mov eax, 0x80000001
-    cpuid
-    test edx, 1 << 29
-    jz .error
-    ret
-.error:
-    mov al, '2'
-    jmp error
-
-; ----------------------------------------------------------------------------
-; Higher Half Kernel için sayfa tablolarını hazırla
-; Identity mapping (0-4GB) + Higher half mapping (kernel)
-; ----------------------------------------------------------------------------
-setup_page_tables_higher_half:
-    ; Tüm tabloları temizle
+setup_page_tables:
+    ; P4 tabloyu temizle
     mov edi, p4_table
-    mov ecx, 6144                           ; 6 * 4096 bytes / 4
+    mov ecx, 4096
     xor eax, eax
     rep stosd
     
-    ; === P4 Table Setup ===
-    ; P4[0] -> p3_table_low (identity mapping için)
+    ; P3 tabloları temizle
+    mov edi, p3_table_low
+    mov ecx, 8192
+    xor eax, eax
+    rep stosd
+    
+    ; P2 tabloları temizle
+    mov edi, p2_table
+    mov ecx, 16384
+    xor eax, eax
+    rep stosd
+    
+    ; P4[0] -> P3_low (identity mapping için)
     mov eax, p3_table_low
-    or eax, 0b11                            ; Present + Writable
+    or eax, 0b11
     mov [p4_table], eax
     
-    ; P4[511] -> p3_table_high (higher half için)
-    ; 0xFFFFFFFF80000000 = P4[511], P3[510], P2[0]
+    ; P4[511] -> P3_high (higher half için)
     mov eax, p3_table_high
     or eax, 0b11
-    mov [p4_table + 511*8], eax
+    mov [p4_table + 511 * 8], eax
     
-    ; === P3 Low Table (Identity Mapping) ===
-    ; P3[0] -> P2[0-511] (first 1GB)
+    ; P3_low[0..3] -> P2[0..3] (0-4GB identity mapping)
     mov eax, p2_table
     or eax, 0b11
     mov [p3_table_low], eax
     
-    ; P3[1] -> P2[512-1023] (second 1GB)
-    mov eax, p2_table
     add eax, 4096
-    or eax, 0b11
     mov [p3_table_low + 8], eax
     
-    ; P3[2] -> P2[1024-1535] (third 1GB)
-    mov eax, p2_table
-    add eax, 8192
-    or eax, 0b11
+    add eax, 4096
     mov [p3_table_low + 16], eax
     
-    ; P3[3] -> P2[1536-2047] (fourth 1GB)
-    mov eax, p2_table
-    add eax, 12288
-    or eax, 0b11
+    add eax, 4096
     mov [p3_table_low + 24], eax
     
-    ; === P3 High Table (Higher Half Mapping) ===
-    ; P3[510] -> P2[0-511] (kernel'in ilk 1GB'si)
-    ; 0xFFFFFFFF80000000 için P3[510] kullanılır
+    ; P3_high[510..511] -> P2[0..3] (kernel higher half)
     mov eax, p2_table
     or eax, 0b11
-    mov [p3_table_high + 510*8], eax
+    mov [p3_table_high + 510 * 8], eax
     
-    ; P3[511] -> P2[512-1023] (kernel'in ikinci 1GB'si)
-    mov eax, p2_table
     add eax, 4096
-    or eax, 0b11
-    mov [p3_table_high + 511*8], eax
+    mov [p3_table_high + 511 * 8], eax
     
-    ; === P2 Tables - 2MB pages ile doldur (4GB toplam) ===
+    ; P2 entries: 2MB pages (0-4GB)
     mov edi, p2_table
-    mov eax, 0b10000011                     ; Present + Writable + Huge (2MB)
-    mov ecx, 2048                           ; 2048 x 2MB = 4GB
-.fill_p2:
+    mov eax, 0x00000083                     ; Present, writable, 2MB
+    mov ecx, 2048                           ; 2048 * 2MB = 4GB
+.map_p2:
     mov [edi], eax
-    add eax, 0x200000                       ; 2MB artır
+    add eax, 0x200000                       ; 2MB
     add edi, 8
-    loop .fill_p2
+    loop .map_p2
     
     ret
 
 ; ----------------------------------------------------------------------------
-; Paging ve long mode'u etkinleştir
+; Paging'i etkinleştir
 ; ----------------------------------------------------------------------------
 enable_paging:
     ; CR3'e P4 adresini yükle
     mov eax, p4_table
     mov cr3, eax
     
-    ; PAE etkinleştir
+    ; PAE'yi etkinleştir (CR4.PAE)
     mov eax, cr4
     or eax, 1 << 5
     mov cr4, eax
     
-    ; Long Mode Enable
+    ; Long mode'u etkinleştir (EFER.LME)
     mov ecx, 0xC0000080
     rdmsr
     or eax, 1 << 8
     wrmsr
     
-    ; Paging etkinleştir
+    ; Paging'i etkinleştir (CR0.PG)
     mov eax, cr0
     or eax, 1 << 31
     mov cr0, eax
+    
+    ; Debug mesajı
+    mov esi, msg_entering_long
+    call serial_print_32
+    
     ret
 
-; ----------------------------------------------------------------------------
-; Hata gösterimi
-; ----------------------------------------------------------------------------
-error:
-    mov dword [0xb8000], 0x4f524f45         ; "ER"
-    mov dword [0xb8004], 0x4f3a4f52         ; "R:"
-    mov byte [0xb8008], al
-    mov byte [0xb8009], 0x4f
-    cli
-.halt:
-    hlt
-    jmp .halt
-
 ; ============================================================================
-; GDT - 64-bit
+; GDT - 64-bit WITH RING 3 SUPPORT
 ; ============================================================================
 section .rodata
+align 16
 gdt64:
-    dq 0                                    ; Null descriptor
+    ; 0x00: Null descriptor
+    dq 0x0000000000000000
+    
 .code: equ $ - gdt64
-    dq (1<<43) | (1<<44) | (1<<47) | (1<<53) ; Code segment
+    ; 0x08: Kernel Code Segment (Ring 0, 64-bit)
+    ; Access: Present(1) DPL(00) Code(1) Exec(1) Readable(1) Accessed(0) = 10011010b = 0x9A
+    ; Flags: Granularity(0) Long(1) = 0010b = 0x2
+    dq 0x00209A0000000000
+    
 .data: equ $ - gdt64
-    dq (1<<44) | (1<<47)                    ; Data segment
+    ; 0x10: Kernel Data Segment (Ring 0)
+    ; Access: Present(1) DPL(00) Data(0) Writable(1) = 10010010b = 0x92
+    dq 0x0000920000000000
+    
+.user_data: equ $ - gdt64
+    ; 0x18: User Data Segment (Ring 3)
+    ; Access: Present(1) DPL(11) Data(0) Writable(1) = 11110010b = 0xF2
+    dq 0x0000F20000000000
+    
+.user_code: equ $ - gdt64
+    ; 0x20: User Code Segment (Ring 3, 64-bit)
+    ; Access: Present(1) DPL(11) Code(1) Exec(1) Readable(1) = 11111010b = 0xFA
+    ; Flags: Granularity(0) Long(1) = 0010b = 0x2
+    dq 0x0020FA0000000000
+
 .pointer:
-    dw $ - gdt64 - 1
-    dq gdt64
+    dw $ - gdt64 - 1            ; GDT limit
+    dq gdt64                    ; GDT base
 
 ; Debug mesajları
 msg_boot_start:     db "[BOOT] AscentOS Higher Half Starting...", 0x0A, 0
@@ -455,8 +420,8 @@ msg_entering_long:  db "[BOOT] Entering long mode (Higher Half)...", 0x0A, 0
 ; ============================================================================
 bits 64
 long_mode_start:
-    ; Segment register'ları sıfırla
-    xor ax, ax
+    ; Segment register'ları kernel data segment'e ayarla
+    mov ax, gdt64.data
     mov ss, ax
     mov ds, ax
     mov es, ax
@@ -467,10 +432,8 @@ long_mode_start:
     mov rsp, kernel_stack_top
     
     ; Multiboot info pointer'ı higher half adrese çevir
-    ; EBX fiziksel adres içeriyor, bunu sanal adrese dönüştür
     mov rdi, rbx                            ; Fiziksel adres
     
-    ; Artık higher half'te çalışıyoruz
     ; Kernel main fonksiyonunu çağır (higher half adreste)
     mov rax, kernel_main
     call rax
