@@ -88,9 +88,6 @@ void task_init(void);
 // Yeni kernel task oluştur (Ring 0)
 task_t* task_create(const char* name, void (*entry_point)(void), uint32_t priority);
 
-// Yeni usermode task oluştur (Ring 3) - NEW FOR PHASE 2
-task_t* task_create_user(const char* name, void (*entry_point)(void), uint32_t priority);
-
 // Task'ı başlat (queue'ya ekle)
 int task_start(task_t* task);
 
@@ -167,12 +164,6 @@ extern void task_save_current_context(cpu_context_t* ctx);
 // Load and jump to context (implemented in interrupts64.asm)
 extern void task_load_and_jump_context(cpu_context_t* ctx);
 
-// ===========================================
-// USERMODE TRANSITION - NEW FOR PHASE 2
-// ===========================================
-
-// Jump to usermode (Ring 3) - implemented in assembly
-extern void jump_to_usermode(uint64_t entry_point, uint64_t stack_pointer);
 
 // ===========================================
 // UTILITY FUNCTIONS

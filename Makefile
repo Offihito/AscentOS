@@ -82,9 +82,7 @@ syscall_setup.o: kernel/syscall_setup.c
 syscall_test.o: kernel/syscall_test.c kernel/syscall.h
 	$(CC) $(CFLAGS) -c kernel/syscall_test.c -o syscall_test.o
 
-# usermode_transition.o is no longer needed - jump_to_usermode is now in interrupts64.asm
-# usermode_transition.o: kernel/usermode_transition.asm
-# 	$(AS) $(ASFLAGS) kernel/usermode_transition.asm -o usermode_transition.o
+
 	
 	
 # ============================================================================
