@@ -1633,7 +1633,7 @@ void cmd_exec(const char* args, CommandOutput* output) {
     output_add_line(output, line, VGA_WHITE);
 
     // ── 6. Zamanlayıcı kuyruğuna ekle ────────────────────────
-    output_add_line(output, "[3/3] Zamanlayici kuyruğuna ekleniyor...", VGA_WHITE);
+    output_add_line(output, "[3/3] Zamanlayici kuyruguna ekleniyor...", VGA_WHITE);
     if (task_start(utask) != 0) {
         output_add_line(output, "[HATA] task_start() basarisiz!", VGA_RED);
         task_terminate(utask);
