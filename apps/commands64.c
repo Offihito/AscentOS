@@ -8,7 +8,7 @@
 #include "../kernel/scheduler.h"
 #include "../kernel/disk64.h"    // fat32_file_size, fat32_read_file
 #include "../kernel/elf64.h"         // ELF-64 loader
-#include "../kernel/syscall.h"
+#include "../kernel/syscall.h"       // SYSCALL/SYSRET altyapısı
 extern void println64(const char* str, uint8_t color);
 extern void print_str64(const char* str, uint8_t color);
 extern uint64_t get_system_ticks(void);
@@ -270,7 +270,7 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_line(output, " vmm       - Virtual Memory Manager test", VGA_WHITE);
     output_add_empty_line(output);
     output_add_line(output, "ELF Loader Commands:", VGA_YELLOW);
-    output_add_line(output, " exec      - Load ELF64 binary from FAT32", VGA_WHITE);
+    output_add_line(output, " exec      - Load ELF64 + Ring-3 task olustur", VGA_WHITE);
     output_add_line(output, " elfinfo   - Show ELF64 header (no load)", VGA_WHITE);
     output_add_empty_line(output);
     output_add_line(output, "Multitasking Commands:", VGA_YELLOW);
@@ -1181,162 +1181,6 @@ void cmd_heap(const char* args, CommandOutput* output) {
     output_add_empty_line(output);
     output_add_line(output, "All heap tests completed!", VGA_CYAN);
 }
-void cmd_testsyscall(const char* args, CommandOutput* output) {
-    (void)args;
-
-    output_add_line(output, "╔══════════════════════════════════════╗", VGA_CYAN);
-    output_add_line(output, "║   Phase 3 Syscall Test Suite          ║", VGA_CYAN);
-    output_add_line(output, "╚══════════════════════════════════════╝", VGA_CYAN);
-    output_add_empty_line(output);
-
-    if (!syscall_is_enabled()) {
-        output_add_line(output, "[ERROR] Syscall system not initialized!", VGA_RED);
-        return;
-    }
-
-    output_add_line(output, "Running 13 test groups (see serial for details)...", VGA_YELLOW);
-    output_add_empty_line(output);
-
-    // Run full test suite — all output goes to serial
-    extern void syscall_kernel_test(void);
-    syscall_kernel_test();
-
-    // ── Show a brief summary on-screen ───────────────────────────────────────
-    char buf[64]; char num[16];
-
-    output_add_line(output, "Test Groups:", VGA_CYAN);
-    output_add_line(output, "  1. Syscall init           [DONE]", VGA_GREEN);
-    output_add_line(output, "  2. MSR configuration      [DONE]", VGA_GREEN);
-    output_add_line(output, "  3. Ascent basic syscalls   [DONE]", VGA_GREEN);
-    output_add_line(output, "  4. FD table (0/1/2)       [DONE]", VGA_GREEN);
-    output_add_line(output, "  5. write() to stdout/stderr[DONE]", VGA_GREEN);
-    output_add_line(output, "  6. open/read/write/close  [DONE]", VGA_GREEN);
-    output_add_line(output, "  7. pipe()                 [DONE]", VGA_GREEN);
-    output_add_line(output, "  8. dup() / dup2()         [DONE]", VGA_GREEN);
-    output_add_line(output, "  9. brk/mmap/munmap        [DONE]", VGA_GREEN);
-    output_add_line(output, " 10. exit/getpid/kill/wait  [DONE]", VGA_GREEN);
-    output_add_line(output, " 11. IPC: shared memory     [DONE]", VGA_GREEN);
-    output_add_line(output, " 12. IPC: message queue     [DONE]", VGA_GREEN);
-    output_add_line(output, " 13. Invalid syscall guard  [DONE]", VGA_GREEN);
-    output_add_empty_line(output);
-
-    // Live stats snapshot
-    syscall_stats_t st;
-    syscall_get_stats(&st);
-
-    str_cpy(buf, "Total syscalls issued: ");
-    uint64_to_string(st.total_syscalls, num);
-    str_concat(buf, num);
-    output_add_line(output, buf, VGA_WHITE);
-
-    if (st.failed_syscalls == 0) {
-        output_add_line(output, "All syscall tests passed!", VGA_GREEN);
-    } else {
-        str_cpy(buf, "Failed syscalls: ");
-        uint64_to_string(st.failed_syscalls, num);
-        str_concat(buf, num);
-        output_add_line(output, buf, VGA_RED);
-    }
-
-    output_add_empty_line(output);
-    output_add_line(output, "Check serial output for full pass/fail log.", VGA_MAGENTA);
-    output_add_line(output, "Phase 4: fork, execve, blocking sleep, COW pages.", VGA_CYAN);
-}
-
-void cmd_syscallstats(const char* args, CommandOutput* output) {
-    (void)args;
-
-    output_add_line(output, "╔══════════════════════════════════════╗", VGA_CYAN);
-    output_add_line(output, "║      Phase 3 Syscall Statistics       ║", VGA_CYAN);
-    output_add_line(output, "╚══════════════════════════════════════╝", VGA_CYAN);
-    output_add_empty_line(output);
-
-    syscall_stats_t stats;
-    syscall_get_stats(&stats);
-
-    char buf[96];
-    char num[32];
-
-    // ── Totals ────────────────────────────────────────────────────────────────
-    output_add_line(output, "Totals:", VGA_YELLOW);
-
-    str_cpy(buf, "  Total    : ");
-    uint64_to_string(stats.total_syscalls, num);   str_concat(buf, num);
-    output_add_line(output, buf, VGA_WHITE);
-
-    str_cpy(buf, "  Invalid  : ");
-    uint64_to_string(stats.invalid_syscalls, num); str_concat(buf, num);
-    output_add_line(output, buf, stats.invalid_syscalls > 0 ? VGA_RED : VGA_GREEN);
-
-    str_cpy(buf, "  Failed   : ");
-    uint64_to_string(stats.failed_syscalls, num);  str_concat(buf, num);
-    output_add_line(output, buf, stats.failed_syscalls > 0 ? VGA_RED : VGA_GREEN);
-
-    output_add_empty_line(output);
-
-    // ── Per-category breakdown ────────────────────────────────────────────────
-    // Helper: build "  name: count" line and add if non-zero
-    #define ADD_STAT(label, syscall_nr)                                      \
-        do {                                                                  \
-            if (stats.syscall_counts[(syscall_nr)] > 0) {                   \
-                str_cpy(buf, "  " label ": ");                               \
-                uint64_to_string(stats.syscall_counts[(syscall_nr)], num);  \
-                str_concat(buf, num);                                        \
-                output_add_line(output, buf, VGA_WHITE);                    \
-            }                                                                 \
-        } while (0)
-
-    output_add_line(output, "File I/O:", VGA_YELLOW);
-    ADD_STAT("open  ", SYS_OPEN);
-    ADD_STAT("read  ", SYS_READ);
-    ADD_STAT("write ", SYS_WRITE);
-    ADD_STAT("close ", SYS_CLOSE);
-    ADD_STAT("stat  ", SYS_STAT);
-    ADD_STAT("fstat ", SYS_FSTAT);
-    ADD_STAT("lseek ", SYS_LSEEK);
-    ADD_STAT("pipe  ", SYS_PIPE);
-    ADD_STAT("dup   ", SYS_DUP);
-    ADD_STAT("dup2  ", SYS_DUP2);
-
-    output_add_empty_line(output);
-    output_add_line(output, "Process:", VGA_YELLOW);
-    ADD_STAT("exit    ", SYS_EXIT);
-    ADD_STAT("getpid  ", SYS_GETPID);
-    ADD_STAT("fork    ", SYS_FORK);
-    ADD_STAT("execve  ", SYS_EXECVE);
-    ADD_STAT("waitpid ", SYS_WAITPID);
-    ADD_STAT("wait4   ", SYS_WAIT4);
-    ADD_STAT("kill    ", SYS_KILL);
-    ADD_STAT("getuid  ", SYS_GETUID);
-    ADD_STAT("getgid  ", SYS_GETGID);
-
-    output_add_empty_line(output);
-    output_add_line(output, "Memory:", VGA_YELLOW);
-    ADD_STAT("brk    ", SYS_BRK);
-    ADD_STAT("mmap   ", SYS_MMAP);
-    ADD_STAT("munmap ", SYS_MUNMAP);
-
-    output_add_empty_line(output);
-    output_add_line(output, "AscentOS IPC/custom:", VGA_YELLOW);
-    ADD_STAT("debug   ", SYS_ASCENT_DEBUG);
-    ADD_STAT("info    ", SYS_ASCENT_INFO);
-    ADD_STAT("yield   ", SYS_ASCENT_YIELD);
-    ADD_STAT("sleep   ", SYS_ASCENT_SLEEP);
-    ADD_STAT("gettime ", SYS_ASCENT_GETTIME);
-    ADD_STAT("shmget  ", SYS_ASCENT_SHMGET);
-    ADD_STAT("shmmap  ", SYS_ASCENT_SHMMAP);
-    ADD_STAT("shmunmap", SYS_ASCENT_SHMUNMAP);
-    ADD_STAT("msgpost ", SYS_ASCENT_MSGPOST);
-    ADD_STAT("msgrecv ", SYS_ASCENT_MSGRECV);
-
-    #undef ADD_STAT
-
-    output_add_empty_line(output);
-    output_add_line(output, "Full per-syscall log written to serial.", VGA_MAGENTA);
-
-    // Dump everything to serial as well
-    syscall_print_stats();
-}
 // ===========================================
 // MULTITASKING COMMANDS
 // ===========================================
@@ -1480,6 +1324,74 @@ void cmd_createtask(const char* args, CommandOutput* output) {
     output_add_line(output, "Check serial output for task messages", VGA_YELLOW);
 }
 
+// ============================================================
+// cmd_usertask  [test|ring3|<isim>]
+//
+// Ring-3 user-mode task olusturur ve baslatir.
+// Parametresiz veya "test"/"ring3" verilirse yerlesik
+// user_mode_test_task() entry fonksiyonu kullanilir.
+// ============================================================
+void cmd_usertask(const char* args, CommandOutput* output) {
+    output_add_line(output, "=== Ring-3 User Task Olusturuluyor ===", VGA_CYAN);
+    output_add_empty_line(output);
+
+    const char* task_name = "UserTest";
+    void (*entry)(void)   = user_mode_test_task;
+
+    // args varsa ve bilinen keyword degilse task ismi olarak kullan
+    if (args && str_len(args) > 0
+        && str_cmp(args, "test")  != 0
+        && str_cmp(args, "ring3") != 0) {
+        task_name = args;
+    }
+
+    char info[128];
+    char num[32];
+
+    str_cpy(info, "Task adi : ");
+    str_concat(info, task_name);
+    output_add_line(output, info, VGA_WHITE);
+    output_add_line(output, "Privilege: Ring-3 (DPL=3)", VGA_WHITE);
+    output_add_line(output, "CS=0x23  SS=0x1B  Entry=user_mode_test_task", VGA_WHITE);
+    output_add_empty_line(output);
+
+    // ── Olustur ───────────────────────────────────────────────────
+    task_t* utask = task_create_user(task_name, entry, TASK_PRIORITY_NORMAL);
+    if (!utask) {
+        output_add_line(output, "[HATA] task_create_user() basarisiz!", VGA_RED);
+        output_add_line(output, "  -> task_init() cagirildi mi?", VGA_YELLOW);
+        return;
+    }
+
+    str_cpy(info, "Olusturuldu -> PID=");
+    int_to_str(utask->pid, num);
+    str_concat(info, num);
+    output_add_line(output, info, VGA_GREEN);
+
+    str_cpy(info, "  kernel_stack_top = 0x");
+    uint64_to_string(utask->kernel_stack_top, num);
+    str_concat(info, num);
+    output_add_line(output, info, VGA_WHITE);
+
+    str_cpy(info, "  user_stack_top   = 0x");
+    uint64_to_string(utask->user_stack_top, num);
+    str_concat(info, num);
+    output_add_line(output, info, VGA_WHITE);
+
+    // ── Zamanlayiciya ekle ────────────────────────────────────────
+    if (task_start(utask) != 0) {
+        output_add_line(output, "[HATA] task_start() basarisiz!", VGA_RED);
+        task_terminate(utask);
+        return;
+    }
+
+    output_add_empty_line(output);
+    output_add_line(output, "Zamanlayici kuyruguna eklendi.", VGA_GREEN);
+    output_add_line(output, "Sonraki timer interrupt -> IRETQ -> Ring-3 gecisi.", VGA_YELLOW);
+    output_add_line(output, "Serial logda '[USER TASK] Hello from Ring-3' gormeli.", VGA_YELLOW);
+    output_add_line(output, "Gorev SYS_EXIT(0) ile kendini sonlandiriyor.", VGA_WHITE);
+}
+
 void cmd_schedinfo(const char* args, CommandOutput* output) {
     (void)args;
     
@@ -1588,23 +1500,29 @@ void cmd_elfinfo(const char* args, CommandOutput* output) {
     output_add_line(output, line, rc == ELF_OK ? VGA_GREEN : VGA_RED);
 }
 
-// cmd_exec <DOSYA.ELF> [load_base_hex]
-// FAT32'deki ELF64 dosyasını belleğe yükler.
-// ET_DYN (PIE) için opsiyonel 0x... base adresi alınabilir.
-// Çekirdek task sistemi geliştiğinde buraya task_create_from_elf() eklenir.
+// ============================================================
+// cmd_exec <DOSYA.ELF> [base_hex]
+//
+// FAT32'deki ELF64 binary'yi yükler ve Ring-3 task olarak başlatır.
+// Tam Ring-3 → Ring-0 → Ring-3 syscall döngüsünü test eder.
+//
+// Kullanım:
+//   exec HELLO.ELF             → 0x400000 tabanından ET_EXEC
+//   exec MYAPP.ELF 0x500000    → özel PIE taban adresi
+// ============================================================
 void cmd_exec(const char* args, CommandOutput* output) {
     if (!args || str_len(args) == 0) {
         output_add_line(output, "Usage: exec <FILE.ELF> [base_hex]", VGA_YELLOW);
-        output_add_line(output, "  Loads an ELF64 binary from FAT32 into memory.", VGA_DARK_GRAY);
-        output_add_line(output, "  base_hex: optional load base for PIE (ET_DYN) files.", VGA_DARK_GRAY);
-        output_add_line(output, "  Example: exec HELLO.ELF", VGA_DARK_GRAY);
-        output_add_line(output, "  Example: exec MYAPP.ELF 0x400000", VGA_DARK_GRAY);
+        output_add_line(output, "  ELF64 binary'yi FAT32'den yukler, Ring-3 task olusturur.", VGA_DARK_GRAY);
+        output_add_line(output, "  base_hex: PIE (ET_DYN) icin opsiyonel load tabanı.", VGA_DARK_GRAY);
+        output_add_line(output, "  Ornek: exec HELLO.ELF", VGA_DARK_GRAY);
+        output_add_line(output, "  Ornek: exec MYAPP.ELF 0x500000", VGA_DARK_GRAY);
         return;
     }
 
-    // Argümanları ayrıştır: <dosya> [hex_base]
+    // ── 1. Argümanları ayrıştır ───────────────────────────────
     char filename[64];
-    uint64_t load_base = 0x400000ULL; // Varsayılan kullanıcı alanı tabanı
+    uint64_t load_base = 0x400000ULL;   // varsayılan ET_EXEC taban adresi
 
     int i = 0;
     while (args[i] && args[i] != ' ' && i < 63) {
@@ -1613,7 +1531,7 @@ void cmd_exec(const char* args, CommandOutput* output) {
     }
     filename[i] = '\0';
 
-    // Opsiyonel base adresini ayrıştır (0x... formatı)
+    // Opsiyonel hex base (0x...)
     if (args[i] == ' ') {
         i++;
         const char* base_str = &args[i];
@@ -1623,7 +1541,7 @@ void cmd_exec(const char* args, CommandOutput* output) {
             while (*base_str) {
                 char c = *base_str++;
                 uint64_t digit;
-                if (c >= '0' && c <= '9')      digit = c - '0';
+                if      (c >= '0' && c <= '9') digit = c - '0';
                 else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
                 else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
                 else break;
@@ -1633,39 +1551,112 @@ void cmd_exec(const char* args, CommandOutput* output) {
         }
     }
 
-    // Dosya adını ve base'i göster
+    // ── 2. Başlık bilgilerini göster ──────────────────────────
     char line[96];
     char tmp[24];
-    output_add_line(output, "=== ELF Loader ===", VGA_CYAN);
-    str_cpy(line, "File      : "); str_concat(line, filename);
-    output_add_line(output, line, VGA_WHITE);
-
-    // uint64_to_hex yerine kendi küçük hex formatlayıcımızı kullanıyoruz
-    // (kernel64.c'deki uint64_to_hex burada extern değil)
-    // Basit 16-bit hex çıktısı:
     const char* hexc = "0123456789ABCDEF";
-    tmp[0]='0'; tmp[1]='x';
-    for(int k=0;k<16;k++) tmp[2+k]=hexc[(load_base>>(60-k*4))&0xF];
-    tmp[18]='\0';
+
+    #define FMT_HEX64(val) do { \
+        tmp[0]='0'; tmp[1]='x'; \
+        for(int _k=0;_k<16;_k++) tmp[2+_k]=hexc[((val)>>(60-_k*4))&0xF]; \
+        tmp[18]='\0'; \
+    } while(0)
+
+    output_add_line(output, "=== exec: ELF Loader + Ring-3 Task ===", VGA_CYAN);
+    str_cpy(line, "Dosya     : "); str_concat(line, filename);
+    output_add_line(output, line, VGA_WHITE);
+    FMT_HEX64(load_base);
     str_cpy(line, "Load base : "); str_concat(line, tmp);
     output_add_line(output, line, VGA_WHITE);
     output_add_empty_line(output);
 
-    // Yükle
+    // ── 3. SYSCALL başlatılmış mı? ────────────────────────────
+    if (!syscall_is_enabled()) {
+        output_add_line(output, "[HATA] SYSCALL altyapisi baslatilmamis!", VGA_RED);
+        output_add_line(output, "  kernel'de syscall_init() cagirildi mi?", VGA_YELLOW);
+        return;
+    }
+
+    // ── 4. ELF'i FAT32'den yükle ─────────────────────────────
+    output_add_line(output, "[1/3] ELF FAT32'den yukleniyor...", VGA_WHITE);
     ElfImage image;
     int rc = elf64_exec_from_fat32(filename, load_base, &image, output);
-
-    if (rc == ELF_OK) {
-        output_add_empty_line(output);
-        output_add_line(output, "Binary loaded into kernel address space.", VGA_GREEN);
-        output_add_line(output, "WARNING: No user-mode isolation yet!", VGA_RED);
-        output_add_line(output, "Use task_create_from_elf() to run safely.", VGA_YELLOW);
-
-        // Gelecekte entegrasyon için seri porta da yaz
-        // (serial_print extern edilmeden derlenebilir)
-    } else {
-        output_add_line(output, "Exec failed.", VGA_RED);
+    if (rc != ELF_OK) {
+        str_cpy(line, "[HATA] ELF yuklenemedi: ");
+        str_concat(line, elf64_strerror(rc));
+        output_add_line(output, line, VGA_RED);
+        return;
     }
+
+    // ── 5. Ring-3 task oluştur ────────────────────────────────
+    output_add_line(output, "[2/3] Ring-3 task olusturuluyor...", VGA_WHITE);
+
+    // task_create_user() entry point olarak ELF'in giriş adresini kullan.
+    // Fonksiyon pointer cast: void(*)(void) — flat memory'de güvenli.
+    void (*entry_fn)(void) = (void (*)(void))image.entry;
+
+    task_t* utask = task_create_user(filename, entry_fn, TASK_PRIORITY_NORMAL);
+    if (!utask) {
+        output_add_line(output, "[HATA] task_create_user() basarisiz!", VGA_RED);
+        output_add_line(output, "  task_init() cagirildi mi? Heap yeterli mi?", VGA_YELLOW);
+        return;
+    }
+
+    // ELF entry point'i context'e doğrudan yaz (cast artifact'ı olmadan kesin override)
+    utask->context.rip    = image.entry;
+    utask->context.rflags = 0x202;   // IF=1 (kesmeler açık)
+
+    // Bilgi satırları
+    FMT_HEX64(image.entry);
+    str_cpy(line, "  Entry point     : "); str_concat(line, tmp);
+    output_add_line(output, line, VGA_YELLOW);
+
+    FMT_HEX64(image.load_min);
+    str_cpy(line, "  Segment VA min  : "); str_concat(line, tmp);
+    output_add_line(output, line, VGA_WHITE);
+
+    FMT_HEX64(image.load_max);
+    str_cpy(line, "  Segment VA max  : "); str_concat(line, tmp);
+    output_add_line(output, line, VGA_WHITE);
+
+    str_cpy(line, "  PID             : ");
+    int_to_str((int)utask->pid, tmp);
+    str_concat(line, tmp);
+    output_add_line(output, line, VGA_WHITE);
+
+    FMT_HEX64(utask->kernel_stack_top);
+    str_cpy(line, "  Kernel RSP0     : "); str_concat(line, tmp);
+    output_add_line(output, line, VGA_WHITE);
+
+    FMT_HEX64(utask->user_stack_top);
+    str_cpy(line, "  User stack top  : "); str_concat(line, tmp);
+    output_add_line(output, line, VGA_WHITE);
+
+    // ── 6. Zamanlayıcı kuyruğuna ekle ────────────────────────
+    output_add_line(output, "[3/3] Zamanlayici kuyruğuna ekleniyor...", VGA_WHITE);
+    if (task_start(utask) != 0) {
+        output_add_line(output, "[HATA] task_start() basarisiz!", VGA_RED);
+        task_terminate(utask);
+        return;
+    }
+
+    // ── 7. Özet ──────────────────────────────────────────────
+    output_add_empty_line(output);
+    output_add_line(output, "================================================", VGA_GREEN);
+    str_cpy(line, "  Task '"); str_concat(line, filename);
+    str_concat(line, "' Ring-3'te basladi!");
+    output_add_line(output, line, VGA_GREEN);
+    output_add_line(output, "================================================", VGA_GREEN);
+    output_add_empty_line(output);
+    output_add_line(output, "Sonraki timer tick -> iretq -> Ring-3 (CS=0x23)", VGA_YELLOW);
+    output_add_line(output, "Program syscall yaptiginda:", VGA_WHITE);
+    output_add_line(output, "  Ring-3 syscall -> kernel_tss.rsp0 -> Ring-0", VGA_DARK_GRAY);
+    output_add_line(output, "  syscall_dispatch() -> handler -> SYSRET", VGA_DARK_GRAY);
+    output_add_line(output, "  SYSRET -> Ring-3 (program devam eder)", VGA_DARK_GRAY);
+    output_add_empty_line(output);
+    output_add_line(output, "Serial logda programin ciktisini izleyin.", VGA_CYAN);
+
+    #undef FMT_HEX64
 }
 
 // ===========================================
@@ -1708,6 +1699,374 @@ void cmd_rmr(const char* args, CommandOutput* output) {
 }
 
 // ===========================================
+// SYSCALL COMMANDS
+// ===========================================
+
+// syscallinfo: MSR durumu, segment bilgisi ve tam syscall tablosunu göster
+void cmd_syscallinfo(const char* args, CommandOutput* output) {
+    (void)args;
+    char line[96];
+    char tmp[32];
+    const char* hexc = "0123456789ABCDEF";
+
+    // hex64 yardimcisi: tmp[0..17] = "0x" + 16 hex digit
+    #define HEX64(v) do { \
+        tmp[0]='0'; tmp[1]='x'; \
+        for(int _i=0;_i<16;_i++) tmp[2+_i]=hexc[((v)>>(60-_i*4))&0xF]; \
+        tmp[18]='\0'; \
+    } while(0)
+
+    output_add_line(output, "=== SYSCALL/SYSRET Infrastructure ===", VGA_CYAN);
+    output_add_empty_line(output);
+
+    // ── Durum ──────────────────────────────────────────────────
+    int enabled = syscall_is_enabled();
+    output_add_line(output,
+        enabled ? "Status : ACTIVE (SYSCALL/SYSRET ready)"
+                : "Status : NOT INITIALIZED",
+        enabled ? VGA_GREEN : VGA_RED);
+
+    // ── Mevcut task bilgisi ────────────────────────────────────
+    {
+        task_t* cur = task_get_current();
+        if (cur) {
+            str_cpy(line, "Task   : ");
+            str_concat(line, cur->name);
+            str_concat(line, "  PID=");
+            int_to_str((int)cur->pid, tmp); str_concat(line, tmp);
+            str_concat(line, "  prio=");
+            int_to_str((int)cur->priority, tmp); str_concat(line, tmp);
+            str_concat(line, cur->privilege_level == 0 ? "  Ring-0" : "  Ring-3");
+            output_add_line(output, line, VGA_WHITE);
+        }
+    }
+
+    output_add_empty_line(output);
+    output_add_line(output, "── MSR Registers ────────────────────", VGA_YELLOW);
+
+    // IA32_EFER
+    uint64_t efer = rdmsr(MSR_EFER);
+    HEX64(efer);
+    str_cpy(line, "EFER  : "); str_concat(line, tmp);
+    str_concat(line, (efer & EFER_SCE) ? "  SCE=1" : "  SCE=0 (!)");
+    str_concat(line, (efer & EFER_LMA) ? " LMA=1" : " LMA=0");
+    str_concat(line, (efer & EFER_NXE) ? " NXE=1" : "");
+    output_add_line(output, line, (efer & EFER_SCE) ? VGA_GREEN : VGA_RED);
+
+    // IA32_STAR
+    uint64_t star = rdmsr(MSR_STAR);
+    HEX64(star);
+    str_cpy(line, "STAR  : "); str_concat(line, tmp);
+    output_add_line(output, line, VGA_WHITE);
+
+    // STAR decoded
+    uint64_t kcs  = (star >> 32) & 0xFFFF;
+    uint64_t ucb  = (star >> 48) & 0xFFFF;   // USER_CS_BASE
+    uint64_t kss  = kcs + 8;
+    uint64_t ucs  = (ucb + 16) | 3;
+    uint64_t uss  = (ucb + 8)  | 3;
+    #define HEX16(v) do { \
+        int _v=(int)(v); \
+        tmp[0]='0'; tmp[1]='x'; tmp[2]=hexc[(_v>>8)&0xF]; \
+        tmp[3]=hexc[(_v>>4)&0xF]; tmp[4]=hexc[_v&0xF]; tmp[5]='\0'; \
+    } while(0)
+
+    HEX16(kcs); str_cpy(line, "  SYSCALL  CS="); str_concat(line, tmp);
+    HEX16(kss); str_concat(line, " SS="); str_concat(line, tmp);
+    str_concat(line, "  (Kernel Ring-0)");
+    output_add_line(output, line, VGA_WHITE);
+
+    HEX16(ucs); str_cpy(line, "  SYSRET   CS="); str_concat(line, tmp);
+    HEX16(uss); str_concat(line, " SS="); str_concat(line, tmp);
+    str_concat(line, "  (User Ring-3)");
+    output_add_line(output, line, VGA_WHITE);
+
+    // IA32_LSTAR
+    uint64_t lstar = rdmsr(MSR_LSTAR);
+    HEX64(lstar);
+    str_cpy(line, "LSTAR : "); str_concat(line, tmp);
+    str_concat(line, "  (syscall_entry)");
+    output_add_line(output, line, VGA_CYAN);
+
+    // IA32_FMASK
+    uint64_t fmask = rdmsr(MSR_FMASK);
+    HEX64(fmask);
+    str_cpy(line, "FMASK : "); str_concat(line, tmp);
+    str_concat(line, (fmask & 0x200) ? "  IF masked" : "  IF NOT masked (!)");
+    str_concat(line, (fmask & 0x400) ? " DF masked" : "");
+    output_add_line(output, line, (fmask & 0x200) ? VGA_GREEN : VGA_RED);
+
+    // CSTAR (compat)
+    uint64_t cstar = rdmsr(MSR_CSTAR);
+    HEX64(cstar);
+    str_cpy(line, "CSTAR : "); str_concat(line, tmp);
+    str_concat(line, "  (32-bit compat, unused)");
+    output_add_line(output, line, VGA_DARK_GRAY);
+
+    // ── Syscall Tablosu ───────────────────────────────────────
+    output_add_empty_line(output);
+    output_add_line(output, "── Syscall Table ────────────────────", VGA_YELLOW);
+    output_add_line(output, " 1  SYS_WRITE       write(fd,buf,len)     -> bytes", VGA_GREEN);
+    output_add_line(output, " 2  SYS_READ        read(fd,buf,len)      -> bytes", VGA_GREEN);
+    output_add_line(output, " 3  SYS_EXIT        exit(code)            -> noreturn", VGA_GREEN);
+    output_add_line(output, " 4  SYS_GETPID      getpid()              -> pid", VGA_GREEN);
+    output_add_line(output, " 5  SYS_YIELD       yield()               -> 0", VGA_GREEN);
+    output_add_line(output, " 6  SYS_SLEEP       sleep(ticks)          -> 0", VGA_GREEN);
+    output_add_line(output, " 7  SYS_UPTIME      uptime()              -> ticks", VGA_GREEN);
+    output_add_line(output, " 8  SYS_DEBUG       debug(msg)            -> 0", VGA_GREEN);
+    output_add_line(output, " 9  SYS_OPEN        open(path,flags)      -> fd", VGA_GREEN);
+    output_add_line(output, "10  SYS_CLOSE       close(fd)             -> 0", VGA_GREEN);
+    output_add_line(output, "11  SYS_GETPPID     getppid()             -> ppid", VGA_GREEN);
+    output_add_line(output, "12  SYS_SBRK        sbrk(incr)            -> old_brk", VGA_GREEN);
+    output_add_line(output, "13  SYS_GETPRIORITY getpriority()         -> 0-255", VGA_GREEN);
+    output_add_line(output, "14  SYS_SETPRIORITY setpriority(prio)     -> 0", VGA_GREEN);
+    output_add_line(output, "15  SYS_GETTICKS    getticks()            -> ticks", VGA_GREEN);
+
+    output_add_empty_line(output);
+    // Hata kodlari
+    output_add_line(output, "── Error Codes ──────────────────────", VGA_YELLOW);
+    output_add_line(output, "  0  OK       -1 EINVAL  -2 ENOSYS", VGA_WHITE);
+    output_add_line(output, " -3  EPERM    -4 ENOENT  -5 EBADF", VGA_WHITE);
+    output_add_line(output, " -6  ENOMEM   -7 EBUSY   -8 EMFILE  -9 EAGAIN", VGA_WHITE);
+
+    output_add_empty_line(output);
+    output_add_line(output, "Run 'syscalltest' to execute all 15 tests.", VGA_GREEN);
+
+    #undef HEX64
+    #undef HEX16
+}
+
+// ============================================================
+// YARDIMCI MAKROLAR – syscalltest icinde inline ASM kisaltmalari
+// ============================================================
+#define _SC0(num) \
+    __asm__ volatile("syscall":"=a"(ret):"a"((uint64_t)(num)):"rcx","r11")
+#define _SC1(num,a1) \
+    __asm__ volatile("syscall":"=a"(ret):"a"((uint64_t)(num)),"D"((uint64_t)(a1)):"rcx","r11","memory")
+#define _SC2(num,a1,a2) \
+    __asm__ volatile("syscall":"=a"(ret):"a"((uint64_t)(num)),"D"((uint64_t)(a1)),"S"((uint64_t)(a2)):"rcx","r11","memory")
+#define _SC3(num,a1,a2,a3) \
+    __asm__ volatile("syscall":"=a"(ret):"a"((uint64_t)(num)),"D"((uint64_t)(a1)),"S"((uint64_t)(a2)),"d"((uint64_t)(a3)):"rcx","r11","memory")
+
+// u64 -> decimal string
+static void u64_to_dec(uint64_t v, char* out) {
+    if (v == 0) { out[0]='0'; out[1]='\0'; return; }
+    int i = 0; uint64_t t = v;
+    while (t > 0) { out[i++] = '0' + (t % 10); t /= 10; }
+    out[i] = '\0';
+    for (int a = 0, b = i-1; a < b; a++, b--) {
+        char c = out[a]; out[a] = out[b]; out[b] = c;
+    }
+}
+
+// PASS/FAIL satiri olustur ve output buffer'a ekle
+static void sc_result(CommandOutput* output, int idx, const char* name,
+                      int64_t ret_val, int pass_cond,
+                      const char* extra, int* pass, int* fail) {
+    char line[96]; char tmp[24];
+    line[0]='['; line[1]='0'+(idx/10); line[2]='0'+(idx%10);
+    line[3]=']'; line[4]=' '; line[5]='\0';
+    str_concat(line, name);
+    str_concat(line, " ret=");
+    int_to_str((int)ret_val, tmp);
+    str_concat(line, tmp);
+    if (extra && extra[0]) { str_concat(line, " "); str_concat(line, extra); }
+    str_concat(line, pass_cond ? "  PASS" : "  FAIL");
+    output_add_line(output, line, pass_cond ? VGA_GREEN : VGA_RED);
+    pass_cond ? (*pass)++ : (*fail)++;
+}
+
+// ============================================================
+// CMD_SYSCALLTEST – tum syscall'lari test eder (15 test)
+//
+// ONEMLI NOTLAR:
+//   - SYS_WRITE serial'a yazar (VGA degil). Bu kasitli:
+//     VGA output_add_line ile yonetilir, karismamasi icin.
+//   - SYS_SLEEP testi 1 tick ile kisaltildi (scheduler_yield
+//     ile busy-wait yapilmaz; timer interrupt beklenir).
+//   - SYS_READ non-blocking: veri yoksa 0 doner, bu PASS sayilir.
+// ============================================================
+void cmd_syscalltest(const char* args, CommandOutput* output) {
+    (void)args;
+
+    if (!syscall_is_enabled()) {
+        output_add_line(output, "ERROR: SYSCALL not initialized!", VGA_RED);
+        output_add_line(output, "Call syscall_init() first.", VGA_YELLOW);
+        return;
+    }
+
+    output_add_line(output, "=== SYSCALL Test Suite v2 (15 tests) ===", VGA_CYAN);
+    output_add_line(output, "  (SYS_WRITE output -> serial port, not VGA)", VGA_YELLOW);
+    output_add_empty_line(output);
+
+    uint64_t ret;
+    int pass = 0, fail = 0;
+    char tmp[32]; char line[96];
+
+    // ── [01] SYS_WRITE fd=1 (stdout -> serial) ────────────────
+    // Serial port'a yazilir; VGA'yi karistirmaz.
+    // Basari: return degeri == yazilan byte sayisi
+    static const char wbuf[] = "[SYS_WRITE fd=1 test]\n";
+    uint64_t wlen = 22;
+    _SC3(SYS_WRITE, 1, wbuf, wlen);
+    sc_result(output, 1, "SYS_WRITE(fd=1)", (int64_t)ret,
+              ret == wlen, "(serial out)", &pass, &fail);
+
+    // ── [02] SYS_WRITE fd=2 (stderr -> serial) ────────────────
+    static const char ebuf[] = "[SYS_WRITE fd=2 test]\n";
+    uint64_t elen = 22;
+    _SC3(SYS_WRITE, 2, ebuf, elen);
+    sc_result(output, 2, "SYS_WRITE(fd=2)", (int64_t)ret,
+              ret == elen, "(serial out)", &pass, &fail);
+
+    // ── [03] SYS_WRITE fd=0 stdin – beklenti EBADF(-5) ────────
+    _SC3(SYS_WRITE, 0, wbuf, wlen);
+    sc_result(output, 3, "SYS_WRITE(fd=0)", (int64_t)ret,
+              (int64_t)ret == (int64_t)SYSCALL_ERR_BADF,
+              "expect EBADF(-5)", &pass, &fail);
+
+    // ── [04] SYS_WRITE fd=99 gecersiz – beklenti EBADF(-5) ────
+    _SC3(SYS_WRITE, 99, wbuf, wlen);
+    sc_result(output, 4, "SYS_WRITE(fd=99)", (int64_t)ret,
+              (int64_t)ret == (int64_t)SYSCALL_ERR_BADF,
+              "expect EBADF(-5)", &pass, &fail);
+
+    // ── [05] SYS_READ fd=0 stdin non-blocking ─────────────────
+    // Serial RX tamponu bos olabilir: 0 bytes = gecerli
+    char rbuf[32];
+    _SC3(SYS_READ, 0, rbuf, 16);
+    {
+        int ok = ((int64_t)ret >= 0);
+        str_cpy(line, "[05] SYS_READ(fd=0) bytes=");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, " (0=no data=OK)");
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [06] SYS_READ fd=1 stdout – beklenti EBADF(-5) ────────
+    _SC3(SYS_READ, 1, rbuf, 16);
+    sc_result(output, 6, "SYS_READ(fd=1)", (int64_t)ret,
+              (int64_t)ret == (int64_t)SYSCALL_ERR_BADF,
+              "expect EBADF(-5)", &pass, &fail);
+
+    // ── [07] SYS_GETPID ────────────────────────────────────────
+    _SC0(SYS_GETPID);
+    {
+        int ok = ((int64_t)ret >= 0);
+        str_cpy(line, "[07] SYS_GETPID pid=");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [08] SYS_GETPPID ───────────────────────────────────────
+    _SC0(SYS_GETPPID);
+    {
+        int ok = ((int64_t)ret >= 0);
+        str_cpy(line, "[08] SYS_GETPPID ppid=");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [09] SYS_UPTIME ────────────────────────────────────────
+    _SC0(SYS_UPTIME);
+    {
+        int ok = ((int64_t)ret >= 0);
+        u64_to_dec(ret, tmp);
+        str_cpy(line, "[09] SYS_UPTIME ticks="); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [10] SYS_GETTICKS ──────────────────────────────────────
+    _SC0(SYS_GETTICKS);
+    {
+        int ok = ((int64_t)ret >= 0);
+        u64_to_dec(ret, tmp);
+        str_cpy(line, "[10] SYS_GETTICKS ticks="); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [11] SYS_YIELD ─────────────────────────────────────────
+    _SC0(SYS_YIELD);
+    sc_result(output, 11, "SYS_YIELD", (int64_t)ret,
+              (int64_t)ret == 0, "expect 0", &pass, &fail);
+
+    // ── [12] SYS_SLEEP ─────────────────────────────────────────
+    // Sadece 0-tick sleep test ediyor (busy-wait olmaz).
+    // Timer yoksa scheduler_yield dongu yapmasin diye 0 tick.
+    _SC1(SYS_SLEEP, 0);
+    sc_result(output, 12, "SYS_SLEEP(0)", (int64_t)ret,
+              (int64_t)ret == 0, "expect 0", &pass, &fail);
+
+    // ── [13] SYS_DEBUG ─────────────────────────────────────────
+    static const char dmsg[] = "syscalltest v2 debug probe";
+    _SC1(SYS_DEBUG, dmsg);
+    sc_result(output, 13, "SYS_DEBUG", (int64_t)ret,
+              (int64_t)ret == 0, "(serial log)", &pass, &fail);
+
+    // ── [14] SYS_GETPRIORITY / SYS_SETPRIORITY ─────────────────
+    // Mevcut priority'yi oku, 200 yaz, tekrar oku, geri yukle.
+    // Idle task (PID=0) context'inde de calisir (pid kisitlamasi kaldirildi).
+    _SC0(SYS_GETPRIORITY);
+    uint64_t old_prio = ret;
+
+    // Farkli bir deger sec: old+50, 255'i asmayacak sekilde
+    uint64_t test_prio = (old_prio < 205) ? (old_prio + 50) : (old_prio - 50);
+    _SC1(SYS_SETPRIORITY, test_prio);
+    uint64_t set_ret = ret;
+
+    _SC0(SYS_GETPRIORITY);
+    uint64_t new_prio = ret;
+
+    _SC1(SYS_SETPRIORITY, old_prio);   // orijinal degeri geri yukle
+    {
+        int ok = ((int64_t)set_ret == 0 && new_prio == test_prio);
+        str_cpy(line, "[14] SYS_SETPRIORITY old=");
+        u64_to_dec(old_prio, tmp); str_concat(line, tmp);
+        str_concat(line, " set=");
+        u64_to_dec(test_prio, tmp); str_concat(line, tmp);
+        str_concat(line, " got=");
+        u64_to_dec(new_prio, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [15] INVALID syscall – beklenti ENOSYS(-2) ─────────────
+    _SC0(9999);
+    sc_result(output, 15, "INVALID(9999)", (int64_t)ret,
+              (int64_t)ret == (int64_t)SYSCALL_ERR_NOSYS,
+              "expect ENOSYS(-2)", &pass, &fail);
+
+    // ── Ozet ───────────────────────────────────────────────────
+    output_add_empty_line(output);
+    str_cpy(line, "Result: ");
+    {char b[8]; int_to_str(pass, b); str_concat(line, b);}
+    str_concat(line, "/15 passed  (");
+    {char b[8]; int_to_str(fail, b); str_concat(line, b);}
+    str_concat(line, " failed)");
+    output_add_line(output, line, fail == 0 ? VGA_GREEN : VGA_YELLOW);
+    if (fail == 0)
+        output_add_line(output, "All syscall tests passed!", VGA_GREEN);
+    else
+        output_add_line(output, "Failed tests: check serial log.", VGA_RED);
+}
+
+#undef _SC0
+#undef _SC1
+#undef _SC2
+#undef _SC3
+
+// ===========================================
 // COMMAND TABLE
 // ===========================================
 
@@ -1726,7 +2085,8 @@ static Command command_table[] = {
     // Multitasking commands
     {"ps", "List all tasks", cmd_ps},
     {"taskinfo", "Show task information", cmd_taskinfo},
-    {"createtask", "Create test tasks", cmd_createtask},
+    {"createtask", "Create test tasks (Ring-0)", cmd_createtask},
+    {"usertask", "Create Ring-3 user-mode task [isim]", cmd_usertask},
     {"schedinfo", "Scheduler information", cmd_schedinfo},
     {"offihito", "Start Offihito demo task", cmd_offihito},
     
@@ -1742,8 +2102,6 @@ static Command command_table[] = {
     {"write", "Write to file", cmd_write},
     {"rm", "Delete file", cmd_rm},
     {"kode", "Text editor", cmd_kode},
-    {"testsyscall", "Phase 3: full syscall test suite (13 groups)", cmd_testsyscall},
-    {"syscallstats", "Phase 3: per-syscall call count breakdown", cmd_syscallstats},
     // Advanced file system commands
     {"tree", "Show directory tree", cmd_tree},
     {"find", "Find files by pattern", cmd_find},
@@ -1752,6 +2110,10 @@ static Command command_table[] = {
     // ELF loader commands
     {"exec",    "Load and execute ELF64 binary from FAT32", cmd_exec},
     {"elfinfo", "Show ELF64 header info (no load)",         cmd_elfinfo},
+
+    // SYSCALL/SYSRET commands
+    {"syscallinfo", "Show SYSCALL MSR configuration",    cmd_syscallinfo},
+    {"syscalltest", "Run SYSCALL test suite (15 tests)", cmd_syscalltest},
 };
 static int command_count = sizeof(command_table) / sizeof(Command);
 

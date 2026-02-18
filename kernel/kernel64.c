@@ -6,7 +6,6 @@
 #include "memory_unified.h"
 #include "vmm64.h"
 #include "disk64.h"
-#include "syscall.h"  //  PHASE 1: Added syscall header 
 
 // Higher half kernel base adresi
 #define KERNEL_VMA      0xFFFFFFFF80000000ULL
@@ -158,8 +157,11 @@ void init_keyboard64(void);
 void init_memory64(void);
 void init_commands64(void);
 void show_prompt64(void);
+void gdt_install_user_segments(void);  // GDT: Ring-3 + TSS descriptor
+void tss_init(void);               // TSS + ltr
 void task_init(void);
 void scheduler_init(void);
+void syscall_init(void);   // SYSCALL/SYSRET MSR altyapısı
 
 #define VGA_GREEN 0x02
 #define VGA_CYAN 0x03
@@ -210,9 +212,6 @@ void kernel_main(uint64_t multiboot_info) {
     print_str64("  OK Higher Half Kernel @ ", VGA_GREEN);
     println64("0xFFFFFFFF80000000", VGA_CYAN);
     serial_print("[KERNEL] Initializing SYSCALL system...\n");
-    syscall_init();
-    println64("  OK SYSCALL system initialized", VGA_GREEN);
-    serial_print("[KERNEL] SYSCALL/SYSRET ready for use\n");
     init_memory64();
     
     // Initialize PMM with a simple memory map
@@ -230,11 +229,25 @@ void kernel_main(uint64_t multiboot_info) {
     vmm_init();
     println64("  OK Virtual Memory Manager initialized", VGA_GREEN);
     
-    // Initialize multitasking
+    // GDT'ye Ring-3 descriptor'lar ve TSS ekle (task_init()'den ONCE olmali)
+    gdt_install_user_segments();
+    println64("  OK GDT: Ring-3 + TSS descriptors installed", VGA_GREEN);
+
+    // TSS'yi baslat ve TR register'ini yukle
+    tss_init();
+    println64("  OK TSS initialized, TR loaded", VGA_GREEN);
+
+    // Initialize multitasking (idle task olusturulur, TSS RSP0 ayarlanir)
     task_init();
     println64("  OK Task system initialized", VGA_GREEN);
     scheduler_init();
     println64("  OK Scheduler initialized", VGA_GREEN);
+
+    // Initialize SYSCALL/SYSRET MSR infrastructure
+    // STAR[63:48]=0x10 -> SYSRET CS=0x23 (User Code), SS=0x1B (User Data)
+    syscall_init();
+    println64("  OK SYSCALL/SYSRET initialized", VGA_GREEN);
+
     test_fat32();
     init_interrupts64();
     init_keyboard64();
@@ -272,6 +285,7 @@ void init_interrupts64(void);
 void init_commands64(void);
 void task_init(void);
 void scheduler_init(void);
+void syscall_init(void);   // SYSCALL/SYSRET MSR altyapısı
 
 bool needs_full_redraw = false;
 

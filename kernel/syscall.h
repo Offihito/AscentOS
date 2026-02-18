@@ -1,98 +1,77 @@
-// syscall.h - System Call Interface for AscentOS 64-bit
-// PHASE 3: Expanded Syscall Interface
+// syscall.h - SYSCALL/SYSRET Infrastructure for AscentOS 64-bit
+// Intel/AMD x86-64 SYSCALL instruction via MSR configuration
 #ifndef SYSCALL_H
 #define SYSCALL_H
 
 #include <stdint.h>
 
-// ===========================================
-// SYSCALL NUMBERS
-// ===========================================
-// Linux-compatible syscall numbers for easier porting
+// ============================================================
+// MSR Adresleri
+// ============================================================
+#define MSR_EFER       0xC0000080   // Extended Feature Enable Register
+#define MSR_STAR       0xC0000081   // Segment selectors for SYSCALL/SYSRET
+#define MSR_LSTAR      0xC0000082   // 64-bit SYSCALL entry point (RIP)
+#define MSR_CSTAR      0xC0000083   // 32-bit compat mode (kullanilmiyor)
+#define MSR_FMASK      0xC0000084   // RFLAGS mask (entry'de sifirlanir)
 
-#define SYS_READ        0   // read(fd, buf, count)
-#define SYS_WRITE       1   // write(fd, buf, count)
-#define SYS_OPEN        2   // open(path, flags, mode)
-#define SYS_CLOSE       3   // close(fd)
-#define SYS_STAT        4   // stat(path, statbuf)
-#define SYS_FSTAT       5   // fstat(fd, statbuf)
-#define SYS_LSEEK       8   // lseek(fd, offset, whence)
-#define SYS_MMAP        9   // mmap(addr, length, prot, flags, fd, offset)
-#define SYS_MUNMAP      11  // munmap(addr, length)
-#define SYS_BRK         12  // brk(addr)
-#define SYS_PIPE        22  // pipe(pipefd[2])
-#define SYS_DUP         32  // dup(oldfd)
-#define SYS_DUP2        33  // dup2(oldfd, newfd)
+// EFER bit flags
+#define EFER_SCE       (1 << 0)     // System Call Extensions
+#define EFER_LME       (1 << 8)     // Long Mode Enable
+#define EFER_LMA       (1 << 10)    // Long Mode Active (read-only)
+#define EFER_NXE       (1 << 11)    // No-Execute Enable
 
-#define SYS_EXIT        60  // exit(status)
-#define SYS_GETPID      39  // getpid()
-#define SYS_FORK        57  // fork()
-#define SYS_EXECVE      59  // execve(path, argv, envp)
-#define SYS_WAIT4       61  // wait4(pid, status, options, rusage)
-#define SYS_WAITPID     7   // waitpid(pid, status, options)
+// RFLAGS mask: syscall entry'de IF ve DF sifirlanir
+#define SYSCALL_RFLAGS_MASK  (0x200 | 0x400)   // IF | DF
 
-#define SYS_KILL        62  // kill(pid, sig)
-#define SYS_GETUID      102 // getuid()
-#define SYS_GETGID      104 // getgid()
+// ============================================================
+// GDT Segment Selectors
+//
+// GDT layout:
+//   0x00  Null
+//   0x08  Kernel Code  (Ring 0, 64-bit, DPL=0)
+//   0x10  Kernel Data  (Ring 0, DPL=0)
+//   0x18  User Data    (Ring 3, DPL=3)              <- SYSRET SS = 0x1B
+//   0x20  User Code    (Ring 3, 64-bit, DPL=3)      <- SYSRET CS = 0x23
+//   0x28  TSS Low
+//   0x30  TSS High
+//
+// SYSRET: CS = STAR[63:48]+16|3 = 0x23
+//         SS = STAR[63:48]+8 |3 = 0x1B
+// ============================================================
+#define KERNEL_CS       0x08
+#define KERNEL_SS       0x10
+#define USER_CS_BASE    0x10    // STAR[63:48] – SYSRET hesabi icin
 
-// AscentOS-specific syscalls (starting from 300)
-#define SYS_ASCENT_DEBUG    300 // Debug print to serial
-#define SYS_ASCENT_INFO     301 // Get system info
-#define SYS_ASCENT_YIELD    302 // Yield CPU to another task
-#define SYS_ASCENT_SLEEP    303 // Sleep for N milliseconds
-#define SYS_ASCENT_GETTIME  304 // Get system uptime in ticks
-#define SYS_ASCENT_SHMGET   305 // Shared memory: get/create segment
-#define SYS_ASCENT_SHMMAP   306 // Shared memory: map into address space
-#define SYS_ASCENT_SHMUNMAP 307 // Shared memory: unmap
-#define SYS_ASCENT_MSGPOST  308 // Message queue: post message
-#define SYS_ASCENT_MSGRECV  309 // Message queue: receive message
+#define STAR_VALUE  (((uint64_t)USER_CS_BASE << 48) | ((uint64_t)KERNEL_CS << 32))
 
-// Maximum syscall number
-#define SYSCALL_MAX     310
+// ============================================================
+// Syscall Numaralari
+//
+// Cagri kurali (Linux x86-64 uyumlu):
+//   RAX = syscall no,  RDI = arg1,  RSI = arg2,  RDX = arg3
+//   R10 = arg4,        R8  = arg5,  R9  = arg6
+//   Donus: RAX = sonuc (negatif = hata kodu)
+// ============================================================
+#define SYS_WRITE        1   // write(fd, buf, len)         -> bytes_written | err
+#define SYS_READ         2   // read(fd, buf, len)           -> bytes_read    | err
+#define SYS_EXIT         3   // exit(code)                   -> noreturn
+#define SYS_GETPID       4   // getpid()                     -> pid
+#define SYS_YIELD        5   // yield()                      -> 0
+#define SYS_SLEEP        6   // sleep(ticks)                 -> 0
+#define SYS_UPTIME       7   // uptime()                     -> system_ticks
+#define SYS_DEBUG        8   // debug(msg)                   -> 0
+#define SYS_OPEN         9   // open(path, flags)            -> fd | err
+#define SYS_CLOSE        10  // close(fd)                    -> 0  | err
+#define SYS_GETPPID      11  // getppid()                    -> parent_pid
+#define SYS_SBRK         12  // sbrk(increment)              -> old_brk | err
+#define SYS_GETPRIORITY  13  // getpriority()                -> priority
+#define SYS_SETPRIORITY  14  // setpriority(prio)            -> 0 | err
+#define SYS_GETTICKS     15  // getticks() – uptime alias    -> ticks
+#define SYSCALL_MAX      16
 
-// ===========================================
-// SYSCALL RETURN VALUES
-// ===========================================
-
-#define SYSCALL_SUCCESS     0
-#define SYSCALL_ERROR      -1
-
-// Error codes (negative values, POSIX-like)
-#define ENOENT      -2   // No such file or directory
-#define EBADF       -9   // Bad file descriptor
-#define ENOMEM      -12  // Out of memory
-#define EACCES      -13  // Permission denied
-#define EFAULT      -14  // Bad address
-#define EBUSY       -16  // Resource busy
-#define EEXIST      -17  // File exists
-#define EINVAL      -22  // Invalid argument
-#define EMFILE      -24  // Too many open files
-#define ENOSPC      -28  // No space left on device
-#define EPIPE       -32  // Broken pipe
-#define ENOSYS      -38  // Function not implemented
-#define ECHILD      -10  // No child processes
-#define EAGAIN      -11  // Try again
-
-// ===========================================
-// FILE DESCRIPTOR CONSTANTS
-// ===========================================
-
-#define STDIN_FD    0
-#define STDOUT_FD   1
-#define STDERR_FD   2
-
-#define MAX_OPEN_FILES   16  // Maximum open FDs per process
-#define MAX_GLOBAL_FILES 32  // Maximum open files system-wide
-
-// File descriptor types
-#define FD_TYPE_NONE    0
-#define FD_TYPE_SERIAL  1   // Serial/TTY
-#define FD_TYPE_FAT32   2   // FAT32 file
-#define FD_TYPE_PIPE_R  3   // Pipe read end
-#define FD_TYPE_PIPE_W  4   // Pipe write end
-#define FD_TYPE_KBUF    5   // Kernel circular buffer
-
-// Open flags (O_*)
+// ============================================================
+// open() flags  (SYS_OPEN)
+// ============================================================
 #define O_RDONLY    0x0000
 #define O_WRONLY    0x0001
 #define O_RDWR      0x0002
@@ -100,254 +79,105 @@
 #define O_TRUNC     0x0200
 #define O_APPEND    0x0400
 
-// Seek whence values
-#define SEEK_SET    0
-#define SEEK_CUR    1
-#define SEEK_END    2
+// Standart fd sabitler
+#define STDIN_FD    0
+#define STDOUT_FD   1
+#define STDERR_FD   2
 
-// ===========================================
-// FILE DESCRIPTOR TABLE
-// ===========================================
+// ============================================================
+// Hata Kodlari
+// Negatif uint64 olarak doner – kullanici tarafinda (int64_t) cast edilmeli.
+// ============================================================
+#define SYSCALL_OK          ((uint64_t)0)
+#define SYSCALL_ERR_INVAL   ((uint64_t)-1)   // -EINVAL  : gecersiz arguman
+#define SYSCALL_ERR_NOSYS   ((uint64_t)-2)   // -ENOSYS  : implemente edilmedi
+#define SYSCALL_ERR_PERM    ((uint64_t)-3)   // -EPERM   : yetki yok
+#define SYSCALL_ERR_NOENT   ((uint64_t)-4)   // -ENOENT  : dosya bulunamadi
+#define SYSCALL_ERR_BADF    ((uint64_t)-5)   // -EBADF   : gecersiz fd
+#define SYSCALL_ERR_NOMEM   ((uint64_t)-6)   // -ENOMEM  : bellek yok
+#define SYSCALL_ERR_BUSY    ((uint64_t)-7)   // -EBUSY   : kaynak mesgul
+#define SYSCALL_ERR_MFILE   ((uint64_t)-8)   // -EMFILE  : fd tablosu dolu
+#define SYSCALL_ERR_AGAIN   ((uint64_t)-9)   // -EAGAIN  : tekrar dene
 
-// Per-process file descriptor entry
+// ============================================================
+// Per-task File Descriptor Tablosu
+//
+// Her task, task_t icinde fd_entry_t fd_table[MAX_FDS] tutar.
+// 0=stdin, 1=stdout, 2=stderr otomatik olarak serial porta
+// baglanir; 3..MAX_FDS-1 kullanici tarafindan open() ile acilir.
+// ============================================================
+#define MAX_FDS          16
+
+#define FD_TYPE_NONE     0   // kapali / kullanilmiyor
+#define FD_TYPE_SERIAL   1   // seri port (stdin/stdout/stderr)
+#define FD_TYPE_FILE     2   // dosya (ileride block-device/VFS ile)
+#define FD_TYPE_PIPE     3   // pipe (ileride)
+#define FD_TYPE_SPECIAL  4   // /dev/* gibi ozel aygitlar
+
 typedef struct {
-    int       type;          // FD_TYPE_*
-    int       flags;         // O_RDONLY / O_WRONLY / O_RDWR
-    uint64_t  offset;        // Current position in file
-    uint32_t  ref_count;     // Reference count (for dup)
-    char      path[32];      // File path (for FAT32)
-    void*     private_data;  // Type-specific pointer (pipe buf, etc.)
+    uint8_t  type;          // FD_TYPE_*
+    uint8_t  flags;         // O_RDONLY, O_WRONLY vs.
+    uint8_t  is_open;       // 1 = acik
+    uint8_t  _pad;
+    uint64_t offset;        // dosya okuma/yazma ofseti
+    char     path[60];      // acik dosyanin yolu (debug / gelecek VFS)
 } fd_entry_t;
 
-// ===========================================
-// PIPE BUFFER
-// ===========================================
-
-#define PIPE_BUF_SIZE  256  // Internal pipe buffer size
-
+// ============================================================
+// Syscall Frame
+// Assembly stub (syscall_entry) tarafindan yigin uzerinde olusturulur.
+// Offset'ler interrupts64.asm ile eslesmeli olmak zorundadir.
+// ============================================================
 typedef struct {
-    uint8_t  buf[PIPE_BUF_SIZE];
-    uint32_t read_pos;
-    uint32_t write_pos;
-    uint32_t count;
-    int      write_end_open;  // 1 if write end still open
-    int      read_end_open;   // 1 if read end still open
-} pipe_buf_t;
+    uint64_t rax;   // syscall number (giris) / donus degeri (cikis)  +0
+    uint64_t rdi;   // arg1                                            +8
+    uint64_t rsi;   // arg2                                            +16
+    uint64_t rdx;   // arg3                                            +24
+    uint64_t r10;   // arg4  (SYSCALL RCX clobber ettigi icin R10)    +32
+    uint64_t r8;    // arg5                                            +40
+    uint64_t r9;    // arg6                                            +48
+    uint64_t rcx;   // SYSCALL'in kaydettigi RIP (return address)     +56
+    uint64_t r11;   // SYSCALL'in kaydettigi RFLAGS                   +64
+} syscall_frame_t;
 
-// ===========================================
-// STAT STRUCTURE
-// ===========================================
+// ============================================================
+// Public API
+// ============================================================
 
-typedef struct {
-    uint32_t  st_mode;    // File type and permissions
-    uint32_t  st_size;    // File size in bytes
-    uint32_t  st_blocks;  // Number of 512B blocks
-} ascent_stat_t;
-
-// stat st_mode bits
-#define S_IFREG   0x8000   // Regular file
-#define S_IFCHR   0x2000   // Character device (serial)
-#define S_IFIFO   0x1000   // FIFO / pipe
-#define S_IRUSR   0x0100
-#define S_IWUSR   0x0080
-#define S_IRGRP   0x0020
-#define S_IWGRP   0x0010
-#define S_IROTH   0x0004
-#define S_IWOTH   0x0002
-
-// ===========================================
-// SHARED MEMORY (IPC)
-// ===========================================
-
-#define SHM_MAX_SEGS   8
-#define SHM_SEG_SIZE   4096   // 4KB per shared segment (one page)
-
-typedef struct {
-    int      id;
-    int      in_use;
-    uint8_t  data[SHM_SEG_SIZE];
-    uint32_t owner_pid;
-} shm_segment_t;
-
-// ===========================================
-// MESSAGE QUEUE (IPC)
-// ===========================================
-
-#define MSG_MAX_QUEUES   4
-#define MSG_MAX_MSGS     8
-#define MSG_MAX_SIZE     64
-
-typedef struct {
-    uint32_t sender_pid;
-    uint32_t size;
-    uint8_t  data[MSG_MAX_SIZE];
-} ipc_message_t;
-
-typedef struct {
-    int          id;
-    int          in_use;
-    ipc_message_t msgs[MSG_MAX_MSGS];
-    uint32_t     head;
-    uint32_t     tail;
-    uint32_t     count;
-} msg_queue_t;
-
-// ===========================================
-// SYSCALL INITIALIZATION
-// ===========================================
-
+// MSR'lari ayarla, SYSCALL altyapisini hazirla.
+// Cagri sirasi: gdt_install_user_segments() -> tss_init() -> syscall_init()
 void syscall_init(void);
+
+// SYSCALL aktif mi?
 int  syscall_is_enabled(void);
 
-// ===========================================
-// SYSCALL HANDLER (called from assembly)
-// ===========================================
+// Dispatcher – assembly stub tarafindan cagirilir
+void syscall_dispatch(syscall_frame_t* frame);
 
-int64_t syscall_handler(uint64_t syscall_num,
-                        uint64_t arg1,
-                        uint64_t arg2,
-                        uint64_t arg3,
-                        uint64_t arg4,
-                        uint64_t arg5);
+// Basit test rutini (kernel modunda SYSCALL tetikler)
+void syscall_test(void);
 
-// ===========================================
-// FILE DESCRIPTOR TABLE API
-// ===========================================
+// ── fd tablosu yardimci fonksiyonlari ────────────────────────
+// fd_table: task_t icinde fd_entry_t[MAX_FDS] dizisinin baslangiç adresi
+void        fd_table_init(fd_entry_t* table);
+int         fd_alloc(fd_entry_t* table, uint8_t type, uint8_t flags,
+                     const char* path);          // bos slot atar, fd doner
+int         fd_free(fd_entry_t* table, int fd);  // slotu kapatiр
+fd_entry_t* fd_get(fd_entry_t* table, int fd);   // gecerli entry | NULL
 
-// Allocate/free FD table for the current process
-void     fd_table_init(fd_entry_t* table);
-int      fd_alloc(fd_entry_t* table, int type, int flags, const char* path);
-void     fd_free(fd_entry_t* table, int fd);
-fd_entry_t* fd_get(fd_entry_t* table, int fd);
-
-// Get fd table for the current task (implemented in syscall.c)
-fd_entry_t* syscall_get_fd_table(void);
-
-// ===========================================
-// INDIVIDUAL SYSCALL IMPLEMENTATIONS
-// ===========================================
-
-// File I/O
-int64_t sys_read(int fd, void* buf, uint64_t count);
-int64_t sys_write(int fd, const void* buf, uint64_t count);
-int64_t sys_open(const char* path, int flags, int mode);
-int64_t sys_close(int fd);
-int64_t sys_stat(const char* path, ascent_stat_t* st);
-int64_t sys_fstat(int fd, ascent_stat_t* st);
-int64_t sys_lseek(int fd, int64_t offset, int whence);
-int64_t sys_pipe(int pipefd[2]);
-int64_t sys_dup(int oldfd);
-int64_t sys_dup2(int oldfd, int newfd);
-
-// Process management
-int64_t sys_exit(int status);
-int64_t sys_getpid(void);
-int64_t sys_fork(void);
-int64_t sys_execve(const char* path, char* const argv[], char* const envp[]);
-int64_t sys_waitpid(int pid, int* status, int options);
-int64_t sys_wait4(int pid, int* status, int options, void* rusage);
-int64_t sys_kill(int pid, int sig);
-int64_t sys_getuid(void);
-int64_t sys_getgid(void);
-
-// Memory management
-int64_t sys_brk(void* addr);
-int64_t sys_mmap(void* addr, uint64_t length, int prot, int flags, int fd, uint64_t offset);
-int64_t sys_munmap(void* addr, uint64_t length);
-
-// AscentOS-specific
-int64_t sys_ascent_debug(const char* message);
-int64_t sys_ascent_info(void* info_buffer, uint64_t buffer_size);
-int64_t sys_ascent_yield(void);
-int64_t sys_ascent_sleep(uint64_t milliseconds);
-int64_t sys_ascent_gettime(void);
-int64_t sys_ascent_shmget(int id, uint64_t size);
-int64_t sys_ascent_shmmap(int id);
-int64_t sys_ascent_shmunmap(int id);
-int64_t sys_ascent_msgpost(int queue_id, const void* data, uint64_t size);
-int64_t sys_ascent_msgrecv(int queue_id, void* data, uint64_t max_size);
-
-// ===========================================
-// USERSPACE SYSCALL WRAPPERS
-// ===========================================
-
-#ifdef USERSPACE
-
-static inline int64_t syscall0(uint64_t num) {
-    int64_t ret;
-    __asm__ volatile ("syscall" : "=a"(ret) : "a"(num) : "rcx", "r11", "memory");
-    return ret;
+// ============================================================
+// Low-level MSR Helpers
+// ============================================================
+static inline uint64_t rdmsr(uint32_t msr) {
+    uint32_t lo, hi;
+    __asm__ volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((uint64_t)hi << 32) | lo;
 }
 
-static inline int64_t syscall1(uint64_t num, uint64_t arg1) {
-    int64_t ret;
-    __asm__ volatile ("syscall" : "=a"(ret) : "a"(num), "D"(arg1) : "rcx", "r11", "memory");
-    return ret;
+static inline void wrmsr(uint32_t msr, uint64_t value) {
+    uint32_t lo = (uint32_t)(value & 0xFFFFFFFF);
+    uint32_t hi = (uint32_t)(value >> 32);
+    __asm__ volatile ("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
 }
-
-static inline int64_t syscall2(uint64_t num, uint64_t arg1, uint64_t arg2) {
-    int64_t ret;
-    __asm__ volatile ("syscall" : "=a"(ret) : "a"(num), "D"(arg1), "S"(arg2) : "rcx", "r11", "memory");
-    return ret;
-}
-
-static inline int64_t syscall3(uint64_t num, uint64_t arg1, uint64_t arg2, uint64_t arg3) {
-    int64_t ret;
-    __asm__ volatile ("syscall" : "=a"(ret) : "a"(num), "D"(arg1), "S"(arg2), "d"(arg3) : "rcx", "r11", "memory");
-    return ret;
-}
-
-static inline int64_t syscall6(uint64_t num,
-                                uint64_t a1, uint64_t a2, uint64_t a3,
-                                uint64_t a4, uint64_t a5, uint64_t a6) {
-    int64_t ret;
-    register uint64_t r10 __asm__("r10") = a4;
-    register uint64_t r8  __asm__("r8")  = a5;
-    register uint64_t r9  __asm__("r9")  = a6;
-    __asm__ volatile ("syscall"
-        : "=a"(ret)
-        : "a"(num), "D"(a1), "S"(a2), "d"(a3), "r"(r10), "r"(r8), "r"(r9)
-        : "rcx", "r11", "memory");
-    return ret;
-}
-
-// Userspace wrapper macros
-#define write(fd, buf, count)       syscall3(SYS_WRITE, (uint64_t)(fd), (uint64_t)(buf), (uint64_t)(count))
-#define read(fd, buf, count)        syscall3(SYS_READ,  (uint64_t)(fd), (uint64_t)(buf), (uint64_t)(count))
-#define open(path, flags, mode)     syscall3(SYS_OPEN,  (uint64_t)(path), (uint64_t)(flags), (uint64_t)(mode))
-#define close(fd)                   syscall1(SYS_CLOSE, (uint64_t)(fd))
-#define lseek(fd, off, whence)      syscall3(SYS_LSEEK, (uint64_t)(fd), (uint64_t)(off), (uint64_t)(whence))
-#define dup(oldfd)                  syscall1(SYS_DUP,   (uint64_t)(oldfd))
-#define dup2(oldfd, newfd)          syscall2(SYS_DUP2,  (uint64_t)(oldfd), (uint64_t)(newfd))
-#define exit(status)                syscall1(SYS_EXIT,  (uint64_t)(status))
-#define getpid()                    syscall0(SYS_GETPID)
-#define waitpid(pid, st, opts)      syscall3(SYS_WAITPID,(uint64_t)(pid),(uint64_t)(st),(uint64_t)(opts))
-#define kill(pid, sig)              syscall2(SYS_KILL,  (uint64_t)(pid), (uint64_t)(sig))
-#define ascent_debug(msg)           syscall1(SYS_ASCENT_DEBUG,   (uint64_t)(msg))
-#define ascent_yield()              syscall0(SYS_ASCENT_YIELD)
-#define ascent_sleep(ms)            syscall1(SYS_ASCENT_SLEEP,   (uint64_t)(ms))
-#define ascent_gettime()            syscall0(SYS_ASCENT_GETTIME)
-#define ascent_shmget(id, sz)       syscall2(SYS_ASCENT_SHMGET,  (uint64_t)(id), (uint64_t)(sz))
-#define ascent_shmmap(id)           syscall1(SYS_ASCENT_SHMMAP,  (uint64_t)(id))
-#define ascent_shmunmap(id)         syscall1(SYS_ASCENT_SHMUNMAP,(uint64_t)(id))
-#define ascent_msgpost(q,d,sz)      syscall3(SYS_ASCENT_MSGPOST, (uint64_t)(q),(uint64_t)(d),(uint64_t)(sz))
-#define ascent_msgrecv(q,d,sz)      syscall3(SYS_ASCENT_MSGRECV, (uint64_t)(q),(uint64_t)(d),(uint64_t)(sz))
-
-#endif // USERSPACE
-
-// ===========================================
-// STATISTICS & DEBUGGING
-// ===========================================
-
-typedef struct {
-    uint64_t total_syscalls;
-    uint64_t syscall_counts[SYSCALL_MAX];
-    uint64_t invalid_syscalls;
-    uint64_t failed_syscalls;
-} syscall_stats_t;
-
-void syscall_get_stats(syscall_stats_t* stats);
-void syscall_print_stats(void);
-void syscall_reset_stats(void);
 
 #endif // SYSCALL_H

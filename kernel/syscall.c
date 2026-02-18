@@ -1,911 +1,788 @@
-// syscall.c - System Call Implementation for AscentOS
-// PHASE 3: Expanded Syscall Interface
-//   - File I/O  : open, read, write, close, stat, fstat, lseek
-//   - Pipe I/O  : pipe, dup, dup2
-//   - Process   : exit, getpid, fork (stub), execve (stub), waitpid, kill
-//   - Memory    : brk, mmap (stub), munmap (stub)
-//   - IPC       : shmget, shmmap, shmunmap, msgpost, msgrecv
-//   - Ascent    : debug, info, yield, sleep, gettime
+// syscall.c - SYSCALL/SYSRET Infrastructure for AscentOS 64-bit
+// MSR tabanlı syscall altyapısı + dispatcher + implementasyonlar
+//
+// Yeni eklenenler (v2):
+//   SYS_READ        – serial port okuma (polling)
+//   SYS_SLEEP       – timer tabanlı busy-wait sleep
+//   SYS_OPEN        – per-task fd tablosu + temel VFS stub
+//   SYS_CLOSE       – fd serbest birakma
+//   SYS_GETPPID     – parent PID (task_t::parent)
+//   SYS_SBRK        – heap genisletme stub (kmalloc_sbrk)
+//   SYS_GETPRIORITY / SYS_SETPRIORITY – task onceligi okuma/yazma
+//   SYS_GETTICKS    – SYS_UPTIME alias
 
 #include "syscall.h"
 #include "task.h"
 #include "scheduler.h"
-#include <stddef.h>
+#include "timer.h"
 
-// ── External kernel helpers ──────────────────────────────────────────────────
-extern void    serial_print(const char* str);
-extern void    serial_putchar(char c);
-extern void    int_to_str(int num, char* str);
-extern uint64_t get_system_ticks(void);
+// ============================================================
+// External declarations
+// ============================================================
+extern void serial_print(const char* str);
+extern void serial_putchar(char c);
+extern void int_to_str(int num, char* str);
 
-// ── FAT32 helpers (disk64.h interface) ──────────────────────────────────────
-extern int      fat32_create_file(const char* name);
-extern int      fat32_write_file(const char* name, const uint8_t* data, uint32_t size);
-extern int      fat32_read_file(const char* name, uint8_t* buf, uint32_t max);
-extern uint32_t fat32_file_size(const char* name);
-extern int      fat32_delete_file(const char* name);
+// Assembly entry point
+extern void syscall_entry(void);
 
-// ── Memory helpers ───────────────────────────────────────────────────────────
-extern void* kmalloc(uint64_t size);
-extern void  kfree(void* ptr);
+// ============================================================
+// SERIAL INPUT – inline implementasyon
+// kernel64.c'de sadece TX taraf (serial_putchar) tanimli.
+// RX tarafi burada COM1 register'lari ile dogrudan implement edildi.
+//
+// COM1 port haritasi:
+//   0x3F8 + 0  : Data Register (RBR okuma / THR yazma)
+//   0x3F8 + 5  : Line Status Register (LSR)
+//     LSR bit0 = Data Ready (DR) : 1 ise okunacak byte var
+//     LSR bit5 = THR Empty       : 1 ise yazilabilir (TX)
+// ============================================================
+#define SERIAL_COM1_BASE    0x3F8
+#define SERIAL_LSR_OFFSET   5
+#define SERIAL_DR_BIT       (1 << 0)   // Data Ready
 
-// =============================================================================
-// INTERNAL HELPERS
-// =============================================================================
-
-static void u64_to_str(uint64_t num, char* str) {
-    if (num == 0) { str[0] = '0'; str[1] = '\0'; return; }
-    char tmp[24]; int i = 0;
-    while (num > 0) { tmp[i++] = '0' + (num % 10); num /= 10; }
-    for (int j = 0; j < i; j++) str[j] = tmp[i - j - 1];
-    str[i] = '\0';
+static inline uint8_t serial_inb(uint16_t port) {
+    uint8_t ret;
+    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
 }
 
-static int k_strlen(const char* s) {
-    int n = 0; while (s[n]) n++; return n;
+// serial_data_ready: RX tamponunda okunacak byte var mi?
+// 1 = evet, 0 = hayir (non-blocking kontrol)
+int serial_data_ready(void) {
+    return (serial_inb(SERIAL_COM1_BASE + SERIAL_LSR_OFFSET) & SERIAL_DR_BIT) ? 1 : 0;
 }
-static void k_memset(void* dst, uint8_t v, uint64_t n) {
-    uint8_t* d = (uint8_t*)dst; while (n--) *d++ = v;
+
+// serial_getchar: Data hazirsa 1 byte oku, yoksa -1 doner (non-blocking).
+// Bloklayan okuma icin: while(!serial_data_ready()); return serial_getchar();
+char serial_getchar(void) {
+    if (!serial_data_ready()) return (char)-1;
+    return (char)serial_inb(SERIAL_COM1_BASE);
 }
-static void k_memcpy(void* dst, const void* src, uint64_t n) {
-    uint8_t* d = (uint8_t*)dst; const uint8_t* s = (const uint8_t*)src;
-    while (n--) *d++ = *s++;
+
+// SBRK – memory_unified.c'de tanimli, burada sadece extern bildirim
+extern uint64_t kmalloc_get_brk(void);
+extern uint64_t kmalloc_set_brk(uint64_t new_brk);
+
+// ============================================================
+// USER-MODE POINTER DOGRULAMA
+// Sayfa tablosu henuz yok (flat memory). Temel kontroller:
+//   1. NULL kontrolu
+//   2. Canonical user address: bit[63:47] sifir olmali
+//   3. Uzunluk tasma kontrolu
+// Sayfa tablosu eklenince mmu_validate_user_range() ile guncelle.
+// ============================================================
+#define USER_SPACE_MAX  0x00007FFFFFFFFFFFull
+
+static int is_valid_user_ptr(const void* ptr, uint64_t len) {
+    if (!ptr) return 0;
+    uint64_t addr = (uint64_t)ptr;
+    if ((addr >> 47) != 0) return 0;              // kernel veya non-canonical
+    if (len > 0 && (addr + len) > USER_SPACE_MAX) return 0;
+    return 1;
 }
-static int k_strcmp(const char* a, const char* b) {
-    while (*a && *a == *b) { a++; b++; }
-    return *(const uint8_t*)a - *(const uint8_t*)b;
+
+// is_valid_user_string: NULL-terminated string icin maksimum maxlen byte
+// kontrol eder, strinin gercekten sonlandigini test etmez (sayfa tablosu yok).
+static int is_valid_user_string(const char* s, uint64_t maxlen) {
+    return is_valid_user_ptr(s, maxlen);
 }
-static void k_strncpy(char* dst, const char* src, int n) {
+
+// ============================================================
+// Dahili yardimcilar
+// ============================================================
+static void print_hex64(uint64_t v) {
+    const char* h = "0123456789ABCDEF";
+    char buf[17];
+    for (int i = 0; i < 16; i++)
+        buf[i] = h[(v >> (60 - i * 4)) & 0xF];
+    buf[16] = '\0';
+    serial_print(buf);
+}
+
+static void print_uint64(uint64_t v) {
+    if (v == 0) { serial_print("0"); return; }
+    char buf[21];
+    int  i = 0;
+    uint64_t t = v;
+    while (t > 0) { buf[i++] = '0' + (t % 10); t /= 10; }
+    buf[i] = '\0';
+    // tersine cevir
+    for (int a = 0, b = i - 1; a < b; a++, b--) {
+        char c = buf[a]; buf[a] = buf[b]; buf[b] = c;
+    }
+    serial_print(buf);
+}
+
+// ============================================================
+// String kopyalama (libc yok)
+// ============================================================
+static void my_strncpy(char* dst, const char* src, int n) {
     int i = 0;
     while (i < n - 1 && src[i]) { dst[i] = src[i]; i++; }
     dst[i] = '\0';
 }
 
-// =============================================================================
-// GLOBAL STATE
-// =============================================================================
+// ============================================================
+// Internal state
+// ============================================================
+static int syscall_enabled = 0;
 
-static int            syscall_enabled = 0;
-static syscall_stats_t stats;
+// ============================================================
+// FD TABLOSU IMPLEMENTASYONU
+// Her task icin task_t::fd_table[MAX_FDS] ayrilir.
+// Bu modul sadece yardimci fonksiyonlar saglar;
+// tablo task_create() / task_create_user() tarafindan
+// fd_table_init() ile hazirlanir.
+// ============================================================
 
-// ── Global FD table (one table per system; task-local tables future work) ────
-// Index 0-2 are pre-filled as stdin/stdout/stderr (serial).
-static fd_entry_t global_fd_table[MAX_OPEN_FILES];
-
-// ── Pipe buffers (kernel-owned) ───────────────────────────────────────────────
-static pipe_buf_t pipe_pool[8];
-static int        pipe_pool_init_done = 0;
-
-// ── Shared memory segments ───────────────────────────────────────────────────
-static shm_segment_t shm_segments[SHM_MAX_SEGS];
-static int           shm_init_done = 0;
-
-// ── Message queues ────────────────────────────────────────────────────────────
-static msg_queue_t msg_queues[MSG_MAX_QUEUES];
-static int         msg_init_done = 0;
-
-// ── Heap brk pointer (per-process in future; global stub for now) ─────────────
-static uint8_t* process_heap_start = NULL;
-static uint8_t* process_heap_end   = NULL;
-#define HEAP_INITIAL_SIZE (64 * 1024)   // 64 KB initial heap
-
-// =============================================================================
-// FD TABLE IMPLEMENTATION
-// =============================================================================
-
+// 0=stdin, 1=stdout, 2=stderr'i seri porta bagla; gerisini kapat.
 void fd_table_init(fd_entry_t* table) {
-    k_memset(table, 0, sizeof(fd_entry_t) * MAX_OPEN_FILES);
+    for (int i = 0; i < MAX_FDS; i++) {
+        table[i].type    = FD_TYPE_NONE;
+        table[i].flags   = 0;
+        table[i].is_open = 0;
+        table[i].offset  = 0;
+        table[i].path[0] = '\0';
+    }
+    // stdin  (fd 0) – okuma
+    table[0].type    = FD_TYPE_SERIAL;
+    table[0].flags   = O_RDONLY;
+    table[0].is_open = 1;
+    my_strncpy(table[0].path, "/dev/serial0", 60);
 
-    // FD 0: stdin  → serial (read-capable; currently returns EAGAIN)
-    table[0].type      = FD_TYPE_SERIAL;
-    table[0].flags     = O_RDONLY;
-    table[0].ref_count = 1;
-    k_strncpy(table[0].path, "stdin", 6);
+    // stdout (fd 1) – yazma
+    table[1].type    = FD_TYPE_SERIAL;
+    table[1].flags   = O_WRONLY;
+    table[1].is_open = 1;
+    my_strncpy(table[1].path, "/dev/serial0", 60);
 
-    // FD 1: stdout → serial
-    table[1].type      = FD_TYPE_SERIAL;
-    table[1].flags     = O_WRONLY;
-    table[1].ref_count = 1;
-    k_strncpy(table[1].path, "stdout", 7);
-
-    // FD 2: stderr → serial
-    table[2].type      = FD_TYPE_SERIAL;
-    table[2].flags     = O_WRONLY;
-    table[2].ref_count = 1;
-    k_strncpy(table[2].path, "stderr", 7);
+    // stderr (fd 2) – yazma
+    table[2].type    = FD_TYPE_SERIAL;
+    table[2].flags   = O_WRONLY;
+    table[2].is_open = 1;
+    my_strncpy(table[2].path, "/dev/serial0", 60);
 }
 
-int fd_alloc(fd_entry_t* table, int type, int flags, const char* path) {
-    for (int i = 3; i < MAX_OPEN_FILES; i++) {   // 0-2 are reserved
-        if (table[i].type == FD_TYPE_NONE) {
-            table[i].type      = type;
-            table[i].flags     = flags;
-            table[i].offset    = 0;
-            table[i].ref_count = 1;
-            table[i].private_data = NULL;
-            if (path) k_strncpy(table[i].path, path, 32);
-            else      table[i].path[0] = '\0';
+// Bos fd slotu ayir (3..MAX_FDS-1 arasinda).
+// Basari: fd degeri doner. Hata: -1.
+int fd_alloc(fd_entry_t* table, uint8_t type, uint8_t flags, const char* path) {
+    for (int i = 3; i < MAX_FDS; i++) {
+        if (!table[i].is_open) {
+            table[i].type    = type;
+            table[i].flags   = flags;
+            table[i].is_open = 1;
+            table[i].offset  = 0;
+            if (path)
+                my_strncpy(table[i].path, path, 60);
+            else
+                table[i].path[0] = '\0';
             return i;
         }
     }
     return -1;  // EMFILE
 }
 
-void fd_free(fd_entry_t* table, int fd) {
-    if (fd < 0 || fd >= MAX_OPEN_FILES) return;
-    if (table[fd].ref_count > 1) { table[fd].ref_count--; return; }
-    k_memset(&table[fd], 0, sizeof(fd_entry_t));
+// fd'yi serbest birak. Basari: 0. Hata: -1.
+int fd_free(fd_entry_t* table, int fd) {
+    if (fd < 0 || fd >= MAX_FDS) return -1;
+    if (!table[fd].is_open)      return -1;
+    table[fd].is_open = 0;
+    table[fd].type    = FD_TYPE_NONE;
+    table[fd].path[0] = '\0';
+    return 0;
 }
 
+// Gecerli fd_entry_t pointer'i doner; hata durumunda NULL.
 fd_entry_t* fd_get(fd_entry_t* table, int fd) {
-    if (fd < 0 || fd >= MAX_OPEN_FILES) return NULL;
-    if (table[fd].type == FD_TYPE_NONE) return NULL;
+    if (fd < 0 || fd >= MAX_FDS) return 0;
+    if (!table[fd].is_open)      return 0;
     return &table[fd];
 }
 
-// Return the global fd table (task-local tables are future work)
-fd_entry_t* syscall_get_fd_table(void) {
-    return global_fd_table;
-}
-
-// =============================================================================
-// PIPE POOL HELPERS
-// =============================================================================
-
-static void pipe_pool_init(void) {
-    if (pipe_pool_init_done) return;
-    k_memset(pipe_pool, 0, sizeof(pipe_pool));
-    pipe_pool_init_done = 1;
-}
-
-static pipe_buf_t* pipe_alloc(void) {
-    pipe_pool_init();
-    for (int i = 0; i < 8; i++) {
-        if (!pipe_pool[i].read_end_open && !pipe_pool[i].write_end_open) {
-            k_memset(&pipe_pool[i], 0, sizeof(pipe_buf_t));
-            pipe_pool[i].read_end_open  = 1;
-            pipe_pool[i].write_end_open = 1;
-            return &pipe_pool[i];
-        }
-    }
-    return NULL;
-}
-
-// =============================================================================
-// SYSCALL INITIALIZATION
-// =============================================================================
-
+// ============================================================
+// SYSCALL_INIT
+// ============================================================
 void syscall_init(void) {
-    if (syscall_enabled) { serial_print("[SYSCALL] Already initialized\n"); return; }
+    serial_print("[SYSCALL] Initializing SYSCALL/SYSRET infrastructure...\n");
 
-    serial_print("[SYSCALL] Initializing Phase 3 syscall system...\n");
+    // ── 1. CPUID: SYSCALL destegi kontrolu ──────────────────────
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ volatile ("cpuid"
+        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+        : "a"(0x80000001), "c"(0));
+    if (!(edx & (1 << 11))) {
+        serial_print("[SYSCALL] ERROR: CPU does not support SYSCALL!\n");
+        return;
+    }
+    serial_print("[SYSCALL] CPU supports SYSCALL/SYSRET\n");
 
-    // Reset stats
-    k_memset(&stats, 0, sizeof(syscall_stats_t));
+    // ── 2. IA32_EFER: SCE bitini set et ─────────────────────────
+    uint64_t efer = rdmsr(MSR_EFER);
+    efer |= EFER_SCE;
+    wrmsr(MSR_EFER, efer);
+    if (!(rdmsr(MSR_EFER) & EFER_SCE)) {
+        serial_print("[SYSCALL] ERROR: EFER.SCE bit set failed!\n");
+        return;
+    }
+    serial_print("[SYSCALL] EFER.SCE enabled\n");
 
-    // Initialize global FD table
-    fd_table_init(global_fd_table);
-    serial_print("[SYSCALL] FD table initialized (stdin/stdout/stderr ready)\n");
+    // ── 3. IA32_STAR: Segment selectors ─────────────────────────
+    wrmsr(MSR_STAR, STAR_VALUE);
+    serial_print("[SYSCALL] MSR_STAR = 0x");
+    print_hex64(rdmsr(MSR_STAR));
+    serial_print("\n");
+    serial_print("[SYSCALL] SYSRET -> CS=0x23 (User Code), SS=0x1B (User Data)\n");
 
-    // Initialize IPC subsystems
-    pipe_pool_init();
-    k_memset(shm_segments, 0, sizeof(shm_segments));
-    shm_init_done = 1;
-    k_memset(msg_queues, 0, sizeof(msg_queues));
-    msg_init_done = 1;
-    serial_print("[SYSCALL] IPC subsystems initialized (pipe/shm/msgq)\n");
+    // ── 4. IA32_LSTAR: syscall_entry adresi ─────────────────────
+    uint64_t entry_addr = (uint64_t)syscall_entry;
+    wrmsr(MSR_LSTAR, entry_addr);
+    serial_print("[SYSCALL] LSTAR = 0x");
+    print_hex64(entry_addr);
+    serial_print("\n");
 
-    // Setup MSRs
-    extern void syscall_setup_msrs(void);
-    syscall_setup_msrs();
+    // ── 5. IA32_CSTAR: 32-bit compat (kullanilmiyor) ────────────
+    wrmsr(MSR_CSTAR, 0);
+
+    // ── 6. IA32_FMASK: IF + DF entry'de sifirlanir ──────────────
+    wrmsr(MSR_FMASK, SYSCALL_RFLAGS_MASK);
+    serial_print("[SYSCALL] FMASK set (IF+DF masked on entry)\n");
 
     syscall_enabled = 1;
-    serial_print("[SYSCALL] Phase 3 syscall system ready\n");
+    serial_print("[SYSCALL] SYSCALL/SYSRET ready!\n");
+    serial_print("[SYSCALL] Supported syscalls: WRITE READ EXIT GETPID YIELD "
+                 "SLEEP UPTIME DEBUG OPEN CLOSE GETPPID SBRK "
+                 "GETPRIORITY SETPRIORITY GETTICKS\n");
 }
 
 int syscall_is_enabled(void) { return syscall_enabled; }
 
-// =============================================================================
-// SYSCALL DISPATCHER
-// =============================================================================
+// ============================================================
+// SYSCALL IMPLEMENTASYONLARI (dispatcher'dan cagrilir)
+// Her fonksiyon frame uzerinden arguman alir ve
+// frame->rax'e donus degerini yazar.
+// ============================================================
 
-int64_t syscall_handler(uint64_t syscall_num,
-                        uint64_t arg1, uint64_t arg2, uint64_t arg3,
-                        uint64_t arg4, uint64_t arg5) {
-    int64_t result = SYSCALL_ERROR;
-    stats.total_syscalls++;
+// ── SYS_WRITE (1) ──────────────────────────────────────────────
+// write(fd, buf, len) -> bytes_written | SYSCALL_ERR_*
+//
+// fd=0 (stdin) yazma girisimi reddedilir.
+// fd=1/2 (stdout/stderr): serial porta yonlendirilir.
+// fd>=3: fd_table'dan bakilir (task_t fd_table iceriyorsa).
+//
+// NOT: task_t henuz fd_table iceremeyebilir. Fallback mantigi:
+//   fd 0-2 icin fd_table'a BAKILMAZ, dogrudan serial kulllanilir.
+//   fd >= 3 icin fd_table zorunlu.
+static void sys_write(syscall_frame_t* frame) {
+    int         fd  = (int)frame->rdi;
+    const char* buf = (const char*)frame->rsi;
+    uint64_t    len = frame->rdx;
 
-    if (syscall_num >= SYSCALL_MAX) {
-        stats.invalid_syscalls++;
-        return ENOSYS;
-    }
-    stats.syscall_counts[syscall_num]++;
+    // Temel dogrulama
+    if (fd < 0 || fd >= MAX_FDS)     { frame->rax = SYSCALL_ERR_BADF;  return; }
+    if (!is_valid_user_ptr(buf, len)) { frame->rax = SYSCALL_ERR_INVAL; return; }
+    if (len == 0)                     { frame->rax = 0; return; }
+    if (len > 4096)                   { frame->rax = SYSCALL_ERR_INVAL; return; }
 
-    switch (syscall_num) {
-        // ── File I/O ──────────────────────────────────────────────────────────
-        case SYS_READ:    result = sys_read ((int)arg1, (void*)arg2, arg3); break;
-        case SYS_WRITE:   result = sys_write((int)arg1, (const void*)arg2, arg3); break;
-        case SYS_OPEN:    result = sys_open ((const char*)arg1, (int)arg2, (int)arg3); break;
-        case SYS_CLOSE:   result = sys_close((int)arg1); break;
-        case SYS_STAT:    result = sys_stat ((const char*)arg1, (ascent_stat_t*)arg2); break;
-        case SYS_FSTAT:   result = sys_fstat((int)arg1, (ascent_stat_t*)arg2); break;
-        case SYS_LSEEK:   result = sys_lseek((int)arg1, (int64_t)arg2, (int)arg3); break;
-        case SYS_PIPE:    result = sys_pipe ((int*)arg1); break;
-        case SYS_DUP:     result = sys_dup  ((int)arg1); break;
-        case SYS_DUP2:    result = sys_dup2 ((int)arg1, (int)arg2); break;
-        // ── Process ──────────────────────────────────────────────────────────
-        case SYS_EXIT:    result = sys_exit   ((int)arg1); break;
-        case SYS_GETPID:  result = sys_getpid(); break;
-        case SYS_FORK:    result = sys_fork  (); break;
-        case SYS_EXECVE:  result = sys_execve((const char*)arg1,(char*const*)arg2,(char*const*)arg3); break;
-        case SYS_WAITPID: result = sys_waitpid((int)arg1,(int*)arg2,(int)arg3); break;
-        case SYS_WAIT4:   result = sys_wait4  ((int)arg1,(int*)arg2,(int)arg3,(void*)arg4); break;
-        case SYS_KILL:    result = sys_kill   ((int)arg1,(int)arg2); break;
-        case SYS_GETUID:  result = sys_getuid(); break;
-        case SYS_GETGID:  result = sys_getgid(); break;
-        // ── Memory ───────────────────────────────────────────────────────────
-        case SYS_BRK:     result = sys_brk   ((void*)arg1); break;
-        case SYS_MMAP:    result = sys_mmap  ((void*)arg1,arg2,(int)arg3,(int)arg4,(int)arg5,0); break;
-        case SYS_MUNMAP:  result = sys_munmap((void*)arg1,arg2); break;
-        // ── AscentOS-specific ─────────────────────────────────────────────────
-        case SYS_ASCENT_DEBUG:    result = sys_ascent_debug   ((const char*)arg1); break;
-        case SYS_ASCENT_INFO:     result = sys_ascent_info    ((void*)arg1,arg2); break;
-        case SYS_ASCENT_YIELD:    result = sys_ascent_yield   (); break;
-        case SYS_ASCENT_SLEEP:    result = sys_ascent_sleep   (arg1); break;
-        case SYS_ASCENT_GETTIME:  result = sys_ascent_gettime (); break;
-        case SYS_ASCENT_SHMGET:   result = sys_ascent_shmget  ((int)arg1, arg2); break;
-        case SYS_ASCENT_SHMMAP:   result = sys_ascent_shmmap  ((int)arg1); break;
-        case SYS_ASCENT_SHMUNMAP: result = sys_ascent_shmunmap((int)arg1); break;
-        case SYS_ASCENT_MSGPOST:  result = sys_ascent_msgpost ((int)arg1,(const void*)arg2,arg3); break;
-        case SYS_ASCENT_MSGRECV:  result = sys_ascent_msgrecv ((int)arg1,(void*)arg2,arg3); break;
+    // fd=0 stdin'e yazma: izin yok
+    if (fd == 0) { frame->rax = SYSCALL_ERR_BADF; return; }
 
-        default:
-            // syscall_num is within SYSCALL_MAX range but has no handler.
-            // Count as failed, NOT as invalid (invalid = out of range, caught above).
-            result = ENOSYS;
-            break;
+    // fd=1 stdout, fd=2 stderr: dogrudan serial (fd_table gerekmez)
+    if (fd == 1 || fd == 2) {
+        for (uint64_t i = 0; i < len; i++)
+            serial_putchar(buf[i]);
+        frame->rax = len;
+        return;
     }
 
-    // Only count as "failed" if the return is the generic SYSCALL_ERROR (-1).
-    // Named error codes (ENOSYS, EINVAL, ECHILD, EAGAIN, etc.) are expected
-    // outcomes and should NOT inflate the failed counter.
-    if (result == SYSCALL_ERROR) stats.failed_syscalls++;
-    return result;
-}
-
-// =============================================================================
-// FILE I/O SYSCALLS
-// =============================================================================
-
-int64_t sys_read(int fd, void* buf, uint64_t count) {
-    if (!buf || count == 0) return EINVAL;
-
-    fd_entry_t* table = syscall_get_fd_table();
-    fd_entry_t* entry = fd_get(table, fd);
-    if (!entry) return EBADF;
-    if (entry->flags == O_WRONLY) return EBADF;
-
-    if (entry->type == FD_TYPE_SERIAL) {
-        // stdin: keyboard input is not buffered yet → return EAGAIN
-        return EAGAIN;
-    }
-
-    if (entry->type == FD_TYPE_FAT32) {
-        // Read a chunk from the FAT32 file at the current offset
-        uint32_t file_size = fat32_file_size(entry->path);
-        if (file_size == 0) return ENOENT;
-
-        if (entry->offset >= file_size) return 0; // EOF
-
-        // Read the whole file into a temporary buffer
-        uint8_t* tmp = (uint8_t*)kmalloc(file_size + 1);
-        if (!tmp) return ENOMEM;
-
-        int n = fat32_read_file(entry->path, tmp, file_size);
-        if (n <= 0) { kfree(tmp); return ENOENT; }
-
-        uint64_t available = (uint64_t)n - entry->offset;
-        uint64_t to_copy   = (count < available) ? count : available;
-        k_memcpy(buf, tmp + entry->offset, to_copy);
-        entry->offset += to_copy;
-        kfree(tmp);
-        return (int64_t)to_copy;
-    }
-
-    if (entry->type == FD_TYPE_PIPE_R) {
-        pipe_buf_t* pb = (pipe_buf_t*)entry->private_data;
-        if (!pb) return EBADF;
-        if (pb->count == 0) {
-            if (!pb->write_end_open) return 0;  // EOF
-            return EAGAIN;
-        }
-        uint64_t copied = 0;
-        uint8_t* out = (uint8_t*)buf;
-        while (copied < count && pb->count > 0) {
-            out[copied++] = pb->buf[pb->read_pos];
-            pb->read_pos  = (pb->read_pos + 1) % PIPE_BUF_SIZE;
-            pb->count--;
-        }
-        return (int64_t)copied;
-    }
-
-    return ENOSYS;
-}
-
-int64_t sys_write(int fd, const void* buf, uint64_t count) {
-    if (!buf || count == 0) return EINVAL;
-
-    fd_entry_t* table = syscall_get_fd_table();
-    fd_entry_t* entry = fd_get(table, fd);
-    if (!entry) return EBADF;
-    if (entry->flags == O_RDONLY) return EBADF;
-
-    if (entry->type == FD_TYPE_SERIAL) {
-        const char* str = (const char*)buf;
-        for (uint64_t i = 0; i < count; i++) serial_putchar(str[i]);
-        return (int64_t)count;
-    }
-
-    if (entry->type == FD_TYPE_FAT32) {
-        // Append-or-truncate write: read existing content if append, overwrite if trunc
-        uint32_t existing_size = fat32_file_size(entry->path);
-        uint8_t* write_buf = NULL;
-        uint32_t write_size = 0;
-
-        if (entry->flags & O_APPEND) {
-            // Append: read existing + concat new data
-            write_size = existing_size + (uint32_t)count;
-            write_buf  = (uint8_t*)kmalloc(write_size);
-            if (!write_buf) return ENOMEM;
-            if (existing_size > 0)
-                fat32_read_file(entry->path, write_buf, existing_size);
-            k_memcpy(write_buf + existing_size, buf, count);
-            entry->offset = write_size;
-        } else {
-            // Overwrite from current offset
-            uint32_t new_size = (uint32_t)(entry->offset + count);
-            if (new_size < existing_size) new_size = existing_size;
-            write_buf  = (uint8_t*)kmalloc(new_size);
-            if (!write_buf) return ENOMEM;
-            if (existing_size > 0)
-                fat32_read_file(entry->path, write_buf, existing_size);
-            k_memcpy(write_buf + entry->offset, buf, count);
-            entry->offset += count;
-            write_size = new_size;
-        }
-
-        int ok = fat32_write_file(entry->path, write_buf, write_size);
-        kfree(write_buf);
-        return ok ? (int64_t)count : ENOSPC;
-    }
-
-    if (entry->type == FD_TYPE_PIPE_W) {
-        pipe_buf_t* pb = (pipe_buf_t*)entry->private_data;
-        if (!pb) return EBADF;
-        if (!pb->read_end_open) return EPIPE;
-        const uint8_t* in = (const uint8_t*)buf;
-        uint64_t written = 0;
-        while (written < count) {
-            if (pb->count >= PIPE_BUF_SIZE) break;  // pipe full
-            pb->buf[pb->write_pos] = in[written++];
-            pb->write_pos = (pb->write_pos + 1) % PIPE_BUF_SIZE;
-            pb->count++;
-        }
-        return (int64_t)written;
-    }
-
-    return ENOSYS;
-}
-
-int64_t sys_open(const char* path, int flags, int mode) {
-    (void)mode;
-    if (!path) return EFAULT;
-
-    fd_entry_t* table = syscall_get_fd_table();
-
-    // Check if file exists on FAT32
-    uint32_t sz = fat32_file_size(path);
-    int exists = (sz > 0 || fat32_file_size(path) == 0);
-    // fat32_file_size returns 0 both for "empty file" and "not found"
-    // We try a read to distinguish
-    {
-        uint8_t probe[1];
-        int r = fat32_read_file(path, probe, 1);
-        exists = (r >= 0 || sz > 0);
-        if (r < 0 && sz == 0) exists = 0;
-    }
-
-    if (!exists) {
-        if (!(flags & O_CREAT)) return ENOENT;
-        // Create the file
-        if (!fat32_create_file(path)) return ENOSPC;
-    } else if (flags & O_TRUNC) {
-        // Truncate: overwrite with empty content
-        fat32_write_file(path, (const uint8_t*)"", 0);
-    }
-
-    int fd = fd_alloc(table, FD_TYPE_FAT32, flags, path);
-    if (fd < 0) return EMFILE;
-
-    if (flags & O_APPEND) {
-        // Position at end
-        table[fd].offset = fat32_file_size(path);
-    }
-
-    serial_print("[SYS_OPEN] Opened '");
-    serial_print(path);
-    serial_print("' -> fd=");
-    char tmp[8]; int_to_str(fd, tmp); serial_print(tmp);
-    serial_print("\n");
-
-    return fd;
-}
-
-int64_t sys_close(int fd) {
-    if (fd < 0 || fd > 2) {
-        // Don't allow closing stdin/stdout/stderr
-    }
-    fd_entry_t* table = syscall_get_fd_table();
-    fd_entry_t* entry = fd_get(table, fd);
-    if (!entry) return EBADF;
-
-    // Handle pipe close
-    if (entry->type == FD_TYPE_PIPE_W) {
-        pipe_buf_t* pb = (pipe_buf_t*)entry->private_data;
-        if (pb) pb->write_end_open = 0;
-    } else if (entry->type == FD_TYPE_PIPE_R) {
-        pipe_buf_t* pb = (pipe_buf_t*)entry->private_data;
-        if (pb) pb->read_end_open = 0;
-    }
-
-    fd_free(table, fd);
-    return SYSCALL_SUCCESS;
-}
-
-int64_t sys_stat(const char* path, ascent_stat_t* st) {
-    if (!path || !st) return EFAULT;
-    uint32_t sz = fat32_file_size(path);
-    // Try to distinguish "no file" vs "empty file" with a read probe
-    uint8_t probe[1];
-    int r = fat32_read_file(path, probe, 1);
-    if (r < 0 && sz == 0) return ENOENT;
-
-    st->st_mode   = S_IFREG | S_IRUSR | S_IWUSR;
-    st->st_size   = sz;
-    st->st_blocks = (sz + 511) / 512;
-    return SYSCALL_SUCCESS;
-}
-
-int64_t sys_fstat(int fd, ascent_stat_t* st) {
-    if (!st) return EFAULT;
-    fd_entry_t* table = syscall_get_fd_table();
-    fd_entry_t* entry = fd_get(table, fd);
-    if (!entry) return EBADF;
-
-    if (entry->type == FD_TYPE_SERIAL) {
-        st->st_mode   = S_IFCHR | S_IRUSR | S_IWUSR;
-        st->st_size   = 0;
-        st->st_blocks = 0;
-        return SYSCALL_SUCCESS;
-    }
-    if (entry->type == FD_TYPE_FAT32) {
-        return sys_stat(entry->path, st);
-    }
-    if (entry->type == FD_TYPE_PIPE_R || entry->type == FD_TYPE_PIPE_W) {
-        st->st_mode   = S_IFIFO | S_IRUSR | S_IWUSR;
-        st->st_size   = 0;
-        st->st_blocks = 0;
-        return SYSCALL_SUCCESS;
-    }
-    return ENOSYS;
-}
-
-int64_t sys_lseek(int fd, int64_t offset, int whence) {
-    fd_entry_t* table = syscall_get_fd_table();
-    fd_entry_t* entry = fd_get(table, fd);
-    if (!entry) return EBADF;
-    if (entry->type != FD_TYPE_FAT32) return ENOSYS;
-
-    uint32_t file_size = fat32_file_size(entry->path);
-    int64_t  new_offset;
-
-    switch (whence) {
-        case SEEK_SET: new_offset = offset; break;
-        case SEEK_CUR: new_offset = (int64_t)entry->offset + offset; break;
-        case SEEK_END: new_offset = (int64_t)file_size + offset; break;
-        default:       return EINVAL;
-    }
-    if (new_offset < 0) return EINVAL;
-    entry->offset = (uint64_t)new_offset;
-    return new_offset;
-}
-
-int64_t sys_pipe(int pipefd[2]) {
-    if (!pipefd) return EFAULT;
-
-    pipe_buf_t* pb = pipe_alloc();
-    if (!pb) return ENOMEM;
-
-    fd_entry_t* table = syscall_get_fd_table();
-
-    // Allocate read end
-    int rfd = fd_alloc(table, FD_TYPE_PIPE_R, O_RDONLY, "pipe:r");
-    if (rfd < 0) { pb->read_end_open = pb->write_end_open = 0; return EMFILE; }
-
-    // Allocate write end
-    int wfd = fd_alloc(table, FD_TYPE_PIPE_W, O_WRONLY, "pipe:w");
-    if (wfd < 0) {
-        fd_free(table, rfd);
-        pb->read_end_open = pb->write_end_open = 0;
-        return EMFILE;
-    }
-
-    table[rfd].private_data = pb;
-    table[wfd].private_data = pb;
-
-    pipefd[0] = rfd;
-    pipefd[1] = wfd;
-
-    serial_print("[SYS_PIPE] Created pipe rfd=");
-    char tmp[8]; int_to_str(rfd, tmp); serial_print(tmp);
-    serial_print(" wfd="); int_to_str(wfd, tmp); serial_print(tmp);
-    serial_print("\n");
-
-    return SYSCALL_SUCCESS;
-}
-
-int64_t sys_dup(int oldfd) {
-    fd_entry_t* table = syscall_get_fd_table();
-    fd_entry_t* entry = fd_get(table, oldfd);
-    if (!entry) return EBADF;
-
-    // Find a free slot
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        if (table[i].type == FD_TYPE_NONE) {
-            table[i] = *entry;   // copy
-            table[i].ref_count = 1;
-            entry->ref_count++;  // bump original ref count too
-            return i;
-        }
-    }
-    return EMFILE;
-}
-
-int64_t sys_dup2(int oldfd, int newfd) {
-    if (newfd < 0 || newfd >= MAX_OPEN_FILES) return EBADF;
-    fd_entry_t* table = syscall_get_fd_table();
-    fd_entry_t* entry = fd_get(table, oldfd);
-    if (!entry) return EBADF;
-
-    // Close newfd if already open
-    if (table[newfd].type != FD_TYPE_NONE) fd_free(table, newfd);
-
-    table[newfd] = *entry;
-    table[newfd].ref_count = 1;
-    entry->ref_count++;
-    return newfd;
-}
-
-// =============================================================================
-// PROCESS MANAGEMENT SYSCALLS
-// =============================================================================
-
-int64_t sys_exit(int status) {
-    serial_print("[SYS_EXIT] Task exiting with status: ");
-    char buf[16]; int_to_str(status, buf); serial_print(buf); serial_print("\n");
-    task_exit();
-    return 0;  // Never reached
-}
-
-int64_t sys_getpid(void) {
+    // fd >= 3: fd_table gerekli
     task_t* cur = task_get_current();
-    return cur ? (int64_t)cur->pid : -1;
+    if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
+
+    fd_entry_t* ent = fd_get(cur->fd_table, fd);
+    if (!ent)  { frame->rax = SYSCALL_ERR_BADF; return; }
+    if (ent->flags == O_RDONLY) { frame->rax = SYSCALL_ERR_BADF; return; }
+
+    for (uint64_t i = 0; i < len; i++)
+        serial_putchar(buf[i]);
+
+    if (ent->type == FD_TYPE_FILE)
+        ent->offset += len;
+
+    frame->rax = len;
 }
 
-int64_t sys_fork(void) {
-    // Full fork requires page-table COW and FD duplication — stub for now
-    serial_print("[SYS_FORK] fork() not implemented (Phase 4)\n");
-    return ENOSYS;
-}
+// ── SYS_READ (2) ───────────────────────────────────────────────
+// read(fd, buf, len) -> bytes_read | SYSCALL_ERR_*
+//
+// fd=0 (stdin): serial porttan non-blocking polling okuma.
+// fd=1/2 yazma amaclı, okuma izni yok.
+// fd>=3: fd_table gerekli.
+//
+// NOT: fd 0 icin fd_table GEREKMEZ – dogrudan serial RX kullanilir.
+static void sys_read(syscall_frame_t* frame) {
+    int      fd  = (int)frame->rdi;
+    char*    buf = (char*)frame->rsi;
+    uint64_t len = frame->rdx;
 
-int64_t sys_execve(const char* path, char* const argv[], char* const envp[]) {
-    (void)argv; (void)envp;
-    // Full execve requires ELF loader integration — stub for now
-    serial_print("[SYS_EXECVE] execve() stub: ");
-    if (path) serial_print(path);
-    serial_print("\n");
-    return ENOSYS;
-}
+    if (fd < 0 || fd >= MAX_FDS)      { frame->rax = SYSCALL_ERR_BADF;  return; }
+    if (!is_valid_user_ptr(buf, len))  { frame->rax = SYSCALL_ERR_INVAL; return; }
+    if (len == 0)                      { frame->rax = 0; return; }
+    if (len > 4096)                    { frame->rax = SYSCALL_ERR_INVAL; return; }
 
-int64_t sys_waitpid(int pid, int* status, int options) {
-    (void)options;
-    // Find the task; if terminated, collect status
-    task_t* t = task_find_by_pid((uint32_t)pid);
-    if (!t) {
-        if (status) *status = 0;
-        return ECHILD;
-    }
-    if (t->state == TASK_STATE_TERMINATED) {
-        if (status) *status = 0;
-        return pid;
-    }
-    // Task still running → would block; for now return EAGAIN
-    return EAGAIN;
-}
+    // fd=1,2 stdout/stderr: sadece yazma amaclı
+    if (fd == 1 || fd == 2) { frame->rax = SYSCALL_ERR_BADF; return; }
 
-int64_t sys_wait4(int pid, int* status, int options, void* rusage) {
-    (void)rusage;
-    return sys_waitpid(pid, status, options);
-}
-
-int64_t sys_kill(int pid, int sig) {
-    if (pid <= 0) return EINVAL;
-    task_t* t = task_find_by_pid((uint32_t)pid);
-    if (!t) return EINVAL;
-
-    // Only handle SIGKILL (9) and SIGTERM (15) for now
-    if (sig == 9 || sig == 15) {
-        serial_print("[SYS_KILL] Terminating PID ");
-        char tmp[16]; int_to_str(pid, tmp); serial_print(tmp); serial_print("\n");
-        task_terminate(t);
-        return SYSCALL_SUCCESS;
-    }
-    return ENOSYS;  // Other signals not implemented
-}
-
-int64_t sys_getuid(void) { return 0; }  // Root only for now
-int64_t sys_getgid(void) { return 0; }
-
-// =============================================================================
-// MEMORY MANAGEMENT SYSCALLS
-// =============================================================================
-
-int64_t sys_brk(void* addr) {
-    if (!process_heap_start) {
-        // First call: allocate initial heap
-        process_heap_start = (uint8_t*)kmalloc(HEAP_INITIAL_SIZE);
-        if (!process_heap_start) return ENOMEM;
-        process_heap_end = process_heap_start + HEAP_INITIAL_SIZE;
-        serial_print("[SYS_BRK] Heap initialized\n");
+    // fd=0 stdin: dogrudan serial RX (fd_table gerekmez)
+    if (fd == 0) {
+        uint64_t count = 0;
+        while (count < len) {
+            if (!serial_data_ready()) break;   // veri yok, non-blocking: dur
+            char c = serial_getchar();
+            buf[count++] = c;
+            if (c == '\n') break;              // satir sonu: okuma tamam
+        }
+        frame->rax = count;   // 0 = veri yok (non-blocking davranis)
+        return;
     }
 
-    if (!addr) {
-        // brk(NULL) → return current break
-        return (int64_t)(uint64_t)process_heap_end;
-    }
-
-    uint8_t* new_end = (uint8_t*)addr;
-    if (new_end < process_heap_start) return EINVAL;
-    if (new_end > process_heap_start + HEAP_INITIAL_SIZE) return ENOMEM;
-
-    process_heap_end = new_end;
-    return (int64_t)(uint64_t)process_heap_end;
-}
-
-int64_t sys_mmap(void* addr, uint64_t length, int prot, int flags, int fd, uint64_t offset) {
-    (void)addr; (void)prot; (void)flags; (void)fd; (void)offset;
-    // Anonymous mmap: just kmalloc for now
-    if (length == 0) return EINVAL;
-    void* mem = kmalloc(length);
-    if (!mem) return ENOMEM;
-    k_memset(mem, 0, length);
-    serial_print("[SYS_MMAP] Allocated ");
-    char tmp[16]; u64_to_str(length, tmp); serial_print(tmp);
-    serial_print(" bytes\n");
-    return (int64_t)(uint64_t)mem;
-}
-
-int64_t sys_munmap(void* addr, uint64_t length) {
-    (void)length;
-    if (!addr) return EINVAL;
-    kfree(addr);
-    return SYSCALL_SUCCESS;
-}
-
-// =============================================================================
-// ASCENTOS-SPECIFIC SYSCALLS
-// =============================================================================
-
-int64_t sys_ascent_debug(const char* message) {
-    if (!message) return EFAULT;
-    serial_print("[USER DEBUG] ");
-    serial_print(message);
-    serial_print("\n");
-    return SYSCALL_SUCCESS;
-}
-
-int64_t sys_ascent_info(void* info_buffer, uint64_t buffer_size) {
-    if (!info_buffer || buffer_size < 64) return EINVAL;
-
-    // Fill with a brief system info string
-    char* buf = (char*)info_buffer;
-    const char* msg = "AscentOS Phase3 - SysInfo: ticks=";
-    int i = 0;
-    while (msg[i] && i < (int)buffer_size - 20) { buf[i] = msg[i]; i++; }
-
-    char tstr[20];
-    u64_to_str(get_system_ticks(), tstr);
-    int j = 0;
-    while (tstr[j] && i < (int)buffer_size - 1) buf[i++] = tstr[j++];
-    buf[i] = '\0';
-    return SYSCALL_SUCCESS;
-}
-
-int64_t sys_ascent_yield(void) {
-    scheduler_yield();
-    return SYSCALL_SUCCESS;
-}
-
-int64_t sys_ascent_sleep(uint64_t milliseconds) {
-    if (milliseconds == 0) return SYSCALL_SUCCESS;
-    // Convert ms → ticks and spin-wait (proper blocking is Phase 4)
-    uint64_t target = get_system_ticks() + milliseconds;
-    while (get_system_ticks() < target) {
-        scheduler_yield();
-    }
-    return SYSCALL_SUCCESS;
-}
-
-int64_t sys_ascent_gettime(void) {
-    return (int64_t)get_system_ticks();
-}
-
-// ── Shared Memory ──────────────────────────────────────────────────────────
-
-int64_t sys_ascent_shmget(int id, uint64_t size) {
-    (void)size;  // We always use SHM_SEG_SIZE
-    if (id < 0 || id >= SHM_MAX_SEGS) return EINVAL;
-
-    if (!shm_segments[id].in_use) {
-        k_memset(&shm_segments[id], 0, sizeof(shm_segment_t));
-        shm_segments[id].in_use    = 1;
-        shm_segments[id].id        = id;
-
-        task_t* cur = task_get_current();
-        shm_segments[id].owner_pid = cur ? cur->pid : 0;
-
-        serial_print("[SYS_SHMGET] Created segment id=");
-        char tmp[8]; int_to_str(id, tmp); serial_print(tmp); serial_print("\n");
-    }
-    return id;
-}
-
-int64_t sys_ascent_shmmap(int id) {
-    if (id < 0 || id >= SHM_MAX_SEGS || !shm_segments[id].in_use)
-        return EINVAL;
-    // Return the kernel address of the segment data
-    return (int64_t)(uint64_t)shm_segments[id].data;
-}
-
-int64_t sys_ascent_shmunmap(int id) {
-    if (id < 0 || id >= SHM_MAX_SEGS) return EINVAL;
-    shm_segments[id].in_use = 0;
-    return SYSCALL_SUCCESS;
-}
-
-// ── Message Queues ──────────────────────────────────────────────────────────
-
-int64_t sys_ascent_msgpost(int queue_id, const void* data, uint64_t size) {
-    if (queue_id < 0 || queue_id >= MSG_MAX_QUEUES) return EINVAL;
-    if (!data || size == 0 || size > MSG_MAX_SIZE) return EINVAL;
-
-    msg_queue_t* q = &msg_queues[queue_id];
-    if (!q->in_use) {
-        k_memset(q, 0, sizeof(msg_queue_t));
-        q->in_use = 1;
-        q->id     = queue_id;
-    }
-    if (q->count >= MSG_MAX_MSGS) return ENOSPC;
-
-    ipc_message_t* msg = &q->msgs[q->tail];
+    // fd >= 3: fd_table gerekli
     task_t* cur = task_get_current();
-    msg->sender_pid = cur ? cur->pid : 0;
-    msg->size       = (uint32_t)size;
-    k_memcpy(msg->data, data, size);
+    if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
 
-    q->tail  = (q->tail + 1) % MSG_MAX_MSGS;
-    q->count++;
+    fd_entry_t* ent = fd_get(cur->fd_table, fd);
+    if (!ent)  { frame->rax = SYSCALL_ERR_BADF; return; }
+    if (ent->flags == O_WRONLY) { frame->rax = SYSCALL_ERR_BADF; return; }
 
-    serial_print("[SYS_MSGPOST] Queue ");
-    char tmp[8]; int_to_str(queue_id, tmp); serial_print(tmp);
-    serial_print(" now has "); int_to_str(q->count, tmp); serial_print(tmp);
-    serial_print(" message(s)\n");
-
-    return SYSCALL_SUCCESS;
-}
-
-int64_t sys_ascent_msgrecv(int queue_id, void* data, uint64_t max_size) {
-    if (queue_id < 0 || queue_id >= MSG_MAX_QUEUES) return EINVAL;
-    if (!data || max_size == 0) return EINVAL;
-
-    msg_queue_t* q = &msg_queues[queue_id];
-    if (!q->in_use || q->count == 0) return EAGAIN;
-
-    ipc_message_t* msg = &q->msgs[q->head];
-    uint64_t copy_size = (msg->size < max_size) ? msg->size : max_size;
-    k_memcpy(data, msg->data, copy_size);
-
-    q->head  = (q->head + 1) % MSG_MAX_MSGS;
-    q->count--;
-
-    return (int64_t)copy_size;
-}
-
-// =============================================================================
-// STATISTICS & DEBUGGING
-// =============================================================================
-
-void syscall_get_stats(syscall_stats_t* out) {
-    if (!out) return;
-    out->total_syscalls   = stats.total_syscalls;
-    out->invalid_syscalls = stats.invalid_syscalls;
-    out->failed_syscalls  = stats.failed_syscalls;
-    for (int i = 0; i < SYSCALL_MAX; i++)
-        out->syscall_counts[i] = stats.syscall_counts[i];
-}
-
-// Human-readable name for the most common syscall numbers
-static const char* syscall_name(int n) {
-    switch (n) {
-        case SYS_READ:    return "read";
-        case SYS_WRITE:   return "write";
-        case SYS_OPEN:    return "open";
-        case SYS_CLOSE:   return "close";
-        case SYS_STAT:    return "stat";
-        case SYS_FSTAT:   return "fstat";
-        case SYS_LSEEK:   return "lseek";
-        case SYS_MMAP:    return "mmap";
-        case SYS_MUNMAP:  return "munmap";
-        case SYS_BRK:     return "brk";
-        case SYS_PIPE:    return "pipe";
-        case SYS_DUP:     return "dup";
-        case SYS_DUP2:    return "dup2";
-        case SYS_EXIT:    return "exit";
-        case SYS_GETPID:  return "getpid";
-        case SYS_WAITPID: return "waitpid";
-        case SYS_FORK:    return "fork";
-        case SYS_EXECVE:  return "execve";
-        case SYS_WAIT4:   return "wait4";
-        case SYS_KILL:    return "kill";
-        case SYS_GETUID:  return "getuid";
-        case SYS_GETGID:  return "getgid";
-        case SYS_ASCENT_DEBUG:    return "ascent_debug";
-        case SYS_ASCENT_INFO:     return "ascent_info";
-        case SYS_ASCENT_YIELD:    return "ascent_yield";
-        case SYS_ASCENT_SLEEP:    return "ascent_sleep";
-        case SYS_ASCENT_GETTIME:  return "ascent_gettime";
-        case SYS_ASCENT_SHMGET:   return "ascent_shmget";
-        case SYS_ASCENT_SHMMAP:   return "ascent_shmmap";
-        case SYS_ASCENT_SHMUNMAP: return "ascent_shmunmap";
-        case SYS_ASCENT_MSGPOST:  return "ascent_msgpost";
-        case SYS_ASCENT_MSGRECV:  return "ascent_msgrecv";
-        default: return NULL;
+    if (ent->type == FD_TYPE_SERIAL) {
+        uint64_t count = 0;
+        while (count < len) {
+            if (!serial_data_ready()) break;
+            char c = serial_getchar();
+            buf[count++] = c;
+            if (c == '\n') break;
+        }
+        frame->rax = count;
+        return;
     }
+
+    // FD_TYPE_FILE: VFS henuz yok
+    frame->rax = SYSCALL_ERR_NOSYS;
 }
 
-void syscall_print_stats(void) {
-    serial_print("\n=== Syscall Statistics (Phase 3) ===\n");
-    char num[32];
-    u64_to_str(stats.total_syscalls,   num); serial_print("Total   : "); serial_print(num); serial_print("\n");
-    u64_to_str(stats.invalid_syscalls, num); serial_print("Invalid : "); serial_print(num); serial_print("\n");
-    u64_to_str(stats.failed_syscalls,  num); serial_print("Failed  : "); serial_print(num); serial_print("\n");
+// ── SYS_EXIT (3) ────────────────────────────────────────────────
+// exit(code) -> noreturn
+//
+// Mevcut task'i sonlandirir; idle task (pid=0) sonlandiramaz.
+// task_exit() zaten donmez; bu fonksiyon da donmez.
+static void sys_exit(syscall_frame_t* frame) {
+    int exit_code = (int)frame->rdi;
+    task_t* cur   = task_get_current();
 
-    serial_print("\nPer-syscall usage (non-zero only):\n");
-    for (int i = 0; i < SYSCALL_MAX; i++) {
-        if (stats.syscall_counts[i] == 0) continue;
-        const char* name = syscall_name(i);
-        serial_print("  ");
-        if (name) { serial_print(name); }
-        else      { int_to_str(i, num); serial_print("syscall#"); serial_print(num); }
-        serial_print(": ");
-        u64_to_str(stats.syscall_counts[i], num);
-        serial_print(num);
+    if (cur && cur->pid != 0) {
+        serial_print("[SYSCALL] SYS_EXIT: pid=");
+        print_uint64(cur->pid);
+        serial_print(" code=");
+        { char b[16]; int_to_str(exit_code, b); serial_print(b); }
         serial_print("\n");
+        task_exit();   // donmez
     }
-    serial_print("\n");
+    // idle task icin hicbir sey yapma
+    frame->rax = SYSCALL_OK;
 }
 
-void syscall_reset_stats(void) {
-    k_memset(&stats, 0, sizeof(syscall_stats_t));
-    serial_print("[SYSCALL] Statistics reset\n");
+// ── SYS_GETPID (4) ──────────────────────────────────────────────
+// getpid() -> pid
+static void sys_getpid(syscall_frame_t* frame) {
+    task_t* cur = task_get_current();
+    frame->rax  = cur ? (uint64_t)cur->pid : 0;
+}
+
+// ── SYS_YIELD (5) ───────────────────────────────────────────────
+// yield() -> 0
+// Calisiyor olan task'i preempt eder, bir sonraki task'a gecer.
+static void sys_yield(syscall_frame_t* frame) {
+    scheduler_yield();
+    frame->rax = SYSCALL_OK;
+}
+
+// ── SYS_SLEEP (6) ───────────────────────────────────────────────
+// sleep(ticks) -> 0
+//
+// Guvenli implementasyon: interrupt-safe busy-wait.
+// scheduler_yield() yerine "sti; hlt" dongusu kullanilir;
+// bu sayede timer interrupt'i CPU'yu uyandirabilir.
+// Klavyeyi KILITMEZ.
+//
+// GELECEK: task'i SLEEPING yap, wake_tick ayarla, scheduler handle etsin.
+static void sys_sleep(syscall_frame_t* frame) {
+    uint64_t ticks = frame->rdi;
+    if (ticks == 0)      { frame->rax = SYSCALL_OK;          return; }
+    if (ticks > 60000)   { frame->rax = SYSCALL_ERR_INVAL;   return; }
+
+    uint64_t end = get_system_ticks() + ticks;
+
+    // Interrupt-safe: hlt interrupt'i bekler, timer tick artirir, kontrol eder.
+    // IF zaten set ise calisir; degilse sadece spin yapar (en kotu durum).
+    while (get_system_ticks() < end) {
+        __asm__ volatile ("sti; hlt" ::: "memory");
+    }
+
+    frame->rax = SYSCALL_OK;
+}
+
+// ── SYS_UPTIME (7) ──────────────────────────────────────────────
+// uptime() -> system_ticks
+static void sys_uptime(syscall_frame_t* frame) {
+    frame->rax = get_system_ticks();
+}
+
+// ── SYS_DEBUG (8) ───────────────────────────────────────────────
+// debug(msg) -> 0
+// Kernel debug cikisi: serial porta [DEBUG] prefiksi ile yazar.
+static void sys_debug(syscall_frame_t* frame) {
+    const char* msg = (const char*)frame->rdi;
+    if (!is_valid_user_string(msg, 256)) { frame->rax = SYSCALL_ERR_INVAL; return; }
+    serial_print("[DEBUG] ");
+    serial_print(msg);
+    serial_print("\n");
+    frame->rax = SYSCALL_OK;
+}
+
+// ── SYS_OPEN (9) ────────────────────────────────────────────────
+// open(path, flags) -> fd | SYSCALL_ERR_*
+//
+// Desteklenen ozel yollar:
+//   /dev/serial0  -> FD_TYPE_SERIAL (stdin/stdout benzeri ek port)
+//   diger         -> FD_TYPE_FILE stub (VFS hazir oldugunda guncelle)
+//
+// open() basarisiz olursa negatif hata kodu doner.
+static void sys_open(syscall_frame_t* frame) {
+    const char* path  = (const char*)frame->rdi;
+    uint64_t    flags = frame->rsi;
+
+    if (!is_valid_user_string(path, 128)) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    // Sadece taninan flag kombinasyonlarına izin ver
+    uint64_t valid_flags = O_RDONLY | O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND;
+    if (flags & ~valid_flags)             { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    task_t* cur = task_get_current();
+    if (!cur)                             { frame->rax = SYSCALL_ERR_PERM;  return; }
+
+    uint8_t fd_type;
+    // /dev/serial0 – seri port
+    // Basit path kiyaslamasi (strncmp yerine)
+    const char* p1 = path;
+    const char* p2 = "/dev/serial0";
+    int match = 1;
+    while (*p1 && *p2) { if (*p1 != *p2) { match = 0; break; } p1++; p2++; }
+    if (match && *p1 == '\0' && *p2 == '\0') {
+        fd_type = FD_TYPE_SERIAL;
+    } else {
+        // Gercek VFS yok: sadece O_CREAT olmadan FILE stub kabul et
+        if (flags & O_CREAT) { frame->rax = SYSCALL_ERR_NOENT; return; }
+        fd_type = FD_TYPE_FILE;
+    }
+
+    int new_fd = fd_alloc(cur->fd_table, fd_type, (uint8_t)(flags & 0xFF), path);
+    if (new_fd < 0) { frame->rax = SYSCALL_ERR_MFILE; return; }
+
+    serial_print("[SYSCALL] open(\"");
+    serial_print(path);
+    serial_print("\") -> fd=");
+    print_uint64((uint64_t)new_fd);
+    serial_print("\n");
+
+    frame->rax = (uint64_t)new_fd;
+}
+
+// ── SYS_CLOSE (10) ──────────────────────────────────────────────
+// close(fd) -> 0 | SYSCALL_ERR_*
+//
+// stdin/stdout/stderr (fd 0-2) katilikla kapatilmaz;
+// kullanici fd'lerini (3..MAX_FDS-1) serbest birakir.
+static void sys_close(syscall_frame_t* frame) {
+    int fd = (int)frame->rdi;
+
+    // Standart stream'leri kapatmaya izin verme
+    if (fd < 3)                          { frame->rax = SYSCALL_ERR_BADF; return; }
+    if (fd >= MAX_FDS)                   { frame->rax = SYSCALL_ERR_BADF; return; }
+
+    task_t* cur = task_get_current();
+    if (!cur)                            { frame->rax = SYSCALL_ERR_PERM; return; }
+
+    int ret = fd_free(cur->fd_table, fd);
+    frame->rax = (ret == 0) ? SYSCALL_OK : SYSCALL_ERR_BADF;
+}
+
+// ── SYS_GETPPID (11) ────────────────────────────────────────────
+// getppid() -> parent_pid
+//
+// task_t'ye parent_pid alani eklenmediyse 0 doner.
+// (task.h'da "uint32_t parent_pid;" eklenmesi onerilir.)
+static void sys_getppid(syscall_frame_t* frame) {
+    task_t* cur = task_get_current();
+    if (!cur) { frame->rax = 0; return; }
+
+    // task_t'de parent_pid varsa kullan; yoksa 0 (init süreci anlaminda)
+#ifdef TASK_HAS_PARENT_PID
+    frame->rax = (uint64_t)cur->parent_pid;
+#else
+    // Henuz implement edilmedi – donus degeri 0 (kernel/init parent)
+    frame->rax = 0;
+#endif
+}
+
+// ── SYS_SBRK (12) ───────────────────────────────────────────────
+// sbrk(increment) -> old_break | SYSCALL_ERR_*
+//
+// Kernel heap'ini (kmalloc bölgesi) increment kadar büyütür.
+// increment=0: mevcut break adresini doner (brk sorgulama).
+// Gercek user-space heap yonetimi icin per-task brk gerekli;
+// su an kernel heap uzerinde calisir (flat memory varsayimi).
+static void sys_sbrk(syscall_frame_t* frame) {
+    int64_t increment = (int64_t)frame->rdi;
+
+    uint64_t old_brk = kmalloc_get_brk();
+
+    if (increment == 0) {
+        // Sadece sorgula
+        frame->rax = old_brk;
+        return;
+    }
+
+    if (increment < 0) {
+        // Heap kucultme: basit implementasyonda desteklenmez
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    // Maksimum tek seferde 1MB artis
+    if ((uint64_t)increment > (1024 * 1024)) {
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    uint64_t new_brk = kmalloc_set_brk(old_brk + (uint64_t)increment);
+    if (new_brk == (uint64_t)-1) {
+        frame->rax = SYSCALL_ERR_NOMEM;
+        return;
+    }
+
+    frame->rax = old_brk;   // POSIX sbrk: eski break adresini doner
+}
+
+// ── SYS_GETPRIORITY (13) ────────────────────────────────────────
+// getpriority() -> priority (0-255)
+static void sys_getpriority(syscall_frame_t* frame) {
+    task_t* cur = task_get_current();
+    frame->rax  = cur ? (uint64_t)cur->priority : 0;
+}
+
+// ── SYS_SETPRIORITY (14) ────────────────────────────────────────
+// setpriority(prio) -> 0 | SYSCALL_ERR_INVAL
+//
+// Gecerli aralik: 0-255.
+// Mevcut task'in (idle dahil) onceligini degistirir.
+// Sadece NULL task kontrolu var; PID=0 kisitlamasi kaldirildi
+// cunku shell idle context'inde calisabilir.
+static void sys_setpriority(syscall_frame_t* frame) {
+    uint64_t prio = frame->rdi;
+    if (prio > 255) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    task_t* cur = task_get_current();
+    if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
+
+    cur->priority  = (uint32_t)prio;
+    frame->rax     = SYSCALL_OK;
+}
+
+// ── SYS_GETTICKS (15) ───────────────────────────────────────────
+// getticks() -> system_ticks  (SYS_UPTIME alias; daha net isim)
+static void sys_getticks(syscall_frame_t* frame) {
+    frame->rax = get_system_ticks();
+}
+
+// ============================================================
+// SYSCALL_DISPATCH
+// Assembly stub (syscall_entry) tarafindan cagirilir.
+// Her syscall kendi static fonksiyonuna delege edilir;
+// bu sayede dispatcher sade ve okunabilir kalir.
+// ============================================================
+void syscall_dispatch(syscall_frame_t* frame) {
+    uint64_t num = frame->rax;
+
+    switch (num) {
+    case SYS_WRITE:        sys_write(frame);       break;
+    case SYS_READ:         sys_read(frame);        break;
+    case SYS_EXIT:         sys_exit(frame);        break;
+    case SYS_GETPID:       sys_getpid(frame);      break;
+    case SYS_YIELD:        sys_yield(frame);       break;
+    case SYS_SLEEP:        sys_sleep(frame);       break;
+    case SYS_UPTIME:       sys_uptime(frame);      break;
+    case SYS_DEBUG:        sys_debug(frame);       break;
+    case SYS_OPEN:         sys_open(frame);        break;
+    case SYS_CLOSE:        sys_close(frame);       break;
+    case SYS_GETPPID:      sys_getppid(frame);     break;
+    case SYS_SBRK:         sys_sbrk(frame);        break;
+    case SYS_GETPRIORITY:  sys_getpriority(frame); break;
+    case SYS_SETPRIORITY:  sys_setpriority(frame); break;
+    case SYS_GETTICKS:     sys_getticks(frame);    break;
+    default:
+        serial_print("[SYSCALL] Unknown syscall: ");
+        { char b[16]; int_to_str((int)(num & 0xFFFF), b); serial_print(b); }
+        serial_print("\n");
+        frame->rax = SYSCALL_ERR_NOSYS;
+        break;
+    }
+}
+
+// ============================================================
+// SYSCALL_TEST
+// Tum syscall'lari kernel modunda test eder.
+// Ring-3 task'tan da ayni sekilde kullanilabilir.
+// ============================================================
+void syscall_test(void) {
+    if (!syscall_enabled) {
+        serial_print("[SYSCALL TEST] SYSCALL not enabled!\n");
+        return;
+    }
+    serial_print("\n========================================\n");
+    serial_print("[SYSCALL TEST] Starting comprehensive syscall tests...\n");
+    serial_print("========================================\n");
+
+    uint64_t ret = 0;
+
+#define DO_SYSCALL0(num) \
+    __asm__ volatile ("syscall" : "=a"(ret) : "a"((uint64_t)(num)) : "rcx","r11")
+
+#define DO_SYSCALL1(num, a1) \
+    __asm__ volatile ("syscall" : "=a"(ret) \
+        : "a"((uint64_t)(num)), "D"((uint64_t)(a1)) : "rcx","r11","memory")
+
+#define DO_SYSCALL2(num, a1, a2) \
+    __asm__ volatile ("syscall" : "=a"(ret) \
+        : "a"((uint64_t)(num)), "D"((uint64_t)(a1)), "S"((uint64_t)(a2)) \
+        : "rcx","r11","memory")
+
+#define DO_SYSCALL3(num, a1, a2, a3) \
+    __asm__ volatile ("syscall" : "=a"(ret) \
+        : "a"((uint64_t)(num)), "D"((uint64_t)(a1)), "S"((uint64_t)(a2)), \
+          "d"((uint64_t)(a3)) : "rcx","r11","memory")
+
+    // ── Test 1: SYS_WRITE ──────────────────────────────────────
+    serial_print("\n[TEST 1] SYS_WRITE (fd=1, stdout):\n");
+    const char* wmsg = "  << Hello from SYS_WRITE! >>\n";
+    DO_SYSCALL3(SYS_WRITE, 1, wmsg, 31);
+    serial_print("  ret="); { char b[16]; int_to_str((int)ret, b); serial_print(b); } serial_print("\n");
+
+    // ── Test 2: SYS_WRITE – gecersiz fd ────────────────────────
+    serial_print("\n[TEST 2] SYS_WRITE (fd=99, expect EBADF):\n");
+    DO_SYSCALL3(SYS_WRITE, 99, wmsg, 31);
+    serial_print("  ret="); { char b[16]; int_to_str((int)ret, b); serial_print(b); } serial_print(" (expect -5)\n");
+
+    // ── Test 3: SYS_READ ───────────────────────────────────────
+    serial_print("\n[TEST 3] SYS_READ (fd=0, non-blocking, veri yoksa 0 beklenir):\n");
+    char rbuf[32] = {0};
+    DO_SYSCALL3(SYS_READ, 0, rbuf, 16);
+    serial_print("  bytes_read="); print_uint64(ret); serial_print("\n");
+
+    // ── Test 4: SYS_GETPID ─────────────────────────────────────
+    serial_print("\n[TEST 4] SYS_GETPID:\n");
+    DO_SYSCALL0(SYS_GETPID);
+    serial_print("  pid="); print_uint64(ret); serial_print("\n");
+
+    // ── Test 5: SYS_GETPPID ────────────────────────────────────
+    serial_print("\n[TEST 5] SYS_GETPPID:\n");
+    DO_SYSCALL0(SYS_GETPPID);
+    serial_print("  ppid="); print_uint64(ret); serial_print("\n");
+
+    // ── Test 6: SYS_GETPRIORITY ────────────────────────────────
+    serial_print("\n[TEST 6] SYS_GETPRIORITY:\n");
+    DO_SYSCALL0(SYS_GETPRIORITY);
+    serial_print("  priority="); print_uint64(ret); serial_print("\n");
+
+    // ── Test 7: SYS_SETPRIORITY ────────────────────────────────
+    serial_print("\n[TEST 7] SYS_SETPRIORITY(128):\n");
+    DO_SYSCALL1(SYS_SETPRIORITY, 128);
+    serial_print("  ret="); { char b[16]; int_to_str((int)ret, b); serial_print(b); }
+    serial_print(" (expect 0)\n");
+
+    DO_SYSCALL0(SYS_GETPRIORITY);
+    serial_print("  new_priority="); print_uint64(ret); serial_print(" (expect 128)\n");
+
+    // ── Test 8: SYS_UPTIME / SYS_GETTICKS ─────────────────────
+    serial_print("\n[TEST 8] SYS_UPTIME & SYS_GETTICKS:\n");
+    DO_SYSCALL0(SYS_UPTIME);
+    serial_print("  uptime_ticks="); print_uint64(ret); serial_print("\n");
+    DO_SYSCALL0(SYS_GETTICKS);
+    serial_print("  getticks="); print_uint64(ret); serial_print("\n");
+
+    // ── Test 9: SYS_SLEEP ──────────────────────────────────────
+    serial_print("\n[TEST 9] SYS_SLEEP(10 ticks):\n");
+    uint64_t before = get_system_ticks();
+    DO_SYSCALL1(SYS_SLEEP, 10);
+    uint64_t after  = get_system_ticks();
+    serial_print("  ret="); { char b[16]; int_to_str((int)ret, b); serial_print(b); }
+    serial_print("  elapsed="); print_uint64(after - before); serial_print(" ticks\n");
+
+    // ── Test 10: SYS_YIELD ─────────────────────────────────────
+    serial_print("\n[TEST 10] SYS_YIELD:\n");
+    DO_SYSCALL0(SYS_YIELD);
+    serial_print("  ret="); { char b[16]; int_to_str((int)ret, b); serial_print(b); }
+    serial_print(" (expect 0)\n");
+
+    // ── Test 11: SYS_DEBUG ─────────────────────────────────────
+    serial_print("\n[TEST 11] SYS_DEBUG:\n");
+    DO_SYSCALL1(SYS_DEBUG, "Hello from SYS_DEBUG test!");
+    serial_print("  ret="); { char b[16]; int_to_str((int)ret, b); serial_print(b); }
+    serial_print(" (expect 0)\n");
+
+    // ── Test 12: SYS_OPEN / SYS_CLOSE ─────────────────────────
+    serial_print("\n[TEST 12] SYS_OPEN(\"/dev/serial0\", O_RDWR):\n");
+    DO_SYSCALL2(SYS_OPEN, "/dev/serial0", O_RDWR);
+    serial_print("  fd="); { char b[16]; int_to_str((int)ret, b); serial_print(b); }
+    serial_print(" (expect >=3)\n");
+    int open_fd = (int)ret;
+
+    if ((int64_t)ret >= 3) {
+        serial_print("\n[TEST 12b] SYS_CLOSE(fd):\n");
+        DO_SYSCALL1(SYS_CLOSE, open_fd);
+        serial_print("  ret="); { char b[16]; int_to_str((int)ret, b); serial_print(b); }
+        serial_print(" (expect 0)\n");
+    }
+
+    // ── Test 13: SYS_CLOSE – gecersiz fd ───────────────────────
+    serial_print("\n[TEST 13] SYS_CLOSE(stdin fd=0, expect EBADF):\n");
+    DO_SYSCALL1(SYS_CLOSE, 0);
+    serial_print("  ret="); { char b[16]; int_to_str((int)ret, b); serial_print(b); }
+    serial_print(" (expect -5)\n");
+
+    // ── Test 14: SYS_SBRK ──────────────────────────────────────
+    serial_print("\n[TEST 14] SYS_SBRK(0) – brk sorgula:\n");
+    DO_SYSCALL1(SYS_SBRK, 0);
+    serial_print("  current_brk=0x"); print_hex64(ret); serial_print("\n");
+
+    serial_print("\n[TEST 14b] SYS_SBRK(4096) – heap'i 4KB buyut:\n");
+    uint64_t old_brk = ret;
+    DO_SYSCALL1(SYS_SBRK, 4096);
+    serial_print("  old_brk=0x"); print_hex64(ret);
+    if (ret == old_brk) serial_print(" (ok, returned old_brk)\n");
+    else                serial_print(" (unexpected!)\n");
+
+    // ── Test 15: Bilinmeyen syscall ────────────────────────────
+    serial_print("\n[TEST 15] Unknown syscall (999, expect ENOSYS=-2):\n");
+    DO_SYSCALL0(999);
+    serial_print("  ret="); { char b[16]; int_to_str((int)ret, b); serial_print(b); }
+    serial_print(" (expect -2)\n");
+
+    serial_print("\n========================================\n");
+    serial_print("[SYSCALL TEST] All tests completed.\n");
+    serial_print("========================================\n\n");
+
+#undef DO_SYSCALL0
+#undef DO_SYSCALL1
+#undef DO_SYSCALL2
+#undef DO_SYSCALL3
 }

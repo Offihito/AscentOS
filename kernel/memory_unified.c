@@ -750,6 +750,28 @@ void* kcalloc(size_t num, size_t size) {
 }
 
 // ============================================================================
+// SBRK Interface – SYS_SBRK syscall icin
+// heap_current: son alloc pointer'i (brk degeri olarak kullanilir)
+// ============================================================================
+
+uint64_t kmalloc_get_brk(void) {
+    return (uint64_t)heap_current;
+}
+
+// new_brk: heap_current'ten buyuk olmali, MAX_HEAP_SIZE'i asmamali.
+// Donus: yeni brk | (uint64_t)-1 hata
+uint64_t kmalloc_set_brk(uint64_t new_brk) {
+    if (new_brk < (uint64_t)heap_current)                    return (uint64_t)-1;
+    if (new_brk > (uint64_t)heap_start + MAX_HEAP_SIZE)      return (uint64_t)-1;
+    if (new_brk > (uint64_t)heap_end) {
+        heap_end = (uint8_t*)new_brk;
+        heap_stats.heap_expansions++;
+    }
+    heap_current = (uint8_t*)new_brk;
+    return (uint64_t)heap_current;
+}
+
+// ============================================================================
 // GUI-Compatible Aliases
 // ============================================================================
 
