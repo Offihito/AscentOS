@@ -71,6 +71,14 @@ framebuffer_width:  dd 0
 framebuffer_height: dd 0
 framebuffer_bpp:    db 0
 
+; Multiboot2 memory map bilgisi (C tarafından okunur)
+global multiboot_mmap_addr
+global multiboot_mmap_entry_size
+global multiboot_mmap_total_size
+multiboot_mmap_addr:       dq 0   ; memory map entry dizisinin fiziksel adresi
+multiboot_mmap_entry_size: dd 0   ; her entry'nin boyutu (byte)
+multiboot_mmap_total_size: dd 0   ; toplam entry verisi boyutu (byte)
+
 ; ============================================================================
 ; GDT - 64-bit  (Ring-0 + Ring-3 + TSS)
 ;
@@ -273,11 +281,38 @@ parse_multiboot_info:
     jz .done
     cmp eax, 8
     je .found_framebuffer
+    cmp eax, 6
+    je .found_mmap
     mov ecx, [esi + 4]
     add esi, ecx
     add esi, 7
     and esi, ~7
     jmp .tag_loop
+
+    ; -----------------------------------------------
+    ; Multiboot2 Memory Map Tag (type=6) layout:
+    ;   +0  uint32 type       = 6
+    ;   +4  uint32 size       = tag toplam boyutu
+    ;   +8  uint32 entry_size = her entry boyutu (genellikle 24)
+    ;   +12 uint32 entry_version = 0
+    ;   +16 entry[]          = memory map entry dizisi
+    ; -----------------------------------------------
+.found_mmap:
+    mov eax, esi
+    add eax, 16             ; entry dizisinin baslangici
+    mov [multiboot_mmap_addr], eax
+    mov eax, [esi + 8]      ; entry_size
+    mov [multiboot_mmap_entry_size], eax
+    mov ecx, [esi + 4]      ; tag toplam boyutu
+    sub ecx, 16             ; entry verisi boyutu = toplam - header(16)
+    mov [multiboot_mmap_total_size], ecx
+    ; tag'i parse etmeye devam et (framebuffer da olabilir)
+    mov ecx, [esi + 4]
+    add esi, ecx
+    add esi, 7
+    and esi, ~7
+    jmp .tag_loop
+
 .found_framebuffer:
     mov eax, [esi + 8]
     mov [framebuffer_addr], eax

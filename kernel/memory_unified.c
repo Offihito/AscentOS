@@ -59,8 +59,8 @@ static struct {
     uint64_t block_splits;
 } heap_stats = {0};
 
-// System memory info
-static uint64_t total_memory_kb = 512 * 1024; // Default 512MB in KB
+// System memory info (gerçek değer pmm_init'te doldurulur)
+static uint64_t total_memory_kb = 0;
 static int use_static_heap = 0;
 
 // PMM enabled flag
@@ -70,8 +70,9 @@ static int pmm_enabled = 0;
 // PMM (Physical Memory Manager) - Bitmap Implementation
 // ============================================================================
 
-#define MAX_MEMORY_SIZE (512 * 1024 * 1024)  // 512MB max
-#define BITMAP_SIZE (MAX_MEMORY_SIZE / PAGE_SIZE / 8)
+// 4GB'a kadar destek (128KB bitmap)
+#define MAX_MEMORY_SIZE (4ULL * 1024ULL * 1024ULL * 1024ULL)  // 4GB
+#define BITMAP_SIZE     (MAX_MEMORY_SIZE / PAGE_SIZE / 8ULL)   // 131072 bytes
 
 // Bitmap (each bit represents a 4KB frame)
 static unsigned char bitmap[BITMAP_SIZE];
@@ -180,6 +181,9 @@ void pmm_init(struct memory_map_entry* mmap, unsigned int mmap_count) {
     }
     
     total_frames = addr_to_frame_index(max_addr);
+    
+    // total_memory_kb'yi gerçek değerle güncelle (get_total_memory() için)
+    total_memory_kb = (max_addr + 1023) / 1024;
     
     // Mark all frames as used initially
     mark_all_used();
