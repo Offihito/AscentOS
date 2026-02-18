@@ -45,8 +45,34 @@ typedef enum {
     WMHIT_TITLE,
     WMHIT_MINIMIZE,
     WMHIT_MAXIMIZE,
-    WMHIT_CLOSE
+    WMHIT_CLOSE,
+    // Resize edges
+    WMHIT_RESIZE_N,
+    WMHIT_RESIZE_S,
+    WMHIT_RESIZE_E,
+    WMHIT_RESIZE_W,
+    WMHIT_RESIZE_NE,
+    WMHIT_RESIZE_NW,
+    WMHIT_RESIZE_SE,
+    WMHIT_RESIZE_SW
 } WMHitResult;
+
+// Resize grab state
+typedef struct {
+    bool active;
+    WMHitResult edge;       // Which edge/corner being dragged
+    int start_mouse_x;      // Screen coords at grab start
+    int start_mouse_y;
+    int start_win_x;        // Window position at grab start
+    int start_win_y;
+    int start_win_w;        // Window size at grab start
+    int start_win_h;
+    int window_id;
+} WMResizeState;
+
+// Minimum window dimensions
+#define WM_MIN_WIDTH  120
+#define WM_MIN_HEIGHT (TITLE_BAR_HEIGHT + BORDER_WIDTH * 2 + 20)
 
 // Button hover state
 typedef struct {
@@ -75,6 +101,7 @@ typedef struct {
     int      screen_width;
     int      screen_height;
     int      focused_window_id;
+    WMResizeState resize;   // Active resize grab state
 } WindowManager;
 
 // Core functions
@@ -113,6 +140,20 @@ WMHitResult wm_hit_test(int win_width, int win_height, int local_x, int local_y)
 // Click handling
 void wm_handle_click(Compositor* comp, WindowManager* wm, Taskbar* taskbar,
                     int window_id, int local_x, int local_y);
+
+// Resize functions
+// Begin a resize drag (call on mouse-down when hit test returns a WMHIT_RESIZE_* edge)
+void wm_begin_resize(WindowManager* wm, Compositor* comp, int window_id,
+                     WMHitResult edge, int screen_x, int screen_y);
+
+// Update resize during mouse-move (call every mouse move while resize is active)
+void wm_update_resize(WindowManager* wm, Compositor* comp, int screen_x, int screen_y);
+
+// Finish resize (call on mouse-up)
+void wm_end_resize(WindowManager* wm);
+
+// Returns true if a resize drag is currently in progress
+bool wm_is_resizing(const WindowManager* wm);
 
 // Drawing functions (internal)
 void wm_draw_window_frame(Compositor* comp, int layer_index, WMWindow* win);

@@ -1,6 +1,3 @@
-// ============================================================================
-// wm64.c - SerenityOS Style Window Manager Implementation
-// ============================================================================
 #include "wm64.h"
 #include <stddef.h>
 
@@ -30,11 +27,6 @@ static WMWindow* wm_find(WindowManager* wm, int window_id) {
     }
     return NULL;
 }
-
-// ============================================================================
-// SerenityOS Style Drawing Functions
-// ============================================================================
-
 // Draw 3D raised bevel (classic Windows 95/SerenityOS style)
 static void draw_raised_box(Layer* layer, int x, int y, int w, int h) {
     // Top and left highlights
@@ -214,6 +206,8 @@ void wm_init(WindowManager* wm, int screen_width, int screen_height) {
     wm->screen_width = screen_width;
     wm->screen_height = screen_height;
     wm->focused_window_id = -1;
+    wm->resize.active = false;
+    wm->resize.window_id = -1;
     
     for (int i = 0; i < MAX_WINDOWS; i++) {
         wm->windows[i].used = false;
@@ -490,9 +484,34 @@ int wm_get_window_at(Compositor* comp, WindowManager* wm,
 }
 
 WMHitResult wm_hit_test(int win_width, int win_height, int local_x, int local_y) {
-    (void)win_height; // Not used currently
-    
-    // Outside title bar
+    // ----------------------------------------------------------------
+    // Resize border/corner detection (highest priority, checked first)
+    // ----------------------------------------------------------------
+    bool on_left   = (local_x >= 0 && local_x < BORDER_WIDTH);
+    bool on_right  = (local_x >= win_width  - BORDER_WIDTH && local_x < win_width);
+    bool on_top    = (local_y >= 0 && local_y < BORDER_WIDTH);
+    bool on_bottom = (local_y >= win_height - BORDER_WIDTH && local_y < win_height);
+
+    // Corner hit zones are slightly larger (4px) for easier grabbing
+    #define CORNER_ZONE 8
+    bool near_left   = (local_x >= 0 && local_x < CORNER_ZONE);
+    bool near_right  = (local_x >= win_width  - CORNER_ZONE && local_x < win_width);
+    bool near_top    = (local_y >= 0 && local_y < CORNER_ZONE);
+    bool near_bottom = (local_y >= win_height - CORNER_ZONE && local_y < win_height);
+
+    if ((on_top || on_left) && near_top && near_left)   return WMHIT_RESIZE_NW;
+    if ((on_top || on_right) && near_top && near_right)  return WMHIT_RESIZE_NE;
+    if ((on_bottom || on_left) && near_bottom && near_left)  return WMHIT_RESIZE_SW;
+    if ((on_bottom || on_right) && near_bottom && near_right) return WMHIT_RESIZE_SE;
+    if (on_top)    return WMHIT_RESIZE_N;
+    if (on_bottom) return WMHIT_RESIZE_S;
+    if (on_left)   return WMHIT_RESIZE_W;
+    if (on_right)  return WMHIT_RESIZE_E;
+    #undef CORNER_ZONE
+
+    // ----------------------------------------------------------------
+    // Title bar / buttons
+    // ----------------------------------------------------------------
     if (local_y < BORDER_WIDTH || local_y >= BORDER_WIDTH + TITLE_BAR_HEIGHT)
         return WMHIT_NONE;
     
@@ -554,4 +573,118 @@ void wm_handle_click(Compositor* comp, WindowManager* wm, Taskbar* taskbar,
         default:
             break;
     }
+}
+
+// ============================================================================
+// Resize Support
+// ============================================================================
+
+void wm_begin_resize(WindowManager* wm, Compositor* comp, int window_id,
+                     WMHitResult edge, int screen_x, int screen_y) {
+    WMWindow* win = wm_find(wm, window_id);
+    if (!win || win->state != WINDOW_STATE_NORMAL) return;
+
+    Layer* layer = &comp->layers[win->layer_index];
+
+    wm->resize.active        = true;
+    wm->resize.edge          = edge;
+    wm->resize.window_id     = window_id;
+    wm->resize.start_mouse_x = screen_x;
+    wm->resize.start_mouse_y = screen_y;
+    wm->resize.start_win_x   = layer->bounds.x;
+    wm->resize.start_win_y   = layer->bounds.y;
+    wm->resize.start_win_w   = layer->bounds.width;
+    wm->resize.start_win_h   = layer->bounds.height;
+
+    wm_focus_window(comp, wm, window_id);
+}
+
+void wm_update_resize(WindowManager* wm, Compositor* comp,
+                      int screen_x, int screen_y) {
+    if (!wm->resize.active) return;
+
+    WMResizeState* rs = &wm->resize;
+    WMWindow* win = wm_find(wm, rs->window_id);
+    if (!win) { rs->active = false; return; }
+
+    int dx = screen_x - rs->start_mouse_x;
+    int dy = screen_y - rs->start_mouse_y;
+
+    int new_x = rs->start_win_x;
+    int new_y = rs->start_win_y;
+    int new_w = rs->start_win_w;
+    int new_h = rs->start_win_h;
+
+    switch (rs->edge) {
+        case WMHIT_RESIZE_E:  new_w = rs->start_win_w + dx;  break;
+        case WMHIT_RESIZE_S:  new_h = rs->start_win_h + dy;  break;
+        case WMHIT_RESIZE_W:
+            new_w = rs->start_win_w - dx;
+            new_x = rs->start_win_x + dx;
+            break;
+        case WMHIT_RESIZE_N:
+            new_h = rs->start_win_h - dy;
+            new_y = rs->start_win_y + dy;
+            break;
+        case WMHIT_RESIZE_SE:
+            new_w = rs->start_win_w + dx;
+            new_h = rs->start_win_h + dy;
+            break;
+        case WMHIT_RESIZE_SW:
+            new_w = rs->start_win_w - dx;
+            new_x = rs->start_win_x + dx;
+            new_h = rs->start_win_h + dy;
+            break;
+        case WMHIT_RESIZE_NE:
+            new_w = rs->start_win_w + dx;
+            new_h = rs->start_win_h - dy;
+            new_y = rs->start_win_y + dy;
+            break;
+        case WMHIT_RESIZE_NW:
+            new_w = rs->start_win_w - dx;
+            new_x = rs->start_win_x + dx;
+            new_h = rs->start_win_h - dy;
+            new_y = rs->start_win_y + dy;
+            break;
+        default: return;
+    }
+
+    /* Enforce minimum size, anchoring the stationary edge */
+    if (new_w < WM_MIN_WIDTH) {
+        if (rs->edge == WMHIT_RESIZE_W ||
+            rs->edge == WMHIT_RESIZE_NW ||
+            rs->edge == WMHIT_RESIZE_SW)
+            new_x = rs->start_win_x + rs->start_win_w - WM_MIN_WIDTH;
+        new_w = WM_MIN_WIDTH;
+    }
+    if (new_h < WM_MIN_HEIGHT) {
+        if (rs->edge == WMHIT_RESIZE_N ||
+            rs->edge == WMHIT_RESIZE_NW ||
+            rs->edge == WMHIT_RESIZE_NE)
+            new_y = rs->start_win_y + rs->start_win_h - WM_MIN_HEIGHT;
+        new_h = WM_MIN_HEIGHT;
+    }
+
+    /* Clamp so window stays on-screen */
+    if (new_x < 0) new_x = 0;
+    if (new_y < 0) new_y = 0;
+    /* Sağ/alt kenar ekranı taşmasın */
+    if (new_x + new_w > wm->screen_width)  new_w = wm->screen_width  - new_x;
+    if (new_y + new_h > wm->screen_height - 40) new_h = wm->screen_height - 40 - new_y;
+    /* Minimum tekrar kontrol (clamp sonrası negatife düşebilir) */
+    if (new_w < WM_MIN_WIDTH)  new_w = WM_MIN_WIDTH;
+    if (new_h < WM_MIN_HEIGHT) new_h = WM_MIN_HEIGHT;
+
+    compositor_move_layer(comp, win->layer_index, new_x, new_y);
+    compositor_resize_layer(comp, win->layer_index, new_w, new_h);
+    wm_draw_window_frame(comp, win->layer_index, win);
+}
+
+void wm_end_resize(WindowManager* wm) {
+    wm->resize.active    = false;
+    wm->resize.window_id = -1;
+}
+
+bool wm_is_resizing(const WindowManager* wm) {
+    return wm->resize.active;
 }

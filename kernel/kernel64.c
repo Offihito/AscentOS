@@ -352,6 +352,7 @@ void kernel_main(uint64_t multiboot_info) {
     int  dragging_win_id  = -1;
     int  drag_anchor_mouse_x = 0, drag_anchor_mouse_y = 0;
     int  drag_anchor_win_x   = 0, drag_anchor_win_y   = 0;
+    /* Resize durumu wm64 içinde g_wm.resize olarak tutulur */
 
     Color cursor_buffer[20 * 18];
     int  prev_x = -100, prev_y = -100;
@@ -388,7 +389,31 @@ void kernel_main(uint64_t multiboot_info) {
         // Mouse hareketi
         bool mouse_moved = (mouse.x != last_mouse_x || mouse.y != last_mouse_y);
         if (mouse_moved) {
-            if (dragging_win_id >= 0) {
+            if (wm_is_resizing(&g_wm)) {
+                // Cursor izini temizle — render öncesi eski konumu geri yaz
+                if (cursor_needs_restore && prev_x >= 0)
+                    for (int row = 0; row < 20; row++)
+                        for (int col = 0; col < 18; col++)
+                            if (gui_is_valid_coord(prev_x + col, prev_y + row))
+                                gui_put_pixel(prev_x + col, prev_y + row,
+                                              cursor_buffer[row * 18 + col]);
+                cursor_needs_restore = false;
+                prev_x = -100; prev_y = -100;
+
+                wm_update_resize(&g_wm, &g_compositor, mouse.x, mouse.y);
+                compositor_render_dirty(&g_compositor);
+
+                // Yeni konumda cursor buffer'ı kaydet ve çiz
+                for (int row = 0; row < 20; row++)
+                    for (int col = 0; col < 18; col++)
+                        if (gui_is_valid_coord(mouse.x + col, mouse.y + row))
+                            cursor_buffer[row * 18 + col] =
+                                gui_get_pixel(mouse.x + col, mouse.y + row);
+                gui_draw_cursor(mouse.x, mouse.y);
+                prev_x = mouse.x; prev_y = mouse.y;
+                cursor_needs_restore = true;
+
+            } else if (dragging_win_id >= 0) {
                 int layer_idx = wm_get_layer_index(&g_wm, dragging_win_id);
                 if (layer_idx >= 0) {
                     int new_x = drag_anchor_win_x + (mouse.x - drag_anchor_mouse_x);
@@ -425,13 +450,20 @@ void kernel_main(uint64_t multiboot_info) {
                     WMHitResult hit = layer
                         ? wm_hit_test(layer->bounds.width, layer->bounds.height, local_x, local_y)
                         : WMHIT_NONE;
-                    if (hit == WMHIT_TITLE) {
+
+                    if (hit >= WMHIT_RESIZE_N) {
+                        // Kenar/köşe yakalandı — resize başlat
+                        wm_begin_resize(&g_wm, &g_compositor, win_id, hit, mouse.x, mouse.y);
+                    } else if (hit == WMHIT_TITLE) {
+                        // Başlık çubuğu — pencereyi sürükle
                         dragging_win_id     = win_id;
                         drag_anchor_mouse_x = mouse.x;
                         drag_anchor_mouse_y = mouse.y;
                         drag_anchor_win_x   = layer->bounds.x;
                         drag_anchor_win_y   = layer->bounds.y;
+                        wm_focus_window(&g_compositor, &g_wm, win_id);
                     } else {
+                        // Düğme tıklamaları (minimize/maximize/close)
                         wm_handle_click(&g_compositor, &g_wm, &taskbar, win_id, local_x, local_y);
                         needs_full_redraw = true;
                     }
@@ -439,8 +471,14 @@ void kernel_main(uint64_t multiboot_info) {
             }
         }
 
-        if (!mouse.left_button && last_left_button)
+        if (!mouse.left_button && last_left_button) {
+            bool was_resizing = wm_is_resizing(&g_wm);
             dragging_win_id = -1;
+            wm_end_resize(&g_wm);
+            // Resize bitti: gölge ve arka planı düzgün çizmek için tam redraw
+            if (was_resizing)
+                needs_full_redraw = true;
+        }
 
         // Yeni pencere isteği (klavyeden)
         if (gui_request_new_window) {
