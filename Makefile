@@ -83,7 +83,7 @@ USERLAND_ASFLAGS := -f elf64
 USERLAND_LDFLAGS := -T userland/libc/user.ld -static -nostdlib
 
 USERLAND_CRT0 := userland/libc/crt0.o
-USERLAND_APPS := hello fork_test stdio_test math_test
+USERLAND_APPS := hello fork_test stdio_test math_test calculator
 USERLAND_ELFS := $(addprefix userland/out/, $(addsuffix .elf, $(USERLAND_APPS)))
 
 .PRECIOUS: userland/out/%.o userland/out/%.elf userland/libc/crt0.o
@@ -114,6 +114,7 @@ install-userland: userland
 	mcopy -i disk.img@@1048576 -o userland/out/fork_test.elf  ::FORKTEST.ELF
 	mcopy -i disk.img@@1048576 -o userland/out/stdio_test.elf ::STDIO.ELF
 	mcopy -i disk.img@@1048576 -o userland/out/math_test.elf  ::MATHTEST.ELF
+	mcopy -i disk.img@@1048576 -o userland/out/calculator.elf ::CALC.ELF
 	@echo "✓ Yazildi:"
 	@mdir -i disk.img@@1048576 :: 2>/dev/null | grep -i elf || true
 
@@ -233,6 +234,7 @@ run-text: AscentOS-Text.iso disk.img install-userland
 	@echo "  elfload FORKTEST.ELF"
 	@echo "  elfload STDIOTEST.ELF"
 	@echo "  elfload MATHTEST.ELF"
+	@echo "  elfload CALC.ELF"
 	@echo ""
 	qemu-system-x86_64 \
 	  -cdrom AscentOS-Text.iso \

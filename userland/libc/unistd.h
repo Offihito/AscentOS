@@ -32,6 +32,10 @@ static inline void sleep(int ticks) {
     syscall1(SYS_SLEEP, ticks);
 }
 
+static inline void yield(void) {
+    syscall1(5, 0);  // SYS_YIELD = 5
+}
+
 static inline pid_t fork(void) {
     long ret;
     __asm__ volatile (

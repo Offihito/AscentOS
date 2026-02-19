@@ -63,6 +63,37 @@ static char input_buffer[256];
 static int buffer_pos = 0;
 static int ctrl_pressed = 0;
 static int extended_key = 0;
+
+// ── Userland klavye ring buffer ───────────────
+// Userland task çalışıyorken tuşlar buraya gelir,
+// sys_read() buradan okur.
+#define KB_RING_SIZE 256
+static volatile char     kb_ring[KB_RING_SIZE];
+static volatile int      kb_ring_head = 0;  // yazma
+static volatile int      kb_ring_tail = 0;  // okuma
+static volatile int      kb_userland_mode = 0; // 1=userland aktif
+
+void kb_set_userland_mode(int on) { kb_userland_mode = on; }
+int  kb_userland_active(void)     { return kb_userland_mode; }
+
+// Ring buffer'a karakter yaz (IRQ handler'dan çağrılır)
+void kb_ring_push(char c) {
+    int next = (kb_ring_head + 1) % KB_RING_SIZE;
+    if (next != kb_ring_tail) {
+        kb_ring[kb_ring_head] = c;
+        kb_ring_head = next;
+    }
+
+}
+
+// Ring buffer'dan karakter oku (sys_read'den çağrılır)
+// Yoksa -1 döner
+int kb_ring_pop(void) {
+    if (kb_ring_head == kb_ring_tail) return -1;
+    char c = kb_ring[kb_ring_tail];
+    kb_ring_tail = (kb_ring_tail + 1) % KB_RING_SIZE;
+    return (unsigned char)c;
+}
 #endif
 
 // ============================================================================
@@ -504,34 +535,51 @@ void keyboard_handler64(void) {
     
     // Handle Enter key
     if (c == '\n') {
+        if (kb_userland_mode) {
+            // Userland aktif: newline ring'e gönder (karakterler zaten gönderildi)
+            kb_ring_push('\n');
+            putchar64('\n', VGA_WHITE);
+            outb(0x20, 0x20);
+            return;
+        }
+
         input_buffer[buffer_pos] = '\0';
-        
-        // Debug: print to serial to verify keyboard is working
         extern void serial_print(const char* str);
         serial_print("[KEYBOARD] Enter pressed, command: ");
         serial_print(input_buffer);
         serial_print("\n");
-        
         process_command64(input_buffer);
         buffer_pos = 0;
         outb(0x20, 0x20);
         return;
     }
-    
+
     // Handle Backspace
     if (c == '\b') {
-        if (buffer_pos > 0) {
-            buffer_pos--;
-            putchar64('\b', VGA_WHITE);
+        if (kb_userland_mode) {
+            // Userland: sadece ring'e gönder
+            // VGA echo'yu calculator/readline halleder (buf boşsa basmaz)
+            kb_ring_push('\b');
+        } else {
+            if (buffer_pos > 0) {
+                buffer_pos--;
+                putchar64('\b', VGA_WHITE);
+            }
         }
         outb(0x20, 0x20);
         return;
     }
-    
+
     // Add character to buffer
     if (buffer_pos < 255) {
-        input_buffer[buffer_pos++] = c;
-        putchar64(c, VGA_WHITE);
+        if (kb_userland_mode) {
+            // Userland: direkt ring'e gönder + VGA echo
+            kb_ring_push(c);
+            putchar64(c, VGA_WHITE);  // kullanıcı yazdığını görsün
+        } else {
+            input_buffer[buffer_pos++] = c;
+            putchar64(c, VGA_WHITE);
+        }
     }
     
     outb(0x20, 0x20);

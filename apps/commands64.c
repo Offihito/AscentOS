@@ -1640,6 +1640,10 @@ void cmd_exec(const char* args, CommandOutput* output) {
         return;
     }
 
+    // Klavyeyi userland task'a devret
+    extern void kb_set_userland_mode(int on);
+    kb_set_userland_mode(1);
+
     // ── 7. Özet ──────────────────────────────────────────────
     output_add_empty_line(output);
     output_add_line(output, "================================================", VGA_GREEN);

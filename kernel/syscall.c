@@ -403,15 +403,41 @@ static void sys_read(syscall_frame_t* frame) {
     if (len > 65536)                 { frame->rax = SYSCALL_ERR_INVAL; return; }
     if (fd == 1 || fd == 2)         { frame->rax = SYSCALL_ERR_BADF;  return; }
 
-    // stdin: doğrudan serial RX
+    // stdin: klavye ring buffer (userland) veya serial RX (kernel shell)
     if (fd == 0) {
+        extern int kb_ring_pop(void);
+        extern int kb_userland_active(void);
+
         uint64_t count = 0;
-        while (count < len) {
-            if (!serial_data_ready()) break;
-            char c = serial_getchar();
-            buf[count++] = c;
-            if (c == '\n') break;
+
+        if (kb_userland_active()) {
+            // Userland modu: klavye ring buffer'dan oku
+            int ch = kb_ring_pop();
+            if (ch < 0) {
+                frame->rax = 0;
+                return;
+            }
+            // Debug: hangi karakteri okuduk
+            serial_print("[READ] ch=");
+            { char tmp[4]; tmp[0]=(char)ch; tmp[1]='\0'; serial_print(tmp); }
+            serial_print("\n");
+            buf[count++] = (char)ch;
+            while (count < len) {
+                ch = kb_ring_pop();
+                if (ch < 0) break;
+                buf[count++] = (char)ch;
+                if ((char)ch == '\n') break;
+            }
+        } else {
+            // Kernel shell modu: eski serial okuma
+            while (count < len) {
+                if (!serial_data_ready()) break;
+                char c = serial_getchar();
+                buf[count++] = c;
+                if (c == '\n') break;
+            }
         }
+
         frame->rax = count;
         return;
     }
@@ -473,6 +499,9 @@ static void sys_exit(syscall_frame_t* frame) {
         serial_print(" code=");
         { char b[16]; int_to_str(exit_code, b); serial_print(b); }
         serial_print("\n");
+        // Userland bitti → klavyeyi kernel shell'e geri ver
+        extern void kb_set_userland_mode(int on);
+        kb_set_userland_mode(0);
         task_exit();
     }
     frame->rax = SYSCALL_OK;
