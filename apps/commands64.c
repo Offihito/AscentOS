@@ -1806,31 +1806,40 @@ void cmd_syscallinfo(const char* args, CommandOutput* output) {
     // ── Syscall Tablosu ───────────────────────────────────────
     output_add_empty_line(output);
     output_add_line(output, "── Syscall Table ────────────────────", VGA_YELLOW);
-    output_add_line(output, " 1  SYS_WRITE       write(fd,buf,len)     -> bytes", VGA_GREEN);
-    output_add_line(output, " 2  SYS_READ        read(fd,buf,len)      -> bytes", VGA_GREEN);
-    output_add_line(output, " 3  SYS_EXIT        exit(code)            -> noreturn", VGA_GREEN);
-    output_add_line(output, " 4  SYS_GETPID      getpid()              -> pid", VGA_GREEN);
-    output_add_line(output, " 5  SYS_YIELD       yield()               -> 0", VGA_GREEN);
-    output_add_line(output, " 6  SYS_SLEEP       sleep(ticks)          -> 0", VGA_GREEN);
-    output_add_line(output, " 7  SYS_UPTIME      uptime()              -> ticks", VGA_GREEN);
-    output_add_line(output, " 8  SYS_DEBUG       debug(msg)            -> 0", VGA_GREEN);
-    output_add_line(output, " 9  SYS_OPEN        open(path,flags)      -> fd", VGA_GREEN);
-    output_add_line(output, "10  SYS_CLOSE       close(fd)             -> 0", VGA_GREEN);
-    output_add_line(output, "11  SYS_GETPPID     getppid()             -> ppid", VGA_GREEN);
-    output_add_line(output, "12  SYS_SBRK        sbrk(incr)            -> old_brk", VGA_GREEN);
-    output_add_line(output, "13  SYS_GETPRIORITY getpriority()         -> 0-255", VGA_GREEN);
-    output_add_line(output, "14  SYS_SETPRIORITY setpriority(prio)     -> 0", VGA_GREEN);
-    output_add_line(output, "15  SYS_GETTICKS    getticks()            -> ticks", VGA_GREEN);
+    output_add_line(output, " 1  SYS_WRITE       write(fd,buf,len)          -> bytes", VGA_GREEN);
+    output_add_line(output, " 2  SYS_READ        read(fd,buf,len)           -> bytes", VGA_GREEN);
+    output_add_line(output, " 3  SYS_EXIT        exit(code)                 -> noreturn", VGA_GREEN);
+    output_add_line(output, " 4  SYS_GETPID      getpid()                   -> pid", VGA_GREEN);
+    output_add_line(output, " 5  SYS_YIELD       yield()                    -> 0", VGA_GREEN);
+    output_add_line(output, " 6  SYS_SLEEP       sleep(ticks)               -> 0", VGA_GREEN);
+    output_add_line(output, " 7  SYS_UPTIME      uptime()                   -> ticks", VGA_GREEN);
+    output_add_line(output, " 8  SYS_DEBUG       debug(msg)                 -> 0", VGA_GREEN);
+    output_add_line(output, " 9  SYS_OPEN        open(path,flags)           -> fd", VGA_GREEN);
+    output_add_line(output, "10  SYS_CLOSE       close(fd)                  -> 0", VGA_GREEN);
+    output_add_line(output, "11  SYS_GETPPID     getppid()                  -> ppid", VGA_GREEN);
+    output_add_line(output, "12  SYS_SBRK        sbrk(incr)                 -> old_brk", VGA_GREEN);
+    output_add_line(output, "13  SYS_GETPRIORITY getpriority()              -> 0-255", VGA_GREEN);
+    output_add_line(output, "14  SYS_SETPRIORITY setpriority(prio)          -> 0", VGA_GREEN);
+    output_add_line(output, "15  SYS_GETTICKS    getticks()                 -> ticks", VGA_GREEN);
+    output_add_line(output, "── v3 New ───────────────────────────", VGA_YELLOW);
+    output_add_line(output, "16  SYS_MMAP        mmap(addr,len,prot,fl,fd,off) -> addr", VGA_CYAN);
+    output_add_line(output, "17  SYS_MUNMAP      munmap(addr,len)           -> 0", VGA_CYAN);
+    output_add_line(output, "18  SYS_BRK         brk(addr)                  -> new_brk", VGA_CYAN);
+    output_add_line(output, "19  SYS_FORK        fork()                     -> pid|0", VGA_CYAN);
+    output_add_line(output, "20  SYS_EXECVE      execve(path,argv,envp)     -> err", VGA_CYAN);
+    output_add_line(output, "21  SYS_WAITPID     waitpid(pid,*st,opts)      -> pid", VGA_CYAN);
+    output_add_line(output, "22  SYS_PIPE        pipe(fd[2])                -> 0", VGA_CYAN);
+    output_add_line(output, "23  SYS_DUP2        dup2(old,new)              -> new", VGA_CYAN);
 
     output_add_empty_line(output);
-    // Hata kodlari
     output_add_line(output, "── Error Codes ──────────────────────", VGA_YELLOW);
-    output_add_line(output, "  0  OK       -1 EINVAL  -2 ENOSYS", VGA_WHITE);
-    output_add_line(output, " -3  EPERM    -4 ENOENT  -5 EBADF", VGA_WHITE);
-    output_add_line(output, " -6  ENOMEM   -7 EBUSY   -8 EMFILE  -9 EAGAIN", VGA_WHITE);
+    output_add_line(output, "  0  OK      -1 EINVAL  -2 ENOSYS  -3 EPERM", VGA_WHITE);
+    output_add_line(output, " -4  ENOENT  -5 EBADF   -6 ENOMEM  -7 EBUSY", VGA_WHITE);
+    output_add_line(output, " -8  EMFILE  -9 EAGAIN -10 ECHILD -11 EFAULT", VGA_WHITE);
+    output_add_line(output, "-12  ENOSPC -13 ERANGE", VGA_WHITE);
 
     output_add_empty_line(output);
-    output_add_line(output, "Run 'syscalltest' to execute all 15 tests.", VGA_GREEN);
+    output_add_line(output, "Run 'syscalltest' to execute all 23 tests.", VGA_GREEN);
 
     #undef HEX64
     #undef HEX16
@@ -1877,14 +1886,14 @@ static void sc_result(CommandOutput* output, int idx, const char* name,
 }
 
 // ============================================================
-// CMD_SYSCALLTEST – tum syscall'lari test eder (15 test)
+// CMD_SYSCALLTEST – syscall test paketi v3 (23 test)
 //
-// ONEMLI NOTLAR:
-//   - SYS_WRITE serial'a yazar (VGA degil). Bu kasitli:
-//     VGA output_add_line ile yonetilir, karismamasi icin.
-//   - SYS_SLEEP testi 1 tick ile kisaltildi (scheduler_yield
-//     ile busy-wait yapilmaz; timer interrupt beklenir).
-//   - SYS_READ non-blocking: veri yoksa 0 doner, bu PASS sayilir.
+// NOTLAR:
+//   - SYS_WRITE serial'a yazar (VGA değil) — kasıtlı.
+//   - SYS_READ non-blocking; veri yoksa 0 döner = PASS.
+//   - SYS_FORK: kernel context'te smoke test; çocuk hemen exit eder.
+//   - SYS_MMAP: 6-arg syscall; R10 ile ayrı asm bloğu kullanılır.
+//   - SYS_EXECVE: stub olduğu için ENOSYS(-2) beklenir.
 // ============================================================
 void cmd_syscalltest(const char* args, CommandOutput* output) {
     (void)args;
@@ -1895,61 +1904,64 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         return;
     }
 
-    output_add_line(output, "=== SYSCALL Test Suite v2 (15 tests) ===", VGA_CYAN);
-    output_add_line(output, "  (SYS_WRITE output -> serial port, not VGA)", VGA_YELLOW);
+    output_add_line(output, "=== SYSCALL Test Suite v3 (23 tests) ===", VGA_CYAN);
+    output_add_line(output, "  (SYS_WRITE -> serial, SYS_FORK smoke only)", VGA_YELLOW);
     output_add_empty_line(output);
 
     uint64_t ret;
     int pass = 0, fail = 0;
     char tmp[32]; char line[96];
+    const char* hexc = "0123456789ABCDEF";
 
-    // ── [01] SYS_WRITE fd=1 (stdout -> serial) ────────────────
-    // Serial port'a yazilir; VGA'yi karistirmaz.
-    // Basari: return degeri == yazilan byte sayisi
+    #define HEX64S(v) do { \
+        tmp[0]='0'; tmp[1]='x'; \
+        for(int _i=0;_i<16;_i++) tmp[2+_i]=hexc[((v)>>(60-_i*4))&0xF]; \
+        tmp[18]='\0'; \
+    } while(0)
+
+    // ── [01] SYS_WRITE fd=1 ────────────────────────────────────
     static const char wbuf[] = "[SYS_WRITE fd=1 test]\n";
     uint64_t wlen = 22;
     _SC3(SYS_WRITE, 1, wbuf, wlen);
     sc_result(output, 1, "SYS_WRITE(fd=1)", (int64_t)ret,
               ret == wlen, "(serial out)", &pass, &fail);
 
-    // ── [02] SYS_WRITE fd=2 (stderr -> serial) ────────────────
+    // ── [02] SYS_WRITE fd=2 ────────────────────────────────────
     static const char ebuf[] = "[SYS_WRITE fd=2 test]\n";
     uint64_t elen = 22;
     _SC3(SYS_WRITE, 2, ebuf, elen);
     sc_result(output, 2, "SYS_WRITE(fd=2)", (int64_t)ret,
               ret == elen, "(serial out)", &pass, &fail);
 
-    // ── [03] SYS_WRITE fd=0 stdin – beklenti EBADF(-5) ────────
+    // ── [03] SYS_WRITE fd=0 stdin → EBADF ─────────────────────
     _SC3(SYS_WRITE, 0, wbuf, wlen);
     sc_result(output, 3, "SYS_WRITE(fd=0)", (int64_t)ret,
               (int64_t)ret == (int64_t)SYSCALL_ERR_BADF,
-              "expect EBADF(-5)", &pass, &fail);
+              "expect EBADF", &pass, &fail);
 
-    // ── [04] SYS_WRITE fd=99 gecersiz – beklenti EBADF(-5) ────
+    // ── [04] SYS_WRITE fd=99 geçersiz → EBADF ─────────────────
     _SC3(SYS_WRITE, 99, wbuf, wlen);
     sc_result(output, 4, "SYS_WRITE(fd=99)", (int64_t)ret,
               (int64_t)ret == (int64_t)SYSCALL_ERR_BADF,
-              "expect EBADF(-5)", &pass, &fail);
+              "expect EBADF", &pass, &fail);
 
-    // ── [05] SYS_READ fd=0 stdin non-blocking ─────────────────
-    // Serial RX tamponu bos olabilir: 0 bytes = gecerli
+    // ── [05] SYS_READ fd=0 non-blocking ───────────────────────
     char rbuf[32];
     _SC3(SYS_READ, 0, rbuf, 16);
     {
         int ok = ((int64_t)ret >= 0);
         str_cpy(line, "[05] SYS_READ(fd=0) bytes=");
         int_to_str((int)ret, tmp); str_concat(line, tmp);
-        str_concat(line, " (0=no data=OK)");
-        str_concat(line, ok ? "  PASS" : "  FAIL");
+        str_concat(line, ok ? " (ok)  PASS" : "  FAIL");
         output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
-    // ── [06] SYS_READ fd=1 stdout – beklenti EBADF(-5) ────────
+    // ── [06] SYS_READ fd=1 → EBADF ────────────────────────────
     _SC3(SYS_READ, 1, rbuf, 16);
     sc_result(output, 6, "SYS_READ(fd=1)", (int64_t)ret,
               (int64_t)ret == (int64_t)SYSCALL_ERR_BADF,
-              "expect EBADF(-5)", &pass, &fail);
+              "expect EBADF", &pass, &fail);
 
     // ── [07] SYS_GETPID ────────────────────────────────────────
     _SC0(SYS_GETPID);
@@ -2000,39 +2012,29 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
     sc_result(output, 11, "SYS_YIELD", (int64_t)ret,
               (int64_t)ret == 0, "expect 0", &pass, &fail);
 
-    // ── [12] SYS_SLEEP ─────────────────────────────────────────
-    // Sadece 0-tick sleep test ediyor (busy-wait olmaz).
-    // Timer yoksa scheduler_yield dongu yapmasin diye 0 tick.
+    // ── [12] SYS_SLEEP(0) ──────────────────────────────────────
     _SC1(SYS_SLEEP, 0);
     sc_result(output, 12, "SYS_SLEEP(0)", (int64_t)ret,
               (int64_t)ret == 0, "expect 0", &pass, &fail);
 
     // ── [13] SYS_DEBUG ─────────────────────────────────────────
-    static const char dmsg[] = "syscalltest v2 debug probe";
+    static const char dmsg[] = "syscalltest v3 debug probe";
     _SC1(SYS_DEBUG, dmsg);
     sc_result(output, 13, "SYS_DEBUG", (int64_t)ret,
               (int64_t)ret == 0, "(serial log)", &pass, &fail);
 
-    // ── [14] SYS_GETPRIORITY / SYS_SETPRIORITY ─────────────────
-    // Mevcut priority'yi oku, 200 yaz, tekrar oku, geri yukle.
-    // Idle task (PID=0) context'inde de calisir (pid kisitlamasi kaldirildi).
+    // ── [14] SYS_SETPRIORITY / SYS_GETPRIORITY ─────────────────
     _SC0(SYS_GETPRIORITY);
     uint64_t old_prio = ret;
-
-    // Farkli bir deger sec: old+50, 255'i asmayacak sekilde
     uint64_t test_prio = (old_prio < 205) ? (old_prio + 50) : (old_prio - 50);
     _SC1(SYS_SETPRIORITY, test_prio);
     uint64_t set_ret = ret;
-
     _SC0(SYS_GETPRIORITY);
     uint64_t new_prio = ret;
-
-    _SC1(SYS_SETPRIORITY, old_prio);   // orijinal degeri geri yukle
+    _SC1(SYS_SETPRIORITY, old_prio);
     {
         int ok = ((int64_t)set_ret == 0 && new_prio == test_prio);
-        str_cpy(line, "[14] SYS_SETPRIORITY old=");
-        u64_to_dec(old_prio, tmp); str_concat(line, tmp);
-        str_concat(line, " set=");
+        str_cpy(line, "[14] SYS_SETPRIORITY set=");
         u64_to_dec(test_prio, tmp); str_concat(line, tmp);
         str_concat(line, " got=");
         u64_to_dec(new_prio, tmp); str_concat(line, tmp);
@@ -2041,24 +2043,180 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         ok ? pass++ : fail++;
     }
 
-    // ── [15] INVALID syscall – beklenti ENOSYS(-2) ─────────────
+    // ── [15] INVALID syscall → ENOSYS ─────────────────────────
     _SC0(9999);
     sc_result(output, 15, "INVALID(9999)", (int64_t)ret,
               (int64_t)ret == (int64_t)SYSCALL_ERR_NOSYS,
               "expect ENOSYS(-2)", &pass, &fail);
 
-    // ── Ozet ───────────────────────────────────────────────────
+    // ================================================================
+    // v3 YENİ TESTLER
+    // ================================================================
+    output_add_empty_line(output);
+    output_add_line(output, "── v3 New Tests ─────────────────────", VGA_YELLOW);
+
+    // ── [16] SYS_BRK(0) sorgula ───────────────────────────────
+    _SC1(SYS_BRK, 0);
+    {
+        int ok = ((int64_t)ret > 0);
+        HEX64S(ret);
+        str_cpy(line, "[16] SYS_BRK(0) cur_brk="); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [17] SYS_MMAP anonim 4096 bytes ───────────────────────
+    // 6-argümanlı syscall: R10=flags, R8=fd, R9=offset
+    uint64_t mmap_addr = 0;
+    {
+        register uint64_t r10v asm("r10") = (uint64_t)(MAP_ANONYMOUS | MAP_PRIVATE);
+        register uint64_t r8v  asm("r8")  = (uint64_t)(int64_t)(-1);
+        register uint64_t r9v  asm("r9")  = 0ULL;
+        __asm__ volatile ("syscall"
+            : "=a"(ret)
+            : "a"((uint64_t)SYS_MMAP),
+              "D"((uint64_t)0),
+              "S"((uint64_t)4096),
+              "d"((uint64_t)(PROT_READ|PROT_WRITE)),
+              "r"(r10v), "r"(r8v), "r"(r9v)
+            : "rcx", "r11", "memory");
+        mmap_addr = ret;
+    }
+    {
+        int ok = (ret != (uint64_t)MAP_FAILED && ret != 0);
+        HEX64S(ret);
+        str_cpy(line, "[17] SYS_MMAP(anon,4096) addr="); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+
+        // Belleğe yaz/oku kısa doğrulama
+        if (ok) {
+            volatile char* mp = (volatile char*)mmap_addr;
+            mp[0] = 0x42; mp[1] = 0x43;
+            int rw_ok = (mp[0] == 0x42 && mp[1] == 0x43);
+            output_add_line(output,
+                rw_ok ? "       mmap R/W verify OK" : "       mmap R/W verify FAIL",
+                rw_ok ? VGA_GREEN : VGA_RED);
+        }
+    }
+
+    // ── [18] SYS_MUNMAP ───────────────────────────────────────
+    if (mmap_addr && mmap_addr != (uint64_t)MAP_FAILED) {
+        _SC2(SYS_MUNMAP, mmap_addr, 4096);
+        sc_result(output, 18, "SYS_MUNMAP", (int64_t)ret,
+                  (int64_t)ret == 0, "expect 0", &pass, &fail);
+    } else {
+        output_add_line(output, "[18] SYS_MUNMAP  SKIP (mmap failed)", VGA_YELLOW);
+    }
+
+    // ── [19] SYS_EXECVE stub → ENOSYS ─────────────────────────
+    static const char exec_path[] = "/bin/sh";
+    _SC3(SYS_EXECVE, exec_path, 0, 0);
+    sc_result(output, 19, "SYS_EXECVE(stub)", (int64_t)ret,
+              (int64_t)ret == (int64_t)SYSCALL_ERR_NOSYS,
+              "expect ENOSYS", &pass, &fail);
+
+    // ── [20] SYS_PIPE ─────────────────────────────────────────
+    int pipe_fds[2] = {-1, -1};
+    _SC1(SYS_PIPE, pipe_fds);
+    {
+        int ok = ((int64_t)ret == 0 && pipe_fds[0] >= 3 && pipe_fds[1] >= 3);
+        str_cpy(line, "[20] SYS_PIPE rfd=");
+        int_to_str(pipe_fds[0], tmp); str_concat(line, tmp);
+        str_concat(line, " wfd=");
+        int_to_str(pipe_fds[1], tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [21] PIPE write + read yuvarlak trip ──────────────────
+    if (pipe_fds[0] >= 3 && pipe_fds[1] >= 3) {
+        static const char pmsg[] = "PIPE_DATA_OK";
+        uint64_t pmsg_len = 12;
+        _SC3(SYS_WRITE, pipe_fds[1], pmsg, pmsg_len);
+        uint64_t write_ret = ret;
+
+        char pbuf[32];
+        _SC3(SYS_READ, pipe_fds[0], pbuf, pmsg_len);
+        uint64_t read_ret = ret;
+
+        // Kaba karşılaştırma (str_cmp bağımlılığı yok; ilk 4 byte)
+        int data_ok = (read_ret == pmsg_len &&
+                       pbuf[0]=='P' && pbuf[1]=='I' && pbuf[2]=='P' && pbuf[3]=='E');
+        str_cpy(line, "[21] PIPE write=");
+        int_to_str((int)write_ret, tmp); str_concat(line, tmp);
+        str_concat(line, " read=");
+        int_to_str((int)read_ret, tmp); str_concat(line, tmp);
+        str_concat(line, data_ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, data_ok ? VGA_GREEN : VGA_RED);
+        data_ok ? pass++ : fail++;
+    } else {
+        output_add_line(output, "[21] PIPE R/W  SKIP", VGA_YELLOW);
+    }
+
+    // ── [22] SYS_DUP2 ─────────────────────────────────────────
+    // wfd'yi fd 8'e kopyala, fd 8'e yaz, kapat
+    int dup_ok_pre = (pipe_fds[1] >= 3);
+    if (dup_ok_pre) {
+        _SC2(SYS_DUP2, pipe_fds[1], 8);
+        int dup_pass = ((int64_t)ret == 8);
+        str_cpy(line, "[22] SYS_DUP2(wfd->8) ret=");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, dup_pass ? "  PASS" : "  FAIL");
+        output_add_line(output, line, dup_pass ? VGA_GREEN : VGA_RED);
+        dup_pass ? pass++ : fail++;
+
+        // Temizle
+        _SC1(SYS_CLOSE, pipe_fds[0]);
+        _SC1(SYS_CLOSE, pipe_fds[1]);
+        _SC1(SYS_CLOSE, 8);
+    } else {
+        output_add_line(output, "[22] SYS_DUP2  SKIP", VGA_YELLOW);
+    }
+
+    // ── [23] SYS_FORK smoke test ────────────────────────────────
+    // Kernel context'te fork çağrısı: çökmemelidir.
+    // Ebeveyn: ret > 0 (child_pid). Çocuk: ret = 0.
+    _SC0(SYS_FORK);
+    {
+        int64_t fork_ret = (int64_t)ret;
+        // ret >= 0 ise çökmedi (başarı); negatif = hata = fail
+        // NOT: fork başarılı olursa iki bağlamda da devam eder;
+        //      çocuk konteksti hemen scheduler'a geçer, burası ebeveyn.
+        int ok = (fork_ret >= 0);
+        str_cpy(line, "[23] SYS_FORK ret=");
+        int_to_str((int)fork_ret, tmp); str_concat(line, tmp);
+        str_concat(line, fork_ret > 0 ? " (parent,child_pid)" :
+                         fork_ret == 0 ? " (child ctx)" : " (err)");
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+
+        // Ebeveyndeysek, çocuğun pid'ini bilgi olarak göster
+        if (fork_ret > 0) {
+            str_cpy(line, "       child_pid=");
+            int_to_str((int)fork_ret, tmp); str_concat(line, tmp);
+            output_add_line(output, line, VGA_WHITE);
+        }
+    }
+
+    // ── Özet ───────────────────────────────────────────────────
     output_add_empty_line(output);
     str_cpy(line, "Result: ");
     {char b[8]; int_to_str(pass, b); str_concat(line, b);}
-    str_concat(line, "/15 passed  (");
+    str_concat(line, "/23 passed  (");
     {char b[8]; int_to_str(fail, b); str_concat(line, b);}
     str_concat(line, " failed)");
     output_add_line(output, line, fail == 0 ? VGA_GREEN : VGA_YELLOW);
     if (fail == 0)
-        output_add_line(output, "All syscall tests passed!", VGA_GREEN);
+        output_add_line(output, "All v3 syscall tests passed!", VGA_GREEN);
     else
         output_add_line(output, "Failed tests: check serial log.", VGA_RED);
+
+    #undef HEX64S
 }
 
 #undef _SC0
@@ -2113,7 +2271,7 @@ static Command command_table[] = {
 
     // SYSCALL/SYSRET commands
     {"syscallinfo", "Show SYSCALL MSR configuration",    cmd_syscallinfo},
-    {"syscalltest", "Run SYSCALL test suite (15 tests)", cmd_syscalltest},
+    {"syscalltest", "Run SYSCALL test suite (23 tests)", cmd_syscalltest},
 };
 static int command_count = sizeof(command_table) / sizeof(Command);
 

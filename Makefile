@@ -14,17 +14,21 @@ ASFLAGS = -f elf64
 LDFLAGS = -n -T kernel/linker64.ld -nostdlib
 
 # Main target
-all: AscentOS-Text.iso AscentOS-GUI.iso
+all: AscentOS-Text.iso AscentOS-GUI.iso userland install-userland
 	@echo "╔═══════════════════════════════════════════════════╗"
 	@echo "║  ✓ AscentOS 64-bit (Unified Boot + Keyboard)     ║"
 	@echo "║  ✓ SYSCALL Support Enabled (Phase 1)             ║"
+	@echo "║  ✓ Userland Libc + Apps derlendi                 ║"
+	@echo "║  ✓ ELF'ler disk.img'e yazildi (LBA 2048)         ║"
 	@echo "║                                                   ║"
 	@echo "║  Text Mode:   make run-text                      ║"
 	@echo "║  GUI Mode:    make run-gui                       ║"
+	@echo "║  Userland:    make userland                      ║"
 	@echo "║                                                   ║"
 	@echo "║  🎯 Single keyboard driver for both modes        ║"
 	@echo "║  🔧 Single unified bootloader for both modes     ║"
 	@echo "║  🚀 Modern SYSCALL/SYSRET interface              ║"
+	@echo "║  📦 Kernel'de: elfload HELLO.ELF                 ║"
 	@echo "╚═══════════════════════════════════════════════════╝"
 
 # ============================================================================
@@ -70,6 +74,50 @@ syscall.o: kernel/syscall.c kernel/syscall.h
 	$(CC) $(CFLAGS) -c kernel/syscall.c -o syscall.o
 
 # ============================================================================
+# USERLAND BUILD
+# ============================================================================
+
+USERLAND_CFLAGS  := -ffreestanding -nostdlib -nostdinc -fno-stack-protector \
+                    -O2 -Wall -I userland/libc
+USERLAND_ASFLAGS := -f elf64
+USERLAND_LDFLAGS := -T userland/libc/user.ld -static -nostdlib
+
+USERLAND_CRT0 := userland/libc/crt0.o
+USERLAND_APPS := hello fork_test stdio_test math_test
+USERLAND_ELFS := $(addprefix userland/out/, $(addsuffix .elf, $(USERLAND_APPS)))
+
+.PRECIOUS: userland/out/%.o userland/out/%.elf userland/libc/crt0.o
+
+userland: userland/out $(USERLAND_CRT0) $(USERLAND_ELFS)
+	@echo "✓ Userland programlari derlendi → userland/out/"
+	@ls -lh userland/out/*.elf
+
+userland/out:
+	@mkdir -p userland/out
+
+userland/libc/crt0.o: userland/libc/crt0.asm
+	$(AS) $(USERLAND_ASFLAGS) -o $@ $<
+
+userland/out/%.o: userland/apps/%.c
+	$(CC) $(USERLAND_CFLAGS) -c -o $@ $<
+
+userland/out/%.elf: userland/out/%.o $(USERLAND_CRT0)
+	$(LD) $(USERLAND_LDFLAGS) -o $@ $(USERLAND_CRT0) $<
+	@echo "  ✓ $@ hazir"
+
+# ELF dosyalarını disk.img'e göm — her run öncesi çağrılır
+# FAT32_PARTITION_LBA = 2048, mtools için @@2048 offset kullanılır
+install-userland: userland
+	@echo "📦 ELF'ler disk.img'e yaziliyor (offset=2048 sektör)..."
+	@if [ ! -f disk.img ]; then echo "HATA: disk.img yok"; exit 1; fi
+	mcopy -i disk.img@@1048576 -o userland/out/hello.elf      ::HELLO.ELF
+	mcopy -i disk.img@@1048576 -o userland/out/fork_test.elf  ::FORKTEST.ELF
+	mcopy -i disk.img@@1048576 -o userland/out/stdio_test.elf ::STDIO.ELF
+	mcopy -i disk.img@@1048576 -o userland/out/math_test.elf  ::MATHTEST.ELF
+	@echo "✓ Yazildi:"
+	@mdir -i disk.img@@1048576 :: 2>/dev/null | grep -i elf || true
+
+# ============================================================================
 # TEXT MODE BUILD
 # ============================================================================
 
@@ -98,12 +146,10 @@ kernel64_text.elf: $(TEXT_OBJS)
 
 disk.img:
 	@echo "📀 Creating 2GB disk image..."
-	@if [ ! -f disk.img ]; then \
-		qemu-img create -f raw disk.img 2G; \
-		echo "✓ 2GB Disk image created!"; \
-	else \
-		echo "✓ Disk image already exists (preserving data)"; \
-	fi
+	qemu-img create -f raw disk.img 2G
+	@echo "📝 FAT32 format at LBA 2048 (512*2048=1048576 byte offset)..."
+	mformat -i disk.img@@1048576 -F -v "ASCENT" -T 4177920 ::
+	@echo "✓ Disk image ready (FAT32 @ LBA 2048)"
 
 AscentOS-Text.iso: kernel64_text.elf grub64.cfg disk.img
 	@echo "📦 Building Text Mode ISO..."
@@ -175,15 +221,18 @@ AscentOS-GUI.iso: kernel64_gui.elf grub64.cfg
 # RUN TARGETS
 # ============================================================================
 
-run-text: AscentOS-Text.iso disk.img
+run-text: AscentOS-Text.iso disk.img install-userland
 	@echo "╔════════════════════════════════════════════╗"
 	@echo "║   AscentOS Text Mode (Unified)            ║"
 	@echo "║   + SYSCALL Support (Phase 1)             ║"
+	@echo "║   📦 ELF'ler disk'te hazir                ║"
 	@echo "╚════════════════════════════════════════════╝"
 	@echo ""
-	@echo "Test commands:"
-	@echo "  • testsyscall  - Test syscall infrastructure"
-	@echo "  • syscallstats - Show syscall statistics"
+	@echo "Kernel komutlari:"
+	@echo "  elfload HELLO.ELF"
+	@echo "  elfload FORKTEST.ELF"
+	@echo "  elfload STDIOTEST.ELF"
+	@echo "  elfload MATHTEST.ELF"
 	@echo ""
 	qemu-system-x86_64 \
 	  -cdrom AscentOS-Text.iso \
@@ -194,10 +243,11 @@ run-text: AscentOS-Text.iso disk.img
 	  -serial stdio \
 	  -display gtk 
 
-run-gui: AscentOS-GUI.iso disk.img
+run-gui: AscentOS-GUI.iso disk.img install-userland
 	@echo "╔════════════════════════════════════════════╗"
 	@echo "║   AscentOS GUI Mode (Unified)             ║"
 	@echo "║   + SYSCALL Support (Phase 1)             ║"
+	@echo "║   📦 ELF'ler disk'te hazir                ║"
 	@echo "╚════════════════════════════════════════════╝"
 	@echo ""
 	@echo "🎹 Using unified keyboard driver"
@@ -285,6 +335,7 @@ clean:
 	rm -rf isodir_text isodir_gui
 	rm -rf AscentOS-Text.iso AscentOS-GUI.iso
 	rm -rf disk.img
+	rm -rf userland/out userland/libc/crt0.o
 	@echo "✓ Clean complete!"
 
 # ============================================================================
@@ -321,4 +372,4 @@ help:
 	@echo "║                                                            ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
 
-.PHONY: all run run-text run-gui debug-text debug-gui clean help info
+.PHONY: all run run-text run-gui debug-text debug-gui clean help info userland install-userland

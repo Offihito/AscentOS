@@ -588,9 +588,11 @@ void task_exit(void) {
         serial_print("[TASK ERROR] Cannot exit idle task!\n");
         return;
     }
-    serial_print("[TASK] Task '");
+    serial_print("[TASK] '");
     serial_print(current_task->name);
-    serial_print("' exiting\n");
+    serial_print("' exiting (PID=");
+    char _b[12]; int_to_str((int)current_task->pid, _b); serial_print(_b);
+    serial_print(")\n");
     current_task->state = TASK_STATE_TERMINATED;
     task_t* next = task_get_next();
     if (!next) next = idle_task;
@@ -599,12 +601,7 @@ void task_exit(void) {
     next->state   = TASK_STATE_RUNNING;
     next->last_run_time = get_system_ticks();
 
-    // Yeni task'in kernel stack'ini TSS'e bildir
     tss_set_kernel_stack(next->kernel_stack_top);
-
-    // Direkt idle_task_entry() cagrilmaz — IF restore edilmez, klavye olur.
-    // Her zaman task_load_and_jump_context() uzerinden gec.
-    serial_print("[TASK] Restoring next task context\n");
     task_load_and_jump_context(&next->context);
     serial_print("[TASK ERROR] task_exit returned!\n");
     while(1) __asm__ volatile("hlt");
@@ -629,13 +626,6 @@ void task_set_current(task_t* task) {
 task_t* task_get_next(void) {
     task_t* next = task_queue_pop(&ready_queue);
     if (!next) return idle_task;
-    serial_print("[TASK] Getting next: ");
-    serial_print(next->name);
-    serial_print(" (RSP=0x");
-    char addr[20];
-    uint64_to_string(next->context.rsp, addr);
-    serial_print(addr);
-    serial_print(")\n");
     return next;
 }
 
@@ -667,18 +657,6 @@ void task_switch(task_t* from, task_t* to) {
         return;
     }
 
-    serial_print("[TASK] Switching from '");
-    serial_print(from ? from->name : "NULL");
-    serial_print("' to '");
-    serial_print(to->name);
-    serial_print("'\n");
-
-    // ── TSS RSP0 Guncelle ──────────────────────────────────────────
-    // Yeni task'in kernel_stack_top'u TSS RSP0'a yazilir.
-    // SYSCALL veya interrupt geldiginde CPU bu adresi RSP olarak kullanir.
-    // Hem Ring-0 hem Ring-3 task'lar icin calisiyor:
-    //   - Ring-0 task: kernel_stack_top, task'in kendi kernel stack tepesi
-    //   - Ring-3 task: kernel_stack_top, SYSCALL handler'in kullanacagi kernel stack
     tss_set_kernel_stack(to->kernel_stack_top);
 
     current_task = to;
@@ -687,14 +665,11 @@ void task_switch(task_t* from, task_t* to) {
     to->context_switches++;
 
     if (!from || from == idle_task) {
-        serial_print("[TASK] Jumping to task (no save)\n");
         task_load_and_jump_context(&to->context);
         return;
     }
 
-    // Normal context switch: from'u kaydet, to'yu yukle
     task_switch_context(&from->context, &to->context);
-    serial_print("[TASK] Context switch returned\n");
 }
 
 // ===========================================
