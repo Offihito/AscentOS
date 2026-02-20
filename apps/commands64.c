@@ -2601,16 +2601,123 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         ok ? pass++ : fail++;
     }
 
+    // ================================================================
+    // v6 YENİ TESTLER: SYS_KILL + SYS_GETTIMEOFDAY
+    // ================================================================
+    output_add_empty_line(output);
+    output_add_line(output, "── v6 New Tests (kill / gettimeofday) ───", VGA_YELLOW);
+
+    // ── [48] SYS_GETTIMEOFDAY – normal ───────────────────────────
+    {
+        timeval_t tv;
+        _SC2(SYS_GETTIMEOFDAY, &tv, 0);
+        int ok = ((int64_t)ret == 0 && (tv.tv_sec >= 0) && (tv.tv_usec >= 0));
+        str_cpy(line, "[48] SYS_GETTIMEOFDAY sec=");
+        u64_to_dec((uint64_t)tv.tv_sec, tmp);  str_concat(line, tmp);
+        str_concat(line, " usec=");
+        u64_to_dec((uint64_t)tv.tv_usec, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [49] SYS_GETTIMEOFDAY – NULL tv → başarı (tz yoksay) ────
+    {
+        _SC2(SYS_GETTIMEOFDAY, 0, 0);
+        sc_result(output, 49, "SYS_GETTIMEOFDAY(NULL tv)", (int64_t)ret,
+                  (int64_t)ret == 0, "expect 0", &pass, &fail);
+    }
+
+    // ── [50] SYS_GETTIMEOFDAY – geçersiz ptr → EFAULT ────────────
+    {
+        _SC2(SYS_GETTIMEOFDAY, (void*)0xDEADBABEDEADBABEull, 0);
+        sc_result(output, 50, "SYS_GETTIMEOFDAY(bad ptr)", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
+    }
+
+    // ── [51] SYS_GETTIMEOFDAY – sleep sonrası zaman ilerliyor mu ─
+    {
+        timeval_t tv_a, tv_b;
+        _SC2(SYS_GETTIMEOFDAY, &tv_a, 0);
+        _SC1(SYS_SLEEP, 20);   // 20 tick bekle
+        _SC2(SYS_GETTIMEOFDAY, &tv_b, 0);
+        int64_t delta = (tv_b.tv_sec - tv_a.tv_sec) * 1000000LL
+                      + (tv_b.tv_usec - tv_a.tv_usec);
+        int ok = (delta > 0);
+        str_cpy(line, "[51] SYS_GETTIMEOFDAY(delta) usec=");
+        int_to_str((int)delta, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  WARN(tick rate?)");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_YELLOW);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [52] SYS_KILL – sig=0 kendi pid'imize (process kontrolü) ─
+    {
+        _SC0(SYS_GETPID);
+        uint64_t my_pid = ret;
+        _SC2(SYS_KILL, my_pid, 0);
+        sc_result(output, 52, "SYS_KILL(self,sig=0)", (int64_t)ret,
+                  (int64_t)ret == 0, "expect 0", &pass, &fail);
+    }
+
+    // ── [53] SYS_KILL – geçersiz pid → EINVAL ────────────────────
+    {
+        _SC2(SYS_KILL, 99999, SIGTERM);
+        sc_result(output, 53, "SYS_KILL(bad pid,SIGTERM)", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                  "expect EINVAL(-1)", &pass, &fail);
+    }
+
+    // ── [54] SYS_KILL – pid=0, SIGUSR1 yoksanır → 0 ─────────────
+    {
+        _SC2(SYS_KILL, 0, SIGUSR1);
+        sc_result(output, 54, "SYS_KILL(pid=0,SIGUSR1)", (int64_t)ret,
+                  (int64_t)ret == 0, "expect 0 (ignored)", &pass, &fail);
+    }
+
+    // ── [55] SYS_KILL – pid<0 (grup), ENOSYS ─────────────────────
+    {
+        _SC2(SYS_KILL, (uint64_t)(int64_t)-1, SIGTERM);
+        sc_result(output, 55, "SYS_KILL(pid=-1,grp)", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_NOSYS,
+                  "expect ENOSYS(-2)", &pass, &fail);
+    }
+
+    // ── [56] SYS_KILL – SIGKILL ile fork çocuğunu öldür ──────────
+    {
+        _SC0(SYS_FORK);
+        int64_t fork_ret = (int64_t)ret;
+        if (fork_ret > 0) {
+            // Ebeveyndeyiz
+            _SC2(SYS_KILL, (uint64_t)fork_ret, SIGKILL);
+            int kill_ok = ((int64_t)ret == 0);
+            str_cpy(line, "[56] SYS_KILL(fork child,SIGKILL) child=");
+            int_to_str((int)fork_ret, tmp); str_concat(line, tmp);
+            str_concat(line, kill_ok ? "  PASS" : "  FAIL");
+            output_add_line(output, line, kill_ok ? VGA_GREEN : VGA_RED);
+            kill_ok ? pass++ : fail++;
+            // Çocuğu topla
+            _SC3(SYS_WAITPID, (uint64_t)fork_ret, 0, 0);
+        } else if (fork_ret == 0) {
+            // Çocuktayız: uyuyalım, ebeveyn bizi öldürecek
+            _SC1(SYS_SLEEP, 5000);
+            _SC1(SYS_EXIT, 0);
+        } else {
+            output_add_line(output, "[56] SYS_KILL(SIGKILL)  SKIP (fork err)", VGA_YELLOW);
+        }
+    }
+
     // ── Özet ───────────────────────────────────────────────────
     output_add_empty_line(output);
     str_cpy(line, "Result: ");
     {char b[8]; int_to_str(pass, b); str_concat(line, b);}
-    str_concat(line, "/47 passed  (");
+    str_concat(line, "/56 passed  (");
     {char b[8]; int_to_str(fail, b); str_concat(line, b);}
     str_concat(line, " failed)");
     output_add_line(output, line, fail == 0 ? VGA_GREEN : VGA_YELLOW);
     if (fail == 0)
-        output_add_line(output, "All v5 syscall tests passed!", VGA_GREEN);
+        output_add_line(output, "All v6 syscall tests passed!", VGA_GREEN);
     else
         output_add_line(output, "Failed tests: check serial log.", VGA_RED);
 
@@ -2669,7 +2776,7 @@ static Command command_table[] = {
 
     // SYSCALL/SYSRET commands
     {"syscallinfo", "Show SYSCALL MSR configuration",    cmd_syscallinfo},
-    {"syscalltest", "Run SYSCALL test suite (47 tests)", cmd_syscalltest},
+    {"syscalltest", "Run SYSCALL test suite (56 tests)", cmd_syscalltest},
 };
 static int command_count = sizeof(command_table) / sizeof(Command);
 

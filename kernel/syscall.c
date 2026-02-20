@@ -1814,6 +1814,110 @@ static void sys_poll(syscall_frame_t* frame) {
 }
 
 
+// ── SYS_KILL (29) ───────────────────────────────────────────────
+// kill(pid, sig) -> 0 | SYSCALL_ERR_*
+//
+// Desteklenen sinyaller:
+//   SIGKILL (9)  – görevi zorla sonlandır (task_kill)
+//   SIGTERM (15) – nazikçe sonlandır (şimdilik SIGKILL gibi davranır)
+//   Diğerleri   – yoksayılır, 0 döndürülür (stub)
+//
+// Notlar:
+//   • Gerçek sinyal maskesi / handler mekanizması henüz yok.
+//   • pid=0: mevcut işleme sinyal gönder.
+//   • pid<0: grup sinyal gönderme; şimdilik ENOSYS.
+// ---------------------------------------------------------------
+static void sys_kill(syscall_frame_t* frame) {
+    int pid = (int)(int64_t)frame->rdi;
+    int sig = (int)(int64_t)frame->rsi;
+
+    serial_print("[SYSCALL] kill(pid=");
+    { char b[12]; int_to_str(pid, b); serial_print(b); }
+    serial_print(", sig=");
+    { char b[12]; int_to_str(sig, b); serial_print(b); }
+    serial_print(")\n");
+
+    // Grup sinyali desteklenmiyor
+    if (pid < 0) {
+        frame->rax = SYSCALL_ERR_NOSYS;
+        return;
+    }
+
+    // pid=0: mevcut task'a sinyal gönder
+    if (pid == 0) {
+        task_t* cur = task_get_current();
+        if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
+        pid = (int)cur->pid;
+    }
+
+    // Hedef task'ı bul
+    task_t* target = task_find_by_pid((uint32_t)pid);
+    if (!target) {
+        frame->rax = SYSCALL_ERR_INVAL;  // ESRCH: böyle bir process yok
+        return;
+    }
+
+    switch (sig) {
+    case SIGKILL:
+    case SIGTERM:
+        // Task'ı sonlandır: state'ini ZOMBIE yap, scheduler devre dışı bırakır
+        serial_print("[SYSCALL] kill: terminating pid=");
+        { char b[12]; int_to_str(pid, b); serial_print(b); }
+        serial_print("\n");
+        target->state = TASK_STATE_ZOMBIE;
+        target->exit_code = (sig == SIGKILL) ? 137 : 143;
+        frame->rax = SYSCALL_OK;
+        break;
+
+    case 0:
+        // Sinyal 0: sadece process var mı kontrol et (zaten bulduk)
+        frame->rax = SYSCALL_OK;
+        break;
+
+    default:
+        // Diğer sinyaller: şimdilik yoksay, başarı döndür
+        // (newlib'in bazı sinyalleri göndermesi gerekebilir)
+        serial_print("[SYSCALL] kill: ignoring signal ");
+        { char b[12]; int_to_str(sig, b); serial_print(b); }
+        serial_print("\n");
+        frame->rax = SYSCALL_OK;
+        break;
+    }
+}
+
+// ── SYS_GETTIMEOFDAY (30) ───────────────────────────────────────
+// gettimeofday(timeval_t* tv, void* tz) -> 0 | SYSCALL_ERR_*
+//
+// tv->tv_sec : sistem başlangıcından bu yana geçen saniye
+//              (gerçek UTC yok; boot zamanını 0 kabul ediyoruz)
+// tv->tv_usec: mikrosaniye (timer tick'ten hesaplanır)
+//
+// Notlar:
+//   • RTC (Real Time Clock) entegrasyonu yapılana kadar boot-relative zaman verir.
+//   • tz parametresi her zaman yoksayılır (POSIX da öyle önerir).
+//   • newlib'in time(), clock() fonksiyonları bu syscall'a bağımlıdır.
+// ---------------------------------------------------------------
+static void sys_gettimeofday(syscall_frame_t* frame) {
+    timeval_t* tv = (timeval_t*)frame->rdi;
+    // tz (frame->rsi) yoksayılır
+
+    if (tv) {
+        if (!is_valid_user_ptr(tv, sizeof(timeval_t))) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+
+        // get_system_ticks() milisaniye cinsinden tick sayısı döndürür
+        // (timer.h: varsayılan 1000 Hz → 1 tick = 1 ms)
+        uint64_t ticks_ms = get_system_ticks();
+
+        tv->tv_sec  = (int64_t)(ticks_ms / 1000ULL);
+        tv->tv_usec = (int64_t)((ticks_ms % 1000ULL) * 1000ULL);
+    }
+
+    frame->rax = SYSCALL_OK;
+}
+
 void syscall_dispatch(syscall_frame_t* frame) {
     uint64_t num = frame->rax;
 
@@ -1847,8 +1951,11 @@ void syscall_dispatch(syscall_frame_t* frame) {
     case SYS_FSTAT:        sys_fstat(frame);       break;
     case SYS_IOCTL:        sys_ioctl(frame);       break;
     // v5
-    case SYS_SELECT:       sys_select(frame);      break;
-    case SYS_POLL:         sys_poll(frame);        break;
+    case SYS_SELECT:       sys_select(frame);       break;
+    case SYS_POLL:         sys_poll(frame);         break;
+    // v6 – newlib uyumu
+    case SYS_KILL:         sys_kill(frame);         break;
+    case SYS_GETTIMEOFDAY: sys_gettimeofday(frame); break;
     default:
         serial_print("[SYSCALL] Unknown syscall: ");
         { char b[16]; int_to_str((int)(num & 0xFFFF), b); serial_print(b); }
@@ -2230,6 +2337,140 @@ void syscall_test(void) {
 
     serial_print("\n========================================\n");
     serial_print("[SYSCALL TEST] All v4 tests completed.\n");
+    serial_print("========================================\n\n");
+
+    // ============================================================
+    // v6 Testleri: SYS_KILL + SYS_GETTIMEOFDAY
+    // ============================================================
+    serial_print("\n========================================\n");
+    serial_print("[SYSCALL TEST] v6: kill + gettimeofday\n");
+    serial_print("========================================\n");
+
+    // ── SYS_GETTIMEOFDAY – normal kullanım ───────────────────────
+    serial_print("\n[T31] SYS_GETTIMEOFDAY (normal):\n");
+    timeval_t tv1;
+    DO_SYSCALL2(SYS_GETTIMEOFDAY, &tv1, 0);
+    serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+    serial_print(" tv_sec="); print_uint64((uint64_t)tv1.tv_sec);
+    serial_print(" tv_usec="); print_uint64((uint64_t)tv1.tv_usec);
+    serial_print("\n");
+    if (ret == SYSCALL_OK)
+        serial_print("  [OK] gettimeofday başarılı\n");
+    else
+        serial_print("  [FAIL] gettimeofday hata döndü!\n");
+
+    // ── SYS_GETTIMEOFDAY – kısa sleep sonrası zaman ilerliyor mu? ─
+    serial_print("\n[T32] SYS_GETTIMEOFDAY – sleep(50) sonrası zaman ilerlemeli:\n");
+    timeval_t tv_before, tv_after;
+    DO_SYSCALL2(SYS_GETTIMEOFDAY, &tv_before, 0);
+    DO_SYSCALL1(SYS_SLEEP, 50);   // 50 tick bekle
+    DO_SYSCALL2(SYS_GETTIMEOFDAY, &tv_after, 0);
+    int64_t delta_sec  = tv_after.tv_sec  - tv_before.tv_sec;
+    int64_t delta_usec = tv_after.tv_usec - tv_before.tv_usec;
+    int64_t delta_ms   = delta_sec * 1000LL + delta_usec / 1000LL;
+    serial_print("  before: sec="); print_uint64((uint64_t)tv_before.tv_sec);
+    serial_print(" usec=");  print_uint64((uint64_t)tv_before.tv_usec);
+    serial_print("\n  after:  sec="); print_uint64((uint64_t)tv_after.tv_sec);
+    serial_print(" usec=");  print_uint64((uint64_t)tv_after.tv_usec);
+    serial_print("\n  delta_ms="); { char b[16]; int_to_str((int)delta_ms,b); serial_print(b); }
+    serial_print("\n");
+    if (delta_ms > 0)
+        serial_print("  [OK] zaman ilerledi\n");
+    else
+        serial_print("  [WARN] zaman ilerlemedi (tick hızı?\n");
+
+    // ── SYS_GETTIMEOFDAY – NULL tv (tz parametresini yoksay) ────
+    serial_print("\n[T33] SYS_GETTIMEOFDAY NULL tv (tz yoksayılmalı):\n");
+    DO_SYSCALL2(SYS_GETTIMEOFDAY, 0, 0);
+    serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+    serial_print(" (expect 0, NULL tv ok)\n");
+    if (ret == SYSCALL_OK)
+        serial_print("  [OK]\n");
+    else
+        serial_print("  [FAIL]\n");
+
+    // ── SYS_GETTIMEOFDAY – geçersiz pointer ─────────────────────
+    serial_print("\n[T34] SYS_GETTIMEOFDAY geçersiz ptr (expect EFAULT=-11):\n");
+    DO_SYSCALL2(SYS_GETTIMEOFDAY, (void*)0xDEADBABEDEADBABEull, 0);
+    serial_print("  ret="); { char b[8]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+    serial_print(" (expect -11)\n");
+    if ((int64_t)ret == -11)
+        serial_print("  [OK]\n");
+    else
+        serial_print("  [FAIL]\n");
+
+    // ── SYS_KILL – sinyal 0 (process var mı kontrolü) ───────────
+    serial_print("\n[T35] SYS_KILL sig=0 kendi pid'imize (process kontrolü):\n");
+    DO_SYSCALL0(SYS_GETPID);
+    uint64_t my_pid = ret;
+    DO_SYSCALL2(SYS_KILL, my_pid, 0);
+    serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+    serial_print(" (expect 0)\n");
+    if (ret == SYSCALL_OK)
+        serial_print("  [OK] process bulundu\n");
+    else
+        serial_print("  [FAIL]\n");
+
+    // ── SYS_KILL – geçersiz pid ──────────────────────────────────
+    serial_print("\n[T36] SYS_KILL geçersiz pid=9999 (expect EINVAL=-1):\n");
+    DO_SYSCALL2(SYS_KILL, 9999, SIGTERM);
+    serial_print("  ret="); { char b[8]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+    serial_print(" (expect -1)\n");
+    if ((int64_t)ret == -1)
+        serial_print("  [OK]\n");
+    else
+        serial_print("  [FAIL]\n");
+
+    // ── SYS_KILL – pid=0 (mevcut task'a SIGUSR1, yoksanır) ──────
+    serial_print("\n[T37] SYS_KILL pid=0 SIGUSR1 (yoksanmalı, ret=0):\n");
+    DO_SYSCALL2(SYS_KILL, 0, SIGUSR1);
+    serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+    serial_print(" (expect 0)\n");
+    if (ret == SYSCALL_OK)
+        serial_print("  [OK]\n");
+    else
+        serial_print("  [FAIL]\n");
+
+    // ── SYS_KILL – grup sinyal (pid<0, expect ENOSYS) ────────────
+    serial_print("\n[T38] SYS_KILL pid=-1 (grup sinyal, expect ENOSYS=-2):\n");
+    DO_SYSCALL2(SYS_KILL, (uint64_t)(int64_t)-1, SIGTERM);
+    serial_print("  ret="); { char b[8]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+    serial_print(" (expect -2)\n");
+    if ((int64_t)ret == -2)
+        serial_print("  [OK]\n");
+    else
+        serial_print("  [FAIL]\n");
+
+    // ── SYS_KILL – SIGKILL ile fork çocuğunu sonlandır ──────────
+    serial_print("\n[T39] SYS_FORK + SYS_KILL(SIGKILL) çocuğu öldür:\n");
+    DO_SYSCALL0(SYS_FORK);
+    int64_t fork_ret = (int64_t)ret;
+    serial_print("  fork ret="); { char b[12]; int_to_str((int)fork_ret,b); serial_print(b); }
+    serial_print("\n");
+    if (fork_ret > 0) {
+        // Ebeveyndeyiz, çocuğu öldür
+        DO_SYSCALL2(SYS_KILL, (uint64_t)fork_ret, SIGKILL);
+        serial_print("  kill(child, SIGKILL) ret=");
+        { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+        serial_print("\n");
+        if (ret == SYSCALL_OK)
+            serial_print("  [OK] çocuk sonlandırıldı\n");
+        else
+            serial_print("  [FAIL] kill başarısız\n");
+        // Çocuğu topla
+        DO_SYSCALL3(SYS_WAITPID, (uint64_t)fork_ret, 0, 0);
+        serial_print("  waitpid ret="); { char b[12]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+        serial_print("\n");
+    } else if (fork_ret == 0) {
+        // Çocuktayız: uyuyalım, ebeveyn bizi öldürecek
+        DO_SYSCALL1(SYS_SLEEP, 1000);
+        DO_SYSCALL1(SYS_EXIT, 0);
+    } else {
+        serial_print("  [SKIP] fork başarısız\n");
+    }
+
+    serial_print("\n========================================\n");
+    serial_print("[SYSCALL TEST] v6 testleri tamamlandı.\n");
     serial_print("========================================\n\n");
 
 #undef DO_SYSCALL0

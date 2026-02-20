@@ -107,7 +107,24 @@
 #define SYS_SELECT       27  // select(nfds,rd,wr,ex,tv)       -> nready | err
 #define SYS_POLL         28  // poll(fds, nfds, timeout_ms)    -> nready | err
 
-#define SYSCALL_MAX      29
+// ── Yeni syscall'lar (v6 – newlib uyumu) ──────────────────────
+#define SYS_KILL         29  // kill(pid, sig)                  -> 0 | err
+#define SYS_GETTIMEOFDAY 30  // gettimeofday(*tv, *tz)          -> 0 | err
+
+#define SYSCALL_MAX      31
+
+// ============================================================
+// kill() sinyal numaraları (POSIX alt kümesi)
+// ============================================================
+#define SIGTERM   15   // Nazikçe sonlandır
+#define SIGKILL    9   // Zorla sonlandır (yakalanamaz)
+#define SIGINT     2   // Klavye interrupt (^C)
+#define SIGHUP     1   // Hang-up
+#define SIGPIPE   13   // Yazma ucuna kimse okumuyorsa
+#define SIGCHLD   17   // Çocuk durumu değişti
+#define SIGALRM   14   // Zamanlayıcı
+#define SIGUSR1   10   // Kullanıcı tanımlı 1
+#define SIGUSR2   12   // Kullanıcı tanımlı 2
 
 // ============================================================
 // mmap() prot flags  (SYS_MMAP)
