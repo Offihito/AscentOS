@@ -302,6 +302,11 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_line(output, " cpuinfo   - CPU information", VGA_WHITE);
     output_add_line(output, " meminfo   - Memory information", VGA_WHITE);
     output_add_line(output, " reboot    - Reboot the system", VGA_WHITE);
+    output_add_empty_line(output);
+    output_add_line(output, "SYSCALL Commands:", VGA_YELLOW);
+    output_add_line(output, " syscallinfo - SYSCALL/SYSRET MSR configuration", VGA_WHITE);
+    output_add_line(output, " syscalltest - Run full test suite (47 tests)", VGA_WHITE);
+    output_add_line(output, "              mmap_file/select/poll included", VGA_WHITE);
 }
 
 void cmd_clear(const char* args, CommandOutput* output) {
@@ -1843,7 +1848,7 @@ void cmd_syscallinfo(const char* args, CommandOutput* output) {
     output_add_line(output, "-12  ENOSPC -13 ERANGE", VGA_WHITE);
 
     output_add_empty_line(output);
-    output_add_line(output, "Run 'syscalltest' to execute all 23 tests.", VGA_GREEN);
+    output_add_line(output, "Run 'syscalltest' to execute all 47 tests.", VGA_GREEN);
 
     #undef HEX64
     #undef HEX16
@@ -1890,7 +1895,7 @@ static void sc_result(CommandOutput* output, int idx, const char* name,
 }
 
 // ============================================================
-// CMD_SYSCALLTEST – syscall test paketi v3 (23 test)
+// CMD_SYSCALLTEST – syscall test paketi v4 (38 test)
 //
 // NOTLAR:
 //   - SYS_WRITE serial'a yazar (VGA değil) — kasıtlı.
@@ -1898,6 +1903,9 @@ static void sc_result(CommandOutput* output, int idx, const char* name,
 //   - SYS_FORK: kernel context'te smoke test; çocuk hemen exit eder.
 //   - SYS_MMAP: 6-arg syscall; R10 ile ayrı asm bloğu kullanılır.
 //   - SYS_EXECVE: stub olduğu için ENOSYS(-2) beklenir.
+//   - SYS_LSEEK: serial/stdin seek'i EINVAL döner (beklenen).
+//   - SYS_FSTAT: fd türüne göre st_mode doğrulanır.
+//   - SYS_IOCTL: TCGETS/TCSETS/TIOCGWINSZ/FIONREAD yuvarlak trip.
 // ============================================================
 void cmd_syscalltest(const char* args, CommandOutput* output) {
     (void)args;
@@ -1908,8 +1916,8 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         return;
     }
 
-    output_add_line(output, "=== SYSCALL Test Suite v3 (23 tests) ===", VGA_CYAN);
-    output_add_line(output, "  (SYS_WRITE -> serial, SYS_FORK smoke only)", VGA_YELLOW);
+    output_add_line(output, "=== SYSCALL Test Suite v4 (38 tests) ===", VGA_CYAN);
+    output_add_line(output, "  (+lseek +fstat +ioctl/termios  v3: mmap/pipe/fork)", VGA_YELLOW);
     output_add_empty_line(output);
 
     uint64_t ret;
@@ -2187,9 +2195,6 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
     _SC0(SYS_FORK);
     {
         int64_t fork_ret = (int64_t)ret;
-        // ret >= 0 ise çökmedi (başarı); negatif = hata = fail
-        // NOT: fork başarılı olursa iki bağlamda da devam eder;
-        //      çocuk konteksti hemen scheduler'a geçer, burası ebeveyn.
         int ok = (fork_ret >= 0);
         str_cpy(line, "[23] SYS_FORK ret=");
         int_to_str((int)fork_ret, tmp); str_concat(line, tmp);
@@ -2199,7 +2204,6 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
 
-        // Ebeveyndeysek, çocuğun pid'ini bilgi olarak göster
         if (fork_ret > 0) {
             str_cpy(line, "       child_pid=");
             int_to_str((int)fork_ret, tmp); str_concat(line, tmp);
@@ -2207,16 +2211,406 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         }
     }
 
+    // ================================================================
+    // v4 YENİ TESTLER: SYS_LSEEK, SYS_FSTAT, SYS_IOCTL
+    // ================================================================
+    output_add_empty_line(output);
+    output_add_line(output, "── v4 New Tests (lseek / fstat / ioctl) ─", VGA_YELLOW);
+
+    // ── [24] SYS_FSTAT fd=0 stdin → S_IFCHR ──────────────────
+    {
+        stat_t st;
+        _SC2(SYS_FSTAT, 0, &st);
+        int ok = ((int64_t)ret == 0 && (st.st_mode & S_IFCHR));
+        str_cpy(line, "[24] SYS_FSTAT(stdin) mode=0x");
+        HEX64S((uint64_t)st.st_mode); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [25] SYS_FSTAT fd=1 stdout → S_IFCHR ─────────────────
+    {
+        stat_t st;
+        _SC2(SYS_FSTAT, 1, &st);
+        int ok = ((int64_t)ret == 0 && (st.st_mode & S_IFCHR));
+        str_cpy(line, "[25] SYS_FSTAT(stdout) mode=0x");
+        HEX64S((uint64_t)st.st_mode); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [26] SYS_FSTAT pipe fd → S_IFIFO + bytes_avail ───────
+    {
+        int pfds[2] = {-1,-1};
+        _SC1(SYS_PIPE, pfds);
+        if ((int64_t)ret == 0 && pfds[0] >= 3 && pfds[1] >= 3) {
+            // 7 byte yaz
+            static const char pmsg7[] = "ABCDEFG";
+            _SC3(SYS_WRITE, pfds[1], pmsg7, 7);
+
+            stat_t sp;
+            _SC2(SYS_FSTAT, pfds[0], &sp);
+            int ok = ((int64_t)ret == 0 &&
+                      (sp.st_mode & S_IFIFO) &&
+                      sp.st_size == 7);
+            str_cpy(line, "[26] SYS_FSTAT(pipe) mode=0x");
+            HEX64S((uint64_t)sp.st_mode); str_concat(line, tmp);
+            str_concat(line, " sz=");
+            u64_to_dec(sp.st_size, tmp); str_concat(line, tmp);
+            str_concat(line, ok ? "  PASS" : "  FAIL");
+            output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+            ok ? pass++ : fail++;
+
+            _SC1(SYS_CLOSE, pfds[0]);
+            _SC1(SYS_CLOSE, pfds[1]);
+        } else {
+            output_add_line(output, "[26] SYS_FSTAT(pipe)  SKIP", VGA_YELLOW);
+        }
+    }
+
+    // ── [27] SYS_FSTAT fd=999 → EBADF ────────────────────────
+    {
+        stat_t st;
+        _SC2(SYS_FSTAT, 999, &st);
+        sc_result(output, 27, "SYS_FSTAT(bad fd)", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_BADF,
+                  "expect EBADF", &pass, &fail);
+    }
+
+    // ── [28] SYS_LSEEK stdin → EINVAL (serial seek yok) ──────
+    _SC3(SYS_LSEEK, 0, 0, SEEK_SET);
+    sc_result(output, 28, "SYS_LSEEK(stdin,SEEK_SET)", (int64_t)ret,
+              (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+              "expect EINVAL", &pass, &fail);
+
+    // ── [29] SYS_LSEEK geçersiz whence=99 → EINVAL ───────────
+    _SC3(SYS_LSEEK, 1, 0, 99);
+    sc_result(output, 29, "SYS_LSEEK(bad whence)", (int64_t)ret,
+              (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+              "expect EINVAL", &pass, &fail);
+
+    // ── [30] SYS_LSEEK fd=999 → EBADF ────────────────────────
+    _SC3(SYS_LSEEK, 999, 0, SEEK_SET);
+    sc_result(output, 30, "SYS_LSEEK(bad fd)", (int64_t)ret,
+              (int64_t)ret == (int64_t)SYSCALL_ERR_BADF,
+              "expect EBADF", &pass, &fail);
+
+    // ── [31] SYS_IOCTL TCGETS → termios al ───────────────────
+    {
+        termios_t tios;
+        _SC3(SYS_IOCTL, 0, TCGETS, &tios);
+        int ok = ((int64_t)ret == 0 && (tios.c_lflag & ICANON) && (tios.c_lflag & ECHO));
+        str_cpy(line, "[31] SYS_IOCTL(TCGETS) lflag=0x");
+        HEX64S((uint64_t)tios.c_lflag); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [32] SYS_IOCTL TCSETS raw mode → ECHO kapalı ─────────
+    {
+        // Önce mevcut ayarları al
+        termios_t orig, raw;
+        _SC3(SYS_IOCTL, 0, TCGETS, &orig);
+
+        // Raw mod oluştur
+        raw = orig;
+        raw.c_lflag &= ~(uint32_t)(ECHO | ICANON | ISIG | IEXTEN);
+        raw.c_iflag &= ~(uint32_t)(ICRNL | IXON);
+        raw.c_oflag &= ~(uint32_t)OPOST;
+        raw.c_cc[VMIN]  = 1;
+        raw.c_cc[VTIME] = 0;
+
+        _SC3(SYS_IOCTL, 0, TCSETS, &raw);
+        uint64_t set_ret = ret;
+
+        // Doğrula
+        termios_t verify;
+        _SC3(SYS_IOCTL, 0, TCGETS, &verify);
+        int ok = ((int64_t)set_ret == 0 &&
+                  !(verify.c_lflag & ECHO) &&
+                  !(verify.c_lflag & ICANON));
+        str_cpy(line, "[32] SYS_IOCTL(TCSETS raw) lflag=0x");
+        HEX64S((uint64_t)verify.c_lflag); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+
+        // Canonical moda geri dön
+        _SC3(SYS_IOCTL, 0, TCSETSF, &orig);
+    }
+
+    // ── [33] SYS_IOCTL TCSETSF canonical geri yükle → ECHO açık
+    {
+        termios_t check;
+        _SC3(SYS_IOCTL, 0, TCGETS, &check);
+        int ok = ((int64_t)ret == 0 && (check.c_lflag & ECHO) && (check.c_lflag & ICANON));
+        str_cpy(line, "[33] SYS_IOCTL(TCSETSF restore) lflag=0x");
+        HEX64S((uint64_t)check.c_lflag); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [34] SYS_IOCTL TIOCGWINSZ → varsayılan 80x25 ─────────
+    {
+        winsize_t ws;
+        _SC3(SYS_IOCTL, 1, TIOCGWINSZ, &ws);
+        int ok = ((int64_t)ret == 0 && ws.ws_col > 0 && ws.ws_row > 0);
+        str_cpy(line, "[34] SYS_IOCTL(TIOCGWINSZ) ");
+        int_to_str((int)ws.ws_col, tmp); str_concat(line, tmp);
+        str_concat(line, "x");
+        int_to_str((int)ws.ws_row, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [35] SYS_IOCTL TIOCSWINSZ yuvarlak trip ───────────────
+    {
+        winsize_t set_ws, got_ws;
+        set_ws.ws_row = 50; set_ws.ws_col = 132;
+        set_ws.ws_xpixel = 0; set_ws.ws_ypixel = 0;
+
+        _SC3(SYS_IOCTL, 1, TIOCSWINSZ, &set_ws);
+        uint64_t sw_ret = ret;
+        _SC3(SYS_IOCTL, 1, TIOCGWINSZ, &got_ws);
+
+        int ok = ((int64_t)sw_ret == 0 &&
+                  got_ws.ws_row == 50 && got_ws.ws_col == 132);
+        str_cpy(line, "[35] SYS_IOCTL(TIOCSWINSZ 132x50) got=");
+        int_to_str((int)got_ws.ws_col, tmp); str_concat(line, tmp);
+        str_concat(line, "x");
+        int_to_str((int)got_ws.ws_row, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+
+        // 80x25'e geri dön
+        winsize_t restore = {25, 80, 0, 0};
+        _SC3(SYS_IOCTL, 1, TIOCSWINSZ, &restore);
+    }
+
+    // ── [36] SYS_IOCTL FIONREAD stdin ─────────────────────────
+    {
+        int avail = -1;
+        _SC3(SYS_IOCTL, 0, FIONREAD, &avail);
+        int ok = ((int64_t)ret == 0 && avail >= 0);
+        str_cpy(line, "[36] SYS_IOCTL(FIONREAD) avail=");
+        int_to_str(avail, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [37] SYS_IOCTL bilinmeyen request → EINVAL ────────────
+    _SC3(SYS_IOCTL, 0, 0xDEAD, 0);
+    sc_result(output, 37, "SYS_IOCTL(bad req)", (int64_t)ret,
+              (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+              "expect EINVAL", &pass, &fail);
+
+    // ── [38] SYS_IOCTL NULL arg → EFAULT ─────────────────────
+    _SC3(SYS_IOCTL, 0, TCGETS, 0);
+    sc_result(output, 38, "SYS_IOCTL(NULL arg)", (int64_t)ret,
+              (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+              "expect EFAULT", &pass, &fail);
+
+    // ================================================================
+    // v5 YENİ TESTLER: SYS_MMAP(MAP_FILE), SYS_SELECT, SYS_POLL
+    // ================================================================
+    output_add_empty_line(output);
+    output_add_line(output, "── v5 New Tests (mmap_file/select/poll) ─", VGA_YELLOW);
+
+    // ── [39] SYS_MMAP anonim (regression) ────────────────────
+    {
+        uint64_t mmap_addr2 = 0;
+        register uint64_t r10v asm("r10") = (uint64_t)(MAP_ANONYMOUS | MAP_PRIVATE);
+        register uint64_t r8v  asm("r8")  = (uint64_t)(int64_t)(-1);
+        register uint64_t r9v  asm("r9")  = 0ULL;
+        __asm__ volatile ("syscall"
+            : "=a"(ret)
+            : "a"((uint64_t)SYS_MMAP),
+              "D"((uint64_t)0), "S"((uint64_t)4096),
+              "d"((uint64_t)(PROT_READ|PROT_WRITE)),
+              "r"(r10v), "r"(r8v), "r"(r9v)
+            : "rcx","r11","memory");
+        mmap_addr2 = ret;
+        int ok = (ret != (uint64_t)MAP_FAILED && ret != 0);
+        str_cpy(line, "[39] SYS_MMAP(anon) addr=0x");
+        HEX64S(ret); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+        if (ok) {
+            volatile char* p = (volatile char*)mmap_addr2;
+            p[0] = 0x55; p[1] = 0xAA;
+            int rw = (p[0] == 0x55 && p[1] == 0xAA);
+            output_add_line(output,
+                rw ? "       anon R/W verify OK" : "       anon R/W verify FAIL",
+                rw ? VGA_GREEN : VGA_RED);
+            // Temizle
+            _SC2(SYS_MUNMAP, mmap_addr2, 4096);
+        }
+    }
+
+    // ── [40] SYS_MMAP MAP_FILE → geçersiz fd (EBADF/MAP_FAILED)
+    {
+        register uint64_t r10v asm("r10") = (uint64_t)MAP_PRIVATE;
+        register uint64_t r8v  asm("r8")  = (uint64_t)99;   // geçersiz fd
+        register uint64_t r9v  asm("r9")  = 0ULL;
+        __asm__ volatile ("syscall"
+            : "=a"(ret)
+            : "a"((uint64_t)SYS_MMAP),
+              "D"((uint64_t)0), "S"((uint64_t)4096),
+              "d"((uint64_t)PROT_READ),
+              "r"(r10v), "r"(r8v), "r"(r9v)
+            : "rcx","r11","memory");
+        int ok = (ret == (uint64_t)MAP_FAILED);
+        str_cpy(line, "[40] SYS_MMAP(bad fd) -> ");
+        str_concat(line, ok ? "MAP_FAILED  PASS" : "unexpected  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [41] SYS_MMAP len=0 → MAP_FAILED ─────────────────────
+    {
+        register uint64_t r10v asm("r10") = (uint64_t)(MAP_ANONYMOUS|MAP_PRIVATE);
+        register uint64_t r8v  asm("r8")  = (uint64_t)(int64_t)(-1);
+        register uint64_t r9v  asm("r9")  = 0ULL;
+        __asm__ volatile ("syscall"
+            : "=a"(ret)
+            : "a"((uint64_t)SYS_MMAP),
+              "D"((uint64_t)0), "S"((uint64_t)0),
+              "d"((uint64_t)PROT_READ),
+              "r"(r10v), "r"(r8v), "r"(r9v)
+            : "rcx","r11","memory");
+        int ok = (ret == (uint64_t)MAP_FAILED);
+        str_concat(line, ""); str_cpy(line, "[41] SYS_MMAP(len=0) -> ");
+        str_concat(line, ok ? "MAP_FAILED  PASS" : "unexpected  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [42] SYS_SELECT non-blocking, stdout yazılabilir ──────
+    {
+        fd_set_t wfds;
+        FD_ZERO(&wfds);
+        FD_SET(1, &wfds);                       // stdout
+        timeval_t tv = {0, 0};                  // non-blocking
+        // select(2, NULL, &wfds, NULL, &tv)
+        // 5-arg: RDI=nfds RSI=rfds RDX=wfds R10=xfds R8=tv
+        register uint64_t r10v asm("r10") = (uint64_t)0;     // exceptfds=NULL
+        register uint64_t r8v  asm("r8")  = (uint64_t)&tv;
+        __asm__ volatile ("syscall"
+            : "=a"(ret)
+            : "a"((uint64_t)SYS_SELECT),
+              "D"((uint64_t)2),
+              "S"((uint64_t)0),
+              "d"((uint64_t)&wfds),
+              "r"(r10v), "r"(r8v)
+            : "rcx","r11","memory");
+        int ok = ((int64_t)ret >= 1 && FD_ISSET(1, &wfds));
+        str_cpy(line, "[42] SYS_SELECT(stdout writable) nready=");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [43] SYS_SELECT non-blocking, stdin okuma (veri yok) ─
+    {
+        fd_set_t rfds;
+        FD_ZERO(&rfds);
+        FD_SET(0, &rfds);
+        timeval_t tv = {0, 0};
+        register uint64_t r10v asm("r10") = (uint64_t)0;
+        register uint64_t r8v  asm("r8")  = (uint64_t)&tv;
+        __asm__ volatile ("syscall"
+            : "=a"(ret)
+            : "a"((uint64_t)SYS_SELECT),
+              "D"((uint64_t)1),
+              "S"((uint64_t)&rfds),
+              "d"((uint64_t)0),
+              "r"(r10v), "r"(r8v)
+            : "rcx","r11","memory");
+        // 0 veya 1 dönebilir (serial veri var/yok) — negatif olmamalı
+        int ok = ((int64_t)ret >= 0);
+        str_cpy(line, "[43] SYS_SELECT(stdin nb) nready=");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [44] SYS_SELECT nfds=0 → 0 ───────────────────────────
+    {
+        timeval_t tv = {0, 0};
+        register uint64_t r10v asm("r10") = (uint64_t)0;
+        register uint64_t r8v  asm("r8")  = (uint64_t)&tv;
+        __asm__ volatile ("syscall"
+            : "=a"(ret)
+            : "a"((uint64_t)SYS_SELECT),
+              "D"((uint64_t)0),
+              "S"((uint64_t)0),
+              "d"((uint64_t)0),
+              "r"(r10v), "r"(r8v)
+            : "rcx","r11","memory");
+        sc_result(output, 44, "SYS_SELECT(nfds=0)", (int64_t)ret,
+                  (int64_t)ret == 0 || (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                  "expect 0 or EINVAL", &pass, &fail);
+    }
+
+    // ── [45] SYS_POLL stdout POLLOUT ──────────────────────────
+    {
+        pollfd_t pfd;
+        pfd.fd = 1; pfd.events = POLLOUT; pfd.revents = 0;
+        _SC3(SYS_POLL, &pfd, 1, 0);
+        int ok = ((int64_t)ret == 1 && (pfd.revents & POLLOUT));
+        str_cpy(line, "[45] SYS_POLL(stdout POLLOUT) rev=0x");
+        int_to_str((int)pfd.revents, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [46] SYS_POLL stdin POLLIN non-blocking ───────────────
+    {
+        pollfd_t pfd;
+        pfd.fd = 0; pfd.events = POLLIN; pfd.revents = 0;
+        _SC3(SYS_POLL, &pfd, 1, 0);
+        int ok = ((int64_t)ret >= 0);  // 0 veya 1 — negatif olmamalı
+        str_cpy(line, "[46] SYS_POLL(stdin POLLIN nb) nready=");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [47] SYS_POLL fd=-1 atlanır → nready=0 ───────────────
+    {
+        pollfd_t pfd;
+        pfd.fd = -1; pfd.events = POLLIN; pfd.revents = 0;
+        _SC3(SYS_POLL, &pfd, 1, 0);
+        int ok = ((int64_t)ret == 0 && pfd.revents == 0);
+        str_cpy(line, "[47] SYS_POLL(fd=-1 skip) nready=");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
     // ── Özet ───────────────────────────────────────────────────
     output_add_empty_line(output);
     str_cpy(line, "Result: ");
     {char b[8]; int_to_str(pass, b); str_concat(line, b);}
-    str_concat(line, "/23 passed  (");
+    str_concat(line, "/47 passed  (");
     {char b[8]; int_to_str(fail, b); str_concat(line, b);}
     str_concat(line, " failed)");
     output_add_line(output, line, fail == 0 ? VGA_GREEN : VGA_YELLOW);
     if (fail == 0)
-        output_add_line(output, "All v3 syscall tests passed!", VGA_GREEN);
+        output_add_line(output, "All v5 syscall tests passed!", VGA_GREEN);
     else
         output_add_line(output, "Failed tests: check serial log.", VGA_RED);
 
@@ -2275,7 +2669,7 @@ static Command command_table[] = {
 
     // SYSCALL/SYSRET commands
     {"syscallinfo", "Show SYSCALL MSR configuration",    cmd_syscallinfo},
-    {"syscalltest", "Run SYSCALL test suite (23 tests)", cmd_syscalltest},
+    {"syscalltest", "Run SYSCALL test suite (47 tests)", cmd_syscalltest},
 };
 static int command_count = sizeof(command_table) / sizeof(Command);
 

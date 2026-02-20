@@ -70,6 +70,10 @@ nano64.o: apps/nano64.c apps/nano64.h
 vga64.o: kernel/vga64.c
 	$(CC) $(CFLAGS) -c kernel/vga64.c -o vga64.o
 
+
+vesa64.o: kernel/vesa64.c kernel/vesa64.h
+	$(CC) $(CFLAGS) -c kernel/vesa64.c -o vesa64.o
+
 syscall.o: kernel/syscall.c kernel/syscall.h
 	$(CC) $(CFLAGS) -c kernel/syscall.c -o syscall.o
 
@@ -123,7 +127,7 @@ install-userland: userland
 # ============================================================================
 
 boot64_text.o: boot/boot64_unified.asm
-	$(AS) $(ASFLAGS) boot/boot64_unified.asm -o boot64_text.o
+	$(AS) $(ASFLAGS) -DTEXT_MODE boot/boot64_unified.asm -o boot64_text.o
 
 interrupts64_text.o: arch/x86_64/interrupts64.asm
 	$(AS) $(ASFLAGS) -DTEXT_MODE_BUILD arch/x86_64/interrupts64.asm -o interrupts64_text.o
@@ -134,10 +138,10 @@ keyboard_text.o: kernel/keyboard_unified.c
 commands64_text.o: apps/commands64.c apps/commands64.h
 	$(CC) $(CFLAGS) -c apps/commands64.c -o commands64_text.o
 
-kernel64_text.o: kernel/kernel64.c
+kernel64_text.o: kernel/kernel64.c kernel/vesa64.h
 	$(CC) $(CFLAGS) -DTEXT_MODE -c kernel/kernel64.c -o kernel64_text.o
 
-TEXT_OBJS = boot64_text.o interrupts64_text.o vga64.o keyboard_text.o \
+TEXT_OBJS = boot64_text.o interrupts64_text.o vesa64.o keyboard_text.o \
             commands64_text.o files64.o disk64.o elf64.o memory_unified.o vmm64.o nano64.o \
             timer.o task.o scheduler.o kernel64_text.o page_fault.o \
 			syscall.o

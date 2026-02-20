@@ -25,6 +25,9 @@ multiboot_header:
     dd 8
     dd 0
 
+; VESA framebuffer tag — hem GUI_MODE hem de TEXT_MODE kullanır
+; TEXT_MODE: 1280x800 (geniş terminal alanı)
+; GUI_MODE:  1920x1080 (tam HD)
 %ifdef GUI_MODE
     align 8
     framebuffer_tag_start:
@@ -34,6 +37,16 @@ multiboot_header:
     dd 1920
     dd 1080
     dd 32
+    framebuffer_tag_end:
+%elifdef TEXT_MODE
+    align 8
+    framebuffer_tag_start:
+    dw 5
+    dw 0
+    dd framebuffer_tag_end - framebuffer_tag_start
+    dd 1280        ; genişlik (pixel) — 1280/8 = 160 sütun
+    dd 800         ; yükseklik (pixel) — 800/16 = 50 satır
+    dd 32          ; bpp
     framebuffer_tag_end:
 %endif
 

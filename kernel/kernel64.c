@@ -156,7 +156,7 @@ static void pmm_init_from_multiboot(void) {
 // ============================================================================
 #ifdef TEXT_MODE
 
-void init_vga64(void);
+void init_vesa64(void);
 void print_str64(const char* str, uint8_t color);
 void println64(const char* str, uint8_t color);
 void init_interrupts64(void);
@@ -183,7 +183,7 @@ void kernel_main(uint64_t multiboot_info) {
 
     serial_print("\n=== AscentOS 64-bit Higher Half Kernel ===\n");
 
-    init_vga64();
+    init_vesa64();
     println64("===============================================================", VGA_CYAN);
     println64("===         ASCENTOS 64-BIT HIGHER HALF v1.1              ===", VGA_LIGHT_GREEN);
     println64("===         Kernel @ 0xFFFFFFFF80000000                   ===", VGA_YELLOW);

@@ -10,8 +10,14 @@
 //   SYS_WAITPID (21) – çocuk işlem bitmesini bekle (WNOHANG destekli)
 //   SYS_PIPE    (22) – anonim pipe oluştur (fd[0]=okuma, fd[1]=yazma)
 //   SYS_DUP2    (23) – fd kopyala (oldfd → newfd, atomik kapat+kopyala)
+//
+// v4 Yeni Eklemeler:
+//   SYS_LSEEK   (24) – dosya ofseti konumlandırma (SEEK_SET/CUR/END)
+//   SYS_FSTAT   (25) – fd üzerinden dosya meta verisi (stat_t)
+//   SYS_IOCTL   (26) – terminal mod / genel aygıt kontrolü (TCGETS/TCSETS/…)
 
 #include "syscall.h"
+#include "../fs/files64.h"
 #include "task.h"
 #include "scheduler.h"
 #include "timer.h"
@@ -62,6 +68,12 @@ extern void  kfree(void* ptr);
 // memset64 / memcpy64: kernel64.c'de tanımlı
 extern void* memset64(void* dest, int val, uint64_t n);
 extern void* memcpy64(void* dest, const void* src, uint64_t n);
+
+// VFS / FAT32 – files64.c + disk64.c'de tanımlı
+// sys_mmap (MAP_FILE), sys_lseek (SEEK_END), sys_fstat için gerekli
+extern const EmbeddedFile64* fs_get_file64(const char* filename);
+extern uint32_t fat32_file_size(const char* name83);
+extern int      fat32_read_file(const char* name83, uint8_t* buf, uint32_t max_len);
 
 // Kısa takma adlar – sadece bu dosyada, extern değil
 #define kmemset(dst, val, n)  memset64((dst),(val),(uint64_t)(n))
@@ -312,7 +324,7 @@ void syscall_init(void) {
     serial_print("[SYSCALL] FMASK set (IF+DF masked on entry)\n");
 
     syscall_enabled = 1;
-    serial_print("[SYSCALL] SYSCALL/SYSRET ready! (v3: +mmap/brk/fork/execve/waitpid/pipe/dup2)\n");
+    serial_print("[SYSCALL] SYSCALL/SYSRET ready! (v5: +mmap_file/select/poll)\n");
 }
 
 int syscall_is_enabled(void) { return syscall_enabled; }
@@ -648,23 +660,26 @@ static void sys_getticks(syscall_frame_t* frame) {
 // ── SYS_MMAP (16) ───────────────────────────────────────────────
 // mmap(addr, len, prot, flags, fd, offset) -> mapped_addr | MAP_FAILED
 //
-// Şu an yalnızca MAP_ANONYMOUS desteklenir; sayfa tablosu yok (flat memory).
-// Bellek kmalloc() ile ayrılır; addr ve prot parametreleri kaydedilir.
+// v5: MAP_FILE desteği eklendi.
+//
+// MAP_ANONYMOUS: kmalloc tabanlı, fd=-1, offset=0
+// MAP_FILE:      fd'nin gösterdiği dosyayı offset'ten itibaren oku,
+//                heap'e kopyala. Sayfa tablosu yok (flat memory model).
+//                MAP_SHARED bile olsa yazma dosyaya geri dönmez (COW stub).
 //
 // Arayüz (Linux x86-64 uyumlu):
-//   RDI = addr   (istenen adres; 0 = kernel seçsin)
+//   RDI = addr   (istenen adres; 0 = kernel seçsin, MAP_FIXED değilse yok sayılır)
 //   RSI = len
 //   RDX = prot   (PROT_*)
 //   R10 = flags  (MAP_*)
-//   R8  = fd     (-1 for anonymous)
-//   R9  = offset (anonim için 0 olmalı)
+//   R8  = fd     (MAP_ANONYMOUS: -1; MAP_FILE: geçerli fd)
+//   R9  = offset (dosya ofseti; 512 byte hizalamalı olmalı)
 //
 // Dönüş: haritalanan adres (uint64_t) veya (uint64_t)MAP_FAILED
 // ---------------------------------------------------------------
 static void sys_mmap(syscall_frame_t* frame) {
-    // uint64_t addr   = frame->rdi;   // istenen adres (şimdilik yok sayılır)
     uint64_t len    = frame->rsi;
-    // uint64_t prot   = frame->rdx;
+    uint64_t prot   = frame->rdx;   (void)prot;  // gelecekte NX için
     uint64_t flags  = frame->r10;
     int      fd_arg = (int)(int64_t)frame->r8;
     uint64_t offset = frame->r9;
@@ -675,35 +690,111 @@ static void sys_mmap(syscall_frame_t* frame) {
         return;
     }
 
-    // Sadece MAP_ANONYMOUS desteklenir
-    if (!(flags & MAP_ANONYMOUS)) {
-        serial_print("[SYSCALL] mmap: only MAP_ANONYMOUS supported\n");
-        frame->rax = (uint64_t)MAP_FAILED;
-        return;
-    }
-
-    // Anonim mmap'te fd=-1 ve offset=0 olmalı
-    if (fd_arg != -1 || offset != 0) {
-        frame->rax = (uint64_t)MAP_FAILED;
-        return;
-    }
-
     // Sayfa hizalaması (4KB)
     uint64_t aligned_len = (len + 0xFFF) & ~0xFFFULL;
 
-    void* mem = kmalloc(aligned_len);
-    if (!mem) {
+    // ── MAP_ANONYMOUS ─────────────────────────────────────────────
+    if (flags & MAP_ANONYMOUS) {
+        if (fd_arg != -1 || offset != 0) {
+            frame->rax = (uint64_t)MAP_FAILED;
+            return;
+        }
+
+        void* mem = kmalloc(aligned_len);
+        if (!mem) { frame->rax = (uint64_t)MAP_FAILED; return; }
+        kmemset(mem, 0, aligned_len);
+
+        serial_print("[SYSCALL] mmap anon -> 0x");
+        print_hex64((uint64_t)mem);
+        serial_print(" len="); print_uint64(aligned_len);
+        serial_print("\n");
+
+        frame->rax = (uint64_t)mem;
+        return;
+    }
+
+    // ── MAP_FILE ──────────────────────────────────────────────────
+    // fd geçerli ve okuma izinli olmalı
+    if (fd_arg < 0 || fd_arg >= MAX_FDS) {
         frame->rax = (uint64_t)MAP_FAILED;
         return;
     }
 
-    // Belleği sıfırla (MAP_ANONYMOUS garantisi)
+    // fd 0-2: stdin/stdout/stderr → haritalama yapılamaz
+    if (fd_arg <= 2) {
+        frame->rax = (uint64_t)MAP_FAILED;
+        return;
+    }
+
+    task_t* cur = task_get_current();
+    if (!cur) { frame->rax = (uint64_t)MAP_FAILED; return; }
+
+    fd_entry_t* ent = fd_get(cur->fd_table, fd_arg);
+    if (!ent || ent->type != FD_TYPE_FILE) {
+        frame->rax = (uint64_t)MAP_FAILED;
+        return;
+    }
+
+    // Dosyanın boyutunu sorgula (VFS → FAT32)
+    uint64_t file_size = 0;
+    {
+        const EmbeddedFile64* vf = fs_get_file64(ent->path);
+        if (vf) {
+            file_size = (uint64_t)vf->size;
+        } else {
+            file_size = (uint64_t)fat32_file_size(ent->path);
+        }
+    }
+
+    // offset + len dosya sınırlarını aşmamalı
+    if (offset > file_size) {
+        frame->rax = (uint64_t)MAP_FAILED;
+        return;
+    }
+
+    // Haritalanacak gerçek byte sayısı
+    uint64_t map_bytes = len;
+    if (offset + map_bytes > file_size)
+        map_bytes = file_size - offset;   // dosya sonuna kadar
+
+    // Bellek ayır ve sıfırla
+    void* mem = kmalloc(aligned_len);
+    if (!mem) { frame->rax = (uint64_t)MAP_FAILED; return; }
     kmemset(mem, 0, aligned_len);
 
-    serial_print("[SYSCALL] mmap -> addr=0x");
-    print_hex64((uint64_t)mem);
-    serial_print(" len=");
-    print_uint64(aligned_len);
+    // Dosyadan oku: VFS in-memory mi yoksa FAT32 mi?
+    {
+        const EmbeddedFile64* vf = fs_get_file64(ent->path);
+        if (vf && vf->content && map_bytes > 0) {
+            // In-memory VFS: doğrudan kopyala
+            kmemcpy(mem, (const void*)(vf->content + offset), map_bytes);
+        } else if (map_bytes > 0) {
+            // FAT32: fat32_read_file ile offset'ten oku
+            // fat32_read_file tüm dosyayı okur; offset'i sonradan uygula
+            uint8_t* tmp_buf = (uint8_t*)kmalloc(file_size + 1);
+            if (tmp_buf) {
+                int rd = fat32_read_file(ent->path, tmp_buf, (uint32_t)file_size);
+                if (rd > 0 && (uint64_t)rd > offset) {
+                    uint64_t copy_bytes = (uint64_t)rd - offset;
+                    if (copy_bytes > map_bytes) copy_bytes = map_bytes;
+                    kmemcpy(mem, tmp_buf + offset, copy_bytes);
+                }
+                kfree(tmp_buf);
+            } else {
+                // Yetersiz bellek: boş haritalama ile devam et (0-dolu)
+                serial_print("[SYSCALL] mmap file: tmp_buf alloc failed, zeroed\n");
+            }
+        }
+    }
+
+    // fd offset'ini güncelle (haritalamadan sonra)
+    ent->offset = offset + map_bytes;
+
+    serial_print("[SYSCALL] mmap file fd=");
+    { char b[8]; int_to_str(fd_arg, b); serial_print(b); }
+    serial_print(" off="); print_uint64(offset);
+    serial_print(" len="); print_uint64(map_bytes);
+    serial_print(" -> 0x"); print_hex64((uint64_t)mem);
     serial_print("\n");
 
     frame->rax = (uint64_t)mem;
@@ -1181,8 +1272,548 @@ static void sys_dup2(syscall_frame_t* frame) {
 }
 
 // ============================================================
-// SYSCALL_DISPATCH
+// v4 YENİ SYSCALL IMPLEMENTASYONLARI
 // ============================================================
+
+// VFS yardımcı fonksiyonları – files64.c / disk64.c'de tanımlı
+// (sys_lseek, sys_fstat, sys_mmap MAP_FILE için kullanılır)
+
+// ── SYS_LSEEK (24) ──────────────────────────────────────────────
+// lseek(fd, offset, whence) -> yeni ofset | SYSCALL_ERR_*
+//
+// whence:
+//   SEEK_SET (0) – dosyanın başından mutlak konum
+//   SEEK_CUR (1) – mevcut konumdan göreli
+//   SEEK_END (2) – dosyanın sonundan göreli (dosya boyutu bilinmeli)
+//
+// Notlar:
+//   • Serial ve pipe fd'leri seek'i desteklemez (ESPIPE benzeri).
+//   • Dosya boyutu VFS'ten sorgulanır; VFS hazır değilse sadece
+//     SEEK_SET ve SEEK_CUR desteklenir.
+// ---------------------------------------------------------------
+static void sys_lseek(syscall_frame_t* frame) {
+    int      fd     = (int)frame->rdi;
+    int64_t  offset = (int64_t)frame->rsi;
+    int      whence = (int)frame->rdx;
+
+    if (fd < 0 || fd >= MAX_FDS) { frame->rax = SYSCALL_ERR_BADF; return; }
+    if (whence < SEEK_SET || whence > SEEK_END) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    // stdin/stdout/stderr: seek desteklenmez
+    if (fd <= 2) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    task_t* cur = task_get_current();
+    if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
+
+    fd_entry_t* ent = fd_get(cur->fd_table, fd);
+    if (!ent) { frame->rax = SYSCALL_ERR_BADF; return; }
+
+    // Serial ve pipe seek'i desteklemez
+    if (ent->type == FD_TYPE_SERIAL || ent->type == FD_TYPE_PIPE) {
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    uint64_t cur_offset = ent->offset;
+    uint64_t file_size  = 0;
+
+    // SEEK_END için dosya boyutunu VFS'ten al
+    if (whence == SEEK_END) {
+        const EmbeddedFile64* f = fs_get_file64(ent->path);
+        if (f) {
+            file_size = (uint64_t)f->size;
+        } else {
+            // FAT32 sorgula (8.3 isim gerektiriyor; ham path ile dene)
+            file_size = (uint64_t)fat32_file_size(ent->path);
+        }
+    }
+
+    int64_t new_offset;
+    switch (whence) {
+    case SEEK_SET:
+        if (offset < 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
+        new_offset = offset;
+        break;
+    case SEEK_CUR:
+        new_offset = (int64_t)cur_offset + offset;
+        break;
+    case SEEK_END:
+        new_offset = (int64_t)file_size + offset;
+        break;
+    default:
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    if (new_offset < 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    ent->offset = (uint64_t)new_offset;
+
+    serial_print("[SYSCALL] lseek fd=");
+    { char b[8]; int_to_str(fd, b); serial_print(b); }
+    serial_print(" new_offset=");
+    print_uint64((uint64_t)new_offset);
+    serial_print("\n");
+
+    frame->rax = (uint64_t)new_offset;
+}
+
+// ── SYS_FSTAT (25) ──────────────────────────────────────────────
+// fstat(fd, *stat) -> 0 | SYSCALL_ERR_*
+//
+// Açık fd'nin meta verilerini stat_t yapısına yazar.
+// Dosya bilgileri önce VFS (in-memory), sonra FAT32 katmanından sorgulanır.
+// Serial ve pipe fd'leri için st_mode'a uygun bit maskeleri atanır.
+// ---------------------------------------------------------------
+static void sys_fstat(syscall_frame_t* frame) {
+    int      fd      = (int)frame->rdi;
+    stat_t*  stat_buf = (stat_t*)frame->rsi;
+
+    if (fd < 0 || fd >= MAX_FDS) { frame->rax = SYSCALL_ERR_BADF; return; }
+    if (!is_valid_user_ptr(stat_buf, sizeof(stat_t))) {
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+
+    // stat yapısını sıfırla
+    kmemset(stat_buf, 0, sizeof(stat_t));
+
+    // stdin/stdout/stderr → karakter aygıtı
+    if (fd <= 2) {
+        stat_buf->st_mode    = S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
+        stat_buf->st_nlink   = 1;
+        stat_buf->st_blksize = 512;
+        frame->rax = SYSCALL_OK;
+        return;
+    }
+
+    task_t* cur = task_get_current();
+    if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
+
+    fd_entry_t* ent = fd_get(cur->fd_table, fd);
+    if (!ent) { frame->rax = SYSCALL_ERR_BADF; return; }
+
+    stat_buf->st_nlink   = 1;
+    stat_buf->st_blksize = 512;
+
+    if (ent->type == FD_TYPE_SERIAL) {
+        stat_buf->st_mode = S_IFCHR | S_IRUSR | S_IWUSR;
+        frame->rax = SYSCALL_OK;
+        return;
+    }
+
+    if (ent->type == FD_TYPE_PIPE) {
+        stat_buf->st_mode = S_IFIFO | S_IRUSR | S_IWUSR;
+        // Pipe'taki mevcut byte sayısını boyut olarak ver
+        if (ent->pipe) stat_buf->st_size = (uint64_t)ent->pipe->bytes_avail;
+        frame->rax = SYSCALL_OK;
+        return;
+    }
+
+    // Düzenli dosya
+    stat_buf->st_mode = S_IFREG | S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+
+    // VFS'ten dosya boyutunu sorgula
+    uint64_t fsize = 0;
+    const EmbeddedFile64* vf = fs_get_file64(ent->path);
+    if (vf) {
+        fsize = (uint64_t)vf->size;
+    } else {
+        fsize = (uint64_t)fat32_file_size(ent->path);
+    }
+
+    stat_buf->st_size   = fsize;
+    stat_buf->st_blocks = (uint32_t)((fsize + 511) / 512);
+
+    serial_print("[SYSCALL] fstat fd=");
+    { char b[8]; int_to_str(fd, b); serial_print(b); }
+    serial_print(" size=");
+    print_uint64(fsize);
+    serial_print("\n");
+
+    frame->rax = SYSCALL_OK;
+}
+
+// ── SYS_IOCTL (26) ──────────────────────────────────────────────
+// ioctl(fd, request, arg) -> 0 | SYSCALL_ERR_*
+//
+// Desteklenen istekler:
+//   TCGETS  (0x5401) – termios_t al (arg = termios_t*)
+//   TCSETS  (0x5402) – termios_t ayarla (arg = const termios_t*)
+//   TCSETSW (0x5403) – TCSETS ile aynı (çıkış boşalması beklenmez)
+//   TCSETSF (0x5404) – TCSETS ile aynı + giriş tamponunu temizle
+//   TIOCGWINSZ (0x5413) – winsize_t al (arg = winsize_t*)
+//   TIOCSWINSZ (0x5414) – winsize_t ayarla (arg = const winsize_t*)
+//   FIONREAD   (0x541B) – okunabilir byte sayısını al (arg = int*)
+//   TIOCGPGRP  (0x540F) – ön plan süreç grubunu al (arg = int*)
+//   TIOCSPGRP  (0x5410) – ön plan süreç grubunu ayarla (arg = const int*)
+//
+// Notlar:
+//   • Gerçek serial port register ayarı yapılmıyor; termios durumu
+//     kernel-side statik yapıda saklanıyor (terminal emülatör yeterli).
+//   • winsize varsayılan: 80 sütun × 25 satır.
+// ---------------------------------------------------------------
+
+// Kernel-tarafı terminal durumu (tüm seri fd'ler için paylaşımlı)
+static termios_t kernel_termios = {
+    .c_iflag = ICRNL | IXON,
+    .c_oflag = OPOST | ONLCR,
+    .c_cflag = CS8 | CREAD | CLOCAL,
+    .c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN,
+    .c_line  = 0,
+    .c_cc    = {
+        [VINTR]    = 0x03,  // ^C
+        [VQUIT]    = 0x1C,  /* ^\ */
+        [VERASE]   = 0x7F,  // DEL
+        [VKILL]    = 0x15,  // ^U
+        [VEOF]     = 0x04,  // ^D
+        [VTIME]    = 0,
+        [VMIN]     = 1,
+        [VSTART]   = 0x11,  // ^Q
+        [VSTOP]    = 0x13,  // ^S
+        [VSUSP]    = 0x1A,  // ^Z
+    },
+    .c_ispeed = B115200,
+    .c_ospeed = B115200,
+};
+
+// Terminal pencere boyutu (varsayılan VGA 80×25)
+static winsize_t kernel_winsize = {
+    .ws_row    = 25,
+    .ws_col    = 80,
+    .ws_xpixel = 0,
+    .ws_ypixel = 0,
+};
+
+// Ön plan süreç grubu (şimdilik mevcut pid'e eşit)
+static int kernel_tty_pgrp = 1;
+
+static void sys_ioctl(syscall_frame_t* frame) {
+    int      fd      = (int)frame->rdi;
+    uint64_t request = frame->rsi;
+    void*    arg     = (void*)frame->rdx;
+
+    if (fd < 0 || fd >= MAX_FDS) { frame->rax = SYSCALL_ERR_BADF; return; }
+
+    // fd 0-2: her zaman terminal
+    // Diğer fd'ler için FD_TYPE_SERIAL kontrolü
+    if (fd > 2) {
+        task_t* cur = task_get_current();
+        if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
+        fd_entry_t* ent = fd_get(cur->fd_table, fd);
+        if (!ent) { frame->rax = SYSCALL_ERR_BADF; return; }
+        // Sadece serial fd'lere terminal ioctl'ı
+        if (ent->type != FD_TYPE_SERIAL && ent->type != FD_TYPE_PIPE) {
+            // Dosya fd'lerine genel olarak ENOTTY
+            frame->rax = SYSCALL_ERR_INVAL;
+            return;
+        }
+    }
+
+    switch (request) {
+
+    // ── TCGETS: mevcut termios ayarlarını döndür ──────────────────
+    case TCGETS:
+        if (!is_valid_user_ptr(arg, sizeof(termios_t))) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+        kmemcpy(arg, &kernel_termios, sizeof(termios_t));
+        serial_print("[SYSCALL] ioctl TCGETS ok\n");
+        frame->rax = SYSCALL_OK;
+        break;
+
+    // ── TCSETS / TCSETSW / TCSETSF: termios ayarlarını uygula ────
+    case TCSETS:
+    case TCSETSW:
+    case TCSETSF:
+        if (!is_valid_user_ptr(arg, sizeof(termios_t))) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+        kmemcpy(&kernel_termios, arg, sizeof(termios_t));
+        // TCSETSF: giriş tamponunu temizle (şimdilik stub)
+        serial_print("[SYSCALL] ioctl TCSETS");
+        if (request == TCSETSF) serial_print("F (flush)");
+        else if (request == TCSETSW) serial_print("W (drain)");
+        serial_print(" ok\n");
+        frame->rax = SYSCALL_OK;
+        break;
+
+    // ── TIOCGWINSZ: pencere boyutunu döndür ──────────────────────
+    case TIOCGWINSZ:
+        if (!is_valid_user_ptr(arg, sizeof(winsize_t))) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+        kmemcpy(arg, &kernel_winsize, sizeof(winsize_t));
+        serial_print("[SYSCALL] ioctl TIOCGWINSZ ok\n");
+        frame->rax = SYSCALL_OK;
+        break;
+
+    // ── TIOCSWINSZ: pencere boyutunu ayarla ──────────────────────
+    case TIOCSWINSZ:
+        if (!is_valid_user_ptr(arg, sizeof(winsize_t))) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+        kmemcpy(&kernel_winsize, arg, sizeof(winsize_t));
+        serial_print("[SYSCALL] ioctl TIOCSWINSZ ok\n");
+        frame->rax = SYSCALL_OK;
+        break;
+
+    // ── FIONREAD: okunabilir byte sayısını döndür ─────────────────
+    case FIONREAD: {
+        if (!is_valid_user_ptr(arg, sizeof(int))) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+        int available = 0;
+        if (fd == 0) {
+            // stdin: seri port LSR'dan
+            available = serial_data_ready() ? 1 : 0;
+        } else if (fd > 2) {
+            task_t* cur = task_get_current();
+            if (cur) {
+                fd_entry_t* ent = fd_get(cur->fd_table, fd);
+                if (ent && ent->type == FD_TYPE_PIPE && ent->pipe)
+                    available = (int)ent->pipe->bytes_avail;
+            }
+        }
+        *((int*)arg) = available;
+        frame->rax = SYSCALL_OK;
+        break;
+    }
+
+    // ── TIOCGPGRP: ön plan süreç grubunu döndür ──────────────────
+    case TIOCGPGRP:
+        if (!is_valid_user_ptr(arg, sizeof(int))) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+        *((int*)arg) = kernel_tty_pgrp;
+        frame->rax = SYSCALL_OK;
+        break;
+
+    // ── TIOCSPGRP: ön plan süreç grubunu ayarla ──────────────────
+    case TIOCSPGRP:
+        if (!is_valid_user_ptr(arg, sizeof(int))) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+        kernel_tty_pgrp = *((const int*)arg);
+        frame->rax = SYSCALL_OK;
+        break;
+
+    default:
+        serial_print("[SYSCALL] ioctl unknown request=0x");
+        print_hex64(request);
+        serial_print("\n");
+        frame->rax = SYSCALL_ERR_INVAL;
+        break;
+    }
+}
+
+
+// ============================================================
+// v5 YENİ SYSCALL IMPLEMENTASYONLARI
+// ============================================================
+
+// ── SYS_SELECT (27) ─────────────────────────────────────────────
+static void sys_select(syscall_frame_t* frame) {
+    int        nfds      = (int)frame->rdi;
+    fd_set_t*  readfds   = (fd_set_t*)frame->rsi;
+    fd_set_t*  writefds  = (fd_set_t*)frame->rdx;
+    fd_set_t*  exceptfds = (fd_set_t*)frame->r10;
+    timeval_t* timeout   = (timeval_t*)frame->r8;
+
+    if (nfds < 0 || nfds > MAX_FDS) { frame->rax = SYSCALL_ERR_INVAL; return; }
+    if (readfds   && !is_valid_user_ptr(readfds,   sizeof(fd_set_t)))  { frame->rax = SYSCALL_ERR_FAULT; return; }
+    if (writefds  && !is_valid_user_ptr(writefds,  sizeof(fd_set_t)))  { frame->rax = SYSCALL_ERR_FAULT; return; }
+    if (exceptfds && !is_valid_user_ptr(exceptfds, sizeof(fd_set_t)))  { frame->rax = SYSCALL_ERR_FAULT; return; }
+    if (timeout   && !is_valid_user_ptr(timeout,   sizeof(timeval_t))) { frame->rax = SYSCALL_ERR_FAULT; return; }
+
+    task_t* cur = task_get_current();
+
+    // Deadline hesabı
+    uint64_t deadline = 0;
+    int      has_deadline = 0;
+    if (timeout) {
+        uint64_t ms = (uint64_t)timeout->tv_sec * 1000ULL
+                    + (uint64_t)timeout->tv_usec / 1000ULL;
+        deadline = get_system_ticks() + ms;
+        has_deadline = 1;
+    }
+
+    fd_set_t out_read, out_write, out_except;
+    FD_ZERO(&out_read);
+    FD_ZERO(&out_write);
+    FD_ZERO(&out_except);
+    int nready = 0;
+
+    do {
+        nready = 0;
+        FD_ZERO(&out_read);
+        FD_ZERO(&out_write);
+
+        for (int fd = 0; fd < nfds; fd++) {
+            // ── Okuma hazırlığı
+            if (readfds && FD_ISSET(fd, readfds)) {
+                int ready = 0;
+                if (fd == 0) {
+                    ready = serial_data_ready();
+                } else if (fd == 1 || fd == 2) {
+                    ready = 0;
+                } else if (cur) {
+                    fd_entry_t* ent = fd_get(cur->fd_table, fd);
+                    if (ent) {
+                        if (ent->type == FD_TYPE_PIPE && ent->pipe)
+                            ready = (ent->pipe->bytes_avail > 0);
+                        else if (ent->type == FD_TYPE_FILE)
+                            ready = 1;
+                        else if (ent->type == FD_TYPE_SERIAL)
+                            ready = serial_data_ready();
+                    }
+                }
+                if (ready) { FD_SET(fd, &out_read); nready++; }
+            }
+            // ── Yazma hazırlığı
+            if (writefds && FD_ISSET(fd, writefds)) {
+                int ready = 0;
+                if (fd == 1 || fd == 2) {
+                    ready = 1;
+                } else if (fd > 2 && cur) {
+                    fd_entry_t* ent = fd_get(cur->fd_table, fd);
+                    if (ent) {
+                        if (ent->type == FD_TYPE_PIPE && ent->pipe)
+                            ready = (ent->pipe->bytes_avail < PIPE_BUF_SIZE);
+                        else if (ent->type == FD_TYPE_FILE ||
+                                 ent->type == FD_TYPE_SERIAL)
+                            ready = 1;
+                    }
+                }
+                if (ready) { FD_SET(fd, &out_write); nready++; }
+            }
+        }
+
+        if (nready > 0) break;
+        if (!has_deadline) break;
+        if (timeout->tv_sec == 0 && timeout->tv_usec == 0) break;  // non-blocking
+        if (get_system_ticks() >= deadline) break;
+        scheduler_yield();
+    } while (1);
+
+    if (readfds)   *readfds   = out_read;
+    if (writefds)  *writefds  = out_write;
+    if (exceptfds) FD_ZERO(exceptfds);
+
+    frame->rax = (uint64_t)(int64_t)nready;
+}
+
+// ── SYS_POLL (28) ───────────────────────────────────────────────
+static void sys_poll(syscall_frame_t* frame) {
+    pollfd_t* fds        = (pollfd_t*)frame->rdi;
+    uint64_t  nfds       = frame->rsi;
+    int       timeout_ms = (int)(int64_t)frame->rdx;
+
+    if (!fds || nfds == 0 || nfds > (uint64_t)MAX_FDS) {
+        frame->rax = (nfds == 0) ? 0 : SYSCALL_ERR_INVAL;
+        return;
+    }
+    if (!is_valid_user_ptr(fds, nfds * sizeof(pollfd_t))) {
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+
+    task_t* cur = task_get_current();
+
+    uint64_t deadline    = get_system_ticks() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0);
+    int      has_timeout = (timeout_ms >= 0);
+
+    int nready = 0;
+
+    do {
+        nready = 0;
+
+        for (uint64_t i = 0; i < nfds; i++) {
+            pollfd_t* pfd = &fds[i];
+            pfd->revents = 0;
+
+            if (pfd->fd < 0) continue;
+
+            if (pfd->fd >= MAX_FDS) {
+                pfd->revents = POLLNVAL;
+                nready++;
+                continue;
+            }
+
+            // stdin
+            if (pfd->fd == 0) {
+                if ((pfd->events & POLLIN) && serial_data_ready()) {
+                    pfd->revents |= POLLIN;
+                    nready++;
+                }
+                continue;
+            }
+            // stdout/stderr
+            if (pfd->fd == 1 || pfd->fd == 2) {
+                if (pfd->events & POLLOUT) {
+                    pfd->revents |= POLLOUT;
+                    nready++;
+                }
+                continue;
+            }
+
+            if (!cur) { pfd->revents = POLLNVAL; nready++; continue; }
+
+            fd_entry_t* ent = fd_get(cur->fd_table, pfd->fd);
+            if (!ent) { pfd->revents = POLLNVAL; nready++; continue; }
+
+            int added = 0;
+
+            if (pfd->events & POLLIN) {
+                int ready = 0;
+                if (ent->type == FD_TYPE_PIPE && ent->pipe) {
+                    ready = (ent->pipe->bytes_avail > 0);
+                    if (!ready && ent->pipe->write_closed) {
+                        pfd->revents |= POLLHUP | POLLRDHUP;
+                        added = 1;
+                    }
+                } else if (ent->type == FD_TYPE_FILE) {
+                    ready = 1;
+                } else if (ent->type == FD_TYPE_SERIAL) {
+                    ready = serial_data_ready();
+                }
+                if (ready) { pfd->revents |= POLLIN; added = 1; }
+            }
+
+            if (pfd->events & POLLOUT) {
+                int ready = 0;
+                if (ent->type == FD_TYPE_PIPE && ent->pipe) {
+                    ready = (ent->pipe->bytes_avail < PIPE_BUF_SIZE);
+                    if (ent->pipe->read_closed) {
+                        pfd->revents |= POLLERR; added = 1;
+                    }
+                } else if (ent->type == FD_TYPE_FILE ||
+                           ent->type == FD_TYPE_SERIAL) {
+                    ready = 1;
+                }
+                if (ready) { pfd->revents |= POLLOUT; added = 1; }
+            }
+
+            if (added) nready++;
+        }
+
+        if (nready > 0) break;
+        if (!has_timeout || timeout_ms == 0) break;
+        if (get_system_ticks() >= deadline) break;
+        scheduler_yield();
+    } while (1);
+
+    frame->rax = (uint64_t)(int64_t)nready;
+}
+
+
 void syscall_dispatch(syscall_frame_t* frame) {
     uint64_t num = frame->rax;
 
@@ -1211,6 +1842,13 @@ void syscall_dispatch(syscall_frame_t* frame) {
     case SYS_WAITPID:      sys_waitpid(frame);     break;
     case SYS_PIPE:         sys_pipe(frame);        break;
     case SYS_DUP2:         sys_dup2(frame);        break;
+    // v4
+    case SYS_LSEEK:        sys_lseek(frame);       break;
+    case SYS_FSTAT:        sys_fstat(frame);       break;
+    case SYS_IOCTL:        sys_ioctl(frame);       break;
+    // v5
+    case SYS_SELECT:       sys_select(frame);      break;
+    case SYS_POLL:         sys_poll(frame);        break;
     default:
         serial_print("[SYSCALL] Unknown syscall: ");
         { char b[16]; int_to_str((int)(num & 0xFFFF), b); serial_print(b); }
@@ -1221,7 +1859,7 @@ void syscall_dispatch(syscall_frame_t* frame) {
 }
 
 // ============================================================
-// SYSCALL_TEST – v3 testleri dahil
+// SYSCALL_TEST – v4 testleri dahil
 // ============================================================
 void syscall_test(void) {
     if (!syscall_enabled) {
@@ -1229,7 +1867,7 @@ void syscall_test(void) {
         return;
     }
     serial_print("\n========================================\n");
-    serial_print("[SYSCALL TEST] v3 comprehensive tests\n");
+    serial_print("[SYSCALL TEST] v4 comprehensive tests\n");
     serial_print("========================================\n");
 
     uint64_t ret = 0;
@@ -1277,8 +1915,6 @@ void syscall_test(void) {
 
     // ── SYS_MMAP (16) ───────────────────────────────────────────
     serial_print("\n[T06] SYS_MMAP anonymous 4096 bytes:\n");
-    // mmap(0, 4096, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0)
-    // R10=flags, R8=fd, R9=offset → inline asm ile 6-arg syscall
     register uint64_t r10_flags asm("r10") = MAP_ANONYMOUS | MAP_PRIVATE;
     register uint64_t r8_fd     asm("r8")  = (uint64_t)(int64_t)-1;
     register uint64_t r9_off    asm("r9")  = 0;
@@ -1293,7 +1929,6 @@ void syscall_test(void) {
     serial_print("  mmap_addr=0x"); print_hex64(ret); serial_print("\n");
     uint64_t mmap_addr = ret;
 
-    // Haritalanan belleğe yaz/oku
     if (ret != (uint64_t)MAP_FAILED) {
         volatile char* p = (volatile char*)ret;
         p[0] = 'A'; p[1] = 'B'; p[2] = '\0';
@@ -1319,7 +1954,6 @@ void syscall_test(void) {
     serial_print(" wfd="); { char b[8]; int_to_str(pipe_fds[1],b); serial_print(b); }
     serial_print("\n");
 
-    // Pipe'a yaz ve oku
     if (ret == (uint64_t)SYSCALL_OK && pipe_fds[0] > 0 && pipe_fds[1] > 0) {
         serial_print("\n[T09] PIPE write/read:\n");
         const char* pmsg = "pipe_test_data";
@@ -1338,10 +1972,8 @@ void syscall_test(void) {
         serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
         serial_print(" (expect 8)\n");
 
-        // dup2 ile kopyalanan fd'ye yaz
         DO_SYSCALL3(SYS_WRITE, 8, "dup2_ok\n", 8);
 
-        // Temizle
         DO_SYSCALL1(SYS_CLOSE, pipe_fds[0]);
         DO_SYSCALL1(SYS_CLOSE, pipe_fds[1]);
         DO_SYSCALL1(SYS_CLOSE, 8);
@@ -1354,21 +1986,16 @@ void syscall_test(void) {
     serial_print(" (expect -2)\n");
 
     // ── SYS_FORK (19) ───────────────────────────────────────────
-    // UYARI: kernel context'te fork tehlikeli olabilir.
-    // Bu test yalnızca fork'un çökmediğini doğrular.
     serial_print("\n[T12] SYS_FORK (kernel context smoke test):\n");
     DO_SYSCALL0(SYS_FORK);
     serial_print("  fork_ret="); { char b[16]; int_to_str((int)ret,b); serial_print(b); }
     serial_print("\n");
-    // ret=0 ise çocuk bağlamındayız; ret>0 ise ebeveyn (child_pid)
     if ((int64_t)ret > 0) {
         serial_print("  [parent] child_pid="); print_uint64(ret); serial_print("\n");
 
-        // ── SYS_WAITPID (21) – WNOHANG ──────────────────────────
         serial_print("\n[T13] SYS_WAITPID(child, WNOHANG):\n");
         int ws = 0;
         uint64_t child_pid = ret;
-        // waitpid(pid, &status, WNOHANG)
         __asm__ volatile ("syscall"
             : "=a"(ret)
             : "a"((uint64_t)SYS_WAITPID),
@@ -1387,8 +2014,222 @@ void syscall_test(void) {
     serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
     serial_print(" (expect -2)\n");
 
+    // ============================================================
+    // v4 YENİ TESTLER
+    // ============================================================
+    serial_print("\n----------------------------------------\n");
+    serial_print("[SYSCALL TEST] v4 tests begin\n");
+    serial_print("----------------------------------------\n");
+
+    // ── SYS_FSTAT – stdin (fd=0) ────────────────────────────────
+    serial_print("\n[T15] SYS_FSTAT fd=0 (stdin, expect S_IFCHR):\n");
+    stat_t st;
+    DO_SYSCALL2(SYS_FSTAT, 0, &st);
+    serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+    serial_print(" st_mode=0x"); print_hex64((uint64_t)st.st_mode);
+    serial_print(" st_size="); print_uint64(st.st_size);
+    serial_print("\n");
+    if (st.st_mode & S_IFCHR)
+        serial_print("  [OK] S_IFCHR set (character device)\n");
+    else
+        serial_print("  [FAIL] S_IFCHR not set!\n");
+
+    // ── SYS_FSTAT – stdout (fd=1) ───────────────────────────────
+    serial_print("\n[T16] SYS_FSTAT fd=1 (stdout, expect S_IFCHR):\n");
+    stat_t st2;
+    DO_SYSCALL2(SYS_FSTAT, 1, &st2);
+    serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+    serial_print(" st_mode=0x"); print_hex64((uint64_t)st2.st_mode);
+    serial_print("\n");
+
+    // ── SYS_FSTAT – pipe fd ──────────────────────────────────────
+    serial_print("\n[T17] SYS_FSTAT üzerinden pipe (S_IFIFO bekleniyor):\n");
+    int pstat_fds[2] = {-1, -1};
+    DO_SYSCALL1(SYS_PIPE, pstat_fds);
+    if (ret == (uint64_t)SYSCALL_OK && pstat_fds[0] > 0) {
+        // Pipe'a birkaç byte yaz (bytes_avail için)
+        DO_SYSCALL3(SYS_WRITE, pstat_fds[1], "hello", 5);
+        stat_t sp;
+        DO_SYSCALL2(SYS_FSTAT, pstat_fds[0], &sp);
+        serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+        serial_print(" st_mode=0x"); print_hex64((uint64_t)sp.st_mode);
+        serial_print(" st_size(bytes_avail)="); print_uint64(sp.st_size);
+        serial_print("\n");
+        if (sp.st_mode & S_IFIFO)
+            serial_print("  [OK] S_IFIFO set\n");
+        else
+            serial_print("  [FAIL] S_IFIFO not set!\n");
+        if (sp.st_size == 5)
+            serial_print("  [OK] bytes_avail=5\n");
+        else
+            serial_print("  [WARN] bytes_avail mismatch\n");
+        DO_SYSCALL1(SYS_CLOSE, pstat_fds[0]);
+        DO_SYSCALL1(SYS_CLOSE, pstat_fds[1]);
+    } else {
+        serial_print("  [SKIP] pipe allocation failed\n");
+    }
+
+    // ── SYS_FSTAT – geçersiz fd ──────────────────────────────────
+    serial_print("\n[T18] SYS_FSTAT fd=999 (expect EBADF=-5):\n");
+    stat_t st_bad;
+    DO_SYSCALL2(SYS_FSTAT, 999, &st_bad);
+    serial_print("  ret="); { char b[8]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+    serial_print(" (expect -5)\n");
+
+    // ── SYS_LSEEK – open bir dosyada SEEK_SET ────────────────────
+    // Not: SYS_OPEN /dev/serial0'a seek yapılabilmesi için FD_TYPE_SERIAL
+    // seek'i desteklemiyor; bu yüzden geçersiz test yapıyoruz.
+    serial_print("\n[T19] SYS_LSEEK stdin (expect EINVAL=-1, serial):\n");
+    DO_SYSCALL3(SYS_LSEEK, 0, 0, SEEK_SET);
+    serial_print("  ret="); { char b[8]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+    serial_print(" (expect -1, stdin not seekable)\n");
+
+    // Gerçek dosya fd'si açılabilirse lseek testi
+    serial_print("\n[T20] SYS_OPEN + SYS_LSEEK (file fd):\n");
+    DO_SYSCALL2(SYS_OPEN, "/dev/serial0", O_RDWR);
+    int test_fd = (int)(int64_t)ret;
+    serial_print("  open ret="); { char b[8]; int_to_str(test_fd,b); serial_print(b); }
+    serial_print("\n");
+    if (test_fd >= 3) {
+        // Serial fd seek desteklemez → EINVAL bekliyoruz
+        DO_SYSCALL3(SYS_LSEEK, test_fd, 0, SEEK_SET);
+        serial_print("  lseek SEEK_SET ret="); { char b[8]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+        serial_print(" (expect -1 for serial)\n");
+        // SEEK_CUR
+        DO_SYSCALL3(SYS_LSEEK, test_fd, 10, SEEK_CUR);
+        serial_print("  lseek SEEK_CUR+10 ret="); { char b[8]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+        serial_print("\n");
+        DO_SYSCALL1(SYS_CLOSE, test_fd);
+    }
+
+    // ── SYS_LSEEK – geçersiz whence ─────────────────────────────
+    serial_print("\n[T21] SYS_LSEEK geçersiz whence=99 (expect EINVAL=-1):\n");
+    DO_SYSCALL3(SYS_LSEEK, 1, 0, 99);
+    serial_print("  ret="); { char b[8]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+    serial_print(" (expect -1)\n");
+
+    // ── SYS_IOCTL – TCGETS ──────────────────────────────────────
+    serial_print("\n[T22] SYS_IOCTL TCGETS (fd=0):\n");
+    termios_t tios;
+    DO_SYSCALL3(SYS_IOCTL, 0, TCGETS, &tios);
+    serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+    serial_print(" c_iflag=0x"); print_hex64((uint64_t)tios.c_iflag);
+    serial_print(" c_lflag=0x"); print_hex64((uint64_t)tios.c_lflag);
+    serial_print("\n");
+    if (tios.c_lflag & ECHO)
+        serial_print("  [OK] ECHO flag set\n");
+    if (tios.c_lflag & ICANON)
+        serial_print("  [OK] ICANON flag set\n");
+
+    // ── SYS_IOCTL – TCSETS: raw mode geçişi ─────────────────────
+    serial_print("\n[T23] SYS_IOCTL TCSETS (raw mode):\n");
+    termios_t raw = tios;
+    // Raw mod: ECHO + ICANON + ISIG + IEXTEN kapat
+    raw.c_lflag &= ~(ECHO | ECHOE | ECHOK | ICANON | ISIG | IEXTEN);
+    raw.c_iflag &= ~(ICRNL | IXON);
+    raw.c_oflag &= ~OPOST;
+    raw.c_cc[VMIN]  = 1;
+    raw.c_cc[VTIME] = 0;
+    DO_SYSCALL3(SYS_IOCTL, 0, TCSETS, &raw);
+    serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+    serial_print(" (expect 0)\n");
+
+    // Doğrula: geri oku
+    termios_t verify;
+    DO_SYSCALL3(SYS_IOCTL, 0, TCGETS, &verify);
+    serial_print("  verify c_lflag=0x"); print_hex64((uint64_t)verify.c_lflag);
+    if (!(verify.c_lflag & ECHO))
+        serial_print(" [OK] ECHO off\n");
+    else
+        serial_print(" [FAIL] ECHO still on!\n");
+
+    // Canonical moda geri dön
+    serial_print("\n[T24] SYS_IOCTL TCSETSF (canonical'a geri dön):\n");
+    DO_SYSCALL3(SYS_IOCTL, 0, TCSETSF, &tios);
+    serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+    serial_print(" (expect 0)\n");
+    termios_t verify2;
+    DO_SYSCALL3(SYS_IOCTL, 0, TCGETS, &verify2);
+    if (verify2.c_lflag & ECHO)
+        serial_print("  [OK] ECHO restored\n");
+    else
+        serial_print("  [FAIL] ECHO not restored!\n");
+
+    // ── SYS_IOCTL – TIOCGWINSZ ──────────────────────────────────
+    serial_print("\n[T25] SYS_IOCTL TIOCGWINSZ:\n");
+    winsize_t ws;
+    DO_SYSCALL3(SYS_IOCTL, 1, TIOCGWINSZ, &ws);
+    serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+    serial_print(" rows="); { char b[8]; int_to_str((int)ws.ws_row,b); serial_print(b); }
+    serial_print(" cols="); { char b[8]; int_to_str((int)ws.ws_col,b); serial_print(b); }
+    serial_print("\n");
+    if (ws.ws_row == 25 && ws.ws_col == 80)
+        serial_print("  [OK] Default 80x25\n");
+    else
+        serial_print("  [WARN] Unexpected window size\n");
+
+    // ── SYS_IOCTL – TIOCSWINSZ ──────────────────────────────────
+    serial_print("\n[T26] SYS_IOCTL TIOCSWINSZ (132x50):\n");
+    winsize_t new_ws = { .ws_row = 50, .ws_col = 132, .ws_xpixel = 0, .ws_ypixel = 0 };
+    DO_SYSCALL3(SYS_IOCTL, 1, TIOCSWINSZ, &new_ws);
+    serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+    serial_print(" (expect 0)\n");
+    // Geri oku
+    winsize_t ws2;
+    DO_SYSCALL3(SYS_IOCTL, 1, TIOCGWINSZ, &ws2);
+    serial_print("  verify rows="); { char b[8]; int_to_str((int)ws2.ws_row,b); serial_print(b); }
+    serial_print(" cols="); { char b[8]; int_to_str((int)ws2.ws_col,b); serial_print(b); }
+    serial_print("\n");
+    if (ws2.ws_row == 50 && ws2.ws_col == 132)
+        serial_print("  [OK] 132x50 set\n");
+    else
+        serial_print("  [FAIL] winsize mismatch!\n");
+    // Orijinale geri dön
+    winsize_t restore_ws = { .ws_row = 25, .ws_col = 80 };
+    DO_SYSCALL3(SYS_IOCTL, 1, TIOCSWINSZ, &restore_ws);
+
+    // ── SYS_IOCTL – FIONREAD ────────────────────────────────────
+    serial_print("\n[T27] SYS_IOCTL FIONREAD (stdin):\n");
+    int avail = -1;
+    DO_SYSCALL3(SYS_IOCTL, 0, FIONREAD, &avail);
+    serial_print("  ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+    serial_print(" avail="); { char b[8]; int_to_str(avail,b); serial_print(b); }
+    serial_print(" (0 if no input pending)\n");
+
+    // ── SYS_IOCTL – TIOCGPGRP / TIOCSPGRP ──────────────────────
+    serial_print("\n[T28] SYS_IOCTL TIOCGPGRP/TIOCSPGRP:\n");
+    int pgrp = -1;
+    DO_SYSCALL3(SYS_IOCTL, 0, TIOCGPGRP, &pgrp);
+    serial_print("  TIOCGPGRP ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+    serial_print(" pgrp="); { char b[8]; int_to_str(pgrp,b); serial_print(b); }
+    serial_print("\n");
+    int new_pgrp = 42;
+    DO_SYSCALL3(SYS_IOCTL, 0, TIOCSPGRP, &new_pgrp);
+    serial_print("  TIOCSPGRP(42) ret="); { char b[8]; int_to_str((int)ret,b); serial_print(b); }
+    serial_print("\n");
+    int pgrp2 = 0;
+    DO_SYSCALL3(SYS_IOCTL, 0, TIOCGPGRP, &pgrp2);
+    if (pgrp2 == 42)
+        serial_print("  [OK] pgrp=42\n");
+    else
+        serial_print("  [FAIL] pgrp mismatch!\n");
+    // Geri dön
+    DO_SYSCALL3(SYS_IOCTL, 0, TIOCSPGRP, &pgrp);
+
+    // ── SYS_IOCTL – bilinmeyen request ──────────────────────────
+    serial_print("\n[T29] SYS_IOCTL unknown request 0xDEAD (expect EINVAL=-1):\n");
+    DO_SYSCALL3(SYS_IOCTL, 0, 0xDEAD, 0);
+    serial_print("  ret="); { char b[8]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+    serial_print(" (expect -1)\n");
+
+    // ── SYS_IOCTL – NULL arg ile TCGETS (expect EFAULT) ─────────
+    serial_print("\n[T30] SYS_IOCTL TCGETS NULL arg (expect EFAULT=-11):\n");
+    DO_SYSCALL3(SYS_IOCTL, 0, TCGETS, 0);
+    serial_print("  ret="); { char b[8]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+    serial_print(" (expect -11)\n");
+
     serial_print("\n========================================\n");
-    serial_print("[SYSCALL TEST] All v3 tests completed.\n");
+    serial_print("[SYSCALL TEST] All v4 tests completed.\n");
     serial_print("========================================\n\n");
 
 #undef DO_SYSCALL0
