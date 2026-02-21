@@ -567,4 +567,4 @@ void set_extended_text_mode(void)  { /* VESA'da gerek yok */ }
 // Renk indeks dönüştürücü (dışarıdan çağrılabilir)
 uint32_t vesa_color_from_vga(uint8_t idx) {
     return vga_palette[idx & 0x0F];
-}z
+}
