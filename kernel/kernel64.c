@@ -66,6 +66,34 @@ void* memcpy64(void* dest, const void* src, size_t n) {
 
 // ============================================================================
 // Yardımcı fonksiyonlar
+
+// ============================================================================
+// SSE / FPU Init
+// Userland ELF'ler SSE kullanabilsin diye CR0 ve CR4 ayarlanır.
+//
+//  CR0.EM  (bit2)  → 0 : FPU emülasyonu KAPALI (gerçek FPU kullan)
+//  CR0.MP  (bit1)  → 1 : FWAIT koruması AKTİF
+//  CR0.TS  (bit3)  → 0 : Task Switch FPU lazy-save KAPALI
+//  CR4.OSFXSR  (bit9)  → 1 : SSE (FXSAVE/FXRSTOR) AKTİF
+//  CR4.OSXMMEXCPT (bit10) → 1 : SSE exception (#XF) AKTİF
+// ============================================================================
+static inline void sse_init(void) {
+    uint64_t cr0, cr4;
+
+    __asm__ volatile ("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~(1ULL << 2);   // CR0.EM = 0
+    cr0 |=  (1ULL << 1);   // CR0.MP = 1
+    cr0 &= ~(1ULL << 3);   // CR0.TS = 0
+    __asm__ volatile ("mov %0, %%cr0" : : "r"(cr0));
+
+    __asm__ volatile ("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1ULL << 9);    // CR4.OSFXSR    = 1
+    cr4 |= (1ULL << 10);   // CR4.OSXMMEXCPT = 1
+    __asm__ volatile ("mov %0, %%cr4" : : "r"(cr4));
+
+    serial_print("[SSE] FPU/SSE initialized\n");
+}
+
 // ============================================================================
 void uint64_to_hex(uint64_t num, char* buf) {
     const char* hex = "0123456789ABCDEF";
@@ -217,6 +245,9 @@ void kernel_main(uint64_t multiboot_info) {
     scheduler_init();
     println64("  OK Scheduler initialized", VGA_GREEN);
 
+    sse_init();
+    println64("  OK SSE/FPU initialized", VGA_GREEN);
+
     syscall_init();
     println64("  OK SYSCALL/SYSRET initialized", VGA_GREEN);
 
@@ -301,6 +332,9 @@ void kernel_main(uint64_t multiboot_info) {
 
     scheduler_init();
     serial_print("Scheduler initialized\n");
+
+    sse_init();
+    serial_print("[SSE] FPU/SSE initialized\n");
 
     syscall_init();
     serial_print("SYSCALL initialized\n");

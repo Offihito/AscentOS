@@ -44,8 +44,8 @@ multiboot_header:
     dw 5
     dw 0
     dd framebuffer_tag_end - framebuffer_tag_start
-    dd 1280        ; genişlik (pixel) — 1280/8 = 160 sütun
-    dd 800         ; yükseklik (pixel) — 800/16 = 50 satır
+    dd 1920        ; genişlik (pixel) — 1920/8 = 240 sütun
+    dd 1080        ; yükseklik (pixel) — 1080/16 = 67 satır
     dd 32          ; bpp
     framebuffer_tag_end:
 %endif

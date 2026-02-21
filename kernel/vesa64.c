@@ -464,13 +464,13 @@ void putchar64(char c, uint8_t color) {
 
 void print_str64(const char* str, uint8_t color) {
     erase_cursor();
-    size_t r0 = cur_row;
+    // Scroll back modundaysa normal görünüme dön
+    scroll_view_offset = 0;
     while (*str)
         putchar_cell(*str++, color);
-    // r0'dan cur_row'a kadar olan satırları çiz
-    size_t r1 = cur_row;
-    if (r1 >= rows) r1 = rows - 1;
-    for (size_t r = r0; r <= r1; r++)
+    // Her zaman tüm ekranı yeniden çiz — partial redraw scroll
+    // durumunda güvenilmez olduğu için garantili yaklaşım.
+    for (size_t r = 0; r < rows; r++)
         for (size_t c = 0; c < cols; c++)
             redraw_cell(r, c);
     update_cursor64();
@@ -478,15 +478,11 @@ void print_str64(const char* str, uint8_t color) {
 
 void println64(const char* str, uint8_t color) {
     erase_cursor();
-    size_t r0 = cur_row;
+    scroll_view_offset = 0;
     while (*str)
         putchar_cell(*str++, color);
     putchar_cell('\n', color);
-    // r0'dan önceki satıra kadar çiz (newline sonrası cur_row arttı)
-    size_t r1 = (cur_row > 0) ? cur_row - 1 : 0;
-    if (r1 >= rows) r1 = rows - 1;
-    if (r0 > r1) r0 = r1;
-    for (size_t r = r0; r <= r1; r++)
+    for (size_t r = 0; r < rows; r++)
         for (size_t c = 0; c < cols; c++)
             redraw_cell(r, c);
     update_cursor64();
@@ -571,4 +567,4 @@ void set_extended_text_mode(void)  { /* VESA'da gerek yok */ }
 // Renk indeks dönüştürücü (dışarıdan çağrılabilir)
 uint32_t vesa_color_from_vga(uint8_t idx) {
     return vga_palette[idx & 0x0F];
-}
+}z

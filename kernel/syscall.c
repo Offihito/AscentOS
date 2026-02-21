@@ -32,6 +32,12 @@ extern void int_to_str(int num, char* str);
 extern void print_str64(const char* str, uint8_t color);
 #define VGA_WHITE 0x0F
 
+// vesa64.c'de tanımlı: yazılımsal cursor'u framebuffer'a çizer.
+extern void update_cursor64(void);
+// putchar64: her karakteri anında framebuffer'a çizer (erase+draw+cursor).
+// print_str64'ten farklı olarak kısmi/scroll durumunda da güvenilir.
+extern void putchar64(char c, uint8_t color);
+
 // Assembly entry point
 extern void syscall_entry(void);
 
@@ -345,27 +351,15 @@ static void sys_write(syscall_frame_t* frame) {
     if (len > 65536)                  { frame->rax = SYSCALL_ERR_INVAL; return; }
     if (fd == 0)                      { frame->rax = SYSCALL_ERR_BADF;  return; }
 
-    // stdout (fd=1): VGA + serial (kullanıcı programları VGA'da görünsün)
-    if (fd == 1) {
-        // Null-terminate edilmiş geçici buffer ile VGA'ya yaz
-        char vga_buf[256];
-        uint64_t i = 0;
-        while (i < len) {
-            uint64_t chunk = len - i;
-            if (chunk > 255) chunk = 255;
-            uint64_t j;
-            for (j = 0; j < chunk; j++) vga_buf[j] = buf[i + j];
-            vga_buf[j] = '\0';
-            print_str64(vga_buf, VGA_WHITE);
-            for (j = 0; j < chunk; j++) serial_putchar(buf[i + j]);
-            i += chunk;
+    // stdout ve stderr: VGA + serial
+    if (fd == 1 || fd == 2) {
+        // putchar64: her karakteri anında erase_cursor+draw+update_cursor
+        // yaparak framebuffer'a yazar. print_str64'ten farklı olarak
+        // scroll/partial-redraw sorunlarından etkilenmez.
+        for (uint64_t i = 0; i < len; i++) {
+            putchar64(buf[i], VGA_WHITE);
+            serial_putchar(buf[i]);
         }
-        frame->rax = len;
-        return;
-    }
-    // stderr (fd=2): sadece serial
-    if (fd == 2) {
-        for (uint64_t i = 0; i < len; i++) serial_putchar(buf[i]);
         frame->rax = len;
         return;
     }
@@ -377,17 +371,12 @@ static void sys_write(syscall_frame_t* frame) {
     if (!ent)  { frame->rax = SYSCALL_ERR_BADF; return; }
     if (ent->flags == O_RDONLY) { frame->rax = SYSCALL_ERR_BADF; return; }
 
-    // Pipe yazma
     if (ent->type == FD_TYPE_PIPE) {
         pipe_buf_t* pb = ent->pipe;
         if (!pb || pb->read_closed) { frame->rax = SYSCALL_ERR_BADF; return; }
-
         uint64_t written = 0;
         while (written < len) {
-            if (pb->bytes_avail >= PIPE_BUF_SIZE) {
-                // Tampon dolu; bloklamak yerine yazılanı döndür
-                break;
-            }
+            if (pb->bytes_avail >= PIPE_BUF_SIZE) break;
             pb->data[pb->write_pos] = buf[written];
             pb->write_pos = (pb->write_pos + 1) % PIPE_BUF_SIZE;
             pb->bytes_avail++;
@@ -397,7 +386,6 @@ static void sys_write(syscall_frame_t* frame) {
         return;
     }
 
-    // Serial veya file fd
     for (uint64_t i = 0; i < len; i++) serial_putchar(buf[i]);
     if (ent->type == FD_TYPE_FILE) ent->offset += len;
     frame->rax = len;
@@ -409,13 +397,12 @@ static void sys_read(syscall_frame_t* frame) {
     char*    buf = (char*)frame->rsi;
     uint64_t len = frame->rdx;
 
-    if (fd < 0 || fd >= MAX_FDS)     { frame->rax = SYSCALL_ERR_BADF;  return; }
-    if (!is_valid_user_ptr(buf, len)){ frame->rax = SYSCALL_ERR_FAULT; return; }
-    if (len == 0)                    { frame->rax = 0; return; }
-    if (len > 65536)                 { frame->rax = SYSCALL_ERR_INVAL; return; }
-    if (fd == 1 || fd == 2)         { frame->rax = SYSCALL_ERR_BADF;  return; }
+    if (fd < 0 || fd >= MAX_FDS)      { frame->rax = SYSCALL_ERR_BADF;  return; }
+    if (!is_valid_user_ptr(buf, len)) { frame->rax = SYSCALL_ERR_FAULT; return; }
+    if (len == 0)                     { frame->rax = 0; return; }
+    if (len > 65536)                  { frame->rax = SYSCALL_ERR_INVAL; return; }
+    if (fd == 1 || fd == 2)          { frame->rax = SYSCALL_ERR_BADF;  return; }
 
-    // stdin: klavye ring buffer (userland) veya serial RX (kernel shell)
     if (fd == 0) {
         extern int kb_ring_pop(void);
         extern int kb_userland_active(void);
@@ -423,27 +410,38 @@ static void sys_read(syscall_frame_t* frame) {
         uint64_t count = 0;
 
         if (kb_userland_active()) {
-            // Userland modu: klavye ring buffer'dan oku
-            int ch = kb_ring_pop();
-            if (ch < 0) {
-                frame->rax = 0;
-                return;
-            }
-            // Debug: hangi karakteri okuduk
-            serial_print("[READ] ch=");
-            { char tmp[4]; tmp[0]=(char)ch; tmp[1]='\0'; serial_print(tmp); }
-            serial_print("\n");
-            buf[count++] = (char)ch;
-            while (count < len) {
+            // Blocking read: en az 1 karakter gelene kadar bekle
+            int ch;
+            do {
                 ch = kb_ring_pop();
-                if (ch < 0) break;
+                if (ch < 0) {
+                    // Karakter yok — interrupt bekle, task'ı meşgul etme
+                    __asm__ volatile ("sti; hlt" ::: "memory");
+
+                    // Task sonlandırılıyorsa çık (sonsuz döngü engeli)
+                    task_t* cur = task_get_current();
+                    if (cur && cur->state == TASK_STATE_TERMINATED)
+                        break;
+                }
+            } while (ch < 0);
+
+            if (ch >= 0) {
                 buf[count++] = (char)ch;
-                if ((char)ch == '\n') break;
+
+                // '\n' görene kadar veya buffer dolana kadar devam et
+                while (count < len) {
+                    ch = kb_ring_pop();
+                    if (ch < 0) break;          // non-blocking: kalan karakterler
+                    buf[count++] = (char)ch;
+                    if ((char)ch == '\n') break;
+                }
             }
         } else {
-            // Kernel shell modu: eski serial okuma
+            // Kernel shell modu: serial'dan blocking oku
+            // (userland aktif değilse buraya düşmemeli ama yine de güvenli)
             while (count < len) {
-                if (!serial_data_ready()) break;
+                while (!serial_data_ready())
+                    __asm__ volatile ("pause");
                 char c = serial_getchar();
                 buf[count++] = c;
                 if (c == '\n') break;
@@ -454,6 +452,7 @@ static void sys_read(syscall_frame_t* frame) {
         return;
     }
 
+    // fd >= 3
     task_t* cur = task_get_current();
     if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
 
@@ -461,17 +460,13 @@ static void sys_read(syscall_frame_t* frame) {
     if (!ent)  { frame->rax = SYSCALL_ERR_BADF; return; }
     if (ent->flags == O_WRONLY) { frame->rax = SYSCALL_ERR_BADF; return; }
 
-    // Pipe okuma
     if (ent->type == FD_TYPE_PIPE) {
         pipe_buf_t* pb = ent->pipe;
         if (!pb) { frame->rax = SYSCALL_ERR_BADF; return; }
-
         if (pb->bytes_avail == 0) {
-            // EOF: yazma ucu kapandıysa 0 döndür, değilse EAGAIN
             frame->rax = pb->write_closed ? 0 : SYSCALL_ERR_AGAIN;
             return;
         }
-
         uint64_t count = 0;
         while (count < len && pb->bytes_avail > 0) {
             buf[count] = (char)pb->data[pb->read_pos];
@@ -483,7 +478,6 @@ static void sys_read(syscall_frame_t* frame) {
         return;
     }
 
-    // Serial
     if (ent->type == FD_TYPE_SERIAL) {
         uint64_t count = 0;
         while (count < len) {
@@ -496,7 +490,7 @@ static void sys_read(syscall_frame_t* frame) {
         return;
     }
 
-    frame->rax = SYSCALL_ERR_NOSYS;   // FD_TYPE_FILE: VFS hazır değil
+    frame->rax = SYSCALL_ERR_NOSYS;
 }
 
 // ── SYS_EXIT (3) ────────────────────────────────────────────────
