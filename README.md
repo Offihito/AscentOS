@@ -6,7 +6,6 @@
 
 - **64-bit Architecture** - Built for modern hardware
 - **FAT32 File System** - Native file management capabilities
-- **Dual Mode Support** - Text and GUI interfaces
 - **Open Source** - Community-driven development
 
 ## 🛠️ Building from Source
@@ -34,17 +33,13 @@ Ensure you have the necessary build tools installed on your system.
    make run
    ```
    
-   For GUI mode:
-   ```bash
-   make run-gui
-   ```
 
 ## 🎯 Usage Modes
 
 | Mode | Command | Description |
 |------|---------|-------------|
-| Text | `make run` | Launches AscentOS in text-based interface |
-| GUI | `make run-gui` | Launches AscentOS with graphical interface |
+| Text | `make run` | Launches AscentOS in text-based interface you can type gfx into prompt to switch gui mode |
+
 
 ## 📝 License
 
