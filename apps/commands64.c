@@ -2738,6 +2738,20 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
 // COMMAND TABLE
 // ===========================================
 
+// ============================================================================
+// GFX KOMUTU — GUI moduna geç
+// ============================================================================
+extern volatile int request_gui_start;
+
+static void cmd_gfx(const char* args, CommandOutput* output) {
+    (void)args;
+    output_add_line(output, "GUI moduna geciliyor...", 0x0E);
+    output_add_line(output, "  Mouse: sol tik = pencere surukle/tikla", 0x0B);
+    output_add_line(output, "  Klavye: N = yeni pencere ac", 0x0B);
+    request_gui_start = 1;
+}
+
+// ============================================================================
 static Command command_table[] = {
     {"hello", "Say hello", cmd_hello},
     {"help", "Show available commands", cmd_help},
@@ -2781,6 +2795,9 @@ static Command command_table[] = {
     // SYSCALL/SYSRET commands
     {"syscallinfo", "Show SYSCALL MSR configuration",    cmd_syscallinfo},
     {"syscalltest", "Run SYSCALL test suite (56 tests)", cmd_syscalltest},
+
+    // GUI modu
+    {"gfx",  "GUI moduna gec (pencere yoneticisi + mouse)", cmd_gfx},
 };
 static int command_count = sizeof(command_table) / sizeof(Command);
 
