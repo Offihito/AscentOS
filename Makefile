@@ -87,6 +87,9 @@ vesa64.o: kernel/vesa64.c kernel/vesa64.h
 syscall.o: kernel/syscall.c kernel/syscall.h
 	$(CC) $(CFLAGS) -c kernel/syscall.c -o syscall.o
 
+syscall_test.o: kernel/syscall_test.c kernel/syscall.h
+	$(CC) $(CFLAGS) -c kernel/syscall_test.c -o syscall_test.o
+
 # ============================================================================
 # NEWLIB — build (bir kez çalıştır, kütüphane cache'lenir)
 #
@@ -225,7 +228,7 @@ kernel64_text.o: kernel/kernel64.c kernel/vesa64.h
 TEXT_OBJS = boot64_text.o interrupts64_text.o vesa64.o keyboard_text.o \
             commands64_text.o files64.o disk64.o elf64.o memory_unified.o vmm64.o nano64.o \
             timer.o task.o scheduler.o kernel64_text.o page_fault.o \
-            syscall.o
+            syscall.o syscall_test.o
 
 kernel64_text.elf: $(TEXT_OBJS)
 	$(LD) $(LDFLAGS) $(TEXT_OBJS) -o kernel64_text.elf
@@ -290,7 +293,7 @@ GUI_OBJS = boot64_gui.o interrupts64_gui.o interrupts_setup.o gui64.o compositor
            commands_gui.o memory_unified.o vmm64.o \
            commands64_gui.o files64.o disk64.o elf64.o nano64.o vga64.o \
            timer.o task.o scheduler.o page_fault.o \
-           syscall.o
+           syscall.o syscall_test.o
 
 kernel64_gui.elf: $(GUI_OBJS)
 	$(LD) $(LDFLAGS) $(GUI_OBJS) -o kernel64_gui.elf
@@ -493,9 +496,9 @@ help:
 	@echo "║    make help         Bu menü                              ║"
 	@echo "║                                                            ║"
 	@echo "║  Kernel shell komutları:                                   ║"
+	@echo "║    testsyscall / syscallstats                              ║"
 	@echo "║    elfload HELLO.ELF / FORKTEST.ELF / STDIO.ELF           ║"
 	@echo "║    elfload MATHTEST.ELF / CALC.ELF                        ║"
-	@echo "║    testsyscall / syscallstats                              ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
 
 # ============================================================================

@@ -58,15 +58,10 @@ extern void load_idt64(struct idt_ptr* ptr);
 static int shift_pressed = 0;
 static int caps_lock = 0;
 
-#ifndef GUI_MODE
-static char input_buffer[256];
-static int buffer_pos = 0;
-static int ctrl_pressed = 0;
-static int extended_key = 0;
-
 // ── Userland klavye ring buffer ───────────────
 // Userland task çalışıyorken tuşlar buraya gelir,
 // sys_read() buradan okur.
+// NOT: GUI_MODE dahil her derleme modunda erişilebilir olmalı.
 #define KB_RING_SIZE 256
 static volatile char     kb_ring[KB_RING_SIZE];
 static volatile int      kb_ring_head = 0;  // yazma
@@ -83,7 +78,6 @@ void kb_ring_push(char c) {
         kb_ring[kb_ring_head] = c;
         kb_ring_head = next;
     }
-
 }
 
 // Ring buffer'dan karakter oku (sys_read'den çağrılır)
@@ -94,6 +88,12 @@ int kb_ring_pop(void) {
     kb_ring_tail = (kb_ring_tail + 1) % KB_RING_SIZE;
     return (unsigned char)c;
 }
+
+#ifndef GUI_MODE
+static char input_buffer[256];
+static int buffer_pos = 0;
+static int ctrl_pressed = 0;
+static int extended_key = 0;
 #endif
 
 // ============================================================================

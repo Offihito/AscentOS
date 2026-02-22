@@ -1,25 +1,5 @@
 // syscall.h - SYSCALL/SYSRET Infrastructure for AscentOS 64-bit
 // Intel/AMD x86-64 SYSCALL instruction via MSR configuration
-//
-// v3 Yeni Eklemeler:
-//   SYS_MMAP    (16) – bellek haritalama (anonim, MAP_ANON)
-//   SYS_MUNMAP  (17) – haritalanmış bölgeyi serbest bırak
-//   SYS_BRK     (18) – program break'i set et (sbrk'nin modern kardeşi)
-//   SYS_FORK    (19) – mevcut task'ı kopyala (copy-on-write yok; tam kopya)
-//   SYS_EXECVE  (20) – yeni program yükle ve çalıştır (stub / gelecek VFS)
-//   SYS_WAITPID (21) – çocuk işlem bitmesini bekle
-//   SYS_PIPE    (22) – tek yönlü pipe oluştur, fd[0]=okuma fd[1]=yazma
-//   SYS_DUP2    (23) – eski fd'yi newfd üzerine kopyala (atomik)
-//
-// v4 Yeni Eklemeler:
-//   SYS_LSEEK   (24) – dosya ofseti konumlandırma (SEEK_SET/CUR/END)
-//   SYS_FSTAT   (25) – fd üzerinden dosya meta verisi sorgulama
-//   SYS_IOCTL   (26) – terminal mod / genel aygıt kontrolü (TCGETS/TCSETS/…)
-//
-// v5 Yeni Eklemeler:
-//   SYS_MMAP    (16) – MAP_FILE desteği eklendi (fd + offset ile dosya haritalama)
-//   SYS_SELECT  (27) – I/O multiplexing; fd kümelerini zaman aşımı ile bekle
-//   SYS_POLL    (28) – select'in modern alternatifi; pollfd dizisi ile bekle
 
 #ifndef SYSCALL_H
 #define SYSCALL_H
@@ -32,14 +12,10 @@
 #define MSR_EFER       0xC0000080   // Extended Feature Enable Register
 #define MSR_STAR       0xC0000081   // Segment selectors for SYSCALL/SYSRET
 #define MSR_LSTAR      0xC0000082   // 64-bit SYSCALL entry point (RIP)
-#define MSR_CSTAR      0xC0000083   // 32-bit compat mode (kullanılmıyor)
 #define MSR_FMASK      0xC0000084   // RFLAGS mask (entry'de sıfırlanır)
 
 // EFER bit flags
 #define EFER_SCE       (1 << 0)     // System Call Extensions
-#define EFER_LME       (1 << 8)     // Long Mode Enable
-#define EFER_LMA       (1 << 10)    // Long Mode Active (read-only)
-#define EFER_NXE       (1 << 11)    // No-Execute Enable
 
 // RFLAGS mask: syscall entry'de IF ve DF sıfırlanır
 #define SYSCALL_RFLAGS_MASK  (0x200 | 0x400)   // IF | DF

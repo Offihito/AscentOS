@@ -251,10 +251,7 @@ void cmd_hello(const char* args, CommandOutput* output) {
     output_add_line(output, "Hello from AscentOS 64-bit! Why so serious? ;)", VGA_YELLOW);
 }
 
-void cmd_jew(const char* args, CommandOutput* output) {
-    (void)args;
-    output_add_line(output, "A DALLIR? THATS A BIG PRABLEM", VGA_YELLOW);
-}
+
 
 void cmd_help(const char* args, CommandOutput* output) {
     (void)args;
@@ -262,7 +259,6 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_line(output, " hello     - Say hello", VGA_WHITE);
     output_add_line(output, " clear     - Clear screen", VGA_WHITE);
     output_add_line(output, " help      - Show this help", VGA_WHITE);
-    output_add_line(output, " jew       - JEW JEW JEW", VGA_WHITE);
     output_add_line(output, " echo      - Echo text", VGA_WHITE);
     output_add_line(output, " about     - About AscentOS", VGA_WHITE);
     output_add_line(output, " neofetch  - Show system info", VGA_WHITE);
@@ -305,8 +301,8 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_empty_line(output);
     output_add_line(output, "SYSCALL Commands:", VGA_YELLOW);
     output_add_line(output, " syscallinfo - SYSCALL/SYSRET MSR configuration", VGA_WHITE);
-    output_add_line(output, " syscalltest - Run full test suite (47 tests)", VGA_WHITE);
-    output_add_line(output, "              mmap_file/select/poll included", VGA_WHITE);
+    output_add_line(output, " syscalltest - Run full test suite (56 tests)", VGA_WHITE);
+    output_add_line(output, "              kill/gettimeofday included", VGA_WHITE);
 }
 
 void cmd_clear(const char* args, CommandOutput* output) {
@@ -328,7 +324,6 @@ void cmd_about(const char* args, CommandOutput* output) {
     output_add_line(output, "     ASCENTOS v0.1 - Why So Serious?", VGA_GREEN);
     output_add_line(output, "   A minimal x86_64 OS written in chaos", VGA_YELLOW);
     output_add_line(output, "      Built from scratch. No regrets.", VGA_RED);
-    output_add_line(output, "       Also Fuck Lalyn and Kamil", VGA_RED);
     output_add_line(output, "========================================", VGA_RED);
     output_add_line(output, "", VGA_WHITE);
     output_add_line(output, "64-bit Edition - Now with MORE bits!", VGA_CYAN);
@@ -606,8 +601,8 @@ void cmd_neofetch(const char* args, CommandOutput* output) {
     str_concat(temp, " files in filesystem");
     str_cpy(info_lines[14], temp);
 
-    str_cpy(info_lines[16], "Fuck Lalyn and Kamil forever");
-    str_cpy(info_lines[17], "Why so serious? ;) Type 'help'");
+    str_cpy(info_lines[16], "Type 'help' to see all commands");
+    str_cpy(info_lines[17], "Why so serious? ;)");
 
     char full_line[MAX_LINE_LENGTH];
     for (int i = 0; i < 18; i++) {
@@ -1757,9 +1752,9 @@ void cmd_syscallinfo(const char* args, CommandOutput* output) {
     uint64_t efer = rdmsr(MSR_EFER);
     HEX64(efer);
     str_cpy(line, "EFER  : "); str_concat(line, tmp);
-    str_concat(line, (efer & EFER_SCE) ? "  SCE=1" : "  SCE=0 (!)");
-    str_concat(line, (efer & EFER_LMA) ? " LMA=1" : " LMA=0");
-    str_concat(line, (efer & EFER_NXE) ? " NXE=1" : "");
+    str_concat(line, (efer & EFER_SCE)      ? "  SCE=1" : "  SCE=0 (!)");
+    str_concat(line, (efer & (1 << 10))    ? " LMA=1" : " LMA=0");
+    str_concat(line, (efer & (1 << 11))    ? " NXE=1" : "");
     output_add_line(output, line, (efer & EFER_SCE) ? VGA_GREEN : VGA_RED);
 
     // IA32_STAR
@@ -1806,7 +1801,7 @@ void cmd_syscallinfo(const char* args, CommandOutput* output) {
     output_add_line(output, line, (fmask & 0x200) ? VGA_GREEN : VGA_RED);
 
     // CSTAR (compat)
-    uint64_t cstar = rdmsr(MSR_CSTAR);
+    uint64_t cstar = rdmsr(0xC0000083);
     HEX64(cstar);
     str_cpy(line, "CSTAR : "); str_concat(line, tmp);
     str_concat(line, "  (32-bit compat, unused)");
@@ -1848,7 +1843,7 @@ void cmd_syscallinfo(const char* args, CommandOutput* output) {
     output_add_line(output, "-12  ENOSPC -13 ERANGE", VGA_WHITE);
 
     output_add_empty_line(output);
-    output_add_line(output, "Run 'syscalltest' to execute all 47 tests.", VGA_GREEN);
+    output_add_line(output, "Run 'syscalltest' to execute all 56 tests.", VGA_GREEN);
 
     #undef HEX64
     #undef HEX16
@@ -1877,7 +1872,7 @@ static void u64_to_dec(uint64_t v, char* out) {
     }
 }
 
-// PASS/FAIL satiri olustur ve output buffer'a ekle
+// PASS/FAIL satiri olustur — output buffer'a ekle ve doğrudan ekrana yaz
 static void sc_result(CommandOutput* output, int idx, const char* name,
                       int64_t ret_val, int pass_cond,
                       const char* extra, int* pass, int* fail) {
@@ -1890,7 +1885,7 @@ static void sc_result(CommandOutput* output, int idx, const char* name,
     str_concat(line, tmp);
     if (extra && extra[0]) { str_concat(line, " "); str_concat(line, extra); }
     str_concat(line, pass_cond ? "  PASS" : "  FAIL");
-    output_add_line(output, line, pass_cond ? VGA_GREEN : VGA_RED);
+    println64(line, pass_cond ? VGA_GREEN : VGA_RED);
     pass_cond ? (*pass)++ : (*fail)++;
 }
 
@@ -1925,6 +1920,12 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
     char tmp[32]; char line[96];
     const char* hexc = "0123456789ABCDEF";
 
+    // Doğrudan ekrana yaz (buffer dolunca drop olmaz)
+    #define SCPRINT(txt, col) do { \
+        println64((txt), (col)); \
+        output_add_line(output, (txt), (col)); \
+    } while(0)
+
     #define HEX64S(v) do { \
         tmp[0]='0'; tmp[1]='x'; \
         for(int _i=0;_i<16;_i++) tmp[2+_i]=hexc[((v)>>(60-_i*4))&0xF]; \
@@ -1958,14 +1959,15 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
               "expect EBADF", &pass, &fail);
 
     // ── [05] SYS_READ fd=0 non-blocking ───────────────────────
+    // Kernel context'te serial'dan veri yoksa EAGAIN döner (blocking yok)
     char rbuf[32];
     _SC3(SYS_READ, 0, rbuf, 16);
     {
-        int ok = ((int64_t)ret >= 0);
-        str_cpy(line, "[05] SYS_READ(fd=0) bytes=");
-        int_to_str((int)ret, tmp); str_concat(line, tmp);
-        str_concat(line, ok ? " (ok)  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        int ok = ((int64_t)ret >= 0 || (int64_t)ret == (int64_t)SYSCALL_ERR_AGAIN);
+        str_cpy(line, "[05] SYS_READ(fd=0) ret=");
+        int_to_str((int)(int64_t)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? " (no-block ok)  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -1982,7 +1984,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[07] SYS_GETPID pid=");
         int_to_str((int)ret, tmp); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -1993,7 +1995,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[08] SYS_GETPPID ppid=");
         int_to_str((int)ret, tmp); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2004,7 +2006,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         u64_to_dec(ret, tmp);
         str_cpy(line, "[09] SYS_UPTIME ticks="); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2015,7 +2017,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         u64_to_dec(ret, tmp);
         str_cpy(line, "[10] SYS_GETTICKS ticks="); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2051,7 +2053,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_concat(line, " got=");
         u64_to_dec(new_prio, tmp); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2064,8 +2066,8 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
     // ================================================================
     // v3 YENİ TESTLER
     // ================================================================
-    output_add_empty_line(output);
-    output_add_line(output, "── v3 New Tests ─────────────────────", VGA_YELLOW);
+    SCPRINT("", VGA_WHITE);
+    SCPRINT("── v3 New Tests ─────────────────────", VGA_YELLOW);
 
     // ── [16] SYS_BRK(0) sorgula ───────────────────────────────
     _SC1(SYS_BRK, 0);
@@ -2074,7 +2076,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         HEX64S(ret);
         str_cpy(line, "[16] SYS_BRK(0) cur_brk="); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2100,7 +2102,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         HEX64S(ret);
         str_cpy(line, "[17] SYS_MMAP(anon,4096) addr="); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
 
         // Belleğe yaz/oku kısa doğrulama
@@ -2108,8 +2110,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
             volatile char* mp = (volatile char*)mmap_addr;
             mp[0] = 0x42; mp[1] = 0x43;
             int rw_ok = (mp[0] == 0x42 && mp[1] == 0x43);
-            output_add_line(output,
-                rw_ok ? "       mmap R/W verify OK" : "       mmap R/W verify FAIL",
+            SCPRINT(rw_ok ? "       mmap R/W verify OK" : "       mmap R/W verify FAIL",
                 rw_ok ? VGA_GREEN : VGA_RED);
         }
     }
@@ -2120,7 +2121,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         sc_result(output, 18, "SYS_MUNMAP", (int64_t)ret,
                   (int64_t)ret == 0, "expect 0", &pass, &fail);
     } else {
-        output_add_line(output, "[18] SYS_MUNMAP  SKIP (mmap failed)", VGA_YELLOW);
+        SCPRINT("[18] SYS_MUNMAP  SKIP (mmap failed)", VGA_YELLOW);
     }
 
     // ── [19] SYS_EXECVE stub → ENOSYS ─────────────────────────
@@ -2140,7 +2141,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_concat(line, " wfd=");
         int_to_str(pipe_fds[1], tmp); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2163,10 +2164,10 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_concat(line, " read=");
         int_to_str((int)read_ret, tmp); str_concat(line, tmp);
         str_concat(line, data_ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, data_ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, data_ok ? VGA_GREEN : VGA_RED);
         data_ok ? pass++ : fail++;
     } else {
-        output_add_line(output, "[21] PIPE R/W  SKIP", VGA_YELLOW);
+        SCPRINT("[21] PIPE R/W  SKIP", VGA_YELLOW);
     }
 
     // ── [22] SYS_DUP2 ─────────────────────────────────────────
@@ -2178,7 +2179,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[22] SYS_DUP2(wfd->8) ret=");
         int_to_str((int)ret, tmp); str_concat(line, tmp);
         str_concat(line, dup_pass ? "  PASS" : "  FAIL");
-        output_add_line(output, line, dup_pass ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, dup_pass ? VGA_GREEN : VGA_RED);
         dup_pass ? pass++ : fail++;
 
         // Temizle
@@ -2186,7 +2187,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         _SC1(SYS_CLOSE, pipe_fds[1]);
         _SC1(SYS_CLOSE, 8);
     } else {
-        output_add_line(output, "[22] SYS_DUP2  SKIP", VGA_YELLOW);
+        SCPRINT("[22] SYS_DUP2  SKIP", VGA_YELLOW);
     }
 
     // ── [23] SYS_FORK smoke test ────────────────────────────────
@@ -2201,21 +2202,21 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_concat(line, fork_ret > 0 ? " (parent,child_pid)" :
                          fork_ret == 0 ? " (child ctx)" : " (err)");
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
 
         if (fork_ret > 0) {
             str_cpy(line, "       child_pid=");
             int_to_str((int)fork_ret, tmp); str_concat(line, tmp);
-            output_add_line(output, line, VGA_WHITE);
+            SCPRINT(line, VGA_WHITE);
         }
     }
 
     // ================================================================
     // v4 YENİ TESTLER: SYS_LSEEK, SYS_FSTAT, SYS_IOCTL
     // ================================================================
-    output_add_empty_line(output);
-    output_add_line(output, "── v4 New Tests (lseek / fstat / ioctl) ─", VGA_YELLOW);
+    SCPRINT("", VGA_WHITE);
+    SCPRINT("── v4 New Tests (lseek / fstat / ioctl) ─", VGA_YELLOW);
 
     // ── [24] SYS_FSTAT fd=0 stdin → S_IFCHR ──────────────────
     {
@@ -2225,7 +2226,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[24] SYS_FSTAT(stdin) mode=0x");
         HEX64S((uint64_t)st.st_mode); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2237,7 +2238,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[25] SYS_FSTAT(stdout) mode=0x");
         HEX64S((uint64_t)st.st_mode); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2260,13 +2261,13 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
             str_concat(line, " sz=");
             u64_to_dec(sp.st_size, tmp); str_concat(line, tmp);
             str_concat(line, ok ? "  PASS" : "  FAIL");
-            output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+            SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
             ok ? pass++ : fail++;
 
             _SC1(SYS_CLOSE, pfds[0]);
             _SC1(SYS_CLOSE, pfds[1]);
         } else {
-            output_add_line(output, "[26] SYS_FSTAT(pipe)  SKIP", VGA_YELLOW);
+            SCPRINT("[26] SYS_FSTAT(pipe)  SKIP", VGA_YELLOW);
         }
     }
 
@@ -2305,7 +2306,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[31] SYS_IOCTL(TCGETS) lflag=0x");
         HEX64S((uint64_t)tios.c_lflag); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2335,7 +2336,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[32] SYS_IOCTL(TCSETS raw) lflag=0x");
         HEX64S((uint64_t)verify.c_lflag); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
 
         // Canonical moda geri dön
@@ -2350,7 +2351,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[33] SYS_IOCTL(TCSETSF restore) lflag=0x");
         HEX64S((uint64_t)check.c_lflag); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2364,7 +2365,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_concat(line, "x");
         int_to_str((int)ws.ws_row, tmp); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2385,7 +2386,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_concat(line, "x");
         int_to_str((int)got_ws.ws_row, tmp); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
 
         // 80x25'e geri dön
@@ -2401,7 +2402,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[36] SYS_IOCTL(FIONREAD) avail=");
         int_to_str(avail, tmp); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2420,8 +2421,8 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
     // ================================================================
     // v5 YENİ TESTLER: SYS_MMAP(MAP_FILE), SYS_SELECT, SYS_POLL
     // ================================================================
-    output_add_empty_line(output);
-    output_add_line(output, "── v5 New Tests (mmap_file/select/poll) ─", VGA_YELLOW);
+    SCPRINT("", VGA_WHITE);
+    SCPRINT("── v5 New Tests (mmap_file/select/poll) ─", VGA_YELLOW);
 
     // ── [39] SYS_MMAP anonim (regression) ────────────────────
     {
@@ -2441,14 +2442,13 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[39] SYS_MMAP(anon) addr=0x");
         HEX64S(ret); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
         if (ok) {
-            volatile char* p = (volatile char*)mmap_addr2;
+            volatile uint8_t* p = (volatile uint8_t*)mmap_addr2;
             p[0] = 0x55; p[1] = 0xAA;
             int rw = (p[0] == 0x55 && p[1] == 0xAA);
-            output_add_line(output,
-                rw ? "       anon R/W verify OK" : "       anon R/W verify FAIL",
+            SCPRINT(rw ? "       anon R/W verify OK" : "       anon R/W verify FAIL",
                 rw ? VGA_GREEN : VGA_RED);
             // Temizle
             _SC2(SYS_MUNMAP, mmap_addr2, 4096);
@@ -2470,7 +2470,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         int ok = (ret == (uint64_t)MAP_FAILED);
         str_cpy(line, "[40] SYS_MMAP(bad fd) -> ");
         str_concat(line, ok ? "MAP_FAILED  PASS" : "unexpected  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2489,7 +2489,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         int ok = (ret == (uint64_t)MAP_FAILED);
         str_concat(line, ""); str_cpy(line, "[41] SYS_MMAP(len=0) -> ");
         str_concat(line, ok ? "MAP_FAILED  PASS" : "unexpected  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2515,7 +2515,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[42] SYS_SELECT(stdout writable) nready=");
         int_to_str((int)ret, tmp); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2540,7 +2540,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[43] SYS_SELECT(stdin nb) nready=");
         int_to_str((int)ret, tmp); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2571,7 +2571,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[45] SYS_POLL(stdout POLLOUT) rev=0x");
         int_to_str((int)pfd.revents, tmp); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2584,7 +2584,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[46] SYS_POLL(stdin POLLIN nb) nready=");
         int_to_str((int)ret, tmp); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2597,15 +2597,15 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[47] SYS_POLL(fd=-1 skip) nready=");
         int_to_str((int)ret, tmp); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
     // ================================================================
     // v6 YENİ TESTLER: SYS_KILL + SYS_GETTIMEOFDAY
     // ================================================================
-    output_add_empty_line(output);
-    output_add_line(output, "── v6 New Tests (kill / gettimeofday) ───", VGA_YELLOW);
+    SCPRINT("", VGA_WHITE);
+    SCPRINT("── v6 New Tests (kill / gettimeofday) ───", VGA_YELLOW);
 
     // ── [48] SYS_GETTIMEOFDAY – normal ───────────────────────────
     {
@@ -2617,7 +2617,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_concat(line, " usec=");
         u64_to_dec((uint64_t)tv.tv_usec, tmp); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  FAIL");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_RED);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
         ok ? pass++ : fail++;
     }
 
@@ -2648,7 +2648,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         str_cpy(line, "[51] SYS_GETTIMEOFDAY(delta) usec=");
         int_to_str((int)delta, tmp); str_concat(line, tmp);
         str_concat(line, ok ? "  PASS" : "  WARN(tick rate?)");
-        output_add_line(output, line, ok ? VGA_GREEN : VGA_YELLOW);
+        SCPRINT(line, ok ? VGA_GREEN : VGA_YELLOW);
         ok ? pass++ : fail++;
     }
 
@@ -2695,7 +2695,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
             str_cpy(line, "[56] SYS_KILL(fork child,SIGKILL) child=");
             int_to_str((int)fork_ret, tmp); str_concat(line, tmp);
             str_concat(line, kill_ok ? "  PASS" : "  FAIL");
-            output_add_line(output, line, kill_ok ? VGA_GREEN : VGA_RED);
+            SCPRINT(line, kill_ok ? VGA_GREEN : VGA_RED);
             kill_ok ? pass++ : fail++;
             // Çocuğu topla
             _SC3(SYS_WAITPID, (uint64_t)fork_ret, 0, 0);
@@ -2704,24 +2704,29 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
             _SC1(SYS_SLEEP, 5000);
             _SC1(SYS_EXIT, 0);
         } else {
-            output_add_line(output, "[56] SYS_KILL(SIGKILL)  SKIP (fork err)", VGA_YELLOW);
+            SCPRINT("[56] SYS_KILL(SIGKILL)  SKIP (fork err)", VGA_YELLOW);
         }
     }
 
     // ── Özet ───────────────────────────────────────────────────
-    output_add_empty_line(output);
+    SCPRINT("", VGA_WHITE);
     str_cpy(line, "Result: ");
     {char b[8]; int_to_str(pass, b); str_concat(line, b);}
     str_concat(line, "/56 passed  (");
     {char b[8]; int_to_str(fail, b); str_concat(line, b);}
     str_concat(line, " failed)");
-    output_add_line(output, line, fail == 0 ? VGA_GREEN : VGA_YELLOW);
+    SCPRINT(line, fail == 0 ? VGA_GREEN : VGA_YELLOW);
     if (fail == 0)
-        output_add_line(output, "All v6 syscall tests passed!", VGA_GREEN);
+        SCPRINT("All v6 syscall tests passed!", VGA_GREEN);
     else
-        output_add_line(output, "Failed tests: check serial log.", VGA_RED);
+        SCPRINT("Failed tests: check serial log.", VGA_RED);
+
+    // Testler println64 ile zaten ekrana yazıldı.
+    // Kernel shell output buffer'ını ikinci kez render etmemesi için temizle.
+    output_init(output);
 
     #undef HEX64S
+    #undef SCPRINT
 }
 
 #undef _SC0
@@ -2735,7 +2740,6 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
 
 static Command command_table[] = {
     {"hello", "Say hello", cmd_hello},
-    {"jew", "JEW JEW JEW", cmd_jew},
     {"help", "Show available commands", cmd_help},
     {"clear", "Clear the screen", cmd_clear},
     {"echo", "Echo text back", cmd_echo},
