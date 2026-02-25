@@ -83,6 +83,18 @@ void pmm_init(struct memory_map_entry* mmap, unsigned int mmap_count);
 void* pmm_alloc_frame(void);
 void pmm_free_frame(void* frame);
 
+// Multi-frame allocation: count adet ardışık olmayan frame tahsis et ve
+// ardışık sanal adres aralığına identity-map uygula (phys == virt).
+// Büyük kernel/user stack'leri için kullanılır (kmalloc heap sınırı yok).
+// Başarılı olursa fiziksel == sanal base adres döner, hata = NULL.
+// pmm_free_pages ile serbest bırakılmalı.
+void* pmm_alloc_pages(uint64_t count);
+void  pmm_free_pages (void* base, uint64_t count);
+
+// Bayrak parametreli versiyon — kernel stack için 0x3, user stack için 0x7
+// map_flags: 0x3 = PRESENT|WRITE (Ring-0), 0x7 = PRESENT|WRITE|USER (Ring-3)
+void* pmm_alloc_pages_flags(uint64_t count, uint64_t map_flags);
+
 // PMM utility functions
 unsigned long pmm_get_total_memory(void);
 unsigned long pmm_get_free_memory(void);

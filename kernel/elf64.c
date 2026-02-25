@@ -23,7 +23,7 @@ static inline uint64_t page_align_up(uint64_t addr) {
 
 // Güvenli dosya boyutu üst sınırı (FAT32_MAX_FILE_BYTES yerine
 // bellek güvenliği için 16 MB ile sınırlıyoruz)
-#define ELF_MAX_LOAD_SIZE (16u * 1024u * 1024u)
+#define ELF_MAX_LOAD_SIZE (64u * 1024u * 1024u)  // 64 MB — PMM destekli yükleme için yeterli
 
 // ============================================================
 // İnsan okunabilir hata dizisi
@@ -184,16 +184,7 @@ static void u64_to_hex_str(uint64_t val, char* out) {
     out[18] = '\0';
 }
 
-static void u32_to_dec_str(uint32_t val, char* out) {
-    if (val == 0) { out[0] = '0'; out[1] = '\0'; return; }
-    char tmp[12]; int i = 0;
-    while (val) { tmp[i++] = '0' + (val % 10); val /= 10; }
-    int j = 0;
-    while (i--) out[j++] = tmp[i + 1]; // Not: i-- sonrası i == -1 olmaz, else için düzelt
-    /* Yukarıdaki reverse döngü düzeltme: */
-    // Tekrar doğru yaz:
-    out[j] = '\0';
-}
+/* u32_to_dec_str kaldırıldı — fmt_u32 kullanılıyor */
 
 // Basitleştirilmiş int→string (reverse trick)
 static void fmt_u32(uint32_t v, char* buf) {
@@ -289,10 +280,17 @@ int elf64_exec_from_fat32(const char* fat83_name,
     // Basit statik tampon (kernel yığını sınırlı olduğundan PMM kullan)
     // Şimdilik 1 MB'a kadar olan ikilileri destekleyen statik tampon.
     // Gerçek çekirdek: pmm_alloc_pages ile dinamik tahsis yapılmalı.
-    static uint8_t elf_read_buf[1u * 1024u * 1024u]; // 1 MB
+    // BASH.ELF ~1.07 MB olduğundan tampon 4 MB'a çıkarıldı
+    static uint8_t elf_read_buf[4u * 1024u * 1024u]; // 4 MB
 
     if (fsize > sizeof(elf_read_buf)) {
-        output_add_line(cout, "  [ELF] File too large for read buffer", VGA_RED);
+        // Hata mesajına dosya boyutunu da ekle
+        char sz_line[96];
+        str_cpy(sz_line, "  [ELF] File too large for read buffer (");
+        char sz_tmp[16]; fmt_u32(fsize / 1024, sz_tmp);
+        str_concat(sz_line, sz_tmp);
+        str_concat(sz_line, " KB > 4096 KB)");
+        output_add_line(cout, sz_line, VGA_RED);
         return ELF_ERR_TOOBIG;
     }
 

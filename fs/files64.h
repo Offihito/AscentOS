@@ -69,4 +69,37 @@ int fs_du64(const char* path, void* output_ptr);
 int fs_count_subdirs(const char* path);
 int fs_count_files_in_tree(const char* path);
 
+// ---- Syscall yardımcıları (SYS_STAT / SYS_ACCESS için) ----
+// Verilen path bir dosya mı? 1=evet, 0=hayır
+int      fs_path_is_file(const char* path);
+// Verilen path bir dizin mi? 1=evet, 0=hayır
+int      fs_path_is_dir(const char* path);
+// Path'in dosya boyutunu döndür (dosya yoksa 0)
+uint32_t fs_path_filesize(const char* path);
+
+// ---- Syscall yazma işlemleri (SYS_UNLINK / SYS_RENAME için) (v14) ----
+// Dosyayı siler (dizinse -1 döner)
+int fs_unlink64(const char* path);
+// Dosya veya dizini yeniden adlandırır/taşır
+int fs_rename64(const char* oldpath, const char* newpath);
+
+// ---- SYS_GETDENTS için (v9) ----
+// d_type sabitleri
+#define DT_UNKNOWN  0
+#define DT_REG      8   // regular file
+#define DT_DIR      4   // directory
+
+// Linux getdents64 dirent yapısı
+typedef struct {
+    uint64_t d_ino;      // inode numarası (stub)
+    uint64_t d_off;      // bir sonraki entry'nin ofseti
+    uint16_t d_reclen;   // bu struct'ın toplam boyutu (hizalanmış)
+    uint8_t  d_type;     // DT_REG | DT_DIR | DT_UNKNOWN
+    char     d_name[256]; // null-terminated dosya/dizin adı
+} __attribute__((packed)) dirent64_t;
+
+// path altındaki entry'leri buf'a yazar.
+// Döndürür: yazılan toplam byte sayısı | -1 (hata)
+int fs_getdents64(const char* path, dirent64_t* buf, int buf_size);
+
 #endif // FILES64_H

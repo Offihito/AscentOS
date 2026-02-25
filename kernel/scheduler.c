@@ -3,6 +3,7 @@
 #include "task.h"
 #include "timer.h"
 #include "memory_unified.h"
+#include "signal64.h"   // signal_dispatch_pending (v10)
 
 // External functions
 extern void serial_print(const char* str);
@@ -170,6 +171,18 @@ void scheduler_tick(void) {
     if (!preemption_enabled) {
         return;
     }
+
+    // BLOCKED task: hemen switch — meşgul beklemeden kaçın
+    if (current->state == TASK_STATE_BLOCKED ||
+        current->state == TASK_STATE_SLEEPING) {
+        task_t* next = scheduler_pick_next_task();
+        if (next && next != current) {
+            previous_task = current;
+            pending_next_task = next;
+            switch_pending = 1;
+        }
+        return;
+    }
     
     if (current->time_used >= time_quantum) {
         task_t* next = scheduler_pick_next_task();
@@ -198,6 +211,10 @@ void scheduler_tick(void) {
     if (current && current->pid == 0) {
         stats.idle_ticks++;
     }
+
+    // Context switch tamamlandıktan sonra yeni task'ın bekleyen
+    // sinyallerini kontrol et ve işle (v10 sinyal altyapısı)
+    signal_dispatch_pending();
 }
 
 // ===========================================

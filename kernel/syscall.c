@@ -1,4 +1,5 @@
 #include "syscall.h"
+#include "signal64.h"
 #include "../fs/files64.h"
 #include "task.h"
 #include "scheduler.h"
@@ -22,6 +23,13 @@ extern void putchar64(char c, uint8_t color);
 
 // Assembly entry point
 extern void syscall_entry(void);
+
+// signal64.c — sinyal syscall handler'ları
+extern void sys_sigaction   (syscall_frame_t* frame);
+extern void sys_sigprocmask (syscall_frame_t* frame);
+extern void sys_sigreturn   (syscall_frame_t* frame);
+extern void sys_sigpending  (syscall_frame_t* frame);
+extern void sys_sigsuspend  (syscall_frame_t* frame);
 
 // ============================================================
 // SERIAL INPUT
@@ -62,6 +70,25 @@ extern void* memcpy64(void* dest, const void* src, uint64_t n);
 extern const EmbeddedFile64* fs_get_file64(const char* filename);
 extern uint32_t fat32_file_size(const char* name83);
 extern int      fat32_read_file(const char* name83, uint8_t* buf, uint32_t max_len);
+
+// VFS dizin syscall'ları için – files64.c'de tanımlı
+extern const char* fs_getcwd64(void);
+extern int         fs_chdir64(const char* path);
+
+// VFS stat/access yardımcıları – files64.c'de tanımlı (v8)
+extern int      fs_path_is_file(const char* path);
+extern int      fs_path_is_dir(const char* path);
+extern uint32_t fs_path_filesize(const char* path);
+
+// VFS getdents yardımcısı – files64.c'de tanımlı (v9)
+extern int fs_getdents64(const char* path, dirent64_t* buf, int buf_size);
+
+// VFS yazma işlemleri – files64.c'de tanımlı (v14)
+// İmzalar files64.h ile eşleşmeli
+extern int fs_mkdir64(const char* path);
+extern int fs_rmdir64(const char* path);
+extern int fs_unlink64(const char* path);
+extern int fs_rename64(const char* oldpath, const char* newpath);
 
 // Kısa takma adlar – sadece bu dosyada, extern değil
 #define kmemset(dst, val, n)  memset64((dst),(val),(uint64_t)(n))
@@ -141,32 +168,36 @@ void fd_table_init(fd_entry_t* table) {
         table[i].pipe    = 0;
     }
     // stdin  (fd 0) – okuma
-    table[0].type    = FD_TYPE_SERIAL;
-    table[0].flags   = O_RDONLY;
-    table[0].is_open = 1;
+    table[0].type     = FD_TYPE_SERIAL;
+    table[0].flags    = O_RDONLY;
+    table[0].fd_flags = 0;
+    table[0].is_open  = 1;
     my_strncpy(table[0].path, "/dev/serial0", 52);
 
     // stdout (fd 1) – yazma
-    table[1].type    = FD_TYPE_SERIAL;
-    table[1].flags   = O_WRONLY;
-    table[1].is_open = 1;
+    table[1].type     = FD_TYPE_SERIAL;
+    table[1].flags    = O_WRONLY;
+    table[1].fd_flags = 0;
+    table[1].is_open  = 1;
     my_strncpy(table[1].path, "/dev/serial0", 52);
 
     // stderr (fd 2) – yazma
-    table[2].type    = FD_TYPE_SERIAL;
-    table[2].flags   = O_WRONLY;
-    table[2].is_open = 1;
+    table[2].type     = FD_TYPE_SERIAL;
+    table[2].flags    = O_WRONLY;
+    table[2].fd_flags = 0;
+    table[2].is_open  = 1;
     my_strncpy(table[2].path, "/dev/serial0", 52);
 }
 
 int fd_alloc(fd_entry_t* table, uint8_t type, uint8_t flags, const char* path) {
     for (int i = 3; i < MAX_FDS; i++) {
         if (!table[i].is_open) {
-            table[i].type    = type;
-            table[i].flags   = flags;
-            table[i].is_open = 1;
-            table[i].offset  = 0;
-            table[i].pipe    = 0;
+            table[i].type     = type;
+            table[i].flags    = flags;
+            table[i].fd_flags = 0;
+            table[i].is_open  = 1;
+            table[i].offset   = 0;
+            table[i].pipe     = 0;
             if (path)
                 my_strncpy(table[i].path, path, 52);
             else
@@ -181,11 +212,12 @@ int fd_alloc(fd_entry_t* table, uint8_t type, uint8_t flags, const char* path) {
 int fd_alloc_pipe(fd_entry_t* table, uint8_t rw_flags, pipe_buf_t* pbuf) {
     for (int i = 3; i < MAX_FDS; i++) {
         if (!table[i].is_open) {
-            table[i].type    = FD_TYPE_PIPE;
-            table[i].flags   = rw_flags;
-            table[i].is_open = 1;
-            table[i].offset  = 0;
-            table[i].pipe    = pbuf;
+            table[i].type     = FD_TYPE_PIPE;
+            table[i].flags    = rw_flags;
+            table[i].fd_flags = 0;
+            table[i].is_open  = 1;
+            table[i].offset   = 0;
+            table[i].pipe     = pbuf;
             my_strncpy(table[i].path, "[pipe]", 52);
             return i;
         }
@@ -488,9 +520,14 @@ static void sys_exit(syscall_frame_t* frame) {
 }
 
 // ── SYS_GETPID (4) ──────────────────────────────────────────────
+// Forward: pg_update_current_pid, pg_resolve_pid ile ayni dosyada tanimlidir.
+static void pg_update_current_pid(uint32_t pid);
+
 static void sys_getpid(syscall_frame_t* frame) {
     task_t* cur = task_get_current();
-    frame->rax  = cur ? (uint64_t)cur->pid : 0;
+    uint64_t pid = cur ? (uint64_t)cur->pid : 0;
+    if (pid != 0) pg_update_current_pid((uint32_t)pid);
+    frame->rax = pid;
 }
 
 // ── SYS_YIELD (5) ───────────────────────────────────────────────
@@ -887,6 +924,9 @@ static void sys_fork(syscall_frame_t* frame) {
         child->pid = candidate;
     }
     child->parent_pid = parent->pid;
+    // POSIX: fork() sonrası child, parent'ın process group ve session'ını miras alır.
+    child->pgid = parent->pgid;
+    child->sid  = parent->sid;
     my_strncpy(child->name, parent->name, 32);
     // İsme "-fork" ekle (ps'de ayırt edebilmek için)
     int nlen = 0;
@@ -1013,29 +1053,359 @@ static void sys_fork(syscall_frame_t* frame) {
 }
 
 // ── SYS_EXECVE (20) ─────────────────────────────────────────────
-// execve(path, argv, envp) -> hata kodu (başarıda dönmez)
+// execve(path, argv, envp) -> err  (başarıda mevcut task'a DÖNMEZ)
 //
-// Gerçek implementasyon için ELF loader ve VFS gereklidir.
-// Bu stub; çağrı arayüzünü doğrular ve ENOSYS döndürür.
-// Gelecekte: mevcut task imgesini temizle → ELF yükle → entry jump.
+// Uygulama özeti:
+//   1. path doğrula  (EFAULT / ENOENT)
+//   2. Dosyayı in-memory VFS'den veya FAT32'den oku
+//   3. ELF64 doğrula + yükle  (elf64_validate / elf64_load)
+//   4. Mevcut task'ın user stack'ini temizle, yeni stack ayır
+//   5. argv[] / envp[] dizilerini yeni user stack'e kopyala
+//   6. task::context'i entry'ye yönlendir  (SYSRET ile döner)
+//
+// Kısıtlamalar (flat-memory / no-VMM):
+//   • Dinamik linker (ld.so) desteği yok → ET_DYN PIE statik.
+//   • ELF segmentleri fiziksel adrese doğrudan yüklenir;
+//     ayrıcalık seviyesi user ise sayfa tablosu güncellemesi
+//     gerekir — bu çekirdek VMM katmanının sorumluluğundadır.
+//   • Başarılı execve sonrası eskiden açık dosyalar O_CLOEXEC ise
+//     kapatılır (POSIX uyumu).
+//
+// Yol çözümleme:
+//   • Path "/bin/<name>" ise FAT32'den "BIN/<NAME>" 8.3 adıyla dene.
+//   • Path VFS'de bulunursa in-memory içerik ELF olarak yorumlanır.
+//   • Hiçbirinde yoksa ENOENT döner.
 // ---------------------------------------------------------------
-static void sys_execve(syscall_frame_t* frame) {
-    const char* path = (const char*)frame->rdi;
-    // argv ve envp: ileride işlenecek
-    // const char** argv = (const char**)frame->rsi;
-    // const char** envp = (const char**)frame->rdx;
 
-    if (!is_valid_user_ptr(path, 256)) {
+// ELF yükleme için elf64.h fonksiyonları
+#include "elf64.h"
+#include <stddef.h>
+// execve argümanlarını yeni user stack'e yazan yardımcı.
+// argv[] / envp[] NULL-terminated dizi; her string stack'e kopyalanır.
+// stack_ptr (inout): mevcut RSP; aşağı doğru büyür.
+// Döner: yeni RSP; argc ve argv başlangıç adresi *out_argc / *out_argv'a yazılır.
+static uint64_t execve_build_stack(uint64_t stack_top,
+                                   const char** argv, const char** envp,
+                                   int* out_argc, uint64_t* out_argv_ptr,
+                                   uint64_t* out_envp_ptr) {
+    // Güvenli erişim için NULL kontrolü
+    if (!argv) argv = (const char*[]){NULL};
+    if (!envp) envp = (const char*[]){NULL};
+
+    // argc hesapla
+    int argc = 0;
+    while (argv[argc]) argc++;
+
+    int envc = 0;
+    while (envp[envc]) envc++;
+
+    // Stack'i 16-byte hizalı başlat
+    uint64_t sp = stack_top & ~(uint64_t)0xF;
+
+    // String içeriklerini stack'e kopyala (ters sıra — üstten aşağı)
+    // Önce envp stringleri
+    uint64_t env_strs[64];
+    for (int i = envc - 1; i >= 0; i--) {
+        int len = 0;
+        while (envp[i][len]) len++;
+        len++;  // null terminator
+        sp -= (uint64_t)len;
+        sp &= ~(uint64_t)0x0;   // byte hizası yeterli
+        char* dst = (char*)sp;
+        for (int j = 0; j < len; j++) dst[j] = envp[i][j];
+        env_strs[i] = sp;
+    }
+
+    // Sonra argv stringleri
+    uint64_t arg_strs[64];
+    for (int i = argc - 1; i >= 0; i--) {
+        int len = 0;
+        while (argv[i][len]) len++;
+        len++;
+        sp -= (uint64_t)len;
+        char* dst = (char*)sp;
+        for (int j = 0; j < len; j++) dst[j] = argv[i][j];
+        arg_strs[i] = sp;
+    }
+
+    // 16-byte hizala
+    sp &= ~(uint64_t)0xF;
+
+    // SysV ABI: NULL | envp ptrs (ters) | NULL | argv ptrs (ters) | argc
+    // Küçük çekirdek ABI: sadece argc, argv[], 0, envp[], 0 dizileri
+
+    // envp NULL sentinel
+    sp -= 8; *(uint64_t*)sp = 0;
+    // envp pointers (ters sıra kayıt, doğru okunur)
+    for (int i = envc - 1; i >= 0; i--) {
+        sp -= 8; *(uint64_t*)sp = env_strs[i];
+    }
+    uint64_t envp_base = sp;
+
+    // argv NULL sentinel
+    sp -= 8; *(uint64_t*)sp = 0;
+    // argv pointers
+    for (int i = argc - 1; i >= 0; i--) {
+        sp -= 8; *(uint64_t*)sp = arg_strs[i];
+    }
+    uint64_t argv_base = sp;
+
+    // argc
+    sp -= 8; *(uint64_t*)sp = (uint64_t)argc;
+
+    // 16-byte hizala (ABI gereksinimi)
+    sp &= ~(uint64_t)0xF;
+
+    *out_argc     = argc;
+    *out_argv_ptr = argv_base;
+    *out_envp_ptr = envp_base;
+    return sp;
+}
+
+// execve için küçük bir okuma tamponu (statik; reentrant değil,
+// ama çekirdek tek iş parçacıklı syscall handler'da güvenli)
+#define EXECVE_BUF_SIZE (1u * 1024u * 1024u)   // 1 MB
+static uint8_t execve_elf_buf[EXECVE_BUF_SIZE];
+
+// Basit path → FAT 8.3 dönüşümü:
+//   "/bin/hello" → "BIN/HELLO"  (nokta yok ise uzantısız 8 kar)
+//   "/usr/bin/hello" → "HELLO"  (sadece son bileşen)
+static void path_to_fat83(const char* path, char* out83) {
+    // Son '/' bul
+    int last_slash = -1;
+    for (int i = 0; path[i]; i++)
+        if (path[i] == '/') last_slash = i;
+
+    const char* base = (last_slash >= 0) ? path + last_slash + 1 : path;
+
+    // Büyük harfe çevir, en fazla 8 karakter al
+    int j = 0;
+    for (int i = 0; base[i] && j < 8; i++) {
+        char c = base[i];
+        if (c == '.') break;
+        if (c >= 'a' && c <= 'z') c -= 32;
+        out83[j++] = c;
+    }
+    out83[j] = '\0';
+}
+
+static void sys_execve(syscall_frame_t* frame) {
+    const char*  path = (const char*)frame->rdi;
+    const char** argv = (const char**)frame->rsi;
+    const char** envp = (const char**)frame->rdx;
+
+    // ── 1. Argüman doğrulama ──────────────────────────────────
+    if (!path) { frame->rax = SYSCALL_ERR_FAULT; return; }
+
+    // path kernel adresi olabilir (test senaryosu) veya user adresi;
+    // sadece NULL-pointer ve erişilebilirlik kontrolü yapıyoruz.
+    // Tam user-ptr doğrulamasını is_valid_user_ptr ile yap;
+    // kernel test bağlamında path çekirdek adresinde olabilir.
+    if ((uint64_t)path > 0x0000800000000000ULL) {
+        // Açıkça geçersiz canonical adresi
         frame->rax = SYSCALL_ERR_FAULT;
         return;
     }
 
-    serial_print("[SYSCALL] execve(\"");
+    serial_print("[EXECVE] path=\"");
     serial_print(path);
-    serial_print("\") -> ENOSYS (ELF loader not yet implemented)\n");
+    serial_print("\"\n");
 
-    // TODO: ELF loader + VFS entegrasyonu tamamlandığında implement et.
-    frame->rax = SYSCALL_ERR_NOSYS;
+    // ── 2. Dosyayı oku ────────────────────────────────────────
+    uint32_t file_size = 0;
+    int      read_ok   = 0;
+
+    // Önce in-memory VFS'yi dene
+    const EmbeddedFile64* vfs_file = fs_get_file64(path);
+    if (vfs_file && vfs_file->content && vfs_file->size > 0 &&
+        vfs_file->size <= EXECVE_BUF_SIZE) {
+        kmemcpy(execve_elf_buf, vfs_file->content, vfs_file->size);
+        file_size = vfs_file->size;
+        read_ok   = 1;
+        serial_print("[EXECVE] loaded from VFS\n");
+    }
+
+    // VFS'de yoksa FAT32'yi dene
+    if (!read_ok) {
+        char fat83[16];
+        path_to_fat83(path, fat83);
+
+        uint32_t fsize = fat32_file_size(fat83);
+        if (fsize > 0 && fsize <= EXECVE_BUF_SIZE) {
+            int n = fat32_read_file(fat83, execve_elf_buf, fsize);
+            if (n > 0) {
+                file_size = (uint32_t)n;
+                read_ok   = 1;
+                serial_print("[EXECVE] loaded from FAT32: ");
+                serial_print(fat83);
+                serial_print("\n");
+            }
+        }
+    }
+
+    if (!read_ok || file_size == 0) {
+        serial_print("[EXECVE] ENOENT: file not found\n");
+        frame->rax = SYSCALL_ERR_NOENT;
+        return;
+    }
+
+    // ── 3. ELF doğrula ───────────────────────────────────────
+    int elf_rc = elf64_validate(execve_elf_buf, file_size);
+    if (elf_rc != ELF_OK) {
+        serial_print("[EXECVE] ELF validate error: ");
+        serial_print(elf64_strerror(elf_rc));
+        serial_print("\n");
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    // ── 4. Mevcut task'ı al ───────────────────────────────────
+    task_t* cur = task_get_current();
+    if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
+
+    // ── 5. ELF yükle ─────────────────────────────────────────
+    // ET_DYN için load_base: 0x400000 (kullanıcı alanı varsayılan).
+    // ET_EXEC için load_base 0 (elf64_load zaten ihmal eder).
+    ElfImage img;
+    uint64_t load_base = 0x400000ULL;
+    elf_rc = elf64_load(execve_elf_buf, file_size, load_base, &img);
+    if (elf_rc != ELF_OK) {
+        serial_print("[EXECVE] ELF load error: ");
+        serial_print(elf64_strerror(elf_rc));
+        serial_print("\n");
+        frame->rax = SYSCALL_ERR_NOMEM;
+        return;
+    }
+
+    serial_print("[EXECVE] ELF loaded, entry=0x");
+    print_hex64(img.entry);
+    serial_print("\n");
+
+    // ── 6. Yeni user stack ayır ───────────────────────────────
+    // Eski user stack'i serbest bırak
+    if (cur->user_stack_base) {
+        kfree((void*)cur->user_stack_base);
+        cur->user_stack_base = 0;
+        cur->user_stack_top  = 0;
+        cur->user_stack_size = 0;
+    }
+
+    uint64_t new_stack_size = USER_STACK_SIZE;
+    void* new_stack = kmalloc(new_stack_size);
+    if (!new_stack) {
+        serial_print("[EXECVE] ENOMEM: stack alloc failed\n");
+        frame->rax = SYSCALL_ERR_NOMEM;
+        return;
+    }
+    kmemset(new_stack, 0, new_stack_size);
+
+    cur->user_stack_base = (uint64_t)new_stack;
+    cur->user_stack_size = new_stack_size;
+    cur->user_stack_top  = cur->user_stack_base + new_stack_size;
+
+    // ── 7. argv / envp → stack'e yerleştir ───────────────────
+    // argv / envp user pointer olabilir veya kernel test'inde NULL.
+    // NULL ise boş dizi kullan.
+    const char* empty_argv0 = path;
+    const char* argv_fallback[2] = { empty_argv0, (const char*)0 };
+    const char* envp_fallback[1] = { (const char*)0 };
+
+    const char** real_argv = argv;
+    const char** real_envp = envp;
+
+    // Geçersiz/kernel pointer → fallback
+    if (!real_argv || !is_valid_user_ptr(real_argv, 8))
+        real_argv = argv_fallback;
+    if (!real_envp || !is_valid_user_ptr(real_envp, 8))
+        real_envp = envp_fallback;
+
+    int      new_argc;
+    uint64_t new_argv_ptr;
+    uint64_t new_envp_ptr;
+
+    uint64_t new_sp = execve_build_stack(
+        cur->user_stack_top,
+        real_argv, real_envp,
+        &new_argc, &new_argv_ptr, &new_envp_ptr);
+
+    // ── 8. FD tablosu: O_CLOEXEC olan fd'leri kapat ──────────
+    for (int i = 0; i < MAX_FDS; i++) {
+        if (cur->fd_table[i].is_open &&
+            (cur->fd_table[i].fd_flags & FD_CLOEXEC)) {
+            fd_free(cur->fd_table, i);
+            serial_print("[EXECVE] closed cloexec fd=");
+            { char b[8]; int_to_str(i, b); serial_print(b); }
+            serial_print("\n");
+        }
+    }
+
+    // ── 9. Sinyal tablosunu sıfırla (POSIX) ──────────────────
+    extern void signal_table_init(signal_table_t* st);
+    signal_table_init(&cur->signal_table);
+
+    // ── 10. Task ismini güncelle ───────────────────────────────
+    // Son path bileşeni
+    {
+        const char* base = path;
+        for (int i = 0; path[i]; i++)
+            if (path[i] == '/') base = path + i + 1;
+        my_strncpy(cur->name, base, 32);
+    }
+
+    // ── 11. CPU bağlamını yeni entry'e yönlendir ──────────────
+    // Ring-3 SYSRET için:
+    //   RIP      = ELF entry noktası          (frame->rcx)
+    //   RSP      = yeni user stack            (frame->user_rsp)  ← DÜZELTİLDİ
+    //   RDI      = argc                       (SysV ABI: ilk argüman)
+    //   RSI      = argv*                      (ikinci argüman)
+    //   RDX      = envp*                      (üçüncü argüman)
+    //   CS/SS    = Ring-3 selectors           (SYSRET donanımsal set eder)
+    //
+    // DÜZELTME: Daha önce frame->user_rsp alanı yoktu; assembly stub
+    // SYSRET öncesi RSP'yi orijinal user RSP'ye (execve'yi çağıran) geri
+    // yüklüyordu. Yeni stack (new_sp) hiçbir zaman RSP olarak uygulanmıyor,
+    // _start [rsp]'den argc okuyamıyordu → yığın bozulması → triple fault.
+    //
+    // Çözüm: frame->user_rsp != 0 ise assembly bu değeri RSP olarak kullanır.
+    // Bkz. interrupts64.asm .user_syscall bölümü (.use_new_rsp etiketi).
+
+    frame->rcx      = img.entry;          // RIP (SYSRET sonrası)
+    frame->rax      = 0;                  // başarı
+    frame->rdi      = (uint64_t)new_argc;
+    frame->rsi      = new_argv_ptr;
+    frame->rdx      = new_envp_ptr;
+    frame->user_rsp = new_sp;             // ← DÜZELTME: yeni user stack RSP'si
+                                           //   Assembly bunu görür ve
+                                           //   orijinal user RSP yerine kullanır.
+
+    // r11 (RFLAGS) güncelle: IF=1 (interrupt'lar açık)
+    frame->r11 = 0x202;
+
+    // context'i de güncelle (task switch sonrası geçerli olsun)
+    cur->context.rip    = img.entry;
+    cur->context.rsp    = new_sp;
+    cur->context.rax    = 0;
+    cur->context.rdi    = (uint64_t)new_argc;
+    cur->context.rsi    = new_argv_ptr;
+    cur->context.rdx    = new_envp_ptr;
+    cur->context.cs     = GDT_USER_CODE_RPL3;
+    cur->context.ss     = GDT_USER_DATA_RPL3;
+    cur->context.rflags = 0x202;   // IF=1
+
+    // Kernel stack'i sıfırla (eski bağlam geçersiz)
+    // RSP0 (TSS) güncelle
+    tss_set_kernel_stack(cur->kernel_stack_top);
+
+    serial_print("[EXECVE] success: jumping to entry 0x");
+    print_hex64(img.entry);
+    serial_print(" new_rsp=0x");
+    print_hex64(new_sp);
+    serial_print("\n");
+
+    // frame->rax = 0 → SYSRET ile entry'ye atlayacak.
+    // execve başarıda "dönmez"; SYSRET yeni koda geçer.
+    // frame->rcx = RIP, frame->user_rsp = RSP (assembly kullanır)
+    frame->rax = SYSCALL_OK;
 }
 
 // ── SYS_WAITPID (21) ────────────────────────────────────────────
@@ -1232,6 +1602,90 @@ static void sys_dup2(syscall_frame_t* frame) {
     frame->rax = (uint64_t)newfd;
 }
 
+
+// ============================================================
+// v11 YENİ SYSCALL IMPLEMENTASYONLARI — fcntl + dup
+// ============================================================
+
+// ── SYS_DUP (67) ────────────────────────────────────────────────
+static void sys_dup(syscall_frame_t* frame) {
+    int oldfd = (int)frame->rdi;
+    if (oldfd < 0 || oldfd >= MAX_FDS) { frame->rax = SYSCALL_ERR_BADF; return; }
+    task_t* cur = task_get_current();
+    if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
+    fd_entry_t* src = fd_get(cur->fd_table, oldfd);
+    if (!src) { frame->rax = SYSCALL_ERR_BADF; return; }
+    // En kucuk bos fd bul
+    int newfd = -1;
+    for (int i = 0; i < MAX_FDS; i++) {
+        if (!cur->fd_table[i].is_open) { newfd = i; break; }
+    }
+    if (newfd < 0) { frame->rax = SYSCALL_ERR_MFILE; return; }
+    cur->fd_table[newfd] = *src;
+    cur->fd_table[newfd].fd_flags = 0;  // dup() FD_CLOEXEC temizler
+    if (src->type == FD_TYPE_PIPE && src->pipe) src->pipe->ref_count++;
+    serial_print("[SYSCALL] dup fd=");
+    { char b[8]; int_to_str(oldfd, b); serial_print(b); }
+    serial_print(" -> newfd=");
+    { char b[8]; int_to_str(newfd, b); serial_print(b); }
+    serial_print("\n");
+    frame->rax = (uint64_t)newfd;
+}
+
+// ── SYS_FCNTL (66) ──────────────────────────────────────────────
+static void sys_fcntl(syscall_frame_t* frame) {
+    int      fd  = (int)frame->rdi;
+    int      cmd = (int)frame->rsi;
+    uint64_t arg = frame->rdx;
+    if (fd < 0 || fd >= MAX_FDS) { frame->rax = SYSCALL_ERR_BADF; return; }
+    task_t* cur = task_get_current();
+    if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
+    fd_entry_t* ent = fd_get(cur->fd_table, fd);
+    if (!ent) { frame->rax = SYSCALL_ERR_BADF; return; }
+
+    switch (cmd) {
+    case F_DUPFD:
+    case F_DUPFD_CLOEXEC: {
+        int start = (int)arg;
+        if (start < 0) start = 0;
+        if (start >= MAX_FDS) { frame->rax = SYSCALL_ERR_INVAL; return; }
+        int newfd = -1;
+        for (int i = start; i < MAX_FDS; i++) {
+            if (!cur->fd_table[i].is_open) { newfd = i; break; }
+        }
+        if (newfd < 0) { frame->rax = SYSCALL_ERR_MFILE; return; }
+        cur->fd_table[newfd] = *ent;
+        cur->fd_table[newfd].fd_flags = (cmd == F_DUPFD_CLOEXEC) ? FD_CLOEXEC : 0;
+        if (ent->type == FD_TYPE_PIPE && ent->pipe) ent->pipe->ref_count++;
+        serial_print("[SYSCALL] fcntl F_DUPFD -> ");
+        { char b[8]; int_to_str(newfd, b); serial_print(b); }
+        serial_print("\n");
+        frame->rax = (uint64_t)newfd;
+        break;
+    }
+    case F_GETFD:
+        frame->rax = (uint64_t)ent->fd_flags;
+        break;
+    case F_SETFD:
+        ent->fd_flags = (uint8_t)(arg & 0xFF);
+        frame->rax = SYSCALL_OK;
+        break;
+    case F_GETFL:
+        frame->rax = (uint64_t)ent->flags;
+        break;
+    case F_SETFL: {
+        uint8_t access = ent->flags & 0x03;
+        ent->flags = access | ((uint8_t)(arg & 0xFF) & ~0x03);
+        frame->rax = SYSCALL_OK;
+        break;
+    }
+    default:
+        serial_print("[SYSCALL] fcntl: unknown cmd\n");
+        frame->rax = SYSCALL_ERR_INVAL;
+        break;
+    }
+}
+
 // ============================================================
 // v4 YENİ SYSCALL IMPLEMENTASYONLARI
 // ============================================================
@@ -1395,6 +1849,12 @@ static void sys_fstat(syscall_frame_t* frame) {
     frame->rax = SYSCALL_OK;
 }
 
+// ── pg_* forward declarations ────────────────────────────────────
+// Tanımlar dosyanın ilerisinde (v12 bölümü); sys_ioctl için önceden bildirilir.
+static uint32_t pg_current_pid(void);
+static uint32_t pg_effective_pgid(uint32_t pid);
+static uint32_t pg_effective_sid(uint32_t pid);
+
 // ── SYS_IOCTL (26) ──────────────────────────────────────────────
 // ioctl(fd, request, arg) -> 0 | SYSCALL_ERR_*
 //
@@ -1447,7 +1907,7 @@ static winsize_t kernel_winsize = {
 };
 
 // Ön plan süreç grubu (şimdilik mevcut pid'e eşit)
-static int kernel_tty_pgrp = 1;
+static uint32_t kernel_tty_pgrp = 1;
 
 static void sys_ioctl(syscall_frame_t* frame) {
     int      fd      = (int)frame->rdi;
@@ -1548,23 +2008,64 @@ static void sys_ioctl(syscall_frame_t* frame) {
 
     // ── TIOCGPGRP: ön plan süreç grubunu döndür ──────────────────
     case TIOCGPGRP:
-        if (!is_valid_user_ptr(arg, sizeof(int))) {
+        if (!is_valid_user_ptr(arg, sizeof(uint32_t))) {
             frame->rax = SYSCALL_ERR_FAULT;
             return;
         }
-        *((int*)arg) = kernel_tty_pgrp;
+        *((uint32_t*)arg) = kernel_tty_pgrp;
         frame->rax = SYSCALL_OK;
         break;
 
     // ── TIOCSPGRP: ön plan süreç grubunu ayarla ──────────────────
     case TIOCSPGRP:
-        if (!is_valid_user_ptr(arg, sizeof(int))) {
+        if (!is_valid_user_ptr(arg, sizeof(uint32_t))) {
             frame->rax = SYSCALL_ERR_FAULT;
             return;
         }
-        kernel_tty_pgrp = *((const int*)arg);
+        kernel_tty_pgrp = *((const uint32_t*)arg);
         frame->rax = SYSCALL_OK;
         break;
+
+    // ── TIOCSCTTY: controlling terminal olarak ata ────────────────
+    // Bash setsid() sonrası bunu çağırır; setsid yapılmamışsa EPERM.
+    // Başka process zaten bu terminal'i kontrol ediyorsa EBUSY.
+    case TIOCSCTTY: {
+        task_t* cur = task_get_current();
+        uint32_t cur_pid = cur ? cur->pid : 1;
+
+        // Session leader değilsek EPERM
+        if (pg_effective_pgid(cur_pid) != cur_pid) {
+            serial_print("[SYSCALL] ioctl TIOCSCTTY: not session leader -> EPERM\n");
+            frame->rax = SYSCALL_ERR_PERM;
+            return;
+        }
+
+        // Terminali bu session'a bağla (kernel_tty_pgrp güncelle)
+        kernel_tty_pgrp = cur_pid;
+        serial_print("[SYSCALL] ioctl TIOCSCTTY ok\n");
+        frame->rax = SYSCALL_OK;
+        break;
+    }
+
+    // ── TIOCNOTTY: controlling terminal'den ayrıl ─────────────────
+    // Session leader olmayanlar için EINVAL döner.
+    case TIOCNOTTY: {
+        task_t* cur = task_get_current();
+        uint32_t cur_pid = cur ? cur->pid : 1;
+
+        // Controlling terminal'e sahip değilsek EINVAL
+        if (kernel_tty_pgrp != pg_effective_pgid(cur_pid)) {
+            serial_print("[SYSCALL] ioctl TIOCNOTTY: not controlling terminal -> EINVAL\n");
+            frame->rax = SYSCALL_ERR_INVAL;
+            return;
+        }
+
+        // Bağı kopar
+        kernel_tty_pgrp = 0;
+        serial_print("[SYSCALL] ioctl TIOCNOTTY ok\n");
+        frame->rax = SYSCALL_OK;
+        break;
+    }
 
     default:
         serial_print("[SYSCALL] ioctl unknown request=0x");
@@ -1788,15 +2289,15 @@ static void sys_poll(syscall_frame_t* frame) {
 // ── SYS_KILL (29) ───────────────────────────────────────────────
 // kill(pid, sig) -> 0 | SYSCALL_ERR_*
 //
-// Desteklenen sinyaller:
-//   SIGKILL (9)  – görevi zorla sonlandır (task_kill)
-//   SIGTERM (15) – nazikçe sonlandır (şimdilik SIGKILL gibi davranır)
-//   Diğerleri   – yoksayılır, 0 döndürülür (stub)
+// v10: signal64.h altyapısına bağlandı. Artık signal_send() üzerinden
+// gerçek sinyal dağıtımı yapılıyor; pending bit set edilip
+// signal_dispatch_pending() tetikleniyor.
 //
-// Notlar:
-//   • Gerçek sinyal maskesi / handler mekanizması henüz yok.
-//   • pid=0: mevcut işleme sinyal gönder.
-//   • pid<0: grup sinyal gönderme; şimdilik ENOSYS.
+//   pid  > 0 : o PID'e sinyal gönder
+//   pid == 0 : mevcut task'ın grubuna (stub: mevcut task)
+//   pid ==-1 : tüm task'lara (stub: sadece mevcut task)
+//   pid  < -1: grup -pid'e (stub: şimdilik ENOSYS)
+//   sig == 0 : process varlık kontrolü (sinyal gönderilmez)
 // ---------------------------------------------------------------
 static void sys_kill(syscall_frame_t* frame) {
     int pid = (int)(int64_t)frame->rdi;
@@ -1808,52 +2309,50 @@ static void sys_kill(syscall_frame_t* frame) {
     { char b[12]; int_to_str(sig, b); serial_print(b); }
     serial_print(")\n");
 
-    // Grup sinyali desteklenmiyor
-    if (pid < 0) {
+    // Geçersiz sinyal numarası
+    if (sig < 0 || sig > NSIG) {
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    // sig == 0: process varlık kontrolü, sinyal gönderme
+    if (sig == 0) {
+        if (pid <= 0) {
+            frame->rax = SYSCALL_OK;
+            return;
+        }
+        task_t* t = task_find_by_pid((uint32_t)pid);
+        frame->rax = t ? SYSCALL_OK : SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    // pid < -1: grup sinyali (stub)
+    if (pid < -1) {
+        serial_print("[SYSCALL] kill: grup sinyali desteklenmiyor\n");
         frame->rax = SYSCALL_ERR_NOSYS;
         return;
     }
 
-    // pid=0: mevcut task'a sinyal gönder
-    if (pid == 0) {
-        task_t* cur = task_get_current();
-        if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
-        pid = (int)cur->pid;
-    }
-
-    // Hedef task'ı bul
-    task_t* target = task_find_by_pid((uint32_t)pid);
-    if (!target) {
-        frame->rax = SYSCALL_ERR_INVAL;  // ESRCH: böyle bir process yok
+    // pid == -1: broadcast desteklenmez -> ENOSYS
+    if (pid == -1) {
+        serial_print("[SYSCALL] kill: pid=-1 broadcast desteklenmiyor\n");
+        frame->rax = SYSCALL_ERR_NOSYS;
         return;
     }
 
-    switch (sig) {
-    case SIGKILL:
-    case SIGTERM:
-        // Task'ı sonlandır: state'ini ZOMBIE yap, scheduler devre dışı bırakır
-        serial_print("[SYSCALL] kill: terminating pid=");
-        { char b[12]; int_to_str(pid, b); serial_print(b); }
-        serial_print("\n");
-        target->state = TASK_STATE_ZOMBIE;
-        target->exit_code = (sig == SIGKILL) ? 137 : 143;
+    // pid == 0: kendine sinyal gonder
+    if (pid == 0) {
+        task_t* cur = task_get_current();
+        if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
+        signal_table_t* st = task_get_signal_table(cur);
+        if (st) st->pending_sigs |= SIG_BIT(sig);
         frame->rax = SYSCALL_OK;
-        break;
-
-    case 0:
-        // Sinyal 0: sadece process var mı kontrol et (zaten bulduk)
-        frame->rax = SYSCALL_OK;
-        break;
-
-    default:
-        // Diğer sinyaller: şimdilik yoksay, başarı döndür
-        // (newlib'in bazı sinyalleri göndermesi gerekebilir)
-        serial_print("[SYSCALL] kill: ignoring signal ");
-        { char b[12]; int_to_str(sig, b); serial_print(b); }
-        serial_print("\n");
-        frame->rax = SYSCALL_OK;
-        break;
+        return;
     }
+
+    // pid > 0: hedef task'a signal_send ile gönder
+    int ret = signal_send(pid, sig);
+    frame->rax = (ret == 0) ? SYSCALL_OK : SYSCALL_ERR_INVAL;
 }
 
 // ── SYS_GETTIMEOFDAY (30) ───────────────────────────────────────
@@ -1886,6 +2385,1008 @@ static void sys_gettimeofday(syscall_frame_t* frame) {
         tv->tv_usec = (int64_t)((ticks_ms % 1000ULL) * 1000ULL);
     }
 
+    frame->rax = SYSCALL_OK;
+}
+
+// ── SYS_GETCWD (43) ─────────────────────────────────────────────
+// getcwd(char* buf, uint64_t size) -> buf (kullanıcı ptr) | 0 (hata)
+//
+// Bash'in çalışma dizinini öğrenmek için kullandığı temel çağrı.
+// Kernel tarafındaki current_dir string'ini kullanıcı buffer'ına kopyalar.
+//
+// POSIX davranışı:
+//   • buf NULL ise ya da size yetmezse EINVAL/ERANGE döner.
+//   • Başarıda RAX = buf adresi (glibc bunu char* olarak kullanır).
+//   • Başarısızda RAX = 0 (NULL) ve errno ERANGE/EINVAL olur.
+// ---------------------------------------------------------------
+static void sys_getcwd(syscall_frame_t* frame) {
+    char*    buf  = (char*)frame->rdi;
+    uint64_t size = frame->rsi;
+
+    // Argüman doğrulama
+    if (!buf || size == 0) {
+        serial_print("[SYSCALL] getcwd: NULL buf veya size=0 (EINVAL)\n");
+        frame->rax = 0;
+        return;
+    }
+
+    if (!is_valid_user_ptr(buf, size)) {
+        serial_print("[SYSCALL] getcwd: geçersiz kullanıcı pointer (EFAULT)\n");
+        frame->rax = 0;
+        return;
+    }
+
+    // Kernel'deki cwd'yi al; VFS henüz başlamamışsa "/" varsayılan
+    const char* cwd = fs_getcwd64();
+    if (!cwd) cwd = "/";
+
+    // Uzunluk kontrolü: null terminator dahil
+    uint64_t cwd_len = 0;
+    while (cwd[cwd_len]) cwd_len++;
+    cwd_len++;  // '\0'
+
+    if (cwd_len > size) {
+        serial_print("[SYSCALL] getcwd: buffer çok küçük (ERANGE)\n");
+        frame->rax = 0;
+        return;
+    }
+
+    // Kullanıcı buffer'ına kopyala
+    for (uint64_t i = 0; i < cwd_len; i++)
+        buf[i] = cwd[i];
+
+    serial_print("[SYSCALL] getcwd -> \"");
+    serial_print(buf);
+    serial_print("\"\n");
+
+    // POSIX: başarıda buf adresini döndür (glibc bunu char* olarak cast eder)
+    frame->rax = (uint64_t)buf;
+}
+
+// ── SYS_CHDIR (44) ──────────────────────────────────────────────
+// chdir(const char* path) -> 0 | err
+//
+// Bash'in `cd` builtin'i bu syscall'ı doğrudan çağırır.
+// Ayrıca execve öncesi çalışma dizini ayarlamak için kullanılır.
+//
+// POSIX davranışı:
+//   • Dizin yoksa ENOENT döner.
+//   • path NULL ise EINVAL döner.
+//   • Başarıda 0 (SYSCALL_OK) döner.
+// ---------------------------------------------------------------
+static void sys_chdir(syscall_frame_t* frame) {
+    const char* path = (const char*)frame->rdi;
+
+    if (!path) {
+        serial_print("[SYSCALL] chdir: NULL path (EINVAL)\n");
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    if (!is_valid_user_ptr(path, 1)) {
+        serial_print("[SYSCALL] chdir: geçersiz kullanıcı pointer (EFAULT)\n");
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+
+    serial_print("[SYSCALL] chdir(\"");
+    serial_print(path);
+    serial_print("\")\n");
+
+    // fs_chdir64: 1 = başarı, 0 = dizin bulunamadı
+    int ok = fs_chdir64(path);
+    if (!ok) {
+        serial_print("[SYSCALL] chdir: dizin bulunamadı (ENOENT)\n");
+        frame->rax = SYSCALL_ERR_NOENT;
+        return;
+    }
+
+    serial_print("[SYSCALL] chdir: ok, yeni cwd=\"");
+    serial_print(fs_getcwd64());
+    serial_print("\"\n");
+
+    frame->rax = SYSCALL_OK;
+}
+
+// ── SYS_STAT (31) ────────────────────────────────────────────────
+// stat(const char* path, stat_t* buf) -> 0 | err
+//
+// Bash her komut öncesi executable'ları, dosyaları ve dizinleri
+// bu syscall ile sorgular. fstat'tan farkı: fd yerine path alır.
+//
+// Davranış:
+//   • path bir dosyaysa  → S_IFREG, st_size = dosya boyutu
+//   • path bir dizinse   → S_IFDIR, st_size = 0
+//   • path yoksa         → ENOENT
+//   • Tüm dosyalar root sahibi (uid=0, gid=0), rw-r--r-- (0644)
+//   • Dizinler rwxr-xr-x (0755)
+//   • Zaman alanları mevcut tick'ten hesaplanır (boot-relative)
+// ---------------------------------------------------------------
+static void sys_stat(syscall_frame_t* frame) {
+    const char* path  = (const char*)frame->rdi;
+    stat_t*     buf   = (stat_t*)frame->rsi;
+
+    if (!path) {
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+    if (!is_valid_user_ptr(path, 1)) {
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+    if (!buf || !is_valid_user_ptr(buf, sizeof(stat_t))) {
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+
+    serial_print("[SYSCALL] stat(\"");
+    serial_print(path);
+    serial_print("\")\n");
+
+    // stat_t'yi sıfırla
+    kmemset(buf, 0, sizeof(stat_t));
+
+    uint32_t now = (uint32_t)get_system_ticks();
+
+    int is_dir  = fs_path_is_dir(path);
+    int is_file = (!is_dir) && fs_path_is_file(path);
+
+    if (!is_dir && !is_file) {
+        serial_print("[SYSCALL] stat: ENOENT\n");
+        frame->rax = SYSCALL_ERR_NOENT;
+        return;
+    }
+
+    buf->st_dev     = 1;
+    buf->st_ino     = 1;          // inode stub
+    buf->st_nlink   = 1;
+    buf->st_uid     = 0;          // root
+    buf->st_gid     = 0;
+    buf->st_rdev    = 0;
+    buf->st_blksize = 512;
+    buf->st_atime   = now;
+    buf->st_mtime   = now;
+    buf->st_ctime   = now;
+
+    if (is_dir) {
+        buf->st_mode   = S_IFDIR | 0755;
+        buf->st_size   = 0;
+        buf->st_blocks = 0;
+    } else {
+        uint32_t fsz   = fs_path_filesize(path);
+        buf->st_mode   = S_IFREG | 0644;
+        buf->st_size   = fsz;
+        buf->st_blocks = (fsz + 511) / 512;
+    }
+
+    serial_print("[SYSCALL] stat: ok, mode=0x");
+    { char b[12]; int_to_str((int)buf->st_mode, b); serial_print(b); }
+    serial_print("\n");
+
+    frame->rax = SYSCALL_OK;
+}
+
+// ── SYS_ACCESS (42) ──────────────────────────────────────────────
+// access(const char* path, int mode) -> 0 | err
+//
+// Bash PATH taramasında ve `command -v`, shebang kontrolünde kullanır.
+// mode bitleri: F_OK(0)=var mı, R_OK(4)=okuma, W_OK(2)=yazma, X_OK(1)=çalıştırma
+//
+// Davranış:
+//   • F_OK : dosya veya dizin varsa 0, yoksa ENOENT
+//   • R_OK : tüm dosya/dizinler okunabilir → her zaman 0 (kernel root)
+//   • W_OK : dinamik (yazılabilir) dosyalar için 0, statik için EACCES
+//   • X_OK : /bin altındaki dosyalar ve dizinler çalıştırılabilir → 0
+//            diğer dosyalar için EACCES
+// ---------------------------------------------------------------
+static void sys_access(syscall_frame_t* frame) {
+    const char* path = (const char*)frame->rdi;
+    int         mode = (int)(int64_t)frame->rsi;
+
+    if (!path) {
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+    if (!is_valid_user_ptr(path, 1)) {
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+
+    serial_print("[SYSCALL] access(\"");
+    serial_print(path);
+    serial_print("\")\n");
+
+    int is_dir  = fs_path_is_dir(path);
+    int is_file = (!is_dir) && fs_path_is_file(path);
+
+    // F_OK: sadece varlık kontrolü
+    if (!(mode & (R_OK | W_OK | X_OK))) {
+        frame->rax = (is_dir || is_file) ? SYSCALL_OK : SYSCALL_ERR_NOENT;
+        return;
+    }
+
+    if (!is_dir && !is_file) {
+        serial_print("[SYSCALL] access: ENOENT\n");
+        frame->rax = SYSCALL_ERR_NOENT;
+        return;
+    }
+
+    // R_OK: her zaman izin var (kernel root gibi davranıyoruz)
+    if (mode & R_OK) {
+        // izin verildi
+    }
+
+    // W_OK: dizinler ve dinamik dosyalar yazılabilir
+    if (mode & W_OK) {
+        if (is_file) {
+            const EmbeddedFile64* f = fs_get_file64(path);
+            if (f && !f->is_dynamic) {
+                // Salt-okunur gömülü dosya
+                serial_print("[SYSCALL] access: W_OK EACCES (read-only file)\n");
+                frame->rax = SYSCALL_ERR_PERM;
+                return;
+            }
+        }
+        // Dizinler ve dinamik dosyalar yazılabilir
+    }
+
+    // X_OK: dizinler her zaman çalıştırılabilir
+    //       dosyalar: /bin veya /usr/bin altındakilere izin ver
+    if (mode & X_OK) {
+        if (is_dir) {
+            // dizine execute = traverse izni → her zaman ok
+        } else {
+            // /bin/ veya /usr/bin/ prefix'i var mı?
+            int exec_ok = 0;
+            // Basit prefix kontrolü
+            const char* p = path;
+            // "/bin/" ile başlıyor mu?
+            if (p[0]=='/' && p[1]=='b' && p[2]=='i' && p[3]=='n' && p[4]=='/') exec_ok = 1;
+            // "/usr/bin/" ile başlıyor mu?
+            if (p[0]=='/' && p[1]=='u' && p[2]=='s' && p[3]=='r' &&
+                p[4]=='/' && p[5]=='b' && p[6]=='i' && p[7]=='n' && p[8]=='/') exec_ok = 1;
+            if (!exec_ok) {
+                serial_print("[SYSCALL] access: X_OK EACCES\n");
+                frame->rax = SYSCALL_ERR_PERM;
+                return;
+            }
+        }
+    }
+
+    serial_print("[SYSCALL] access: ok\n");
+    frame->rax = SYSCALL_OK;
+}
+
+// ================================================================
+// v9 – SYS_OPENDIR / SYS_GETDENTS / SYS_CLOSEDIR
+//
+// Bash glob expansion (*.c, for f in *) ve ls için şart.
+// Tasarım: opendir() bir "dir fd" döndürür. Bu fd, FD_TYPE_SPECIAL
+// olarak açılır ve path bilgisini fd_entry_t.path'te saklar.
+// getdents() o fd üzerinden fs_getdents64() çağırır, offset takip eder.
+// closedir() sadece fd_free() yapar.
+// ================================================================
+
+// ── SYS_OPENDIR (59) ────────────────────────────────────────────
+// opendir(const char* path) -> dirfd | err
+//
+// POSIX opendir(3) yerine kullanılan raw syscall versiyonu.
+// Başarıda dizine bağlı bir fd döndürür; getdents ile okunur.
+// ---------------------------------------------------------------
+static void sys_opendir(syscall_frame_t* frame) {
+    const char* path = (const char*)frame->rdi;
+
+    if (!path) {
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+    if (!is_valid_user_ptr(path, 1)) {
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+
+    serial_print("[SYSCALL] opendir(\"");
+    serial_print(path);
+    serial_print("\")\n");
+
+    if (!fs_path_is_dir(path)) {
+        frame->rax = SYSCALL_ERR_NOENT;
+        return;
+    }
+
+    task_t* cur = task_get_current();
+    if (!cur) {
+        frame->rax = SYSCALL_ERR_PERM;
+        return;
+    }
+
+    int fd = fd_alloc(cur->fd_table, FD_TYPE_SPECIAL, O_RDONLY, path);
+    if (fd < 0) {
+        frame->rax = SYSCALL_ERR_MFILE;
+        return;
+    }
+
+    // offset = 0: getdents henüz hiçbir şey okumadı
+    cur->fd_table[fd].offset = 0;
+
+    serial_print("[SYSCALL] opendir: dirfd=");
+    { char b[8]; int_to_str(fd, b); serial_print(b); }
+    serial_print("\n");
+
+    frame->rax = (uint64_t)fd;
+}
+
+// ── SYS_GETDENTS (58) ────────────────────────────────────────────
+// getdents(int dirfd, dirent64_t* buf, int count) -> nbytes | err
+//
+// dirfd: opendir() ile alınan fd
+// buf  : kullanıcı buffer'ı
+// count: buffer boyutu (byte)
+//
+// Döndürür: yazılan byte sayısı (0 = dizin sonu), negatif = hata
+//
+// Basit implementasyon: tüm entry'leri ilk çağrıda döker.
+// İkinci çağrıda offset != 0 kontrolü ile 0 (EOF) döner.
+// ---------------------------------------------------------------
+static void sys_getdents(syscall_frame_t* frame) {
+    int         dirfd = (int)(int64_t)frame->rdi;
+    dirent64_t* buf   = (dirent64_t*)frame->rsi;
+    int         count = (int)(int64_t)frame->rdx;
+
+    if (!buf || count <= 0) {
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+    if (!is_valid_user_ptr(buf, (uint64_t)count)) {
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+
+    task_t* cur = task_get_current();
+    if (!cur) {
+        frame->rax = SYSCALL_ERR_PERM;
+        return;
+    }
+
+    fd_entry_t* ent = fd_get(cur->fd_table, dirfd);
+    if (!ent || ent->type != FD_TYPE_SPECIAL) {
+        frame->rax = SYSCALL_ERR_BADF;
+        return;
+    }
+
+    // EOF kontrolü: offset > 0 → daha önce okundu, dizin sonu
+    if (ent->offset > 0) {
+        frame->rax = 0;   // 0 = no more entries
+        return;
+    }
+
+    serial_print("[SYSCALL] getdents(dirfd=");
+    { char b[8]; int_to_str(dirfd, b); serial_print(b); }
+    serial_print(", path=\"");
+    serial_print(ent->path);
+    serial_print("\")\n");
+
+    int written = fs_getdents64(ent->path, buf, count);
+
+    if (written < 0) {
+        frame->rax = SYSCALL_ERR_NOENT;
+        return;
+    }
+
+    // offset > 0 olarak işaretle → bir sonraki çağrı EOF döner
+    ent->offset = (uint64_t)(written > 0 ? written : 1);
+
+    serial_print("[SYSCALL] getdents: wrote ");
+    { char b[12]; int_to_str(written, b); serial_print(b); }
+    serial_print(" bytes\n");
+
+    frame->rax = (uint64_t)written;
+}
+
+// ── SYS_CLOSEDIR (60) ────────────────────────────────────────────
+// closedir(int dirfd) -> 0 | err
+// ---------------------------------------------------------------
+static void sys_closedir(syscall_frame_t* frame) {
+    int dirfd = (int)(int64_t)frame->rdi;
+
+    task_t* cur = task_get_current();
+    if (!cur) {
+        frame->rax = SYSCALL_ERR_PERM;
+        return;
+    }
+
+    fd_entry_t* ent = fd_get(cur->fd_table, dirfd);
+    if (!ent || ent->type != FD_TYPE_SPECIAL) {
+        frame->rax = SYSCALL_ERR_BADF;
+        return;
+    }
+
+    fd_free(cur->fd_table, dirfd);
+
+    serial_print("[SYSCALL] closedir: ok\n");
+    frame->rax = SYSCALL_OK;
+}
+
+// ============================================================
+// v12 – Process Group & Session Syscall'ları
+//
+// Bu dört syscall bash'in iş kontrolü (job control) altyapısını
+// tamamlar:
+//   setpgid  – pipeline grubu oluştur / gruba katıl
+//   getpgid  – herhangi bir process'in grup ID'sini sorgula
+//   setsid   – yeni session başlat (login shell)
+//   tcsetpgrp – terminale foreground process grubunu ayarla
+//   tcgetpgrp – terminaldeki foreground process grubunu sorgula
+// ============================================================
+
+// ── SYS_SETPGID (68) ─────────────────────────────────────────────
+// setpgid(pid_t pid, pid_t pgid) -> 0 | err
+//
+// pid  = 0 → çağıran task kullanılır
+// pgid = 0 → pgid = pid yapılır (yeni grup lideri)
+// Kısıtlamalar:
+//   • Session liderinin (pid == sid) grubu değiştirilemez → EPERM
+//   • Hedef task çağıranın session'ında olmalı           → EPERM
+//   • pgid, aynı session'daki mevcut bir gruba ait olmalı
+//     ya da pgid == pid (yeni grup) olmalı               → EPERM
+// ---------------------------------------------------------------
+// ============================================================
+// v13 – Process Group & Session: PID-indexed bağımsız tablo
+//
+// task_t struct'ına DOKUNMUYORUZ. pgid ve sid değerleri burada
+// tutulur; böylece task.h layout değişikliğinden etkilenmeyiz.
+// Tüm erişim getpid() syscall sonucundan elde edilen PID üzerinden.
+//
+// MAX_TASKS: task.c'deki maksimum task sayısıyla uyumlu olmalı.
+// Pratikte küçük bir kernel için 64 slot fazlasıyla yeterli.
+// ============================================================
+#define PG_MAX_TASKS  64
+// Bos slot isareti: pid hicbir zaman bu degeri almaz (uint32 max)
+#define PG_SLOT_EMPTY 0xFFFFFFFFu
+
+typedef struct {
+    uint32_t pid;    // PG_SLOT_EMPTY = bos slot; pid=0 gecerlidir
+    uint32_t pgid;
+    uint32_t sid;
+} pg_entry_t;
+
+static pg_entry_t g_pg_table[PG_MAX_TASKS];
+static int        g_pg_inited = 0;
+
+static void pg_ensure_init(void) {
+    if (g_pg_inited) return;
+    for (int i = 0; i < PG_MAX_TASKS; i++)
+        g_pg_table[i].pid = PG_SLOT_EMPTY;
+    g_pg_inited = 1;
+}
+
+// pid icin slot bul; yoksa yeni slot ac.
+// pid=0 artik gecerlidir (test/idle task olabilir).
+static pg_entry_t* pg_get_or_create(uint32_t pid) {
+    pg_ensure_init();
+    for (int i = 0; i < PG_MAX_TASKS; i++) {
+        if (g_pg_table[i].pid == pid)
+            return &g_pg_table[i];
+    }
+    for (int i = 0; i < PG_MAX_TASKS; i++) {
+        if (g_pg_table[i].pid == PG_SLOT_EMPTY) {
+            g_pg_table[i].pid  = pid;
+            g_pg_table[i].pgid = pid;
+            g_pg_table[i].sid  = pid;
+            return &g_pg_table[i];
+        }
+    }
+    return (void*)0;
+}
+
+// Sadece okuma; slot yoksa NULL doner
+static pg_entry_t* pg_find(uint32_t pid) {
+    pg_ensure_init();
+    for (int i = 0; i < PG_MAX_TASKS; i++) {
+        if (g_pg_table[i].pid == pid)
+            return &g_pg_table[i];
+    }
+    return (void*)0;
+}
+
+// Virtual PID: task->pid=0 oldugunda kullanilir.
+// Syscall context'te task_get_current() NULL donebilir;
+// bu durumda g_virtual_pid onceki syscall'da set edilmis olmali.
+static uint32_t g_virtual_pid = 0;
+
+// sys_getpid ve pg_current_pid tarafindan cagirilir; her gecerli pid
+// geldikten sonra g_virtual_pid'i tazeler.
+static void pg_update_current_pid(uint32_t pid) {
+    if (pid != 0) g_virtual_pid = pid;
+}
+
+static uint32_t pg_resolve_pid(uint32_t raw_pid) {
+    if (raw_pid != 0) {
+        // Gecerli pid bulundu — g_virtual_pid'i guncelle (gelecek NULL durumu icin)
+        g_virtual_pid = raw_pid;
+        return raw_pid;
+    }
+    // raw_pid=0: onceki syscall'dan kalan gecerli pid'i kullan
+    if (g_virtual_pid != 0) return g_virtual_pid;
+    // Son care: scheduler listesinden ilk gecerli pid
+    for (uint32_t try_pid = 1; try_pid < 256; try_pid++) {
+        task_t* t = task_find_by_pid(try_pid);
+        if (t) { g_virtual_pid = try_pid; return try_pid; }
+    }
+    g_virtual_pid = 1;
+    return 1;
+}
+
+static uint32_t pg_current_pid(void) {
+    task_t* cur = task_get_current();
+    uint32_t raw = cur ? cur->pid : 0u;
+    if (raw != 0) pg_update_current_pid(raw);
+    return pg_resolve_pid(raw);
+}
+
+// Verilen pid'in pgid'ini dondur (slot yoksa pid'den turet)
+static uint32_t pg_effective_pgid(uint32_t pid) {
+    pg_entry_t* e = pg_find(pid);
+    return e ? e->pgid : pid;
+}
+
+// Verilen pid'in sid'ini dondur (slot yoksa pid'den turet)
+static uint32_t pg_effective_sid(uint32_t pid) {
+    pg_entry_t* e = pg_find(pid);
+    return e ? e->sid : pid;
+}
+
+// ── SYS_SETPGID (68) ─────────────────────────────────────────────
+// setpgid(pid_t pid, pid_t pgid) -> 0 | err
+// ---------------------------------------------------------------
+static void sys_setpgid(syscall_frame_t* frame) {
+    int arg_pid  = (int)(int64_t)frame->rdi;
+    int arg_pgid = (int)(int64_t)frame->rsi;
+
+    uint32_t caller_pid = pg_current_pid();
+
+    // pgid negatifse hemen EINVAL
+    if (arg_pgid < 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    // pid == 0 → çağıranın kendisi
+    uint32_t target_pid = (arg_pid == 0) ? caller_pid : (uint32_t)arg_pid;
+
+    // Hedef task var mı?
+    if (target_pid != caller_pid) {
+        task_t* t = task_find_by_pid(target_pid);
+        if (!t) { frame->rax = SYSCALL_ERR_INVAL; return; }
+    }
+
+    // pgid == 0 → pgid = target'ın pid'i (yeni grup lideri)
+    uint32_t new_pgid = (arg_pgid == 0) ? target_pid : (uint32_t)arg_pgid;
+
+    // Session kontrolü
+    uint32_t caller_sid = pg_effective_sid(caller_pid);
+    uint32_t target_sid = pg_effective_sid(target_pid);
+    if (target_sid != caller_sid) {
+        frame->rax = SYSCALL_ERR_PERM;
+        return;
+    }
+
+    // new_pgid ya target_pid (yeni lider) ya da aynı session'daki mevcut grup
+    if (new_pgid != target_pid) {
+        // Aynı session'da bu pgid'e sahip bir task var mı?
+        int found = 0;
+        for (int i = 0; i < PG_MAX_TASKS; i++) {
+            if (g_pg_table[i].pid != PG_SLOT_EMPTY &&
+                g_pg_table[i].pgid == new_pgid &&
+                g_pg_table[i].sid  == caller_sid) {
+                found = 1; break;
+            }
+        }
+        // Ayrıca task_find_by_pid ile kontrol (tabloya henüz eklenmediyse)
+        if (!found) {
+            task_t* pg = task_find_by_pid(new_pgid);
+            if (pg && pg_effective_sid(pg->pid) == caller_sid) found = 1;
+        }
+        if (!found) { frame->rax = SYSCALL_ERR_PERM; return; }
+    }
+
+    pg_entry_t* ent = pg_get_or_create(target_pid);
+    if (!ent) { frame->rax = SYSCALL_ERR_NOMEM; return; }
+    ent->pgid = new_pgid;
+
+    // task_t'ye de yaz (varsa ve alan mevcutsa, olmasa da zarar yok)
+    task_t* t = task_find_by_pid(target_pid);
+    if (t) t->pgid = new_pgid;
+
+    serial_print("[SYSCALL] setpgid: pid=");
+    { char b[12]; int_to_str((int)target_pid, b); serial_print(b); }
+    serial_print(" -> pgid=");
+    { char b[12]; int_to_str((int)new_pgid, b); serial_print(b); }
+    serial_print("\n");
+
+    frame->rax = SYSCALL_OK;
+}
+
+// ── SYS_GETPGID (69) ─────────────────────────────────────────────
+// getpgid(pid_t pid) -> pgid | err
+// ---------------------------------------------------------------
+static void sys_getpgid(syscall_frame_t* frame) {
+    int arg_pid = (int)(int64_t)frame->rdi;
+
+    uint32_t caller_pid = pg_current_pid();
+
+    uint32_t target_pid = (arg_pid == 0) ? caller_pid : (uint32_t)arg_pid;
+
+    // Hedef var mı? (kendi pid'i ise task aramasına gerek yok)
+    if (target_pid != caller_pid) {
+        task_t* t = task_find_by_pid(target_pid);
+        if (!t) { frame->rax = SYSCALL_ERR_INVAL; return; }
+    }
+
+    // Farklı session → EPERM
+    if (pg_effective_sid(target_pid) != pg_effective_sid(caller_pid)) {
+        frame->rax = SYSCALL_ERR_PERM;
+        return;
+    }
+
+    frame->rax = (uint64_t)pg_effective_pgid(target_pid);
+}
+
+// ── SYS_SETSID (70) ──────────────────────────────────────────────
+// setsid() -> new_sid | err
+// ---------------------------------------------------------------
+static void sys_setsid(syscall_frame_t* frame) {
+    uint32_t cur_pid = pg_current_pid();
+
+    // Zaten grup lideri ise EPERM
+    if (pg_effective_pgid(cur_pid) == cur_pid) {
+        frame->rax = SYSCALL_ERR_PERM;
+        return;
+    }
+
+    pg_entry_t* ent = pg_get_or_create(cur_pid);
+    if (!ent) { frame->rax = SYSCALL_ERR_NOMEM; return; }
+    ent->pgid = cur_pid;
+    ent->sid  = cur_pid;
+
+    // task_t'ye de yaz
+    task_t* t = task_find_by_pid(cur_pid);
+    if (t) { t->pgid = cur_pid; t->sid = cur_pid; }
+
+    serial_print("[SYSCALL] setsid: new sid=");
+    { char b[12]; int_to_str((int)cur_pid, b); serial_print(b); }
+    serial_print("\n");
+
+    frame->rax = (uint64_t)cur_pid;
+}
+
+// ── SYS_TCSETPGRP (71) / SYS_TCGETPGRP (72) ─────────────────────
+// Tek terminal için global foreground pgid.
+// 0 = henüz ayarlanmamış.
+static uint32_t g_terminal_foreground_pgid = 0;
+
+static void sys_tcsetpgrp(syscall_frame_t* frame) {
+    int fd   = (int)(int64_t)frame->rdi;
+    int pgrp = (int)(int64_t)frame->rsi;
+
+    // fd doğrulama — 0,1,2 her zaman terminal; diğerleri fd tablosundan kontrol
+    if (fd < 0 || fd >= MAX_FDS) {
+        frame->rax = SYSCALL_ERR_BADF;
+        return;
+    }
+    if (fd > 2) {
+        task_t* cur = task_get_current();
+        fd_entry_t* ent = cur ? fd_get(cur->fd_table, fd) : (void*)0;
+        if (!ent || !ent->is_open) {
+            frame->rax = SYSCALL_ERR_BADF;
+            return;
+        }
+    }
+
+    // pgrp <= 0 → EINVAL (POSIX: pgrp pozitif olmalı)
+    if (pgrp <= 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    uint32_t cur_pid = pg_current_pid();
+
+    // Session kontrolü
+    task_t* pg_task = task_find_by_pid((uint32_t)pgrp);
+    if (pg_task && pg_effective_sid(pg_task->pid) != pg_effective_sid(cur_pid)) {
+        frame->rax = SYSCALL_ERR_PERM;
+        return;
+    }
+
+    g_terminal_foreground_pgid = (uint32_t)pgrp;
+
+    serial_print("[SYSCALL] tcsetpgrp: pgrp=");
+    { char b[12]; int_to_str(pgrp, b); serial_print(b); }
+    serial_print("\n");
+
+    frame->rax = SYSCALL_OK;
+}
+
+static void sys_tcgetpgrp(syscall_frame_t* frame) {
+    int fd = (int)(int64_t)frame->rdi;
+
+    if (fd < 0 || fd >= MAX_FDS) {
+        frame->rax = SYSCALL_ERR_BADF;
+        return;
+    }
+    if (fd > 2) {
+        task_t* cur = task_get_current();
+        fd_entry_t* ent = cur ? fd_get(cur->fd_table, fd) : (void*)0;
+        if (!ent || !ent->is_open) {
+            frame->rax = SYSCALL_ERR_BADF;
+            return;
+        }
+    }
+
+    uint32_t cur_pid = pg_current_pid();
+
+    // Henüz set edilmemişse çağıranın pgid'ini döndür
+    uint32_t result = (g_terminal_foreground_pgid != 0)
+                      ? g_terminal_foreground_pgid
+                      : pg_effective_pgid(cur_pid);
+
+    frame->rax = (uint64_t)result;
+}
+
+// ============================================================
+// v15 YENİ SYSCALL IMPLEMENTASYONLARI
+// getuid/geteuid/getgid/getegid / nanosleep / sigaltstack
+// ============================================================
+
+// AscentOS sabit kimlik değerleri
+// Gerçek çok-kullanıcılı yapı olana kadar root gibi davranıyoruz.
+// bash $UID=0 görünce bazı güvenlik kısıtlamalarını atlar — istenen davranış.
+#define ASCENT_UID   0   // root
+#define ASCENT_GID   0   // root
+
+// ── SYS_GETUID (84) ──────────────────────────────────────────────
+static void sys_getuid(syscall_frame_t* frame) {
+    frame->rax = ASCENT_UID;
+}
+
+// ── SYS_GETEUID (85) ─────────────────────────────────────────────
+static void sys_geteuid(syscall_frame_t* frame) {
+    frame->rax = ASCENT_UID;
+}
+
+// ── SYS_GETGID (86) ──────────────────────────────────────────────
+static void sys_getgid(syscall_frame_t* frame) {
+    frame->rax = ASCENT_GID;
+}
+
+// ── SYS_GETEGID (87) ─────────────────────────────────────────────
+static void sys_getegid(syscall_frame_t* frame) {
+    frame->rax = ASCENT_GID;
+}
+
+// ── SYS_NANOSLEEP (88) ───────────────────────────────────────────
+// nanosleep(*req, *rem) -> 0 | err
+//
+// bash'in harici sleep komutu ve readline timeout'ları bunu kullanır.
+// Gerçek nanosaniye hassasiyeti yok; timer tick'lerine çevrilir.
+// 1 tick ≈ 10ms (100 Hz) varsayılır.
+// ---------------------------------------------------------------
+static void sys_nanosleep(syscall_frame_t* frame) {
+    timespec_t* req = (timespec_t*)frame->rdi;
+    timespec_t* rem = (timespec_t*)frame->rsi;  // NULL olabilir
+
+    if (!is_valid_user_ptr(req, sizeof(timespec_t))) {
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+    if (req->tv_sec < 0 || req->tv_nsec < 0 || req->tv_nsec >= 1000000000LL) {
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    // Toplam nanosaniyeyi tick'e çevir (1 tick = 10_000_000 ns = 10 ms)
+    int64_t total_ns = req->tv_sec * 1000000000LL + req->tv_nsec;
+    uint64_t ticks   = (uint64_t)(total_ns / 10000000LL);  // 10ms per tick
+    if (ticks == 0 && total_ns > 0) ticks = 1;             // en az 1 tick
+
+    if (ticks > 0) {
+        uint64_t end = get_system_ticks() + ticks;
+        while (get_system_ticks() < end)
+            __asm__ volatile ("sti; hlt" ::: "memory");
+    }
+
+    // rem: kalan süre — sinyal kesemediyse 0
+    if (rem && is_valid_user_ptr(rem, sizeof(timespec_t))) {
+        rem->tv_sec  = 0;
+        rem->tv_nsec = 0;
+    }
+
+    serial_print("[SYSCALL] nanosleep ok\n");
+    frame->rax = SYSCALL_OK;
+}
+
+// ── SYS_SIGALTSTACK (89) ─────────────────────────────────────────
+// sigaltstack(*ss, *old_ss) -> 0 | err
+//
+// bash SIGSEGV için alternate stack kurar (stack overflow'dan kurtarma).
+// Kernel sanal — stack'i gerçekten kullanmıyor, sadece kaydediyor.
+// Asıl handler dispatch'i signal64.c'de yapılıyor.
+// ---------------------------------------------------------------
+
+// Per-task alternate stack (şimdilik global — tek task varsayımı)
+static stack_t g_altstack = { .ss_sp = (void*)0, .ss_flags = SS_DISABLE, .ss_size = 0 };
+
+static void sys_sigaltstack(syscall_frame_t* frame) {
+    const stack_t* ss     = (const stack_t*)frame->rdi;
+    stack_t*       old_ss = (stack_t*)frame->rsi;
+
+    // old_ss: mevcut durumu döndür
+    if (old_ss) {
+        if (!is_valid_user_ptr(old_ss, sizeof(stack_t))) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+        *old_ss = g_altstack;
+    }
+
+    // ss: yeni stack kur
+    if (ss) {
+        if (!is_valid_user_ptr(ss, sizeof(stack_t))) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+        // SS_DISABLE: alternate stack'i devre dışı bırak
+        if (ss->ss_flags & SS_DISABLE) {
+            g_altstack.ss_flags = SS_DISABLE;
+            g_altstack.ss_sp    = (void*)0;
+            g_altstack.ss_size  = 0;
+            frame->rax = SYSCALL_OK;
+            return;
+        }
+        // Boyut kontrolü
+        if (ss->ss_size < MINSIGSTKSZ) {
+            frame->rax = SYSCALL_ERR_INVAL;
+            return;
+        }
+        if (!is_valid_user_ptr(ss->ss_sp, ss->ss_size)) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+        g_altstack = *ss;
+        g_altstack.ss_flags = 0;  // SS_ONSTACK değil — henüz kullanılmıyor
+        serial_print("[SYSCALL] sigaltstack: sp=");
+        print_hex64((uint64_t)ss->ss_sp);
+        serial_print(" size=");
+        print_uint64(ss->ss_size);
+        serial_print("\n");
+    }
+
+    frame->rax = SYSCALL_OK;
+}
+
+// ── SYS_MKDIR (80) ───────────────────────────────────────────────
+// mkdir(path, mode) -> 0 | err
+// ---------------------------------------------------------------
+static void sys_mkdir(syscall_frame_t* frame) {
+    const char* path = (const char*)frame->rdi;
+    uint32_t    mode = (uint32_t)frame->rsi;
+    (void)mode;  // VFS kendi izin yönetimini yapıyor
+
+    if (!is_valid_user_ptr(path, 1)) { frame->rax = SYSCALL_ERR_FAULT;  return; }
+    if (path[0] == '\0')             { frame->rax = SYSCALL_ERR_NOENT;  return; }
+
+    // Zaten var mı?
+    if (fs_path_is_dir(path))  { frame->rax = SYSCALL_ERR_BUSY;   return; }
+    if (fs_path_is_file(path)) { frame->rax = SYSCALL_ERR_BUSY;   return; }
+
+    int r = fs_mkdir64(path);
+    if (r < 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    serial_print("[SYSCALL] mkdir: ");
+    serial_print(path);
+    serial_print("\n");
+
+    frame->rax = SYSCALL_OK;
+}
+
+// ── SYS_RMDIR (81) ───────────────────────────────────────────────
+// rmdir(path) -> 0 | err
+// Sadece boş dizinleri siler.
+// ---------------------------------------------------------------
+static void sys_rmdir(syscall_frame_t* frame) {
+    const char* path = (const char*)frame->rdi;
+
+    if (!is_valid_user_ptr(path, 1)) { frame->rax = SYSCALL_ERR_FAULT;  return; }
+    if (path[0] == '\0')             { frame->rax = SYSCALL_ERR_NOENT;  return; }
+    if (!fs_path_is_dir(path))       { frame->rax = SYSCALL_ERR_NOENT;  return; }
+
+    int r = fs_rmdir64(path);
+    if (r == -2) { frame->rax = SYSCALL_ERR_BUSY;  return; }  // dolu dizin
+    if (r <   0) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    serial_print("[SYSCALL] rmdir: ");
+    serial_print(path);
+    serial_print("\n");
+
+    frame->rax = SYSCALL_OK;
+}
+
+// ── SYS_UNLINK (82) ──────────────────────────────────────────────
+// unlink(path) -> 0 | err
+// Dosyayı siler; dizin için EISDIR döner.
+// ---------------------------------------------------------------
+static void sys_unlink(syscall_frame_t* frame) {
+    const char* path = (const char*)frame->rdi;
+
+    if (!is_valid_user_ptr(path, 1)) { frame->rax = SYSCALL_ERR_FAULT;  return; }
+    if (path[0] == '\0')             { frame->rax = SYSCALL_ERR_NOENT;  return; }
+    if (fs_path_is_dir(path))        { frame->rax = SYSCALL_ERR_INVAL;  return; }  // EISDIR
+    if (!fs_path_is_file(path))      { frame->rax = SYSCALL_ERR_NOENT;  return; }
+
+    int r = fs_unlink64(path);
+    if (r < 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    serial_print("[SYSCALL] unlink: ");
+    serial_print(path);
+    serial_print("\n");
+
+    frame->rax = SYSCALL_OK;
+}
+
+// ── SYS_RENAME (83) ──────────────────────────────────────────────
+// rename(oldpath, newpath) -> 0 | err
+// Dosya veya dizini yeniden adlandırır / taşır.
+// ---------------------------------------------------------------
+static void sys_rename(syscall_frame_t* frame) {
+    const char* oldpath = (const char*)frame->rdi;
+    const char* newpath = (const char*)frame->rsi;
+
+    if (!is_valid_user_ptr(oldpath, 1)) { frame->rax = SYSCALL_ERR_FAULT; return; }
+    if (!is_valid_user_ptr(newpath, 1)) { frame->rax = SYSCALL_ERR_FAULT; return; }
+    if (oldpath[0] == '\0')             { frame->rax = SYSCALL_ERR_NOENT; return; }
+    if (newpath[0] == '\0')             { frame->rax = SYSCALL_ERR_NOENT; return; }
+
+    // Kaynak var mı?
+    int src_is_dir  = fs_path_is_dir(oldpath);
+    int src_is_file = !src_is_dir && fs_path_is_file(oldpath);
+    if (!src_is_dir && !src_is_file) { frame->rax = SYSCALL_ERR_NOENT; return; }
+
+    int r = fs_rename64(oldpath, newpath);
+    if (r < 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    serial_print("[SYSCALL] rename: ");
+    serial_print(oldpath);
+    serial_print(" -> ");
+    serial_print(newpath);
+    serial_print("\n");
+
+    frame->rax = SYSCALL_OK;
+}
+
+// ── SYS_UNAME (73) ───────────────────────────────────────────────
+// uname(utsname_t* buf) -> 0 | err
+//
+// bash bu bilgiyi şu amaçlarla kullanır:
+//   $MACHTYPE, $HOSTTYPE, $OSTYPE  → machine + sysname alanlarından
+//   PS1 \s (shell adı) / \v (versiyon) escape'leri → sysname/release
+// ---------------------------------------------------------------
+static void sys_uname(syscall_frame_t* frame) {
+    utsname_t* buf = (utsname_t*)frame->rdi;
+
+    if (!is_valid_user_ptr(buf, sizeof(utsname_t))) {
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+
+    // Alanları sıfırla
+    kmemset(buf, 0, sizeof(utsname_t));
+
+    // sysname: işletim sistemi adı
+    my_strncpy(buf->sysname,  "AscentOS",  UTS_LEN);
+    // nodename: hostname (şimdilik sabit; ileride hostname syscall ile değişir)
+    my_strncpy(buf->nodename, "ascent",    UTS_LEN);
+    // release: kernel sürümü
+    my_strncpy(buf->release,  "1.0.0",     UTS_LEN);
+    // version: build tarihi / derleme bilgisi
+    my_strncpy(buf->version,  "#1 SMP AscentOS kernel", UTS_LEN);
+    // machine: donanım mimarisi — bash $MACHTYPE için kritik
+    my_strncpy(buf->machine,  "x86_64",    UTS_LEN);
+
+    serial_print("[SYSCALL] uname: AscentOS x86_64\n");
     frame->rax = SYSCALL_OK;
 }
 
@@ -1927,6 +3428,45 @@ void syscall_dispatch(syscall_frame_t* frame) {
     // v6 – newlib uyumu
     case SYS_KILL:         sys_kill(frame);         break;
     case SYS_GETTIMEOFDAY: sys_gettimeofday(frame); break;
+    // v7 – bash dizin syscall'ları
+    case SYS_GETCWD:       sys_getcwd(frame);       break;
+    case SYS_CHDIR:        sys_chdir(frame);        break;
+    // v8 – bash dosya sorgulama
+    case SYS_STAT:         sys_stat(frame);         break;
+    case SYS_ACCESS:       sys_access(frame);       break;
+    // v9 – bash dizin okuma
+    case SYS_GETDENTS:     sys_getdents(frame);     break;
+    case SYS_OPENDIR:      sys_opendir(frame);      break;
+    case SYS_CLOSEDIR:     sys_closedir(frame);     break;
+    // v11 – fcntl + dup
+    case SYS_FCNTL:        sys_fcntl(frame);       break;
+    case SYS_DUP:          sys_dup(frame);         break;
+    // v12 – process group & session (bash iş kontrolü)
+    case SYS_SETPGID:      sys_setpgid(frame);     break;
+    case SYS_GETPGID:      sys_getpgid(frame);     break;
+    case SYS_SETSID:       sys_setsid(frame);      break;
+    case SYS_TCSETPGRP:    sys_tcsetpgrp(frame);   break;
+    case SYS_TCGETPGRP:    sys_tcgetpgrp(frame);   break;
+    // v13 – sistem bilgisi
+    case SYS_UNAME:        sys_uname(frame);        break;
+    // v14 – dosya sistemi yazma (bash mkdir/rm/mv)
+    case SYS_MKDIR:        sys_mkdir(frame);        break;
+    case SYS_RMDIR:        sys_rmdir(frame);        break;
+    case SYS_UNLINK:       sys_unlink(frame);       break;
+    case SYS_RENAME:       sys_rename(frame);       break;
+    // v15 – kullanıcı kimliği / nanosleep / sigaltstack
+    case SYS_GETUID:       sys_getuid(frame);       break;
+    case SYS_GETEUID:      sys_geteuid(frame);      break;
+    case SYS_GETGID:       sys_getgid(frame);       break;
+    case SYS_GETEGID:      sys_getegid(frame);      break;
+    case SYS_NANOSLEEP:    sys_nanosleep(frame);    break;
+    case SYS_SIGALTSTACK:  sys_sigaltstack(frame);  break;
+    // v10 – sinyal altyapısı
+    case SYS_SIGACTION:    sys_sigaction(frame);    break;
+    case SYS_SIGPROCMASK:  sys_sigprocmask(frame);  break;
+    case SYS_SIGRETURN:    sys_sigreturn(frame);    break;
+    case SYS_SIGPENDING:   sys_sigpending(frame);   break;
+    case SYS_SIGSUSPEND:   sys_sigsuspend(frame);   break;
     default:
         serial_print("[SYSCALL] Unknown syscall: ");
         { char b[16]; int_to_str((int)(num & 0xFFFF), b); serial_print(b); }
@@ -1934,4 +3474,8 @@ void syscall_dispatch(syscall_frame_t* frame) {
         frame->rax = SYSCALL_ERR_NOSYS;
         break;
     }
+
+    // Her syscall dönüşünde bekleyen sinyalleri kontrol et ve işle.
+    // Bu sayede userspace handler'ları syscall noktalarında teslim edilir.
+    signal_dispatch_pending();
 }

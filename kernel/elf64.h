@@ -125,7 +125,7 @@ typedef struct __attribute__((packed)) {
 #define ELF_ERR_MACHINE     6   // Not EM_X86_64
 #define ELF_ERR_NOPHDR      7   // No LOAD segments found
 #define ELF_ERR_PHENTSIZE   8   // Bad program header entry size
-#define ELF_ERR_TOOBIG      9   // Segment too large for buffer
+#define ELF_ERR_TOOBIG      9   // Segment too large for buffer (read buf = 4 MB)
 #define ELF_ERR_NOMEM       10  // Memory allocation failed
 
 // ----------------------------------------------------------

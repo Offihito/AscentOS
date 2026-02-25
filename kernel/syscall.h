@@ -87,11 +87,72 @@
 #define SYS_KILL         29  // kill(pid, sig)                  -> 0 | err
 #define SYS_GETTIMEOFDAY 30  // gettimeofday(*tv, *tz)          -> 0 | err
 
-#define SYSCALL_MAX      31
+// ── v7 – Bash temel dizin syscall'ları ───────────────────────────
+#define SYS_GETCWD       43  // getcwd(buf, size)               -> buf | NULL
+#define SYS_CHDIR        44  // chdir(path)                     -> 0 | err
+
+// ── v8 – Bash dosya sorgulama syscall'ları ───────────────────────
+#define SYS_STAT         31  // stat(path, *stat_buf)           -> 0 | err
+#define SYS_ACCESS       42  // access(path, mode)              -> 0 | err
+
+// ── v9 – Bash dizin okuma ────────────────────────────────────────
+#define SYS_GETDENTS     58  // getdents(dirfd, buf, count)     -> nbytes | err
+#define SYS_OPENDIR      59  // opendir(path)                   -> dirfd  | err
+#define SYS_CLOSEDIR     60  // closedir(dirfd)                 -> 0      | err
+
+// ── v11 – fcntl + dup (bash fd yönetimi) ───────────────────────────
+#define SYS_FCNTL        66  // fcntl(fd, cmd, arg)                -> val | err
+#define SYS_DUP          67  // dup(fd)                            -> newfd | err
+
+// ── v12 – Process Group & Session (bash iş kontrolü) ────────────────
+#define SYS_SETPGID      68  // setpgid(pid, pgid)                 -> 0 | err
+#define SYS_GETPGID      69  // getpgid(pid)                       -> pgid | err
+#define SYS_SETSID       70  // setsid()                           -> new_sid | err
+#define SYS_TCSETPGRP    71  // tcsetpgrp(fd, pgrp)                -> 0 | err
+#define SYS_TCGETPGRP    72  // tcgetpgrp(fd)                      -> pgrp | err
+
+// ── v10 – Sinyal altyapısı (bash için kritik) ────────────────────
+#define SYS_SIGACTION    61  // sigaction(signo, *new_sa, *old_sa) -> 0 | err
+#define SYS_SIGPROCMASK  62  // sigprocmask(how, *set, *oldset)    -> 0 | err
+#define SYS_SIGRETURN    63  // sigreturn()  — trampoline tarafından çağrılır
+#define SYS_SIGPENDING   64  // sigpending(*set)                   -> 0 | err
+#define SYS_SIGSUSPEND   65  // sigsuspend(*mask) — sinyal gelene kadar bekle
+
+// ── v13 – Sistem bilgisi (bash $MACHTYPE, $HOSTTYPE, PS1 \s/\v) ─────────
+#define SYS_UNAME        73  // uname(*utsname_t)                  -> 0 | err
+
+// ── v14 – Dosya sistemi yazma (bash mkdir/rm/mv, geçici dosyalar) ───────
+#define SYS_MKDIR        80  // mkdir(path, mode)                  -> 0 | err
+#define SYS_RMDIR        81  // rmdir(path)                        -> 0 | err
+#define SYS_UNLINK       82  // unlink(path)                       -> 0 | err
+#define SYS_RENAME       83  // rename(oldpath, newpath)           -> 0 | err
+
+// ── v15 – Kullanıcı kimliği (bash $UID/$EUID, root kontrolü) ────────────
+#define SYS_GETUID       84  // getuid()                           -> uid
+#define SYS_GETEUID      85  // geteuid()                          -> euid
+#define SYS_GETGID       86  // getgid()                          -> gid
+#define SYS_GETEGID      87  // getegid()                         -> egid
+
+// ── v15 – Zamanlama (bash sleep, $SECONDS) ───────────────────────────────
+#define SYS_NANOSLEEP    88  // nanosleep(*req, *rem)              -> 0 | err
+
+// ── v15 – Alternate sinyal yığını (bash SIGSEGV güvenliği) ──────────────
+#define SYS_SIGALTSTACK  89  // sigaltstack(*ss, *old_ss)          -> 0 | err
+
+// access() mod bitleri
+#define F_OK   0   // dosya var mı?
+#define R_OK   4   // okuma izni var mı?
+#define W_OK   2   // yazma izni var mı?
+#define X_OK   1   // çalıştırma izni var mı?
+
+#define SYSCALL_MAX      90
 
 // ============================================================
 // kill() sinyal numaraları (POSIX alt kümesi)
+// signal64.h dahil edilmemişse buradaki tanımlar geçerlidir;
+// signal64.h dahil edilmişse oradaki kapsamlı NSIG=32 tanımları kullanılır.
 // ============================================================
+#ifndef SIGNAL64_H
 #define SIGTERM   15   // Nazikçe sonlandır
 #define SIGKILL    9   // Zorla sonlandır (yakalanamaz)
 #define SIGINT     2   // Klavye interrupt (^C)
@@ -101,6 +162,7 @@
 #define SIGALRM   14   // Zamanlayıcı
 #define SIGUSR1   10   // Kullanıcı tanımlı 1
 #define SIGUSR2   12   // Kullanıcı tanımlı 2
+#endif /* SIGNAL64_H */
 
 // ============================================================
 // mmap() prot flags  (SYS_MMAP)
@@ -204,6 +266,14 @@ typedef struct {
 #define FIONREAD     0x541B   // Okunabilir byte sayısını döndür
 #define TIOCGPGRP    0x540F   // Ön plan süreç grubunu al
 #define TIOCSPGRP    0x5410   // Ön plan süreç grubunu ayarla
+#define TIOCSCTTY    0x540E   // Controlling terminal olarak ata (setsid() sonrası)
+#define TIOCNOTTY    0x5422   // Controlling terminal'den ayrıl
+#define TIOCSTI      0x5412   // Terminale karakter enjekte et (nadiren)
+
+// tcsetattr() when sabitleri — TCSETS/TCSETSW/TCSETSF ile eşleşir
+#define TCSANOW      0        // Hemen uygula           → TCSETS
+#define TCSADRAIN    1        // Output boşalınca uygula → TCSETSW
+#define TCSAFLUSH    2        // Flush + uygula          → TCSETSF
 
 // ============================================================
 // termios yapısı  (POSIX.1 uyumlu)
@@ -267,6 +337,7 @@ typedef struct {
 #define ECHONL   0x0040   // ICANON açıkken NL'yi yankıla
 #define NOFLSH   0x0080   // Sinyal sonrası tamponu temizleme
 #define TOSTOP   0x0100   // Arkaplan yazma girişimlerinde SIGTTOU
+#define ECHOCTL  0x0200   // Kontrol karakterlerini ^X biçiminde göster (^C, ^Z vb.)
 #define IEXTEN   0x8000   // Genişletilmiş giriş işlemeyi etkinleştir
 
 // c_cc dizisi indeksleri (kontrol karakterleri)
@@ -305,6 +376,47 @@ typedef struct {
     uint16_t ws_xpixel; // Yatay piksel (genellikle 0)
     uint16_t ws_ypixel; // Dikey piksel  (genellikle 0)
 } winsize_t;
+
+// ============================================================
+// utsname yapısı  (SYS_UNAME)
+//
+// bash bu bilgiyi $MACHTYPE, $HOSTTYPE, $OSTYPE env değişkenlerine
+// ve PS1 içindeki \s (shell adı) / \v (versiyon) escape'lerine yazar.
+// ============================================================
+#define UTS_LEN     65   // Her alan max 64 karakter + null terminator
+
+typedef struct {
+    char sysname [UTS_LEN];   // İşletim sistemi adı  → "AscentOS"
+    char nodename[UTS_LEN];   // Hostname             → "ascent"
+    char release [UTS_LEN];   // Kernel sürümü        → "1.0.0"
+    char version [UTS_LEN];   // Build bilgisi        → "#1 SMP ..."
+    char machine [UTS_LEN];   // Donanım mimarisi     → "x86_64"
+} utsname_t;
+
+// ============================================================
+// timespec yapısı  (SYS_NANOSLEEP, SYS_CLOCK_GETTIME)
+// ============================================================
+typedef struct {
+    int64_t tv_sec;    // Saniye
+    int64_t tv_nsec;   // Nanosaniye (0..999_999_999)
+} timespec_t;
+
+// ============================================================
+// stack_t yapısı  (SYS_SIGALTSTACK)
+//
+// bash SIGSEGV handler'ı için alternate signal stack kurar.
+// ss_flags: SS_ONSTACK (1) = şu an alt-stack'te, SS_DISABLE (2) = devre dışı
+// ============================================================
+#define SS_ONSTACK   1
+#define SS_DISABLE   2
+#define MINSIGSTKSZ  2048    // Minimum alternate stack boyutu
+#define SIGSTKSZ     8192    // Önerilen alternate stack boyutu
+
+typedef struct {
+    void*    ss_sp;      // Stack başlangıç adresi
+    uint32_t ss_flags;   // SS_ONSTACK | SS_DISABLE
+    uint64_t ss_size;    // Stack boyutu (byte)
+} stack_t;
 
 // ============================================================
 // stat yapısı  (SYS_FSTAT)
@@ -349,6 +461,19 @@ typedef struct {
 #define O_CREAT     0x0040
 #define O_TRUNC     0x0200
 #define O_APPEND    0x0400
+#define O_NONBLOCK  0x0800
+#define O_CLOEXEC   0x80000
+
+// ── fcntl komutları ──────────────────────────────────────────────
+#define F_DUPFD         0   // fd kopyala (>= arg olan ilk bos fde)
+#define F_GETFD         1   // fd bayraklarini al
+#define F_SETFD         2   // fd bayraklarini ayarla
+#define F_GETFL         3   // dosya durum bayraklarini al
+#define F_SETFL         4   // dosya durum bayraklarini ayarla
+#define F_DUPFD_CLOEXEC 1030 // F_DUPFD + FD_CLOEXEC atomik
+
+// ── fd bayraklari ───────────────────────────────────────────────
+#define FD_CLOEXEC      1   // exec() sonrasi fdi kapat
 
 // Standart fd sabitleri
 #define STDIN_FD    0
@@ -413,9 +538,9 @@ typedef struct pipe_buf {
 
 typedef struct {
     uint8_t     type;        // FD_TYPE_*
-    uint8_t     flags;       // O_RDONLY, O_WRONLY vb.
-    uint8_t     is_open;     // 1 = açık
-    uint8_t     _pad;
+    uint8_t     flags;       // O_RDONLY, O_WRONLY vb. (dosya erisim modu)
+    uint8_t     fd_flags;    // FD_CLOEXEC vb. (fcntl F_GETFD/F_SETFD)
+    uint8_t     is_open;     // 1 = acik
     uint64_t    offset;      // dosya okuma/yazma ofseti
     char        path[52];    // açık dosyanın yolu (debug / gelecek VFS)
     pipe_buf_t* pipe;        // FD_TYPE_PIPE ise tampon; diğer türler için NULL
@@ -425,17 +550,24 @@ typedef struct {
 // Syscall Frame
 // Assembly stub (syscall_entry) tarafından yığın üzerinde oluşturulur.
 // Offsetler interrupts64.asm ile eşleşmeli.
+//
+// DÜZELTİLMİŞ: user_rsp alanı eklendi (+72).
+// sys_execve bu alana yeni user stack pointer'ını yazar.
+// Assembly stub SYSRET öncesi bu değeri kontrol eder:
+//   - 0 ise: orijinal user RSP'ye dön (normal syscall davranışı)
+//   - 0 dışı: bu adresi RSP olarak kullan (execve sonrası yeni stack)
 // ============================================================
 typedef struct {
-    uint64_t rax;   // syscall number (giriş) / dönüş değeri (çıkış)  +0
-    uint64_t rdi;   // arg1                                            +8
-    uint64_t rsi;   // arg2                                            +16
-    uint64_t rdx;   // arg3                                            +24
-    uint64_t r10;   // arg4  (SYSCALL RCX clobber ettiği için R10)    +32
-    uint64_t r8;    // arg5                                            +40
-    uint64_t r9;    // arg6                                            +48
-    uint64_t rcx;   // SYSCALL'in kaydettiği RIP (return address)     +56
-    uint64_t r11;   // SYSCALL'in kaydettiği RFLAGS                   +64
+    uint64_t rax;       // syscall number (giriş) / dönüş değeri (çıkış)  +0
+    uint64_t rdi;       // arg1                                            +8
+    uint64_t rsi;       // arg2                                            +16
+    uint64_t rdx;       // arg3                                            +24
+    uint64_t r10;       // arg4  (SYSCALL RCX clobber ettiği için R10)    +32
+    uint64_t r8;        // arg5                                            +40
+    uint64_t r9;        // arg6                                            +48
+    uint64_t rcx;       // SYSCALL'in kaydettiği RIP (return address)     +56
+    uint64_t r11;       // SYSCALL'in kaydettiği RFLAGS                   +64
+    uint64_t user_rsp;  // execve tarafından override edilir (0 = kullanma) +72
 } syscall_frame_t;
 
 // ============================================================

@@ -1,6 +1,7 @@
 // task.c - Task Management Implementation
 // Ring-0 + Ring-3 (SYSRET) + TSS destekli versiyon
 #include "task.h"
+#include "signal64.h"
 #include "memory_unified.h"
 #include <stddef.h>
 
@@ -13,6 +14,12 @@ extern void int_to_str(int num, char* str);
 extern void uint64_to_string(uint64_t num, char* str);
 extern void serial_print(const char* str);
 extern uint64_t get_system_ticks(void);
+
+// PMM büyük tahsis — vmm identity-map ile (stack'ler için)
+extern void* pmm_alloc_pages(uint64_t count);
+extern void  pmm_free_pages (void* base, uint64_t count);
+// Bayrak parametreli: 0x3=kernel-only, 0x7=user-accessible
+extern void* pmm_alloc_pages_flags(uint64_t count, uint64_t map_flags);
 
 // GDT pointer (boot64_unified.asm'de tanimli)
 // gdt64_pointer: [0..1]=limit (uint16), [2..9]=base (uint64)
@@ -332,16 +339,38 @@ task_t* task_create(const char* name, void (*entry_point)(void), uint32_t priori
     task->priority        = priority;
     task->privilege_level = TASK_PRIVILEGE_KERNEL;  // Ring 0
 
+    // Process group & session: başlangıçta kendi PID'i ile aynı session/grup.
+    // fork() sonrası child, parent'ın pgid/sid değerlerini miras alır (sys_fork'ta yapılır).
+    task->pgid = task->pid;
+    task->sid  = task->pid;
+
+    // Sinyal tablosunu başlat (v10)
+    signal_table_init(&task->signal_table);
+    task->signal_trampoline = 0;
+
+    // fd tablosunu başlat — stdin/stdout/stderr serial'a bağlanır (v11)
+    fd_table_init(task->fd_table);
+
     // ── Kernel Stack ──────────────────────────────────────────────
+    // pmm_alloc_pages kullanılır: heap dışında, VMM identity-map ile
+    // güvenli büyük blok tahsisi. kmalloc heap sınırları aşılmaz.
     task->kernel_stack_size = KERNEL_STACK_SIZE;
-    task->kernel_stack_base = (uint64_t)kmalloc(KERNEL_STACK_SIZE);
-    if (!task->kernel_stack_base) {
-        serial_print("[TASK ERROR] Failed to allocate kernel stack\n");
-        kfree(task);
-        return NULL;
+    {
+        uint64_t page_count = KERNEL_STACK_SIZE / 4096;
+        void* ks = pmm_alloc_pages(page_count);
+        if (!ks) {
+            // PMM başarısız — kmalloc fallback (küçük stack'ler için)
+            serial_print("[TASK WARN] pmm_alloc_pages failed for kernel stack, trying kmalloc\n");
+            ks = kmalloc(KERNEL_STACK_SIZE);
+            if (!ks) {
+                serial_print("[TASK ERROR] Failed to allocate kernel stack\n");
+                kfree(task);
+                return NULL;
+            }
+        }
+        task->kernel_stack_base = (uint64_t)ks;
     }
-    memset_task((void*)task->kernel_stack_base, 0, KERNEL_STACK_SIZE);
-    // Stack asagi buyur: top = base + size
+    // Stack aşağı büyür: top = base + size
     task->kernel_stack_top = task->kernel_stack_base + KERNEL_STACK_SIZE;
 
     // user_stack: kernel task'ta yok
@@ -436,7 +465,10 @@ task_t* task_create(const char* name, void (*entry_point)(void), uint32_t priori
         serial_print("[TASK]   kernel_stack_top=0x");
         uint64_to_string(task->kernel_stack_top, buf);
         serial_print(buf);
-        serial_print(", ctx.rsp=0x");
+        serial_print(" (size=");
+        int_to_str((int)(KERNEL_STACK_SIZE / 1024), buf);
+        serial_print(buf);
+        serial_print(" KB), ctx.rsp=0x");
         uint64_to_string(task->context.rsp, buf);
         serial_print(buf);
         serial_print("\n");
@@ -469,30 +501,61 @@ task_t* task_create_user(const char* name, void (*entry_point)(void), uint32_t p
     task->priority        = priority;
     task->privilege_level = TASK_PRIVILEGE_USER;   // Ring 3
 
+    // Process group & session: başlangıçta kendi PID'i ile aynı session/grup.
+    // fork() child'ı parent'ın pgid/sid'ini miras alır (sys_fork'ta kopyalanır).
+    task->pgid = task->pid;
+    task->sid  = task->pid;
+
+    // Sinyal tablosunu başlat (v10)
+    signal_table_init(&task->signal_table);
+    task->signal_trampoline = 0;
+
+    // fd tablosunu başlat — stdin/stdout/stderr serial'a bağlanır (v11)
+    fd_table_init(task->fd_table);
+
     // ── Kernel Stack ──────────────────────────────────────────────
     // SYSCALL/interrupt geldiginde CPU, TSS RSP0'dan bu adresi yukler.
     // task_switch() sirasinda tss_set_kernel_stack(task->kernel_stack_top)
     // cagirilarak TSS her task degisiminde guncellenir.
+    // pmm_alloc_pages: heap dışı, VMM identity-map, güvenli büyük tahsis.
     task->kernel_stack_size = KERNEL_STACK_SIZE;
-    task->kernel_stack_base = (uint64_t)kmalloc(KERNEL_STACK_SIZE);
-    if (!task->kernel_stack_base) {
-        kfree(task);
-        return NULL;
+    {
+        uint64_t page_count = KERNEL_STACK_SIZE / 4096;
+        void* ks = pmm_alloc_pages(page_count);
+        if (!ks) {
+            serial_print("[TASK WARN] pmm_alloc_pages failed for kernel stack, trying kmalloc\n");
+            ks = kmalloc(KERNEL_STACK_SIZE);
+            if (!ks) {
+                kfree(task);
+                return NULL;
+            }
+        }
+        task->kernel_stack_base = (uint64_t)ks;
     }
-    memset_task((void*)task->kernel_stack_base, 0, KERNEL_STACK_SIZE);
     task->kernel_stack_top = task->kernel_stack_base + KERNEL_STACK_SIZE;
 
     // ── User Stack ────────────────────────────────────────────────
     // SYSRET sonrasi RSP bu degere ayarlanir.
     // Ring-3 task'in butun calisma suresi bu stack'i kullanir.
+    // Bash 4.4 icin 8 MB; pmm_alloc_pages_flags ile VMM map'li tahsis.
+    // KRITIK: USER_STACK MUTLAKA PAGE_USER (0x4) bayrağıyla map'lenmeli!
+    // Aksi halde Ring-3 task bu sayfaya erişirken #PF → triple fault.
     task->user_stack_size = USER_STACK_SIZE;
-    task->user_stack_base = (uint64_t)kmalloc(USER_STACK_SIZE);
-    if (!task->user_stack_base) {
-        kfree((void*)task->kernel_stack_base);
-        kfree(task);
-        return NULL;
+    {
+        uint64_t page_count = USER_STACK_SIZE / 4096;
+        // 0x7 = PAGE_PRESENT | PAGE_WRITE | PAGE_USER
+        void* us = pmm_alloc_pages_flags(page_count, 0x7);
+        if (!us) {
+            serial_print("[TASK WARN] pmm_alloc_pages_flags failed for user stack, trying kmalloc\n");
+            us = kmalloc(USER_STACK_SIZE);
+            if (!us) {
+                pmm_free_pages((void*)task->kernel_stack_base, KERNEL_STACK_SIZE / 4096);
+                kfree(task);
+                return NULL;
+            }
+        }
+        task->user_stack_base = (uint64_t)us;
     }
-    memset_task((void*)task->user_stack_base, 0, USER_STACK_SIZE);
     task->user_stack_top = task->user_stack_base + USER_STACK_SIZE;
 
     // ── Kernel Stack'e iretq Frame ────────────────────────────────
@@ -543,10 +606,16 @@ task_t* task_create_user(const char* name, void (*entry_point)(void), uint32_t p
         serial_print("[TASK]   kernel_stack_top=0x");
         uint64_to_string(task->kernel_stack_top, buf);
         serial_print(buf);
-        serial_print("  user_stack_top=0x");
+        serial_print(" (");
+        int_to_str((int)(KERNEL_STACK_SIZE / 1024), buf);
+        serial_print(buf);
+        serial_print(" KB)  user_stack_top=0x");
         uint64_to_string(task->user_stack_top, buf);
         serial_print(buf);
-        serial_print("\n");
+        serial_print(" (");
+        int_to_str((int)(USER_STACK_SIZE / 1024), buf);
+        serial_print(buf);
+        serial_print(" KB)\n");
         serial_print("[TASK]   CS=0x23 SS=0x1B (Ring-3 selectors)\n");
     }
 
@@ -576,10 +645,13 @@ void task_terminate(task_t* task) {
     serial_print("'\n");
     task->state = TASK_STATE_TERMINATED;
     task_queue_remove(&ready_queue, task);
+    // Stack'ler pmm_alloc_pages ile tahsis edilmiş olabilir; sayfaları serbest bırak.
+    // Fallback kmalloc ile tahsis edilmişse pmm_free_pages güvenle çalışır
+    // (vmm_get_physical_address 0 döner → skip).
     if (task->kernel_stack_base)
-        kfree((void*)task->kernel_stack_base);
+        pmm_free_pages((void*)task->kernel_stack_base, task->kernel_stack_size / 4096);
     if (task->user_stack_base)
-        kfree((void*)task->user_stack_base);
+        pmm_free_pages((void*)task->user_stack_base, task->user_stack_size / 4096);
     kfree(task);
 }
 
@@ -609,6 +681,53 @@ void task_exit(void) {
 
 void task_set_state(task_t* task, uint32_t new_state) {
     if (task) task->state = new_state;
+}
+
+// ── signal64.c için: SIGSTOP/SIGCONT desteği ─────────────────
+void task_set_stopped(task_t* t, int stopped) {
+    if (!t) return;
+    if (stopped) {
+        if (t->state == TASK_STATE_RUNNING ||
+            t->state == TASK_STATE_READY) {
+            t->state = TASK_STATE_STOPPED;
+            serial_print("[TASK] Stopped (SIGSTOP): ");
+            serial_print(t->name);
+            serial_print("\n");
+        }
+    } else {
+        if (t->state == TASK_STATE_STOPPED) {
+            t->state = TASK_STATE_READY;
+            task_queue_push(&ready_queue, t);
+            serial_print("[TASK] Continued (SIGCONT): ");
+            serial_print(t->name);
+            serial_print("\n");
+        }
+    }
+}
+
+// ============================================================
+// Process Group & Session Yönetimi  (v12)
+// ============================================================
+
+// task_set_pgid – task'ın process group ID'sini değiştirir.
+// Çağırmadan önce POSIX kuralları syscall katmanında kontrol edilmeli.
+// Bu fonksiyon salt mekanik atama yapar; hata dönmez.
+// Dönüş: 0=ok, -1=null task
+int task_set_pgid(task_t* t, uint32_t new_pgid) {
+    if (!t) return -1;
+    t->pgid = new_pgid;
+    return 0;
+}
+
+// task_do_setsid – yeni session oluştur.
+// POSIX: çağıran process grup lideri (pgid == pid) ise EPERM → -1.
+// Başarılı olursa sid = pgid = pid yapılır; yeni sid döner.
+int task_do_setsid(task_t* t) {
+    if (!t) return -1;
+    if (t->pgid == t->pid) return -1;   // zaten grup lideri → EPERM
+    t->sid  = t->pid;
+    t->pgid = t->pid;
+    return (int)t->sid;
 }
 
 // ===========================================

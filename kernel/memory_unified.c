@@ -8,6 +8,11 @@
 extern void println64(const char* str, uint8_t color);
 extern void print_str64(const char* str, uint8_t color);
 
+// VMM entegrasyonu — stack tahsisi için (vmm64.c)
+extern int      vmm_map_page              (uint64_t virt, uint64_t phys, uint64_t flags);
+extern int      vmm_unmap_page            (uint64_t virt);
+extern uint64_t vmm_get_physical_address  (uint64_t virt);
+
 #define VGA_WHITE 0x0F
 #define VGA_GREEN 0x0A
 #define VGA_YELLOW 0x0E
@@ -277,6 +282,96 @@ void pmm_free_frame(void* frame) {
         bitmap_clear_bit(frame_index);
         used_frames--;
         free_frames++;
+    }
+}
+
+// ============================================================================
+// pmm_alloc_pages / pmm_free_pages
+//
+// Büyük ardışık bellekler (kernel stack, user stack) için kullanılır.
+// kmalloc heap'i dışında, doğrudan PMM frame'leri alıp vmm_map_page ile
+// ardışık sanal adres alanına map eder.
+//
+// Sanal adres düzeni:
+//   Heap 0x200000..0x4200000 (64MB) kullanıldığından,
+//   stack'ler için 0x10000000 (256MB) üstünden başlayan bir havuz kullanılır.
+//   Her tahsis bu havuzdan ardışık sanal sayfa alır; fiziksel kareler
+//   ardışık olmak zorunda değil.
+// ============================================================================
+
+// Sanal stack havuzu: 256MB'dan başla, yukarı büyü.
+// Kernel/user stack'ler buraya map edilir.
+#define STACK_POOL_BASE  0x10000000ULL   // 256 MB
+#define STACK_POOL_MAX   0x80000000ULL   // 2 GB (üst sınır)
+static uint64_t stack_pool_cursor = STACK_POOL_BASE;
+
+// PAGE flags
+#define PMM_FLAGS_KERNEL  0x3ULL   // PRESENT | WRITE            (Ring-0 erişim)
+#define PMM_FLAGS_USER    0x7ULL   // PRESENT | WRITE | USER     (Ring-3 erişim)
+
+void* pmm_alloc_pages(uint64_t count) {
+    if (!pmm_enabled || count == 0) return NULL;
+    return pmm_alloc_pages_flags(count, PMM_FLAGS_KERNEL);
+}
+
+// Bayrak parametreli gerçek implementasyon
+void* pmm_alloc_pages_flags(uint64_t count, uint64_t map_flags) {
+    if (!pmm_enabled || count == 0) return NULL;
+    if (count > 4096) return NULL;  // max 16MB tek seferde
+
+    if (free_frames < count) return NULL;
+
+    // Sanal alan ayır (4KB hizalı)
+    uint64_t virt_base = stack_pool_cursor;
+    uint64_t virt_end  = virt_base + count * PAGE_SIZE;
+
+    if (virt_end > STACK_POOL_MAX) {
+        // Havuz doldu — başa sar (basit; gerçek OS'ta daha karmaşık)
+        stack_pool_cursor = STACK_POOL_BASE;
+        virt_base = stack_pool_cursor;
+        virt_end  = virt_base + count * PAGE_SIZE;
+        if (virt_end > STACK_POOL_MAX) return NULL;
+    }
+
+    stack_pool_cursor = virt_end;
+
+    // Her sanal sayfaya bir fiziksel frame map et
+    for (uint64_t i = 0; i < count; i++) {
+        // Boş bir fiziksel frame bul
+        void* phys_frame = pmm_alloc_frame();
+        if (!phys_frame) {
+            // Yeterli frame yok; şimdiye kadar map edilenleri geri al
+            for (uint64_t j = 0; j < i; j++) {
+                uint64_t vp = virt_base + j * PAGE_SIZE;
+                uint64_t pp = vmm_get_physical_address(vp);
+                vmm_unmap_page(vp);
+                if (pp) pmm_free_frame((void*)pp);
+            }
+            return NULL;
+        }
+
+        uint64_t virt_page = virt_base + i * PAGE_SIZE;
+        vmm_map_page(virt_page, (uint64_t)phys_frame, map_flags);
+
+        // Sıfırla
+        unsigned char* p = (unsigned char*)virt_page;
+        for (uint64_t b = 0; b < PAGE_SIZE; b++) p[b] = 0;
+    }
+
+    return (void*)virt_base;
+}
+
+void pmm_free_pages(void* base, uint64_t count) {
+    if (!pmm_enabled || !base || count == 0) return;
+
+    uint64_t virt = (uint64_t)base;
+    for (uint64_t j = 0; j < count; j++) {
+        uint64_t page_virt = virt + j * PAGE_SIZE;
+        uint64_t page_phys = vmm_get_physical_address(page_virt);
+        if (page_phys) {
+            vmm_unmap_page(page_virt);
+            pmm_free_frame((void*)page_phys);
+        }
     }
 }
 

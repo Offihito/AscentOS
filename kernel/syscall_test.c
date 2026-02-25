@@ -537,6 +537,176 @@ void syscall_test(void) {
     serial_print("[SYSCALL TEST] v6 testleri tamamlandı.\n");
     serial_print("========================================\n\n");
 
+    // ============================================================
+    // v7 Testleri: SYS_GETCWD + SYS_CHDIR
+    // ============================================================
+    serial_print("\n========================================\n");
+    serial_print("[SYSCALL TEST] v7: getcwd + chdir\n");
+    serial_print("========================================\n");
+
+    // ── T40: SYS_GETCWD – normal kullanım ───────────────────────
+    serial_print("\n[T40] SYS_GETCWD normal (buf=256):\n");
+    char cwd_buf[256];
+    DO_SYSCALL2(SYS_GETCWD, cwd_buf, 256);
+    if (ret != 0) {
+        serial_print("  cwd=\""); serial_print(cwd_buf); serial_print("\"\n");
+        serial_print("  [OK] getcwd başarılı\n");
+    } else {
+        serial_print("  [FAIL] getcwd NULL döndü!\n");
+    }
+
+    // ── T41: SYS_GETCWD – NULL buf (expect 0/hata) ──────────────
+    serial_print("\n[T41] SYS_GETCWD NULL buf (expect 0):\n");
+    DO_SYSCALL2(SYS_GETCWD, 0, 256);
+    serial_print("  ret=0x"); print_hex64(ret);
+    serial_print("\n");
+    if (ret == 0)
+        serial_print("  [OK] NULL buf reddedildi\n");
+    else
+        serial_print("  [FAIL] NULL buf kabul edildi!\n");
+
+    // ── T42: SYS_GETCWD – size=0 (expect 0/hata) ────────────────
+    serial_print("\n[T42] SYS_GETCWD size=0 (expect 0):\n");
+    char tiny_buf[4];
+    DO_SYSCALL2(SYS_GETCWD, tiny_buf, 0);
+    serial_print("  ret=0x"); print_hex64(ret);
+    serial_print("\n");
+    if (ret == 0)
+        serial_print("  [OK] size=0 reddedildi\n");
+    else
+        serial_print("  [FAIL]\n");
+
+    // ── T43: SYS_GETCWD – çok küçük buffer (expect 0/ERANGE) ────
+    serial_print("\n[T43] SYS_GETCWD 2 byte buf (expect 0/ERANGE):\n");
+    char tiny2[2];
+    DO_SYSCALL2(SYS_GETCWD, tiny2, 2);
+    serial_print("  ret=0x"); print_hex64(ret);
+    serial_print("\n");
+    if (ret == 0)
+        serial_print("  [OK] küçük buffer ERANGE ile reddedildi\n");
+    else
+        serial_print("  [FAIL] küçük buffer kabul edildi!\n");
+
+    // ── T44: SYS_GETCWD – geçersiz kullanıcı ptr (expect 0) ─────
+    serial_print("\n[T44] SYS_GETCWD geçersiz ptr (expect 0/EFAULT):\n");
+    DO_SYSCALL2(SYS_GETCWD, (void*)0xFFFFFFFFFFFF0000ull, 256);
+    serial_print("  ret=0x"); print_hex64(ret);
+    serial_print("\n");
+    if (ret == 0)
+        serial_print("  [OK] geçersiz ptr reddedildi\n");
+    else
+        serial_print("  [FAIL]\n");
+
+    // ── T45: SYS_CHDIR – var olan dizin ("/") ───────────────────
+    serial_print("\n[T45] SYS_CHDIR \"/\" (root, expect 0):\n");
+    DO_SYSCALL1(SYS_CHDIR, "/");
+    serial_print("  ret="); { char b[8]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+    serial_print("\n");
+    if (ret == SYSCALL_OK) {
+        // Doğrula: getcwd "/" döndürmeli
+        char after_root[256];
+        DO_SYSCALL2(SYS_GETCWD, after_root, 256);
+        serial_print("  cwd after chdir(\"/\")=\""); serial_print(after_root);
+        serial_print("\"\n");
+        if (after_root[0] == '/' && after_root[1] == '\0')
+            serial_print("  [OK] cwd=\"/\"\n");
+        else
+            serial_print("  [WARN] cwd beklenen \"/\" değil\n");
+    } else {
+        serial_print("  [FAIL] chdir(\"/\") hata döndü!\n");
+    }
+
+    // ── T46: SYS_CHDIR – var olan alt dizin ─────────────────────
+    serial_print("\n[T46] SYS_CHDIR \"/bin\" (expect 0 veya ENOENT):\n");
+    DO_SYSCALL1(SYS_CHDIR, "/bin");
+    serial_print("  ret="); { char b[8]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+    serial_print("\n");
+    if (ret == SYSCALL_OK) {
+        char after_bin[256];
+        DO_SYSCALL2(SYS_GETCWD, after_bin, 256);
+        serial_print("  cwd=\""); serial_print(after_bin); serial_print("\"\n");
+        serial_print("  [OK] /bin'e geçildi\n");
+        // Kök'e geri dön
+        DO_SYSCALL1(SYS_CHDIR, "/");
+    } else {
+        serial_print("  [INFO] /bin yok, ENOENT bekleniyor\n");
+    }
+
+    // ── T47: SYS_CHDIR – var olmayan dizin (expect ENOENT=-4) ───
+    serial_print("\n[T47] SYS_CHDIR \"/nonexistent_xyz\" (expect ENOENT=-4):\n");
+    DO_SYSCALL1(SYS_CHDIR, "/nonexistent_xyz_999");
+    serial_print("  ret="); { char b[8]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+    serial_print(" (expect -4)\n");
+    if ((int64_t)ret == -4)
+        serial_print("  [OK] ENOENT döndü\n");
+    else
+        serial_print("  [FAIL] yanlış hata kodu!\n");
+
+    // ── T48: SYS_CHDIR – NULL path (expect EINVAL=-1) ───────────
+    serial_print("\n[T48] SYS_CHDIR NULL path (expect EINVAL=-1):\n");
+    DO_SYSCALL1(SYS_CHDIR, 0);
+    serial_print("  ret="); { char b[8]; int_to_str((int)(int64_t)ret,b); serial_print(b); }
+    serial_print(" (expect -1)\n");
+    if ((int64_t)ret == -1)
+        serial_print("  [OK] NULL path reddedildi\n");
+    else
+        serial_print("  [FAIL]\n");
+
+    // ── T49: SYS_CHDIR – ".." navigasyonu ───────────────────────
+    serial_print("\n[T49] SYS_CHDIR \"..\" navigasyonu:\n");
+    // Önce /home'a git (varsa)
+    DO_SYSCALL1(SYS_CHDIR, "/home");
+    if (ret == SYSCALL_OK) {
+        char before_up[256];
+        DO_SYSCALL2(SYS_GETCWD, before_up, 256);
+        serial_print("  cwd before=\""); serial_print(before_up); serial_print("\"\n");
+        // Üste çık
+        DO_SYSCALL1(SYS_CHDIR, "..");
+        char after_up[256];
+        DO_SYSCALL2(SYS_GETCWD, after_up, 256);
+        serial_print("  cwd after \"..\"=\""); serial_print(after_up); serial_print("\"\n");
+        if (after_up[0] == '/' && after_up[1] == '\0')
+            serial_print("  [OK] \"..\" / 'e çıktı\n");
+        else
+            serial_print("  [WARN] beklenen \"/\"\n");
+    } else {
+        // /home yoksa root'tan .. dene
+        DO_SYSCALL1(SYS_CHDIR, "/");
+        DO_SYSCALL1(SYS_CHDIR, "..");  // root'tan ".." root kalmalı
+        char root_up[256];
+        DO_SYSCALL2(SYS_GETCWD, root_up, 256);
+        serial_print("  root'tan \"..\" -> cwd=\""); serial_print(root_up);
+        serial_print("\"\n");
+        if (root_up[0] == '/' && root_up[1] == '\0')
+            serial_print("  [OK] root'tan \"..\" root'ta kalıyor\n");
+        else
+            serial_print("  [WARN]\n");
+    }
+
+    // ── T50: SYS_CHDIR + SYS_GETCWD – tur testi ─────────────────
+    serial_print("\n[T50] Tur: chdir -> getcwd tutarlılık testi:\n");
+    const char* tour[] = { "/", "/bin", "/usr", "/home", "/etc", "/tmp" };
+    DO_SYSCALL1(SYS_CHDIR, "/");   // başlangıç noktası
+    for (int ti = 0; ti < 6; ti++) {
+        DO_SYSCALL1(SYS_CHDIR, tour[ti]);
+        if (ret == SYSCALL_OK) {
+            char tour_buf[256];
+            DO_SYSCALL2(SYS_GETCWD, tour_buf, 256);
+            serial_print("  chdir(\""); serial_print(tour[ti]);
+            serial_print("\") -> getcwd=\""); serial_print(tour_buf);
+            serial_print("\"\n");
+        } else {
+            serial_print("  chdir(\""); serial_print(tour[ti]);
+            serial_print("\") -> ENOENT (dizin yok)\n");
+        }
+    }
+    // Kök'e geri dön
+    DO_SYSCALL1(SYS_CHDIR, "/");
+
+    serial_print("\n========================================\n");
+    serial_print("[SYSCALL TEST] v7 testleri tamamlandı.\n");
+    serial_print("========================================\n\n");
+
 #undef DO_SYSCALL0
 #undef DO_SYSCALL1
 #undef DO_SYSCALL2

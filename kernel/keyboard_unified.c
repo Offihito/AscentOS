@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-
+#include "task.h"
 // ============================================================================
 // Forward declarations — kullanılmadan önce bildirilir
 // ============================================================================
@@ -21,6 +21,9 @@ extern void clear_screen64(void);
 // nano API
 #include "../apps/nano64.h"
 #include "../apps/commands64.h"
+
+// Sinyal altyapısı — Ctrl+C (SIGINT) ve Ctrl+Z (SIGTSTP) için
+#include "signal64.h"
 
 // ============================================================================
 // I/O
@@ -342,10 +345,28 @@ void keyboard_handler64(void) {
 
     // Ctrl+L: temizle
     if (ctrl_pressed && sc == 0x26) { clear_screen64(); show_prompt64(); outb(0x20, 0x20); return; }
-    // Ctrl+C: iptal
+    // Ctrl+C: foreground task'a SIGINT gönder
     if (ctrl_pressed && sc == 0x2E) {
-        putchar64('\n', VGA_WHITE); buffer_pos = 0; input_buffer[0] = '\0';
-        show_prompt64(); outb(0x20, 0x20); return;
+        if (kb_userland_mode) {
+            // Userland çalışıyor: SIGINT ile durdur
+            extern task_t* task_get_current(void);
+            task_t* fg = task_get_current();
+            if (fg) signal_send((int)fg->pid, SIGINT);
+        } else {
+            // Kernel shell: girişi temizle
+            putchar64('\n', VGA_WHITE); buffer_pos = 0; input_buffer[0] = '\0';
+            show_prompt64();
+        }
+        outb(0x20, 0x20); return;
+    }
+    // Ctrl+Z: foreground task'a SIGTSTP gönder (job control)
+    if (ctrl_pressed && sc == 0x2C) {
+        if (kb_userland_mode) {
+            extern task_t* task_get_current(void);
+            task_t* fg = task_get_current();
+            if (fg) signal_send((int)fg->pid, SIGTSTP);
+        }
+        outb(0x20, 0x20); return;
     }
 
     // Enter

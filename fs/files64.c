@@ -1054,6 +1054,304 @@ int fs_chdir64(const char* dirname) {
 
 const char* fs_getcwd64(void) { return current_dir; }
 
+// ================================================================
+// SYS_STAT / SYS_ACCESS için VFS yardımcıları
+// ================================================================
+
+// fs_path_is_file: path'in dosyaya işaret edip etmediğini döndürür.
+// fs_get_file64 ile aynı mantığı kullanır; sadece bool döndürür.
+int fs_path_is_file(const char* path) {
+    if (!path || path[0] == '\0') return 0;
+    const EmbeddedFile64* f = fs_get_file64(path);
+    return (f != NULL) ? 1 : 0;
+}
+
+// fs_path_is_dir: path'in dizine işaret edip etmediğini döndürür.
+// Root ("/") her zaman dizindir.
+int fs_path_is_dir(const char* path) {
+    if (!path || path[0] == '\0') return 0;
+    // Normalize ederek dir_exists mantığını yeniden yaz
+    // (dir_exists static olduğu için buraya açık implement ediyoruz)
+    char norm[MAX_PATH_LENGTH];
+    normalize_path(path, norm);
+    if (norm[0] == '/' && norm[1] == '\0') return 1;  // root
+    for (int i = 0; i < dir_count; i++) {
+        if (str_cmp(directories[i].path, norm) == 0) return 1;
+    }
+    return 0;
+}
+
+// fs_path_filesize: dosyanın boyutunu döndürür. Dosya yoksa 0.
+uint32_t fs_path_filesize(const char* path) {
+    if (!path) return 0;
+    const EmbeddedFile64* f = fs_get_file64(path);
+    if (!f) return 0;
+    return f->size;
+}
+
+// ================================================================
+// fs_unlink64 – SYS_UNLINK için (v14)
+// Tam path ile dosyayı siler. Dizin için -1 döner.
+// Başarıda 0, hata/yok -1.
+// ================================================================
+int fs_unlink64(const char* path) {
+    if (!path || path[0] == '\0') return -1;
+
+    // Dizinse reddet (EISDIR)
+    if (fs_path_is_dir(path)) return -1;
+
+    // Dosya var mı?
+    const EmbeddedFile64* f = fs_get_file64(path);
+    if (!f) return -1;
+
+    // path'i dizin + isim olarak ayır
+    char dir_part[MAX_PATH_LENGTH];
+    char name_part[MAX_PATH_LENGTH];
+    int  len = str_len(path);
+    int  sep = -1;
+    for (int i = len - 1; i >= 0; i--) {
+        if (path[i] == '/') { sep = i; break; }
+    }
+    if (sep <= 0) {
+        str_cpy(dir_part, "/");
+        str_cpy(name_part, (sep == 0) ? path + 1 : path);
+    } else {
+        for (int i = 0; i < sep; i++) dir_part[i] = path[i];
+        dir_part[sep] = '\0';
+        str_cpy(name_part, path + sep + 1);
+    }
+
+    // file_index bul (dizin + isim eşleşmesi)
+    int file_index = -1;
+    for (int i = 0; i < file_count64; i++) {
+        if (str_cmp(all_files64[i].directory, dir_part)  == 0 &&
+            str_cmp(all_files64[i].name,      name_part) == 0) {
+            file_index = i;
+            break;
+        }
+    }
+    if (file_index < 0 || !all_files64[file_index].is_dynamic) return -1;
+
+    // FAT32'den sil
+    char fname[13];
+    make_content_fname(file_index, fname);
+    fat32_delete_file(fname);
+
+    // Diziyi sıkıştır
+    for (int i = file_index; i < file_count64 - 1; i++) {
+        all_files64[i]         = all_files64[i + 1];
+        dynamic_content_ptr[i] = dynamic_content_ptr[i + 1];
+    }
+    file_count64--;
+    auto_save_files64();
+    return 0;
+}
+
+// ================================================================
+// fs_rename64 – SYS_RENAME için (v14)
+// oldpath → newpath: dizin veya dosya taşır/yeniden adlandırır.
+// Başarıda 0, hata -1.
+// ================================================================
+int fs_rename64(const char* oldpath, const char* newpath) {
+    if (!oldpath || !newpath) return -1;
+    if (oldpath[0] == '\0' || newpath[0] == '\0') return -1;
+
+    char old_norm[MAX_PATH_LENGTH];
+    char new_norm[MAX_PATH_LENGTH];
+    normalize_path(oldpath, old_norm);
+    normalize_path(newpath, new_norm);
+
+    // ── Dizin rename ─────────────────────────────────────────────
+    if (fs_path_is_dir(old_norm)) {
+        // Hedef zaten varsa hata
+        if (fs_path_is_dir(new_norm)) return -1;
+
+        // Dizin kaydını güncelle
+        for (int i = 0; i < dir_count; i++) {
+            if (str_cmp(directories[i].path, old_norm) == 0) {
+                str_cpy(directories[i].path, new_norm);
+                break;
+            }
+        }
+
+        // İçindeki dosyaların directory alanını güncelle
+        int old_len = str_len(old_norm);
+        for (int i = 0; i < file_count64; i++) {
+            if (str_cmp(all_files64[i].directory, old_norm) == 0) {
+                // Statik isim alanına yazamayız; sadece dynamic dosyaları güncelle
+                if (all_files64[i].is_dynamic) {
+                    // dynamic_name_buf gibi bir buffer kullan — mevcut yapıya göre
+                    // directory pointer'ı doğrudan güncelle
+                    str_cpy((char*)all_files64[i].directory, new_norm);
+                }
+            }
+            // Alt dizinlerdeki dosyalar için prefix kontrolü
+            if (str_len(all_files64[i].directory) > (uint32_t)old_len &&
+                all_files64[i].is_dynamic) {
+                // eski prefix eşleşiyor mu?
+                int match = 1;
+                for (int k = 0; k < old_len; k++) {
+                    if (all_files64[i].directory[k] != old_norm[k]) { match = 0; break; }
+                }
+                if (match && all_files64[i].directory[old_len] == '/') {
+                    char new_dir[MAX_PATH_LENGTH];
+                    str_cpy(new_dir, new_norm);
+                    str_concat(new_dir, (char*)all_files64[i].directory + old_len);
+                    str_cpy((char*)all_files64[i].directory, new_dir);
+                }
+            }
+        }
+
+        auto_save_files64();
+        return 0;
+    }
+
+    // ── Dosya rename ──────────────────────────────────────────────
+    if (!fs_path_is_file(old_norm)) return -1;
+
+    // new_norm'un dizin kısmını ve isim kısmını ayır
+    char new_dir[MAX_PATH_LENGTH];
+    char new_name[MAX_PATH_LENGTH];
+    int  nlen = str_len(new_norm);
+    int  nsep = -1;
+    for (int i = nlen - 1; i >= 0; i--) {
+        if (new_norm[i] == '/') { nsep = i; break; }
+    }
+    if (nsep <= 0) {
+        str_cpy(new_dir,  "/");
+        str_cpy(new_name, (nsep == 0) ? new_norm + 1 : new_norm);
+    } else {
+        for (int i = 0; i < nsep; i++) new_dir[i] = new_norm[i];
+        new_dir[nsep] = '\0';
+        str_cpy(new_name, new_norm + nsep + 1);
+    }
+
+    // old dosyanın index'ini bul
+    char old_dir[MAX_PATH_LENGTH];
+    char old_name[MAX_PATH_LENGTH];
+    int  olen = str_len(old_norm);
+    int  osep = -1;
+    for (int i = olen - 1; i >= 0; i--) {
+        if (old_norm[i] == '/') { osep = i; break; }
+    }
+    if (osep <= 0) {
+        str_cpy(old_dir,  "/");
+        str_cpy(old_name, (osep == 0) ? old_norm + 1 : old_norm);
+    } else {
+        for (int i = 0; i < osep; i++) old_dir[i] = old_norm[i];
+        old_dir[osep] = '\0';
+        str_cpy(old_name, old_norm + osep + 1);
+    }
+
+    for (int i = 0; i < file_count64; i++) {
+        if (str_cmp(all_files64[i].directory, old_dir)  == 0 &&
+            str_cmp(all_files64[i].name,      old_name) == 0 &&
+            all_files64[i].is_dynamic) {
+            str_cpy((char*)all_files64[i].name,      new_name);
+            str_cpy((char*)all_files64[i].directory, new_dir);
+            auto_save_files64();
+            return 0;
+        }
+    }
+
+    return -1;  // Dosya bulunamadı veya statik
+}
+
+// ================================================================
+// fs_getdents64 – SYS_GETDENTS için VFS entry toplayıcı (v9)
+//
+// path altındaki tüm alt dizinleri ve dosyaları tarayarak
+// dirent64_t array'ine yazar. "." ve ".." pseudo entry'leri de eklenir.
+//
+// Döndürür: toplam yazılan byte sayısı | -1 (path geçersiz)
+// ================================================================
+int fs_getdents64(const char* path, dirent64_t* buf, int buf_size) {
+    if (!path || !buf || buf_size <= 0) return -1;
+
+    // Path'i normalize et
+    char norm[MAX_PATH_LENGTH];
+    normalize_path(path, norm);
+
+    // Dizin var mı?
+    int is_root = (norm[0] == '/' && norm[1] == '\0');
+    if (!is_root) {
+        int found = 0;
+        for (int i = 0; i < dir_count; i++) {
+            if (str_cmp(directories[i].path, norm) == 0) { found = 1; break; }
+        }
+        if (!found) return -1;   // ENOENT
+    }
+
+    // norm'un sonunda '/' olduğundan emin ol (parent karşılaştırması için)
+    char norm_slash[MAX_PATH_LENGTH];
+    str_cpy(norm_slash, norm);
+    int nslen = str_len(norm_slash);
+    if (norm_slash[nslen - 1] != '/') {
+        norm_slash[nslen]     = '/';
+        norm_slash[nslen + 1] = '\0';
+    }
+
+    int total_bytes = 0;
+    uint64_t ino = 1;
+
+    // Kullanıcı buffer'ına tek dirent yaz — sığıyor mu kontrol et
+    #define WRITE_DIRENT(nm, tp) do {                               \
+        int nlen_ = str_len(nm);                                    \
+        /* d_reclen: sabit kısım(19) + isim + null, 8-byte hizala */ \
+        int reclen_ = (int)(19 + nlen_ + 1 + 7) & ~7;              \
+        if (total_bytes + reclen_ > buf_size) goto done;            \
+        dirent64_t* de = (dirent64_t*)((char*)buf + total_bytes);   \
+        de->d_ino    = ino++;                                        \
+        de->d_off    = (uint64_t)(total_bytes + reclen_);           \
+        de->d_reclen = (uint16_t)reclen_;                           \
+        de->d_type   = (tp);                                        \
+        for (int _i = 0; _i <= nlen_; _i++) de->d_name[_i] = (nm)[_i]; \
+        total_bytes += reclen_;                                      \
+    } while(0)
+
+    // "." ve ".." pseudo entry'leri
+    WRITE_DIRENT(".",  DT_DIR);
+    WRITE_DIRENT("..", DT_DIR);
+
+    // Alt dizinler: parent'ı norm olan dizinler
+    for (int i = 0; i < dir_count; i++) {
+        char parent[MAX_PATH_LENGTH];
+        get_parent_dir(directories[i].path, parent);
+
+        // Parent eşleşmesi: parent == norm (slash olmadan)
+        if (str_cmp(parent, norm) != 0 &&
+            str_cmp(parent, norm_slash) != 0) continue;
+
+        // Dizin adını çıkar
+        char dname[MAX_PATH_LENGTH];
+        get_dir_name(directories[i].path, dname);
+        if (dname[0] == '\0') continue;  // root edge case
+
+        WRITE_DIRENT(dname, DT_DIR);
+    }
+
+    // Dosyalar: directory alanı norm ile eşleşen dosyalar
+    for (int i = 0; i < file_count64; i++) {
+        const char* fdir = all_files64[i].directory;
+
+        // directory "/foo" veya "/foo/" her ikisi de kabul
+        int match = (str_cmp(fdir, norm) == 0 ||
+                     str_cmp(fdir, norm_slash) == 0);
+        // norm="/" özel durumu: directory="/" veya "" olanlar
+        if (is_root && (fdir[0] == '\0' ||
+                        (fdir[0] == '/' && fdir[1] == '\0'))) match = 1;
+
+        if (!match) continue;
+
+        WRITE_DIRENT(all_files64[i].name, DT_REG);
+    }
+
+    #undef WRITE_DIRENT
+
+done:
+    return total_bytes;
+}
+
 const EmbeddedFile64* get_all_files_list64(int* count) {
     *count = file_count64;
     return all_files64;

@@ -15,6 +15,7 @@
 
 #include <stdint.h>
 #include "syscall.h"    // fd_entry_t, MAX_FDS
+#include "signal64.h"   // signal_table_t, syscall_frame_t (sinyal altyapisi)
 
 // ============================================================
 // Task States
@@ -25,6 +26,7 @@
 #define TASK_STATE_TERMINATED 3   // Sonlandi
 #define TASK_STATE_SLEEPING   4   // SYS_SLEEP: wake_tick'e kadar uyu
 #define TASK_STATE_ZOMBIE     5   // Sonlandi ama parent bekliyor (ileride wait())
+#define TASK_STATE_STOPPED    6   // SIGSTOP/SIGTSTP ile durduruldu (SIGCONT'a kadar)
 
 // ============================================================
 // Task Privilege Levels
@@ -35,8 +37,16 @@
 // ============================================================
 // Stack Sizes
 // ============================================================
-#define KERNEL_STACK_SIZE  0x4000   // 16 KB – kernel/interrupt handler icin
-#define USER_STACK_SIZE    0x4000   // 16 KB – ring-3 task icin
+// KERNEL_STACK_SIZE: SYSCALL/interrupt handler'in kullandığı Ring-0 stack.
+// Bash 4.4 gibi karmaşık uygulamaların derin çağrı zincirleri (readline,
+// yash parser, heredoc işleme vb.) kernel geçişlerinde bu stack'i tüketir.
+// 2 MB güvenli alt sınırdır.
+#define KERNEL_STACK_SIZE  0x200000   // 2 MB – kernel/interrupt handler icin
+
+// USER_STACK_SIZE: Ring-3 task'in çalışma stack'i (SYSRET sonrası RSP).
+// Bash 4.4: readline + history + job control + recursive fonksiyonlar
+// için tipik tüketim ~4-6 MB; 8 MB tampon sağlar.
+#define USER_STACK_SIZE    0x800000   // 8 MB – ring-3 task icin (Bash 4.4+)
 
 // ============================================================
 // Oncelik sinir degerleri
@@ -140,8 +150,14 @@ typedef struct {
 typedef struct task {
     // ── Kimlik ───────────────────────────────────────────────
     uint32_t pid;               // Process ID (0 = idle)
-    uint32_t parent_pid;        // Ebevneyn PID (SYS_GETPPID) [TASK_HAS_PARENT_PID]
-    char     name[32];          // Task adi (debug/ps icin)
+    uint32_t parent_pid;        // Ebeveyn PID (SYS_GETPPID) [TASK_HAS_PARENT_PID]
+    uint32_t pgid;              // Process Group ID (SYS_SETPGID / SYS_GETPGID)
+                                //   fork() sonrası parent'ın pgid'ini miras alır.
+                                //   Bash pipeline grupları ve iş kontrolü için kritik.
+    uint32_t sid;               // Session ID (SYS_SETSID)
+                                //   setsid() çağrısında pid = sid = pgid yapılır.
+                                //   Login shell'in yeni session başlatması için gerekli.
+    char     name[32];          // Task adı (debug/ps için)
 
     // ── Durum ────────────────────────────────────────────────
     uint32_t state;             // TASK_STATE_*
@@ -176,6 +192,18 @@ typedef struct task {
     // 0=stdin, 1=stdout, 2=stderr otomatik; 3..MAX_FDS-1 = acik dosyalar.
     // task_create() / task_create_user() icinde fd_table_init() cagirilmali.
     fd_entry_t fd_table[MAX_FDS];
+
+    // ── Sinyal Altyapisi (v10) ────────────────────────────────
+    // Her task kendi handler tablosunu, pending/masked bitmask'ini
+    // ve handler re-entry koruyucusunu burada tutar.
+    // task_create() / task_create_user() icinde signal_table_init() cagirilir.
+    signal_table_t signal_table;
+
+    // Handler oncesi syscall frame yedeği (ring-3 trampoline için)
+    syscall_frame_t signal_saved_frame;
+
+    // Userspace sigreturn trampoline adresi (ring-3 varsa set edilir)
+    uint64_t        signal_trampoline;
 
     // ── Istatistik ────────────────────────────────────────────
     uint64_t context_switches;  // Toplam context switch sayisi
@@ -291,6 +319,49 @@ void     task_set_current(task_t* task);
 task_t*  task_get_next(void);
 uint32_t task_get_count(void);
 task_t*  task_find_by_pid(uint32_t pid);
+
+// signal64.c'nin extern beklediği wrapper (int pid parametreli)
+static inline task_t* task_get_by_pid(int pid) {
+    return (pid >= 0) ? task_find_by_pid((uint32_t)pid) : (task_t*)0;
+}
+
+// signal64.c accessor'ları
+static inline signal_table_t* task_get_signal_table(task_t* t) {
+    return t ? &t->signal_table : (signal_table_t*)0;
+}
+static inline syscall_frame_t* task_get_saved_frame(task_t* t) {
+    return t ? &t->signal_saved_frame : (syscall_frame_t*)0;
+}
+static inline uint64_t task_get_trampoline(task_t* t) {
+    return t ? t->signal_trampoline : 0;
+}
+
+// SIGSTOP/SIGCONT: task'i durdur veya devam ettir
+void task_set_stopped(task_t* t, int stopped);
+
+// ============================================================
+// Process Group & Session Yönetimi  (v12 – iş kontrolü)
+// ============================================================
+
+// Belirtilen task'ın PGID'ini döndür (task == NULL → -1)
+static inline int task_get_pgid(task_t* t) {
+    return t ? (int)t->pgid : -1;
+}
+
+// Belirtilen task'ın SID'ini döndür (task == NULL → -1)
+static inline int task_get_sid(task_t* t) {
+    return t ? (int)t->sid : -1;
+}
+
+// task'ın PGID'ini değiştir. Aynı session içindeki bir gruba
+// katılmak için kullanılır.
+// Dönüş: 0=ok, -1=hata (EPERM / geçersiz pgid)
+int task_set_pgid(task_t* t, uint32_t new_pgid);
+
+// Yeni session oluştur: sid = pgid = pid; terminal bağını kopar.
+// Çağıran zaten session lideriyse -1 döner (EPERM).
+// Dönüş: yeni sid | -1
+int task_do_setsid(task_t* t);
 
 // ============================================================
 // Context Switch

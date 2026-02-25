@@ -69,11 +69,14 @@ nano64.o: apps/nano64.c apps/nano64.h
 vesa64.o: kernel/vesa64.c kernel/vesa64.h
 	$(CC) $(CFLAGS) -c kernel/vesa64.c -o vesa64.o
 
-syscall.o: kernel/syscall.c kernel/syscall.h
+syscall.o: kernel/syscall.c kernel/syscall.h kernel/signal64.h
 	$(CC) $(CFLAGS) -c kernel/syscall.c -o syscall.o
 
 syscall_test.o: kernel/syscall_test.c kernel/syscall.h
 	$(CC) $(CFLAGS) -c kernel/syscall_test.c -o syscall_test.o
+
+signal64.o: kernel/signal64.c kernel/signal64.h kernel/syscall.h kernel/task.h
+	$(CC) $(CFLAGS) -c kernel/signal64.c -o signal64.o
 
 # ============================================================================
 # UNIFIED KERNEL OBJECTS
@@ -108,15 +111,18 @@ wm64.o: kernel/wm64.c kernel/wm64.h kernel/compositor64.h kernel/taskbar64.h
 commands64.o: apps/commands64.c apps/commands64.h
 	$(CC) $(CFLAGS) -c apps/commands64.c -o commands64.o
 
+syscalltest64.o: apps/syscalltest64.c apps/commands64.h kernel/syscall.h kernel/signal64.h kernel/task.h
+	$(CC) $(CFLAGS) -c apps/syscalltest64.c -o syscalltest64.o
+
 kernel64.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h kernel/wm64.h
 	$(CC) $(CFLAGS) -c kernel/kernel64.c -o kernel64.o
 
 KERNEL_OBJS = boot64.o interrupts64.o \
               vesa64.o gui64.o compositor64.o wm64.o mouse64.o \
               keyboard.o kernel64.o taskbar.o \
-              commands64.o files64.o disk64.o elf64.o nano64.o \
+              commands64.o syscalltest64.o files64.o disk64.o elf64.o nano64.o \
               memory_unified.o vmm64.o timer.o task.o scheduler.o \
-              page_fault.o syscall.o syscall_test.o
+              page_fault.o syscall.o syscall_test.o signal64.o
 
 kernel64.elf: $(KERNEL_OBJS)
 	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o kernel64.elf
@@ -197,7 +203,7 @@ USERLAND_LDFLAGS := \
 
 USERLAND_CRT0   := userland/libc/crt0.o
 SYSCALLS_OBJ    := userland/out/syscalls.o
-USERLAND_APPS   := hello fork_test stdio_test math_test calculator
+USERLAND_APPS   := hello calculator
 USERLAND_ELFS   := $(addprefix userland/out/, $(addsuffix .elf, $(USERLAND_APPS)))
 
 .PRECIOUS: userland/out/%.o userland/out/%.elf userland/libc/crt0.o $(SYSCALLS_OBJ)
@@ -246,17 +252,9 @@ install-userland: userland
 	@echo "📦 ELF'ler disk.img'e yaziliyor (offset=2048 sektör)..."
 	@if [ ! -f disk.img ]; then echo "HATA: disk.img yok"; exit 1; fi
 	mcopy -i disk.img@@1048576 -o userland/out/hello.elf      ::HELLO.ELF
-	mcopy -i disk.img@@1048576 -o userland/out/fork_test.elf  ::FORKTEST.ELF
-	mcopy -i disk.img@@1048576 -o userland/out/stdio_test.elf ::STDIO.ELF
-	mcopy -i disk.img@@1048576 -o userland/out/math_test.elf  ::MATHTEST.ELF
 	mcopy -i disk.img@@1048576 -o userland/out/calculator.elf ::CALC.ELF
 	@echo "✓ Yazildi:"
 	@mdir -i disk.img@@1048576 :: 2>/dev/null | grep -i elf || true
-
-
-# ============================================================================
-# CLEAN
-# ============================================================================
 
 # ============================================================================
 # RUN / DEBUG
@@ -330,29 +328,20 @@ info:
 	@echo "║    • atoi, strtol, strtoul, exit                          ║"
 	@echo "║    • syscall stub'lar: userland/libc/syscalls.c           ║"
 	@echo "║                                                            ║"
-	@echo "║  🚀 SYSCALL Support (Phase 1):                             ║"
-	@echo "║    • Modern SYSCALL/SYSRET instructions                    ║"
-	@echo "║    • MSR-based configuration                               ║"
-	@echo "║    • Statistics and debugging                              ║"
 	@echo "║                                                            ║"
-	@echo "║  🎹 Unified Keyboard Driver:                               ║"
-	@echo "║    • Single source for both modes (GUI_MODE flag)          ║"
-	@echo "║    • Full nano editor + terminal support                   ║"
-	@echo "║                                                            ║"
-	@echo "║  🔧 Bootloader:                                            ║"
-	@echo "║    • Single unified bootloader (TEXT + GUI)                ║"
-	@echo "║    • 4GB identity mapped, VESA framebuffer                 ║"
+	@echo "║  🚀 SYSCALL Support:                                       ║"
+	@echo "║    • fork, execve, waitpid, pipe, dup2                    ║"
+	@echo "║    • sigaction, sigprocmask, kill                         ║"
+	@echo "║    • open, read, write, close, lseek, stat               ║"
+	@echo "║    • getcwd, chdir, opendir, readdir                      ║"
+	@echo "║    • setpgid, setsid, tcsetpgrp (job control)             ║"
 	@echo "║                                                            ║"
 	@echo "║  📋 Build Targets:                                         ║"
-	@echo "║    make              Build everything                      ║"
+	@echo "║    make              Kernel + userland derle              ║"
 	@echo "║    make newlib       newlib'i derle (ilk kurulum)         ║"
 	@echo "║    make userland     Userland ELF'leri derle              ║"
-	@echo "║    make run-text     Text mode çalıştır                   ║"
-	@echo "║    make run-gui      GUI mode çalıştır                    ║"
-	@echo "║    make debug-text   GDB ile text mode                    ║"
-	@echo "║    make debug-gui    GDB ile GUI mode                     ║"
+	@echo "║    make run          QEMU'da çalıştır                     ║"
 	@echo "║    make clean        Build temizle (newlib korunur)       ║"
-	@echo "║    make newlib-clean newlib cache'ini sil                 ║"
 	@echo "║    make clean-all    Her şeyi sıfırla                     ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
 
@@ -362,42 +351,30 @@ info:
 
 help:
 	@echo "╔════════════════════════════════════════════════════════════╗"
-	@echo "║   AscentOS Makefile — newlib + SYSCALL Edition            ║"
+	@echo "║   AscentOS Makefile — newlib + SYSCALL + Bash Edition     ║"
 	@echo "╠════════════════════════════════════════════════════════════╣"
 	@echo "║                                                            ║"
 	@echo "║  İlk kurulum:                                              ║"
 	@echo "║    make newlib       newlib'i cross-compile et            ║"
 	@echo "║    make              Her şeyi derle                       ║"
+	@echo "║                                                            ║" 
 	@echo "║                                                            ║"
 	@echo "║  Geliştirme:                                               ║"
 	@echo "║    make userland     Sadece userland ELF'leri derle       ║"
-	@echo "║    make run-text     Build + Text mode QEMU               ║"
-	@echo "║    make run-gui      Build + GUI mode QEMU                ║"
-	@echo "║    make run          run-text ile aynı (default)          ║"
-	@echo "║                                                            ║"
-	@echo "║  Debug:                                                    ║"
-	@echo "║    make debug-text   QEMU -s -S (Text mode)               ║"
-	@echo "║    make debug-gui    QEMU -s -S (GUI mode)                ║"
-	@echo "║    make gdb-text     GDB bağlan (text kernel)             ║"
-	@echo "║    make gdb-gui      GDB bağlan (GUI kernel)              ║"
+	@echo "║    make run          QEMU'da çalıştır                     ║"               
 	@echo "║                                                            ║"
 	@echo "║  Temizlik:                                                 ║"
 	@echo "║    make clean        Build dosyaları (newlib korunur)     ║"
-	@echo "║    make newlib-clean newlib cache sil + yeniden derle     ║"
+	@echo "║    make newlib-clean newlib cache sil                     ║"
 	@echo "║    make clean-all    Tam sıfırlama                        ║"
 	@echo "║                                                            ║"
-	@echo "║  Bilgi:                                                    ║"
-	@echo "║    make info         Detaylı build bilgisi                ║"
-	@echo "║    make help         Bu menü                              ║"
-	@echo "║                                                            ║"
 	@echo "║  Kernel shell komutları:                                   ║"
-	@echo "║    testsyscall / syscallstats                              ║"
-	@echo "║    elfload HELLO.ELF / FORKTEST.ELF / STDIO.ELF           ║"
-	@echo "║    elfload MATHTEST.ELF / CALC.ELF                        ║"
+	@echo "║    elfload HELLO.ELF / CALC.ELF                           ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
 
 # ============================================================================
 # PHONY
 # ============================================================================
 
-.PHONY: all run debug gdb newlib userland install-userland clean newlib-clean clean-all info help
+.PHONY: all run debug gdb newlib userland install-userland \
+        clean newlib-clean clean-all info help
