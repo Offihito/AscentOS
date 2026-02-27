@@ -86,6 +86,50 @@ static const char file_passwd[] =
     "root:x:0:0:root:/root:/bin/bash\n"
     "user:x:1000:1000:User:/home/user:/bin/bash\n";
 
+// ---- Bash portu için gerekli dosyalar ----
+
+// /root/.bashrc — bash her interactive shell açılışında okur
+static const char file_root_bashrc[] =
+    "# AscentOS root shell configuration\n"
+    "export PATH=/bin:/usr/bin:/usr/local/bin\n"
+    "export HOME=/root\n"
+    "export USER=root\n"
+    "export TERM=vt100\n"
+    "export PS1='AscentOS\\$ '\n"
+    "alias ll='ls -la'\n"
+    "alias ..='cd ..'\n";
+
+// /root/.profile — login shell'de kaynak alınır
+static const char file_root_profile[] =
+    "# Root login profile\n"
+    "[ -f /root/.bashrc ] && . /root/.bashrc\n";
+
+// /home/user/.bashrc
+static const char file_user_bashrc[] =
+    "# AscentOS user shell configuration\n"
+    "export PATH=/bin:/usr/bin:/usr/local/bin\n"
+    "export HOME=/home/user\n"
+    "export USER=user\n"
+    "export TERM=vt100\n"
+    "export PS1='\\u@ascentos:\\w\\$ '\n";
+
+// /etc/group — bash $GROUPS ve id komutu için
+static const char file_group[] =
+    "root:x:0:root\n"
+    "users:x:100:user\n"
+    "wheel:x:10:root\n";
+
+// /etc/shells — valid login shell listesi
+static const char file_shells[] =
+    "/bin/sh\n"
+    "/bin/bash\n";
+
+// /etc/nsswitch.conf — newlib getpwuid için (files backend)
+static const char file_nsswitch[] =
+    "passwd: files\n"
+    "group:  files\n"
+    "shadow: files\n";
+
 static const char file_readme[] =
     "AscentOS File System (FAT32 backend)\n"
     "=====================================\n"
@@ -226,19 +270,25 @@ static const char file_elf_readme[] =
     "  exec    TEST.ELF   -- load into memory\n";
 
 static const EmbeddedFile64 static_files64[] = {
-    {"motd",        file_motd64,     sizeof(file_motd64)     - 1, 0, "/etc"},
-    {"hostname",    file_hostname,   sizeof(file_hostname)   - 1, 0, "/etc"},
-    {"hosts",       file_hosts,      sizeof(file_hosts)      - 1, 0, "/etc"},
-    {"fstab",       file_fstab,      sizeof(file_fstab)      - 1, 0, "/etc"},
-    {"passwd",      file_passwd,     sizeof(file_passwd)     - 1, 0, "/etc"},
-    {"bashrc",      file_bashrc,     sizeof(file_bashrc)     - 1, 0, "/etc"},
-    {"profile",     file_profile,    sizeof(file_profile)    - 1, 0, "/etc"},
-    {"README.txt",  file_readme,     sizeof(file_readme)     - 1, 0, "/"},
-    {"version",     file_version,    sizeof(file_version)    - 1, 0, "/etc"},
-    {"null",        file_null,       0,                          0, "/dev"},
-    {"zero",        file_zero,       0,                          0, "/dev"},
-    {"random",      file_random,     sizeof(file_random)     - 1, 0, "/dev"},
-    {"test.elf.txt",file_elf_readme, sizeof(file_elf_readme) - 1, 0, "/bin"},
+    {"motd",        file_motd64,     sizeof(file_motd64)          - 1, 0, "/etc"},
+    {"hostname",    file_hostname,   sizeof(file_hostname)        - 1, 0, "/etc"},
+    {"hosts",       file_hosts,      sizeof(file_hosts)           - 1, 0, "/etc"},
+    {"fstab",       file_fstab,      sizeof(file_fstab)           - 1, 0, "/etc"},
+    {"passwd",      file_passwd,     sizeof(file_passwd)          - 1, 0, "/etc"},
+    {"group",       file_group,      sizeof(file_group)           - 1, 0, "/etc"},
+    {"shells",      file_shells,     sizeof(file_shells)          - 1, 0, "/etc"},
+    {"nsswitch.conf", file_nsswitch, sizeof(file_nsswitch)        - 1, 0, "/etc"},
+    {"bashrc",      file_bashrc,     sizeof(file_bashrc)          - 1, 0, "/etc"},
+    {"profile",     file_profile,    sizeof(file_profile)         - 1, 0, "/etc"},
+    {".bashrc",     file_root_bashrc,  sizeof(file_root_bashrc)   - 1, 0, "/root"},
+    {".profile",    file_root_profile, sizeof(file_root_profile)  - 1, 0, "/root"},
+    {".bashrc",     file_user_bashrc,  sizeof(file_user_bashrc)   - 1, 0, "/home/user"},
+    {"README.txt",  file_readme,     sizeof(file_readme)          - 1, 0, "/"},
+    {"version",     file_version,    sizeof(file_version)         - 1, 0, "/etc"},
+    {"null",        file_null,       0,                               0, "/dev"},
+    {"zero",        file_zero,       0,                               0, "/dev"},
+    {"random",      file_random,     sizeof(file_random)          - 1, 0, "/dev"},
+    {"test.elf.txt",file_elf_readme, sizeof(file_elf_readme)      - 1, 0, "/bin"},
     {NULL, NULL, 0, 0, NULL}
 };
 
@@ -496,7 +546,7 @@ static void auto_save_files64(void) {
         char fname[13];
         make_content_fname(i, fname);
         fat32_create_file(fname);
-        if (all_files64[i].size > 0) {
+        if (all_files64[i].size > 0 && all_files64[i].content && all_files64[i].content[0] != '\0') {
             fat32_write_file(fname,
                              (const uint8_t*)all_files64[i].content,
                              all_files64[i].size);
@@ -627,6 +677,29 @@ void init_filesystem64(void) {
 
         dynamic_content_ptr[idx] = cbuf;
 
+        // ── Duplicate & sıfır-byte kontrolü ──────────────────────────────
+        // Aynı (dir, name) kombinasyonu zaten yüklüyse bu kaydı atla.
+        // content_size == 0 olan hayalet dosyaları da atla.
+        if (content_size == 0) continue;   // 0-byte'lık hayalet → atla
+
+        int duplicate = 0;
+        for (int di = 0; di < idx; di++) {
+            if (!all_files64[di].is_dynamic) continue;
+            if (str_cmp(all_files64[di].name, dynamic_names64[idx]) == 0 &&
+                str_cmp(all_files64[di].directory, dynamic_dirs64[idx]) == 0) {
+                // Duplicate: daha büyük olan kazanır
+                if (content_size > all_files64[di].size) {
+                    all_files64[di].content   = cbuf;
+                    all_files64[di].size      = content_size;
+                    dynamic_content_ptr[di]   = cbuf;
+                }
+                duplicate = 1;
+                break;
+            }
+        }
+        if (duplicate) continue;
+        // ─────────────────────────────────────────────────────────────────
+
         all_files64[idx].name      = dynamic_names64[idx];
         all_files64[idx].content   = cbuf;
         all_files64[idx].size      = content_size;
@@ -692,7 +765,8 @@ int fs_touch_file64(const char* filename) {
 }
 
 int fs_write_file64(const char* name, const char* content) {
-    if (str_len(name) == 0 || str_len(content) == 0) return 0;
+    if (str_len(name) == 0) return 0;
+    if (!content) return 0;  // NULL kontrol, ama bos string gecebilir (truncate)
 
     EmbeddedFile64* file = (EmbeddedFile64*)fs_get_file64(name);
     if (file == NULL || !file->is_dynamic) return 0;
@@ -1258,6 +1332,55 @@ int fs_rename64(const char* oldpath, const char* newpath) {
 }
 
 // ================================================================
+// fs_truncate64 – SYS_TRUNCATE / SYS_FTRUNCATE için (v18)
+//
+// Dosyanın boyutunu length byte'a ayarlar.
+//   length < mevcut boyut  → içerik kırpılır
+//   length > mevcut boyut  → sıfır ile doldurulur (zero-extend)
+//   length == mevcut boyut → değişiklik yok
+//
+// Sadece dynamic dosyalarda çalışır (statik dosyalar read-only).
+// Döndürür: 0 başarı | -1 hata
+// ================================================================
+int fs_truncate64(const char* path, uint64_t length) {
+    if (!path || path[0] == '\0') return -1;
+    if (length > MAX_FILE_SIZE) return -1;
+
+    char norm[MAX_PATH_LENGTH];
+    normalize_path(path, norm);
+
+    // Dosyayı bul
+    EmbeddedFile64* file = (EmbeddedFile64*)fs_get_file64(norm);
+    if (!file || !file->is_dynamic) return -1;
+
+    int idx = (int)(file - all_files64);
+    uint32_t new_size = (uint32_t)length;
+
+    // Yeni içerik buffer'ı ayır
+    char* nbuf = pool_alloc(new_size + 1);
+    if (!nbuf && new_size > 0) return -1;
+
+    uint32_t copy_len = (new_size < file->size) ? new_size : file->size;
+
+    // Mevcut içeriği kopyala
+    if (copy_len > 0 && file->content) {
+        for (uint32_t i = 0; i < copy_len; i++)
+            nbuf[i] = file->content[i];
+    }
+    // Zero-extend: length > mevcut boyut ise kalan kısım sıfırla
+    for (uint32_t i = copy_len; i < new_size; i++)
+        nbuf[i] = '\0';
+    if (new_size > 0) nbuf[new_size] = '\0';
+
+    dynamic_content_ptr[idx] = nbuf;
+    file->content = nbuf;
+    file->size    = new_size;
+
+    auto_save_files64();
+    return 0;
+}
+
+// ================================================================
 // fs_getdents64 – SYS_GETDENTS için VFS entry toplayıcı (v9)
 //
 // path altındaki tüm alt dizinleri ve dosyaları tarayarak
@@ -1517,4 +1640,58 @@ int fs_du64(const char* path, void* output_ptr) {
     str_concat(line, size_str);
     output_add_line(output, line, VGA_WHITE);
     return 1;
+}
+// ============================================================
+// fs_vfs_write — sys_write'ın dosya fd'leri için bridge'i
+// Syscall.c bu fonksiyonu çağırır; files64.c VFS + FAT32'ye yazar.
+// offset=0 ve O_TRUNC sonrası çağrılır: sadece append/overwrite.
+// ============================================================
+int fs_vfs_write(const char* path, uint64_t offset,
+                 const char* data, uint32_t len) {
+    if (!path || !data || len == 0) return 0;
+
+    // Dosya adını (basename) path'ten çıkar
+    const char* fname = path;
+    for (const char* p = path; *p; p++)
+        if (*p == '/') fname = p + 1;
+    if (fname[0] == '\0') return -1;
+
+    // VFS'te bu dosya var mı?
+    EmbeddedFile64* file = (EmbeddedFile64*)fs_get_file64(fname);
+    if (!file || !file->is_dynamic) {
+        // Yoksa oluştur (fs_touch_file64 current_dir'e göre çalışır)
+        if (!fs_touch_file64(fname)) return -1;
+        file = (EmbeddedFile64*)fs_get_file64(fname);
+        if (!file) return -1;
+    }
+
+    // offset=0 ise eski icerigi sil (O_WRONLY|O_CREAT sonrasi ilk yazi)
+    if (offset == 0) file->size = 0;
+    uint32_t old_size = file->size;
+    uint32_t new_size = (uint32_t)offset + len;
+    if (new_size > MAX_FILE_SIZE) new_size = MAX_FILE_SIZE;
+
+    char* nbuf = pool_alloc(new_size + 1);
+    if (!nbuf) return -1;
+
+    // Mevcut içeriği kopyala (offset'e kadar)
+    uint32_t copy_old = (uint32_t)offset < old_size ? (uint32_t)offset : old_size;
+    if (copy_old > 0 && file->content)
+        for (uint32_t i = 0; i < copy_old; i++) nbuf[i] = file->content[i];
+
+    // Yeni veriyi yaz
+    uint32_t write_len = len;
+    if ((uint32_t)offset + write_len > MAX_FILE_SIZE)
+        write_len = MAX_FILE_SIZE - (uint32_t)offset;
+    for (uint32_t i = 0; i < write_len; i++)
+        nbuf[(uint32_t)offset + i] = data[i];
+    nbuf[new_size] = '\0';
+
+    int idx = (int)(file - all_files64);
+    dynamic_content_ptr[idx] = nbuf;
+    file->content = nbuf;
+    file->size    = new_size;
+
+    auto_save_files64();
+    return (int)write_len;
 }

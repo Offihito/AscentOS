@@ -98,6 +98,24 @@ typedef long           ptrdiff_t;
 #define SYS_GETEGID      87
 #define SYS_NANOSLEEP    88
 #define SYS_SIGALTSTACK  89
+// v16: clock, alarm, truncate, rlimit, lstat, link, umask, symlink, readlink, chmod, mprotect, pipe2, times, getgroups
+#define SYS_CLOCK_GETTIME 90
+#define SYS_CLOCK_GETRES  91
+#define SYS_ALARM         92
+#define SYS_FTRUNCATE     93
+#define SYS_TRUNCATE      94
+#define SYS_GETRLIMIT     95
+#define SYS_SETRLIMIT     96
+#define SYS_LSTAT         97
+#define SYS_LINK          98
+#define SYS_TIMES         99
+#define SYS_UMASK        100
+#define SYS_SYMLINK      101
+#define SYS_READLINK     102
+#define SYS_CHMOD        103
+#define SYS_MPROTECT     104
+#define SYS_PIPE2        105
+#define SYS_GETGROUPS    106
 
 // ── open() flags ─────────────────────────────────────────────────────────
 #define O_RDONLY    0x00
@@ -108,6 +126,9 @@ typedef long           ptrdiff_t;
 #define O_APPEND    0x400
 #define O_NONBLOCK  0x800
 #define O_CLOEXEC   0x80000
+
+// errno forward declaration (tanım dosyanın sonunda)
+extern int _errno_val;
 
 // ── access() modları ─────────────────────────────────────────────────────
 #define F_OK   0
@@ -443,7 +464,9 @@ static inline long _sc6(long nr, long a1, long a2, long a3,
 // ═══════════════════════════════════════════════════════════════════════════
 
 ssize_t write(int fd, const void *buf, size_t len) {
-    return (ssize_t)_sc3(SYS_WRITE, (long)fd, (long)buf, (long)len);
+    long ret = _sc3(SYS_WRITE, (long)fd, (long)buf, (long)len);
+    if (ret < 0) { _errno_val = (ret == -9) ? 9 : 22; return -1; }
+    return (ssize_t)ret;
 }
 
 ssize_t read(int fd, void *buf, size_t len) {
@@ -455,8 +478,29 @@ ssize_t read(int fd, void *buf, size_t len) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 int open(const char *path, int flags, ...) {
-    // mode argümanı (O_CREAT için) — şimdilik yoksay
-    return (int)_sc2(SYS_OPEN, (long)path, (long)flags);
+    // Bilinmeyen flag bitlerini maskele (newlib O_CLOEXEC=0x80000 vb. ekleyebilir)
+    int clean_flags = flags & (O_RDONLY | O_WRONLY | O_RDWR |
+                                O_CREAT  | O_TRUNC  | O_APPEND |
+                                O_NONBLOCK | O_CLOEXEC);
+    unsigned int mode = 0644;
+    long ret = _sc3(SYS_OPEN, (long)path, (long)clean_flags, (long)mode);
+    if (ret < 0) {
+        // Kernel AscentOS hata kodlarını (-1..-14) errno değerlerine çevir
+        // SYSCALL_ERR_INVAL=-1→EINVAL, SYSCALL_ERR_NOENT=-4→ENOENT vb.
+        int e = (int)(-ret);
+        switch (e) {
+            case 1:  _errno_val = 22; break; // EINVAL
+            case 2:  _errno_val = 38; break; // ENOSYS
+            case 3:  _errno_val = 1;  break; // EPERM
+            case 4:  _errno_val = 2;  break; // ENOENT
+            case 5:  _errno_val = 9;  break; // EBADF
+            case 6:  _errno_val = 12; break; // ENOMEM
+            case 8:  _errno_val = 24; break; // EMFILE
+            default: _errno_val = 22; break; // EINVAL
+        }
+        return -1;
+    }
+    return (int)ret;
 }
 
 int close(int fd) {
@@ -476,8 +520,7 @@ int fstat(int fd, struct stat *buf) {
 }
 
 int lstat(const char *path, struct stat *buf) {
-    // AscentOS'ta symlink yok; stat ile aynı
-    return stat(path, buf);
+    return (int)_sc2(SYS_LSTAT, (long)path, (long)buf);
 }
 
 int access(const char *path, int mode) {
@@ -504,15 +547,9 @@ int pipe(int fd[2]) {
     return (int)_sc1(SYS_PIPE, (long)fd);
 }
 
-// pipe2: O_CLOEXEC bayrağını destekleriz (fcntl ile uygula)
+// pipe2: O_CLOEXEC bayrağını atomik destekler
 int pipe2(int fd[2], int flags) {
-    int r = pipe(fd);
-    if (r < 0) return r;
-    if (flags & O_CLOEXEC) {
-        fcntl(fd[0], F_SETFD, FD_CLOEXEC);
-        fcntl(fd[1], F_SETFD, FD_CLOEXEC);
-    }
-    return 0;
+    return (int)_sc2(SYS_PIPE2, (long)fd, (long)flags);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -701,9 +738,7 @@ int raise(int sig) {
 }
 
 unsigned int alarm(unsigned int seconds) {
-    // SIGALRM desteği için gerekli; şimdilik stub
-    (void)seconds;
-    return 0;
+    return (unsigned int)_sc1(SYS_ALARM, (long)seconds);
 }
 
 int pause(void) {
@@ -884,23 +919,27 @@ gid_t getgid(void)  { return (gid_t)_sc0(SYS_GETGID); }
 gid_t getegid(void) { return (gid_t)_sc0(SYS_GETEGID); }
 
 // symlink/link/readlink: FAT32'de yok
-int symlink(const char *t, const char *l) { (void)t;(void)l; return -1; }
-int link(const char *o, const char *n)    { (void)o;(void)n; return -1; }
-ssize_t readlink(const char *p, char *b, size_t s) { (void)p;(void)b;(void)s; return -1; }
+int symlink(const char *target, const char *linkpath) {
+    return (int)_sc2(SYS_SYMLINK, (long)target, (long)linkpath);
+}
+int link(const char *oldpath, const char *newpath) {
+    return (int)_sc2(SYS_LINK, (long)oldpath, (long)newpath);
+}
+ssize_t readlink(const char *path, char *buf, size_t size) {
+    return (ssize_t)_sc3(SYS_READLINK, (long)path, (long)buf, (long)size);
+}
 
 // chmod/chown: tek kullanıcılı sistem
-int chmod(const char *p, mode_t m)  { (void)p;(void)m; return 0; }
+int chmod(const char *path, mode_t mode) {
+    return (int)_sc2(SYS_CHMOD, (long)path, (long)mode);
+}
 int chown(const char *p, uid_t u, gid_t g) { (void)p;(void)u;(void)g; return 0; }
-int fchmod(int fd, mode_t m)        { (void)fd;(void)m; return 0; }
+int fchmod(int fd, mode_t m)               { (void)fd;(void)m; return 0; }
 
 // times/getrusage: süreç zamanı
 typedef struct { long tms_utime, tms_stime, tms_cutime, tms_cstime; } tms_t;
 long times(tms_t *buf) {
-    if (buf) {
-        buf->tms_utime = buf->tms_stime = 0;
-        buf->tms_cutime = buf->tms_cstime = 0;
-    }
-    return (long)_sc0(SYS_GETTICKS);
+    return (long)_sc1(SYS_TIMES, (long)buf);
 }
 
 // select: zaten kernel'da var
@@ -963,15 +1002,94 @@ int sigaltstack(const stack_t *ss, stack_t *old_ss) {
     return (int)_sc2(SYS_SIGALTSTACK, (long)ss, (long)old_ss);
 }
 
-// ── errno emülasyonu ──────────────────────────────────────────────────────
-// Kernel negatif hata kodu döndürür; newlib errno'yu bu değerden alır.
-// newlib'in _errno() fonksiyonu global errno'ya pointer döndürür.
-static int _errno_val = 0;
-int *__errno_location(void) { return &_errno_val; }
-// newlib bazı platformlarda bunu kullanır:
-int *_errno(void) { return &_errno_val; }
 /* ═══════════════════════════════════════════════════════════════════════════
  * ASCENTOS_STUBS_INJECTED — Bash 4.4 port için gerekli stub semboller
  * Bu blok bash-build.sh tarafından otomatik eklendi.
  * Düzeltmeler: hosted header yok, duplicate fonksiyonlar kaldırıldı.
  * ═══════════════════════════════════════════════════════════════════════════ */
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 13: CLOCK (v16)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// POSIX saat ID'leri
+#define CLOCK_REALTIME  0
+#define CLOCK_MONOTONIC 1
+
+int clock_gettime(int clockid, struct timespec *tp) {
+    return (int)_sc2(SYS_CLOCK_GETTIME, (long)clockid, (long)tp);
+}
+
+int clock_getres(int clockid, struct timespec *res) {
+    return (int)_sc2(SYS_CLOCK_GETRES, (long)clockid, (long)res);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 14: TRUNCATE (v16)
+// ═══════════════════════════════════════════════════════════════════════════
+
+int ftruncate(int fd, off_t length) {
+    return (int)_sc2(SYS_FTRUNCATE, (long)fd, (long)length);
+}
+
+int truncate(const char *path, off_t length) {
+    return (int)_sc2(SYS_TRUNCATE, (long)path, (long)length);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 15: RLIMIT (v16)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// POSIX rlimit kaynak ID'leri
+#define RLIMIT_CPU    0   // CPU zamanı (saniye)
+#define RLIMIT_FSIZE  1   // Maksimum dosya boyutu
+#define RLIMIT_DATA   2   // Maksimum data segment boyutu
+#define RLIMIT_STACK  3   // Maksimum stack boyutu
+#define RLIMIT_CORE   4   // Maksimum core dosyası boyutu
+#define RLIMIT_NOFILE 7   // Açık dosya sayısı limiti
+#define RLIMIT_AS     9   // Sanal adres alanı limiti
+
+#define RLIM_INFINITY ((unsigned long)-1)
+
+typedef struct {
+    unsigned long rlim_cur;   // Soft limit
+    unsigned long rlim_max;   // Hard limit (ceiling)
+} rlimit_t;
+
+int getrlimit(int resource, rlimit_t *rlim) {
+    return (int)_sc2(SYS_GETRLIMIT, (long)resource, (long)rlim);
+}
+
+int setrlimit(int resource, const rlimit_t *rlim) {
+    return (int)_sc2(SYS_SETRLIMIT, (long)resource, (long)rlim);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 16: UMASK & MPROTECT (v16)
+// ═══════════════════════════════════════════════════════════════════════════
+
+mode_t umask(mode_t mask) {
+    return (mode_t)_sc1(SYS_UMASK, (long)mask);
+}
+
+int mprotect(void *addr, size_t len, int prot) {
+    return (int)_sc3(SYS_MPROTECT, (long)addr, (long)len, (long)prot);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 17: GRUP KİMLİĞİ (v16)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// getgroups: sürecin ek grup listesini döndürür
+// Tek kullanıcılı AscentOS'ta genellikle 0 grup döner.
+int getgroups(int size, gid_t list[]) {
+    return (int)_sc2(SYS_GETGROUPS, (long)size, (long)list);
+}
+
+// ── errno emülasyonu ──────────────────────────────────────────────────────
+// Kernel negatif hata kodu döndürür; newlib errno'yu bu değerden alır.
+// newlib'in _errno() fonksiyonu global errno'ya pointer döndürür.
+int _errno_val = 0;
+int *__errno_location(void) { return &_errno_val; }
+// newlib bazı platformlarda bunu kullanır:
+int *_errno(void) { return &_errno_val; }

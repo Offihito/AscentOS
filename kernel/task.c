@@ -1,8 +1,10 @@
 // task.c - Task Management Implementation
 // Ring-0 + Ring-3 (SYSRET) + TSS destekli versiyon
+// v2: task_create_from_elf() eklendi
 #include "task.h"
 #include "signal64.h"
 #include "memory_unified.h"
+#include "elf64.h"
 #include <stddef.h>
 
 // External helpers
@@ -339,8 +341,6 @@ task_t* task_create(const char* name, void (*entry_point)(void), uint32_t priori
     task->priority        = priority;
     task->privilege_level = TASK_PRIVILEGE_KERNEL;  // Ring 0
 
-    // Process group & session: başlangıçta kendi PID'i ile aynı session/grup.
-    // fork() sonrası child, parent'ın pgid/sid değerlerini miras alır (sys_fork'ta yapılır).
     task->pgid = task->pid;
     task->sid  = task->pid;
 
@@ -348,18 +348,15 @@ task_t* task_create(const char* name, void (*entry_point)(void), uint32_t priori
     signal_table_init(&task->signal_table);
     task->signal_trampoline = 0;
 
-    // fd tablosunu başlat — stdin/stdout/stderr serial'a bağlanır (v11)
+    // fd tablosunu başlat — stdin/stdout/stderr serial'a bağlanır
     fd_table_init(task->fd_table);
 
     // ── Kernel Stack ──────────────────────────────────────────────
-    // pmm_alloc_pages kullanılır: heap dışında, VMM identity-map ile
-    // güvenli büyük blok tahsisi. kmalloc heap sınırları aşılmaz.
     task->kernel_stack_size = KERNEL_STACK_SIZE;
     {
         uint64_t page_count = KERNEL_STACK_SIZE / 4096;
         void* ks = pmm_alloc_pages(page_count);
         if (!ks) {
-            // PMM başarısız — kmalloc fallback (küçük stack'ler için)
             serial_print("[TASK WARN] pmm_alloc_pages failed for kernel stack, trying kmalloc\n");
             ks = kmalloc(KERNEL_STACK_SIZE);
             if (!ks) {
@@ -370,7 +367,6 @@ task_t* task_create(const char* name, void (*entry_point)(void), uint32_t priori
         }
         task->kernel_stack_base = (uint64_t)ks;
     }
-    // Stack aşağı büyür: top = base + size
     task->kernel_stack_top = task->kernel_stack_base + KERNEL_STACK_SIZE;
 
     // user_stack: kernel task'ta yok
@@ -378,56 +374,21 @@ task_t* task_create(const char* name, void (*entry_point)(void), uint32_t priori
     task->user_stack_top  = 0;
     task->user_stack_size = 0;
 
-    // ── Kernel Stack Frame ────────────────────────────────────────
-    // Timer ISR (isr_timer) context switch mekanizmasi:
-    //   1. Calisan task'in register'larini push eder (15 adet)
-    //   2. task_save_current_stack(rsp) -> context.rsp buraya yazilir
-    //   3. Sonraki task'in context.rsp'si RSP'ye yuklenir
-    //   4. 15 pop + iretq -> yeni task'a atlar
-    //
-    // Yani task_create() ile ilk kez olusturulan bir task icin
-    // context.rsp, timer ISR'in iretq yapabilmesi icin dogru formatta
-    // hazir bir stack'e isaret etmeli:
-    //
-    //   [yuksek]  SS      = 0x10  (Kernel Data)   \
-    //             RSP     = kernel_stack_top        |  iretq frame
-    //             RFLAGS  = 0x202 (IF=1)            |  (5 qword)
-    //             CS      = 0x08  (Kernel Code)     |
-    //             RIP     = entry_point             /
-    //             r15..rax = 0  (15 register)      <- context.rsp buraya
-    //   [dusuk]
-    //
-    // task_load_and_jump_context() Ring-0 path'i de (context_switches==0
-    // durumunda task_switch tarafindan cagirilir) bu formati destekler:
-    // struct'tan register yukleme yerine RSP'yi set edip ayni pop+iretq
-    // yapar -- HAYIR, o path hala ret kullaniyor.
-    //
-    // En tutarli cozum: her iki path icin de (timer ISR ve ilk baslatma)
-    // ayni stack formati. task_load_and_jump_context Ring-0 path'ini de
-    // pop+iretq yapacak sekilde guncelliyoruz (interrupts64.asm'de).
-    // Burada sadece stack'i hazirliyoruz.
-
     uint64_t* stk = (uint64_t*)task->kernel_stack_top;
 
-    // iretq frame (Ring-0 -> Ring-0, ayni privilege seviyesi)
-    // Ring-0 iretq: CPU SS ve RSP'yi stack'ten ALMAZ (privilege degismedi).
-    // Sadece RIP, CS, RFLAGS alinir. Ama stack formati tutarlilik icin
-    // 5 kelime yaziyoruz; timer ISR her zaman 5 kelimelik iretq frame bekler.
     *(--stk) = GDT_KERNEL_DATA;          // SS      = 0x10
     *(--stk) = task->kernel_stack_top;   // RSP     = stack tepesi (referans)
     *(--stk) = 0x202ULL;                 // RFLAGS  = IF=1
     *(--stk) = GDT_KERNEL_CODE;          // CS      = 0x08
     *(--stk) = (uint64_t)entry_point;    // RIP     = entry
 
-    // 15 genel amacli register (timer ISR pop sirasi: r15..rax)
     for (int i = 0; i < 15; i++) *(--stk) = 0;
 
-    // ── CPU Context ───────────────────────────────────────────────
-    task->context.rsp    = (uint64_t)stk;        // stack tepesi (15 reg alani)
+    task->context.rsp    = (uint64_t)stk;
     task->context.rip    = (uint64_t)entry_point;
     task->context.rflags = 0x202;
-    task->context.cs     = GDT_KERNEL_CODE;       // 0x08
-    task->context.ss     = GDT_KERNEL_DATA;       // 0x10
+    task->context.cs     = GDT_KERNEL_CODE;
+    task->context.ss     = GDT_KERNEL_DATA;
     task->context.ds     = GDT_KERNEL_DATA;
     task->context.es     = GDT_KERNEL_DATA;
     task->context.fs     = 0;
@@ -501,23 +462,15 @@ task_t* task_create_user(const char* name, void (*entry_point)(void), uint32_t p
     task->priority        = priority;
     task->privilege_level = TASK_PRIVILEGE_USER;   // Ring 3
 
-    // Process group & session: başlangıçta kendi PID'i ile aynı session/grup.
-    // fork() child'ı parent'ın pgid/sid'ini miras alır (sys_fork'ta kopyalanır).
     task->pgid = task->pid;
     task->sid  = task->pid;
 
-    // Sinyal tablosunu başlat (v10)
     signal_table_init(&task->signal_table);
     task->signal_trampoline = 0;
 
-    // fd tablosunu başlat — stdin/stdout/stderr serial'a bağlanır (v11)
     fd_table_init(task->fd_table);
 
     // ── Kernel Stack ──────────────────────────────────────────────
-    // SYSCALL/interrupt geldiginde CPU, TSS RSP0'dan bu adresi yukler.
-    // task_switch() sirasinda tss_set_kernel_stack(task->kernel_stack_top)
-    // cagirilarak TSS her task degisiminde guncellenir.
-    // pmm_alloc_pages: heap dışı, VMM identity-map, güvenli büyük tahsis.
     task->kernel_stack_size = KERNEL_STACK_SIZE;
     {
         uint64_t page_count = KERNEL_STACK_SIZE / 4096;
@@ -535,11 +488,6 @@ task_t* task_create_user(const char* name, void (*entry_point)(void), uint32_t p
     task->kernel_stack_top = task->kernel_stack_base + KERNEL_STACK_SIZE;
 
     // ── User Stack ────────────────────────────────────────────────
-    // SYSRET sonrasi RSP bu degere ayarlanir.
-    // Ring-3 task'in butun calisma suresi bu stack'i kullanir.
-    // Bash 4.4 icin 8 MB; pmm_alloc_pages_flags ile VMM map'li tahsis.
-    // KRITIK: USER_STACK MUTLAKA PAGE_USER (0x4) bayrağıyla map'lenmeli!
-    // Aksi halde Ring-3 task bu sayfaya erişirken #PF → triple fault.
     task->user_stack_size = USER_STACK_SIZE;
     {
         uint64_t page_count = USER_STACK_SIZE / 4096;
@@ -558,16 +506,6 @@ task_t* task_create_user(const char* name, void (*entry_point)(void), uint32_t p
     }
     task->user_stack_top = task->user_stack_base + USER_STACK_SIZE;
 
-    // ── Kernel Stack'e iretq Frame ────────────────────────────────
-    // task_load_and_jump_context ve timer ISR ayni stack formatini bekler:
-    //   [yuksek]  SS     = 0x1B  (User Data)
-    //             RSP    = user_stack_top
-    //             RFLAGS = 0x202 (IF=1)
-    //             CS     = 0x23  (User Code, DPL=3)
-    //             RIP    = entry_point
-    //             r15..rax = 0  (15 adet)  <- context.rsp buraya
-    //   [dusuk]
-
     uint64_t* stk = (uint64_t*)task->kernel_stack_top;
 
     *(--stk) = GDT_USER_DATA_RPL3;      // SS
@@ -578,7 +516,6 @@ task_t* task_create_user(const char* name, void (*entry_point)(void), uint32_t p
 
     for (int i = 0; i < 15; i++) *(--stk) = 0;
 
-    // ── CPU Context ───────────────────────────────────────────────
     task->context.rsp    = (uint64_t)stk;
     task->context.rip    = (uint64_t)entry_point;
     task->context.rflags = 0x202;
@@ -623,6 +560,124 @@ task_t* task_create_user(const char* name, void (*entry_point)(void), uint32_t p
 }
 
 // ===========================================
+// ELF'TEN USER TASK OLUSTURMA (Ring-3)
+// ===========================================
+//
+// elf64_load() ile belleğe yüklenmiş bir ELF imajından
+// düzgün yapılandırılmış Ring-3 task oluşturur.
+//
+// Fark: task_create_user()'a göre iretq frame'deki RIP
+// ELF entry noktasına, RSP SysV ABI'ye uygun şekilde
+// hizalanmış user stack tepesine ayarlanır.
+// argc/argv/envp sıfır olarak başlatılır.
+//
+// Kullanım:
+//   ElfImage img;
+//   elf64_exec_from_fat32("CALC", 0x400000, &img, cout);
+//   task_t* t = task_create_from_elf("CALC.ELF", &img, TASK_PRIORITY_NORMAL);
+//   if (t) task_start(t);
+// ===========================================
+
+task_t* task_create_from_elf(const char* name,
+                              const ElfImage* img,
+                              uint32_t priority)
+{
+    if (!name || !img) {
+        serial_print("[TASK_ELF] NULL argument!\n");
+        return NULL;
+    }
+    if (!task_system_initialized) {
+        serial_print("[TASK_ELF] Task system not initialized!\n");
+        return NULL;
+    }
+
+    serial_print("[TASK_ELF] Creating ELF task '");
+    serial_print(name);
+    serial_print("' entry=0x");
+    char buf[24];
+    uint64_to_string(img->entry, buf);
+    serial_print(buf);
+    serial_print("\n");
+
+    // ── 1. TCB + stack'leri task_create_user ile oluştur ────────
+    // ELF entry'yi void(*)(void) olarak cast ediyoruz.
+    // iretq frame'i aşağıda düzeltileceğinden geçici değer.
+    void (*elf_entry)(void) = (void(*)(void))img->entry;
+    task_t* task = task_create_user(name, elf_entry, priority);
+    if (!task) {
+        serial_print("[TASK_ELF] task_create_user failed!\n");
+        return NULL;
+    }
+
+    // ── 2. Kernel stack'teki iretq frame'ini ELF için düzelt ────
+    //
+    // task_create_user'ın oluşturduğu kernel stack düzeni
+    // (yüksekten alçağa, context.rsp = en alt — 15 register'ın başı):
+    //
+    //   [kernel_stack_top - 8]   SS      (0x1B)
+    //   [kernel_stack_top - 16]  RSP     (user_stack_top)   ← bunu düzeltiyoruz
+    //   [kernel_stack_top - 24]  RFLAGS  (0x202)
+    //   [kernel_stack_top - 32]  CS      (0x23)
+    //   [kernel_stack_top - 40]  RIP     (entry_point)      ← bunu düzeltiyoruz
+    //   [context.rsp + 14*8]     r15     (0)
+    //   ...
+    //   [context.rsp + 0]        rax     (0)
+    //
+    // context.rsp → kernel stack'teki 15-register bloğunun tabanı.
+    // BU DEĞER DEĞİŞMEMELİ — scheduler bu pointer'ı RSP'ye yükler,
+    // ardından 15x pop + iretq yapar.
+    //
+    // Sadece iretq frame içindeki RIP ve RSP alanlarını güncelliyoruz.
+
+    // SysV AMD64 ABI: RSP % 16 == 0 olmalı çağrı anında,
+    // yani iretq'dan hemen sonra (call'dan önce) 16 hizalı.
+    // iretq RSP'yi doğrudan yükler — %16 == 0 bırakıyoruz.
+    uint64_t abi_rsp = task->user_stack_top & ~(uint64_t)0xF;
+
+    // iretq frame: kernel_stack_top'tan aşağı doğru SS, RSP, RFLAGS, CS, RIP
+    // context.rsp = kernel_stack_top - (15+5)*8 = iretq frame'in tabanı - 15*8
+    // Yani iretq frame'in ilk kelimesi (RIP) = context.rsp + 15*8
+    uint64_t* frame_rip = (uint64_t*)(task->context.rsp + 15 * 8);
+    uint64_t* frame_cs  = frame_rip + 1;
+    uint64_t* frame_rfl = frame_rip + 2;
+    uint64_t* frame_rsp = frame_rip + 3;
+    uint64_t* frame_ss  = frame_rip + 4;
+
+    *frame_rip = img->entry;            // ELF entry point
+    *frame_cs  = GDT_USER_CODE_RPL3;   // 0x23 — Ring-3 code
+    *frame_rfl = 0x202;                 // IF=1
+    *frame_rsp = abi_rsp;              // Ring-3 user stack (16-byte hizalı)
+    *frame_ss  = GDT_USER_DATA_RPL3;   // 0x1B — Ring-3 data
+
+    // ── 3. cpu_context: sadece RIP/CS/SS güncellenir ────────────
+    // CRITICAL: context.rsp DEĞİŞMEZ — kernel stack frame pointer'ı!
+    // task_switch_context / task_load_and_jump_context bu değeri
+    // RSP'ye yükleyip 15x pop + iretq yapar. Yanlış değer = triple fault.
+    task->context.rip    = img->entry;
+    // context.rsp = task_create_user'ın kurduğu kernel stack pointer — DOKUNMA
+    task->context.rflags = 0x202;
+    task->context.cs     = GDT_USER_CODE_RPL3;
+    task->context.ss     = GDT_USER_DATA_RPL3;
+
+    // ── 4. SysV ABI: argc=0, argv=NULL, envp=NULL ───────────────
+    task->context.rdi = 0;
+    task->context.rsi = 0;
+    task->context.rdx = 0;
+
+    serial_print("[TASK_ELF] Task '");
+    serial_print(name);
+    serial_print("' ready. PID=");
+    int_to_str((int)task->pid, buf);
+    serial_print(buf);
+    serial_print(" abi_rsp=0x");
+    uint64_to_string(abi_rsp, buf);
+    serial_print(buf);
+    serial_print("\n");
+
+    return task;
+}
+
+// ===========================================
 // TASK YASAM DONGUSU
 // ===========================================
 
@@ -640,18 +695,14 @@ int task_start(task_t* task) {
 
 void task_terminate(task_t* task) {
     if (!task) return;
-    serial_print("[TASK] Terminating task '");
-    serial_print(task->name);
-    serial_print("'\n");
     task->state = TASK_STATE_TERMINATED;
-    task_queue_remove(&ready_queue, task);
-    // Stack'ler pmm_alloc_pages ile tahsis edilmiş olabilir; sayfaları serbest bırak.
-    // Fallback kmalloc ile tahsis edilmişse pmm_free_pages güvenle çalışır
-    // (vmm_get_physical_address 0 döner → skip).
+
+    // Stack'leri serbest bırak
     if (task->kernel_stack_base)
         pmm_free_pages((void*)task->kernel_stack_base, task->kernel_stack_size / 4096);
     if (task->user_stack_base)
         pmm_free_pages((void*)task->user_stack_base, task->user_stack_size / 4096);
+
     kfree(task);
 }
 
@@ -705,26 +756,40 @@ void task_set_stopped(task_t* t, int stopped) {
     }
 }
 
+// ── Sleep Yönetimi ────────────────────────────────────────────
+
+void task_sleep(task_t* task, uint64_t ticks) {
+    if (!task) return;
+    task->wake_tick = get_system_ticks() + ticks;
+    task->state     = TASK_STATE_SLEEPING;
+}
+
+void task_wakeup_check(void) {
+    uint64_t now = get_system_ticks();
+    // Ready queue'da sleeping task kontrol et
+    task_t* t = ready_queue.head;
+    while (t) {
+        task_t* next = t->next;
+        if (t->state == TASK_STATE_SLEEPING && t->wake_tick <= now) {
+            t->state = TASK_STATE_READY;
+        }
+        t = next;
+    }
+}
+
 // ============================================================
 // Process Group & Session Yönetimi  (v12)
 // ============================================================
 
-// task_set_pgid – task'ın process group ID'sini değiştirir.
-// Çağırmadan önce POSIX kuralları syscall katmanında kontrol edilmeli.
-// Bu fonksiyon salt mekanik atama yapar; hata dönmez.
-// Dönüş: 0=ok, -1=null task
 int task_set_pgid(task_t* t, uint32_t new_pgid) {
     if (!t) return -1;
     t->pgid = new_pgid;
     return 0;
 }
 
-// task_do_setsid – yeni session oluştur.
-// POSIX: çağıran process grup lideri (pgid == pid) ise EPERM → -1.
-// Başarılı olursa sid = pgid = pid yapılır; yeni sid döner.
 int task_do_setsid(task_t* t) {
     if (!t) return -1;
-    if (t->pgid == t->pid) return -1;   // zaten grup lideri → EPERM
+    if (t->pgid == t->pid) return -1;
     t->sid  = t->pid;
     t->pgid = t->pid;
     return (int)t->sid;
@@ -868,12 +933,6 @@ void offihito_task(void) {
 // ===========================================
 
 void user_mode_test_task(void) {
-    // Bu fonksiyon SYSRET ile Ring-3'te baslar.
-    // Buradaki kod user privilege level'da calisir.
-    // SYSCALL ile kernel'e gecebilir.
-
-    // SYS_DEBUG syscall'i ile kernel'e mesaj gonder
-    // RAX=8 (SYS_DEBUG), RDI=msg_ptr
     const char* msg = "[USER TASK] Hello from Ring-3 via SYSRET!\n";
     uint64_t ret;
     __asm__ volatile (
@@ -884,7 +943,6 @@ void user_mode_test_task(void) {
         : "rcx", "r11", "memory"
     );
 
-    // SYS_GETPID
     uint64_t pid;
     __asm__ volatile (
         "syscall"
@@ -894,16 +952,14 @@ void user_mode_test_task(void) {
     );
     (void)pid;
 
-    // SYS_EXIT ile cik
     __asm__ volatile (
         "syscall"
         :
         : "a"((uint64_t)3),         // SYS_EXIT
-          "D"((uint64_t)0)          // exit code = 0
+          "D"((uint64_t)0)
         : "rcx", "r11"
     );
 
-    // Buraya hic gelinmemeli
     while (1) __asm__ volatile("hlt");
 }
 
@@ -962,4 +1018,17 @@ void task_print_stats(void) {
     int_to_str(next_pid, num);
     serial_print(num); serial_print("\n");
 #endif
+}
+
+const char* task_state_name(uint32_t state) {
+    switch (state) {
+        case TASK_STATE_READY:      return "READY";
+        case TASK_STATE_RUNNING:    return "RUNNING";
+        case TASK_STATE_BLOCKED:    return "BLOCKED";
+        case TASK_STATE_TERMINATED: return "TERMINATED";
+        case TASK_STATE_SLEEPING:   return "SLEEPING";
+        case TASK_STATE_ZOMBIE:     return "ZOMBIE";
+        case TASK_STATE_STOPPED:    return "STOPPED";
+        default:                    return "UNKNOWN";
+    }
 }

@@ -126,6 +126,28 @@ cpu_context_t* task_get_next_context(void) {
     return &next->context;
 }
 
+// ============================================================
+// TSS RSP0 GÜNCELLEME — isr_timer context switch sonrası
+// ============================================================
+//
+// isr_timer TSS.RSP0'ı task_switch() gibi güncellemez;
+// task_get_next_context → cpu_context_t* döner ve isr_timer
+// doğrudan RSP'yi değiştirir. Ring-3'ten interrupt/syscall
+// geldiğinde CPU TSS.RSP0'ı kullanır — bu fonksiyon olmadan
+// yanlış kernel stack'e geçilir → #DF → triple fault.
+//
+// cpu_context_t.rsp = kernel stack'teki frame pointer'ı.
+// kernel_stack_top = context.rsp + (15 reg + 5 iretq) * 8 = context.rsp + 160
+//
+// Parametre: isr_timer'ın task_get_next_context'ten aldığı cpu_context_t*
+// ============================================================
+void tss_update_rsp0_from_context(cpu_context_t* ctx) {
+    if (!ctx) return;
+    // kernel_stack_top = context.rsp + 160 (15 register + 5 iretq qword)
+    uint64_t kernel_stack_top = ctx->rsp + 160;
+    tss_set_kernel_stack(kernel_stack_top);
+}
+
 // ===========================================
 // SCHEDULER TICK
 // ===========================================
@@ -148,11 +170,41 @@ void scheduler_tick(void) {
         serial_print("[SCHEDULER] Cleaning up: ");
         serial_print(previous_task->name);
         serial_print("\n");
-        
+
+        // Kernel stack: pmm_alloc_pages ile tahsis edildiyse pmm_free_pages ile serbest bırak.
+        // kfree() ile serbest bırakmak heap'i bozar çünkü adres heap aralığında değil.
         if (previous_task->kernel_stack_base) {
-            extern void kfree(void* ptr);
-            kfree((void*)previous_task->kernel_stack_base);
+            extern void pmm_free_pages(void* base, uint64_t count);
+            extern uint8_t* heap_start;
+            extern uint8_t* heap_current;
+            uint8_t* ks = (uint8_t*)previous_task->kernel_stack_base;
+            // Heap aralığında değilse pmm ile serbest bırak
+            if (ks < heap_start || ks >= heap_current) {
+                uint64_t page_count = previous_task->kernel_stack_size / 4096;
+                pmm_free_pages((void*)previous_task->kernel_stack_base, page_count);
+            } else {
+                extern void kfree(void* ptr);
+                kfree((void*)previous_task->kernel_stack_base);
+            }
         }
+
+        // User stack: pmm_alloc_pages_flags ile tahsis edildi
+        if (previous_task->user_stack_base) {
+            extern void pmm_free_pages(void* base, uint64_t count);
+            extern uint8_t* heap_start;
+            extern uint8_t* heap_current;
+            uint8_t* us = (uint8_t*)previous_task->user_stack_base;
+            if (us < heap_start || us >= heap_current) {
+                uint64_t page_count = previous_task->user_stack_size / 4096;
+                pmm_free_pages((void*)previous_task->user_stack_base, page_count);
+            } else {
+                extern void kfree(void* ptr);
+                kfree((void*)previous_task->user_stack_base);
+            }
+        }
+
+        // TCB kendisi heap'ten kmalloc ile alındı
+        extern void kfree(void* ptr);
         kfree(previous_task);
         previous_task = NULL;
     }

@@ -1592,20 +1592,14 @@ void cmd_exec(const char* args, CommandOutput* output) {
     // ── 5. Ring-3 task oluştur ────────────────────────────────
     output_add_line(output, "[2/3] Ring-3 task olusturuluyor...", VGA_WHITE);
 
-    // task_create_user() entry point olarak ELF'in giriş adresini kullan.
-    // Fonksiyon pointer cast: void(*)(void) — flat memory'de güvenli.
-    void (*entry_fn)(void) = (void (*)(void))image.entry;
-
-    task_t* utask = task_create_user(filename, entry_fn, TASK_PRIORITY_NORMAL);
+    // task_create_from_elf: TCB + stack + iretq frame'i ELF entry'sine
+    // doğru şekilde kurar. SysV ABI uyumlu RSP hizalaması dahil.
+    task_t* utask = task_create_from_elf(filename, &image, TASK_PRIORITY_NORMAL);
     if (!utask) {
-        output_add_line(output, "[HATA] task_create_user() basarisiz!", VGA_RED);
+        output_add_line(output, "[HATA] task_create_from_elf() basarisiz!", VGA_RED);
         output_add_line(output, "  task_init() cagirildi mi? Heap yeterli mi?", VGA_YELLOW);
         return;
     }
-
-    // ELF entry point'i context'e doğrudan yaz (cast artifact'ı olmadan kesin override)
-    utask->context.rip    = image.entry;
-    utask->context.rflags = 0x202;   // IF=1 (kesmeler açık)
 
     // Bilgi satırları
     FMT_HEX64(image.entry);
@@ -1658,6 +1652,7 @@ void cmd_exec(const char* args, CommandOutput* output) {
     output_add_line(output, "  Ring-3 syscall -> kernel_tss.rsp0 -> Ring-0", VGA_DARK_GRAY);
     output_add_line(output, "  syscall_dispatch() -> handler -> SYSRET", VGA_DARK_GRAY);
     output_add_line(output, "  SYSRET -> Ring-3 (program devam eder)", VGA_DARK_GRAY);
+    output_add_line(output, "  SYS_EXIT(0) -> task_exit() -> TERMINATED", VGA_DARK_GRAY);
     output_add_empty_line(output);
     output_add_line(output, "Serial logda programin ciktisini izleyin.", VGA_CYAN);
 

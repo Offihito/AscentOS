@@ -55,6 +55,10 @@ void task_save_current_stack(uint64_t stack_pointer);
 // Returns pointer to cpu_context_t of next task, or NULL if no switch needed
 cpu_context_t* task_get_next_context(void);
 
+// isr_timer context switch sonrası TSS.RSP0'ı günceller.
+// Ring-3 task'tan interrupt/syscall gelince doğru kernel stack'in kullanılması için şart.
+void tss_update_rsp0_from_context(cpu_context_t* ctx);
+
 // ===========================================
 // TASK SCHEDULING
 // ===========================================

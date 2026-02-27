@@ -67,13 +67,20 @@ extern volatile int gui_request_new_window;
 // ============================================================================
 // Userland ring buffer
 // ============================================================================
-#define KB_RING_SIZE 256
+#define KB_RING_SIZE 512
 static volatile char kb_ring[KB_RING_SIZE];
 static volatile int  kb_ring_head = 0;
 static volatile int  kb_ring_tail = 0;
 static volatile int  kb_userland_mode = 0;
 
-void kb_set_userland_mode(int on) { kb_userland_mode = on; }
+void kb_set_userland_mode(int on) {
+    kb_userland_mode = on;
+    if (on) {
+        // Userland task başlıyor: ekranı temizle, siyah-üstü-beyaz renk
+        // kilo kendi \x1b[2J\x1b[H göndermeden önce temiz başlasın
+        clear_screen64();
+    }
+}
 int  kb_userland_active(void)     { return kb_userland_mode; }
 
 void kb_ring_push(char c) {
@@ -337,34 +344,60 @@ void keyboard_handler64(void) {
     // --- Normal terminal ---
     if (extended_key) {
         extended_key = 0;
-        if (sc == 0x48) { scroll_up(3);   outb(0x20, 0x20); return; } // yukari ok
-        if (sc == 0x50) { scroll_down(3); outb(0x20, 0x20); return; } // asagi ok
+
+        if (kb_userland_mode) {
+            // Userland çalışıyor: ok tuşlarını VT100 escape sequence olarak gönder
+            // kilo bu sequence'leri editorReadKey() içinde parse eder
+            switch (sc) {
+            case 0x48: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('A'); break; // ↑
+            case 0x50: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('B'); break; // ↓
+            case 0x4D: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('C'); break; // →
+            case 0x4B: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('D'); break; // ←
+            case 0x47: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('H'); break; // Home
+            case 0x4F: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('F'); break; // End
+            case 0x53: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('3'); kb_ring_push('~'); break; // Del
+            case 0x49: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('5'); kb_ring_push('~'); break; // PgUp
+            case 0x51: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('6'); kb_ring_push('~'); break; // PgDn
+            }
+        } else {
+            // Kernel shell: scroll
+            if (sc == 0x48) { scroll_up(3);   outb(0x20, 0x20); return; }
+            if (sc == 0x50) { scroll_down(3); outb(0x20, 0x20); return; }
+        }
         outb(0x20, 0x20); return;
     }
     if (sc & 0x80) { outb(0x20, 0x20); return; } // release
 
-    // Ctrl+L: temizle
-    if (ctrl_pressed && sc == 0x26) { clear_screen64(); show_prompt64(); outb(0x20, 0x20); return; }
-    // Ctrl+C: foreground task'a SIGINT gönder
-    if (ctrl_pressed && sc == 0x2E) {
+    // Ctrl+L: temizle (sadece kernel shell)
+    if (ctrl_pressed && sc == 0x26 && !kb_userland_mode) { clear_screen64(); show_prompt64(); outb(0x20, 0x20); return; }
+
+    // Ctrl kombinasyonları — userland'a ASCII kontrol kodu olarak gönder
+    // CTRL+key = key & 0x1F  (örn: Ctrl+S=0x13, Ctrl+Q=0x11, Ctrl+F=0x06)
+    if (ctrl_pressed) {
         if (kb_userland_mode) {
-            // Userland çalışıyor: SIGINT ile durdur
+            char ascii = sc_to_char(sc);
+            if (ascii >= 'a' && ascii <= 'z') {
+                kb_ring_push(ascii & 0x1F);  // Ctrl+a→0x01 ... Ctrl+z→0x1A
+            } else if (ascii >= 'A' && ascii <= 'Z') {
+                kb_ring_push(ascii & 0x1F);
+            } else {
+                // ESC tuşu (sc=0x01) veya bilinmeyen
+                if (sc == 0x01) kb_ring_push(0x1B);
+            }
+            outb(0x20, 0x20); return;
+        }
+        // Kernel shell Ctrl+C / Ctrl+Z
+        if (sc == 0x2E) {
             extern task_t* task_get_current(void);
             task_t* fg = task_get_current();
             if (fg) signal_send((int)fg->pid, SIGINT);
-        } else {
-            // Kernel shell: girişi temizle
-            putchar64('\n', VGA_WHITE); buffer_pos = 0; input_buffer[0] = '\0';
-            show_prompt64();
+            outb(0x20, 0x20); return;
         }
-        outb(0x20, 0x20); return;
-    }
-    // Ctrl+Z: foreground task'a SIGTSTP gönder (job control)
-    if (ctrl_pressed && sc == 0x2C) {
-        if (kb_userland_mode) {
+        if (sc == 0x2C) {
             extern task_t* task_get_current(void);
             task_t* fg = task_get_current();
             if (fg) signal_send((int)fg->pid, SIGTSTP);
+            outb(0x20, 0x20); return;
         }
         outb(0x20, 0x20); return;
     }
@@ -377,21 +410,31 @@ void keyboard_handler64(void) {
         while (ci < buffer_pos) { cmd[ci] = input_buffer[ci]; ci++; }
         cmd[ci] = '\0';
         buffer_pos = 0;
-        if (kb_userland_mode) kb_ring_push('\n');
+        if (kb_userland_mode) kb_ring_push('\r');
         else process_command64(cmd);
+        outb(0x20, 0x20); return;
+    }
+    // ESC tuşu → userland'a \x1b gönder (kilo search/quit için)
+    if (sc == 0x01) {
+        if (kb_userland_mode) kb_ring_push('\x1b');
         outb(0x20, 0x20); return;
     }
     // Backspace
     if (sc == 0x0E) {
-        if (kb_userland_mode) { kb_ring_push('\b'); }
+        if (kb_userland_mode) { kb_ring_push('\x7f'); }  // DEL (127) — kilo BACKSPACE=127 bekler
         else if (buffer_pos > 0) { buffer_pos--; putchar64('\b', VGA_WHITE); }
         outb(0x20, 0x20); return;
     }
     // Karakter
     char c = sc_to_char(sc);
     if (c && buffer_pos < 255) {
-        if (kb_userland_mode) { kb_ring_push(c); putchar64(c, VGA_WHITE); }
-        else { input_buffer[buffer_pos++] = c; putchar64(c, VGA_WHITE); }
+        if (kb_userland_mode) {
+            // Userland (kilo vb.) kendi echo'sunu yönetir — sadece ring'e push et
+            kb_ring_push(c);
+        } else {
+            input_buffer[buffer_pos++] = c;
+            putchar64(c, VGA_WHITE);
+        }
     }
     outb(0x20, 0x20);
 }

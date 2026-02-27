@@ -82,6 +82,8 @@ uint32_t fs_path_filesize(const char* path);
 int fs_unlink64(const char* path);
 // Dosya veya dizini yeniden adlandırır/taşır
 int fs_rename64(const char* oldpath, const char* newpath);
+// Dosyayı length byte'a kırpar/genişletir (v18)
+int fs_truncate64(const char* path, uint64_t length);
 
 // ---- SYS_GETDENTS için (v9) ----
 // d_type sabitleri
@@ -103,3 +105,8 @@ typedef struct {
 int fs_getdents64(const char* path, dirent64_t* buf, int buf_size);
 
 #endif // FILES64_H
+// ---- Syscall write bridge (SYS_WRITE FD_TYPE_FILE için) ----
+// path: tam dosya yolu, offset: yazma başlangıcı, data/len: yazılacak veri
+// Döndürür: yazılan byte sayısı | -1 (hata)
+int fs_vfs_write(const char* path, uint64_t offset,
+                 const char* data, uint32_t len);

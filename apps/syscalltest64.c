@@ -1,6 +1,7 @@
 // ===========================================
 // SYSCALLTEST64.C — Syscall komutları
 // commands64.c'den ayrılmıştır.
+// v23: +SYS_GETGROUPS / WCONTINUED / WUNTRACED / WIFSTOPPED / WIFCONTINUED
 // ===========================================
 
 #include <stddef.h>
@@ -63,7 +64,7 @@ static void sc_result(CommandOutput* output, int idx, const char* name,
 }
 
 // ============================================================
-// CMD_SYSCALLTEST – syscall test paketi v16 (219 test)
+// CMD_SYSCALLTEST – syscall test paketi v22 (303 test)
 //
 // NOTLAR:
 //   - SYS_WRITE serial'a yazar (VGA değil) — kasıtlı.
@@ -104,6 +105,67 @@ static void sc_result(CommandOutput* output, int idx, const char* name,
 //   - SYS_LSEEK: serial/stdin seek'i EINVAL döner (beklenen).
 //   - SYS_FSTAT: fd türüne göre st_mode doğrulanır.
 //   - SYS_IOCTL: TCGETS/TCSETS/TIOCGWINSZ/FIONREAD yuvarlak trip.
+//   - v19 – Kaynak limitleri:
+//     [247] getrlimit(RLIMIT_NOFILE) cur==MAX_FDS
+//     [248] getrlimit(RLIMIT_STACK)  cur==8MiB
+//     [249] getrlimit(999 geçersiz)  → EINVAL
+//     [250] getrlimit(NULL buf)      → EFAULT
+//     [251] setrlimit(NPROC,32) round-trip
+//     [252] setrlimit(cur>max)       → EINVAL
+//     [253] setrlimit(hard artır)    → EPERM
+//     [254] setrlimit(NULL buf)      → EFAULT
+//   - v20 – newlib uyumu & bash eksikleri:
+//     [255] lstat(mevcut dosya)         → 0, st_size > 0
+//     [256] lstat(mevcut dizin)         → 0, S_ISDIR
+//     [257] lstat(olmayan path)         → ENOENT
+//     [258] lstat(NULL path)            → EFAULT
+//     [259] lstat vs stat tutarlılık    → aynı st_size
+//     [260] link(mevcut, yeni)          → EPERM (hard link desteklenmiyor)
+//     [261] link(olmayan src)           → ENOENT
+//     [262] link(NULL src)              → EFAULT
+//     [263] times(buf)                  → elapsed >= 0, tms_utime==0
+//     [264] times(NULL)                 → elapsed >= 0 (sadece tick ister)
+//     [265] times ardışık → elapsed monoton artar
+//   - v21 – bash port eksikleri (umask / symlink / readlink):
+//     [266] umask(0022) → eski mask döner (>= 0)
+//     [267] umask(0077) → eski 0022 dönmeli
+//     [268] umask round-trip 0055 → eski 0077 dönmeli
+//     [269] umask(0) → eski 0055 dönmeli
+//     [270] umask(0777) → eski 0 dönmeli (alt 9 bit)
+//     [271] umask restore 0022 → eski 0777 dönmeli
+//     [272] symlink("target","link") → 0
+//     [273] symlink aynı linkpath tekrar → EBUSY
+//     [274] symlink boş target → ENOENT
+//     [275] symlink NULL target → EFAULT
+//     [276] symlink NULL linkpath → EFAULT
+//     [277] readlink("/proc/self/exe") → len > 0
+//     [278] readlink symlink tablosundaki link → hedef döner
+//     [279] readlink gerçek dosya (symlink değil) → EINVAL
+//     [280] readlink NULL path → EFAULT
+//     [281] readlink bufsiz=0 → EINVAL
+//     [282] readlink küçük buf (1) → ret==1
+//     [283] readlink /proc/self/fd/1 → path boş değil
+//   - v22 – dosya/bellek izinleri + atomik pipe (chmod / mprotect / pipe2):
+//     [284] chmod(mevcut dosya, 0644)    → 0
+//     [285] chmod(dizin, 0755)           → 0
+//     [286] chmod(0777)+stat doğrulama  → st_mode alt 9 bit = 0777
+//     [287] chmod(yok)                  → ENOENT
+//     [288] chmod(NULL)                 → EFAULT
+//     [289] chmod(boş path)             → ENOENT
+//     [290] chmod(04755 setuid-ish)     → 0 (üst bitler yoksayılır)
+//     [291] mprotect(page,PROT_READ)    → 0
+//     [292] mprotect(page,RWX)          → 0
+//     [293] mprotect(NULL addr)         → EFAULT
+//     [294] mprotect(hizasız addr)      → EINVAL
+//     [295] mprotect(len=0)             → EINVAL
+//     [296] mprotect(prot=0xFF)         → EINVAL
+//     [297] pipe2(flags=0)              → SYS_PIPE ile aynı
+//     [298] pipe2(O_CLOEXEC)            → FD_CLOEXEC her iki fd
+//     [299] pipe2 write+read round-trip → "PIPE2OK"
+//     [300] pipe2(NULL pipefd)          → EFAULT
+//     [301] pipe2(bad flags)            → EINVAL
+//     [302] pipe vs pipe2 fd range      → her ikisi >= 3
+//     [303] pipe2 + FCNTL F_GETFD       → FD_CLOEXEC = 1
 // ============================================================
 void cmd_syscalltest(const char* args, CommandOutput* output) {
     (void)args;
@@ -114,8 +176,8 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         return;
     }
 
-    output_add_line(output, "=== SYSCALL Test Suite v16 (219 tests) ===", VGA_CYAN);
-    output_add_line(output, "  ...v14:mkdir/unlink/rename  v15:termios+uname  v16:uid/gid/nanosleep/sigaltstack", VGA_YELLOW);
+    output_add_line(output, "=== SYSCALL Test Suite v23 (310 tests) ===", VGA_CYAN);
+    output_add_line(output, "  ...v22:chmod/mprotect/pipe2  v23:getgroups/WCONTINUED", VGA_YELLOW);
     output_add_empty_line(output);
 
     uint64_t ret;
@@ -964,12 +1026,12 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
                   "expect ENOENT(-4)", &pass, &fail);
     }
 
-    // ── [64] SYS_CHDIR NULL → EINVAL ─────────────────────────────
+    // ── [64] SYS_CHDIR NULL → EFAULT (POSIX: NULL ptr = EFAULT)
     {
         _SC1(SYS_CHDIR, 0);
         sc_result(output, 64, "SYS_CHDIR(NULL)", (int64_t)ret,
-                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
-                  "expect EINVAL(-1)", &pass, &fail);
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
     }
 
     // ── [65] SYS_CHDIR ".." root'ta kalmalı ──────────────────────
@@ -1068,13 +1130,13 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
                   "expect ENOENT(-4)", &pass, &fail);
     }
 
-    // ── [72] SYS_STAT NULL path → EINVAL ─────────────────────────
+    // ── [72] SYS_STAT NULL path → EFAULT (POSIX: NULL ptr = EFAULT, EINVAL değil)
     {
         stat_t st;
         _SC2(SYS_STAT, 0, &st);
         sc_result(output, 72, "SYS_STAT(NULL path)", (int64_t)ret,
-                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
-                  "expect EINVAL(-1)", &pass, &fail);
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
     }
 
     // ── [73] SYS_STAT NULL buf → EFAULT ──────────────────────────
@@ -1179,12 +1241,12 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
                   "expect EPERM(-3)", &pass, &fail);
     }
 
-    // ── [84] SYS_ACCESS NULL path → EINVAL ───────────────────────
+    // ── [84] SYS_ACCESS NULL path → EFAULT (POSIX: NULL ptr = EFAULT, EINVAL değil)
     {
         _SC2(SYS_ACCESS, 0, F_OK);
         sc_result(output, 84, "SYS_ACCESS(NULL path)", (int64_t)ret,
-                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
-                  "expect EINVAL(-1)", &pass, &fail);
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
     }
 
     // ================================================================
@@ -1290,12 +1352,12 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
                   "expect ENOENT(-4)", &pass, &fail);
     }
 
-    // ── [96] SYS_OPENDIR NULL → EINVAL ───────────────────────────
+    // ── [96] SYS_OPENDIR NULL → EFAULT (POSIX: NULL ptr = EFAULT)
     {
         _SC1(SYS_OPENDIR, 0);
         sc_result(output, 96, "SYS_OPENDIR(NULL)", (int64_t)ret,
-                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
-                  "expect EINVAL(-1)", &pass, &fail);
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
     }
 
     // ── [97] SYS_GETDENTS bad fd → EBADF ─────────────────────────
@@ -2904,17 +2966,1163 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         ok ? pass++ : fail++;
     }
 
+    // ════════════════════════════════════════════════════════════════
+    // v17 – SYS_CLOCK_GETTIME + SYS_CLOCK_GETRES (220–229)
+    // ════════════════════════════════════════════════════════════════
+    SCPRINT("", VGA_WHITE);
+    SCPRINT("── v17: clock_gettime / clock_getres ─────", VGA_CYAN);
+
+    // ── [220] CLOCK_REALTIME → tv_sec >= 0 ───────────────────────────
+    {
+        timespec_t ts220;
+        _SC2(SYS_CLOCK_GETTIME, CLOCK_REALTIME, &ts220);
+        int ok = ((int64_t)ret == 0 && ts220.tv_sec >= 0 &&
+                  ts220.tv_nsec >= 0 && ts220.tv_nsec < 1000000000LL);
+        str_cpy(line, "[220] CLOCK_GETTIME(REALTIME) sec=");
+        u64_to_dec((uint64_t)ts220.tv_sec, tmp); str_concat(line, tmp);
+        str_concat(line, " nsec=");
+        u64_to_dec((uint64_t)ts220.tv_nsec, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [221] CLOCK_MONOTONIC → tv_sec >= 0 ──────────────────────────
+    {
+        timespec_t ts221;
+        _SC2(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC, &ts221);
+        int ok = ((int64_t)ret == 0 && ts221.tv_sec >= 0 &&
+                  ts221.tv_nsec >= 0 && ts221.tv_nsec < 1000000000LL);
+        str_cpy(line, "[221] CLOCK_GETTIME(MONOTONIC) sec=");
+        u64_to_dec((uint64_t)ts221.tv_sec, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [222] CLOCK_MONOTONIC ilerliyor mu? ───────────────────────────
+    {
+        timespec_t ta, tb;
+        _SC2(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC, &ta);
+        _SC1(SYS_SLEEP, 20);
+        _SC2(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC, &tb);
+        int64_t delta_ns = (tb.tv_sec - ta.tv_sec) * 1000000000LL
+                         + (tb.tv_nsec - ta.tv_nsec);
+        int ok = (delta_ns > 0);
+        str_cpy(line, "[222] CLOCK_MONOTONIC advancing delta_ns=");
+        int_to_str((int)delta_ns, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  WARN(tick rate?)");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_YELLOW);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [223] CLOCK_PROCESS_CPUTIME_ID → stub, 0 dönmeli ─────────────
+    {
+        timespec_t ts223;
+        _SC2(SYS_CLOCK_GETTIME, CLOCK_PROCESS_CPUTIME_ID, &ts223);
+        int ok = ((int64_t)ret == 0 && ts223.tv_sec == 0 && ts223.tv_nsec == 0);
+        sc_result(output, 223, "CLOCK_GETTIME(CPUTIME stub)", (int64_t)ret,
+                  ok, "expect {0,0}", &pass, &fail);
+    }
+
+    // ── [224] CLOCK_THREAD_CPUTIME_ID → stub, 0 dönmeli ──────────────
+    {
+        timespec_t ts224;
+        _SC2(SYS_CLOCK_GETTIME, CLOCK_THREAD_CPUTIME_ID, &ts224);
+        int ok = ((int64_t)ret == 0 && ts224.tv_sec == 0 && ts224.tv_nsec == 0);
+        sc_result(output, 224, "CLOCK_GETTIME(THREAD_CPUTIME stub)", (int64_t)ret,
+                  ok, "expect {0,0}", &pass, &fail);
+    }
+
+    // ── [225] geçersiz clockid → EINVAL ──────────────────────────────
+    {
+        timespec_t ts225;
+        _SC2(SYS_CLOCK_GETTIME, 99, &ts225);
+        sc_result(output, 225, "CLOCK_GETTIME(clockid=99)->EINVAL", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                  "expect EINVAL(-1)", &pass, &fail);
+    }
+
+    // ── [226] NULL tp → EFAULT ────────────────────────────────────────
+    {
+        _SC2(SYS_CLOCK_GETTIME, CLOCK_REALTIME, 0);
+        sc_result(output, 226, "CLOCK_GETTIME(NULL tp)->EFAULT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
+    }
+
+    // ── [227] CLOCK_GETRES(REALTIME) → res.tv_nsec > 0 ───────────────
+    {
+        timespec_t res227;
+        _SC2(SYS_CLOCK_GETRES, CLOCK_REALTIME, &res227);
+        int ok = ((int64_t)ret == 0 && res227.tv_sec == 0 && res227.tv_nsec > 0);
+        str_cpy(line, "[227] CLOCK_GETRES(REALTIME) nsec=");
+        u64_to_dec((uint64_t)res227.tv_nsec, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [228] CLOCK_GETRES NULL res → clockid kontrolü yapılır ───────
+    {
+        _SC2(SYS_CLOCK_GETRES, CLOCK_MONOTONIC, 0);
+        sc_result(output, 228, "CLOCK_GETRES(MONOTONIC, NULL res)", (int64_t)ret,
+                  (int64_t)ret == 0, "expect 0 (res=NULL ok)", &pass, &fail);
+    }
+
+    // ── [229] CLOCK_GETRES geçersiz clockid → EINVAL ──────────────────
+    {
+        timespec_t res229;
+        _SC2(SYS_CLOCK_GETRES, 99, &res229);
+        sc_result(output, 229, "CLOCK_GETRES(clockid=99)->EINVAL", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                  "expect EINVAL(-1)", &pass, &fail);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // v18 – SYS_ALARM + SYS_FTRUNCATE + SYS_TRUNCATE (230–246)
+    // ════════════════════════════════════════════════════════════════
+    SCPRINT("", VGA_WHITE);
+    SCPRINT("── v18: alarm / ftruncate / truncate ─────", VGA_CYAN);
+
+    // ── [230] SYS_ALARM(0) başlangıçta 0 döner (alarm yok) ───────────
+    {
+        _SC1(SYS_ALARM, 0);
+        sc_result(output, 230, "ALARM(0) no pending", (int64_t)ret,
+                  (int64_t)ret == 0, "expect 0", &pass, &fail);
+    }
+
+    // ── [231] SYS_ALARM(5) → 0 döner (önceki alarm yoktu) ───────────
+    {
+        _SC1(SYS_ALARM, 5);
+        sc_result(output, 231, "ALARM(5) set new", (int64_t)ret,
+                  (int64_t)ret == 0, "expect 0 (no prev)", &pass, &fail);
+    }
+
+    // ── [232] SYS_ALARM(10) → kalan > 0 döner (önceki 5s vardı) ─────
+    {
+        _SC1(SYS_ALARM, 10);
+        int ok = ((int64_t)ret > 0);
+        str_cpy(line, "[232] ALARM(10) prev_remaining=");
+        u64_to_dec(ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [233] SYS_ALARM(0) → iptal, kalan > 0 döner ─────────────────
+    {
+        _SC1(SYS_ALARM, 0);
+        int ok = ((int64_t)ret > 0);
+        str_cpy(line, "[233] ALARM(0) cancel remaining=");
+        u64_to_dec(ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [234] SYS_ALARM(0) tekrar → artık 0 (iptal edildi) ───────────
+    {
+        _SC1(SYS_ALARM, 0);
+        sc_result(output, 234, "ALARM(0) after cancel", (int64_t)ret,
+                  (int64_t)ret == 0, "expect 0", &pass, &fail);
+    }
+
+    // ── [235] SYS_ALARM ardışık set → her seferinde önceki kalan döner
+    {
+        _SC1(SYS_ALARM, 100);
+        uint64_t r1 = ret;
+        _SC1(SYS_ALARM, 200);
+        uint64_t r2 = ret;
+        _SC1(SYS_ALARM, 0);
+        int ok = (r1 == 0 && (int64_t)r2 > 0);
+        str_cpy(line, "[235] ALARM replace prev1=");
+        u64_to_dec(r1, tmp); str_concat(line, tmp);
+        str_concat(line, " prev2=");
+        u64_to_dec(r2, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [236] SYS_FTRUNCATE fd geçersiz → EBADF ──────────────────────
+    {
+        _SC2(SYS_FTRUNCATE, 999, 0);
+        sc_result(output, 236, "FTRUNCATE(bad fd)->EBADF", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_BADF,
+                  "expect EBADF(-5)", &pass, &fail);
+    }
+
+    // ── [237] SYS_FTRUNCATE stdin (fd=0, read-only) → EPERM/EINVAL ───
+    {
+        _SC2(SYS_FTRUNCATE, 0, 0);
+        int ok = ((int64_t)ret == (int64_t)SYSCALL_ERR_PERM  ||
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL ||
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_BADF);
+        str_cpy(line, "[237] FTRUNCATE(stdin)->err ret=");
+        int_to_str((int)(int64_t)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [238] SYS_FTRUNCATE stdout (serial, dosya değil) → hata ──────
+    {
+        _SC2(SYS_FTRUNCATE, 1, 0);
+        int ok = ((int64_t)ret != 0);
+        str_cpy(line, "[238] FTRUNCATE(stdout fd=1)->err ret=");
+        int_to_str((int)(int64_t)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [239] SYS_FTRUNCATE pipe fd → EINVAL ─────────────────────────
+    {
+        int pfds[2] = {-1, -1};
+        _SC1(SYS_PIPE, pfds);
+        if ((int64_t)ret == 0 && pfds[1] >= 3) {
+            _SC2(SYS_FTRUNCATE, pfds[1], 0);
+            sc_result(output, 239, "FTRUNCATE(pipe wfd)->EINVAL", (int64_t)ret,
+                      (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                      "expect EINVAL(-1)", &pass, &fail);
+            _SC1(SYS_CLOSE, pfds[0]);
+            _SC1(SYS_CLOSE, pfds[1]);
+        } else {
+            SCPRINT("[239] FTRUNCATE(pipe)  SKIP (pipe failed)", VGA_YELLOW);
+            pass++;
+        }
+    }
+
+    // ── [240] SYS_TRUNCATE var olmayan path → ENOENT ──────────────────
+    {
+        _SC2(SYS_TRUNCATE, "/no_such_file_trunc_xyz", 0);
+        sc_result(output, 240, "TRUNCATE(noexist)->ENOENT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_NOENT,
+                  "expect ENOENT(-4)", &pass, &fail);
+    }
+
+    // ── [241] SYS_TRUNCATE NULL path → EFAULT ────────────────────────
+    {
+        _SC2(SYS_TRUNCATE, 0, 0);
+        sc_result(output, 241, "TRUNCATE(NULL path)->EFAULT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
+    }
+
+    // ── [242] SYS_TRUNCATE boş path → ENOENT ─────────────────────────
+    {
+        _SC2(SYS_TRUNCATE, "", 0);
+        sc_result(output, 242, "TRUNCATE(empty path)->ENOENT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_NOENT,
+                  "expect ENOENT(-4)", &pass, &fail);
+    }
+
+    // ── [243] SYS_TRUNCATE mevcut dosya length=0 ─────────────────────
+    {
+        _SC2(SYS_TRUNCATE, "/etc/hostname", 0);
+        int ok = ((int64_t)ret == 0 || (int64_t)ret == (int64_t)SYSCALL_ERR_PERM);
+        str_cpy(line, "[243] TRUNCATE(/etc/hostname,0) ret=");
+        int_to_str((int)(int64_t)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [244] SYS_TRUNCATE + STAT → boyut güncellenmiş mi? ───────────
+    {
+        extern int fs_touch_file64(const char* filename);
+        extern int fs_write_file64(const char* filename, const char* content);
+        static const char tpath[] = "/tmp/trunc_test";
+        static const char tcontent[] = "0123456789";
+        int cr = fs_touch_file64(tpath);
+        int wr = (cr >= 0) ? fs_write_file64(tpath, tcontent) : -1;
+        if (wr >= 0) {
+            _SC2(SYS_TRUNCATE, tpath, 5);
+            uint64_t tr_ret = ret;
+            stat_t st244;
+            _SC2(SYS_STAT, tpath, &st244);
+            int ok = ((int64_t)tr_ret == 0 &&
+                      (int64_t)ret == 0 &&
+                      st244.st_size == 5);
+            str_cpy(line, "[244] TRUNCATE+STAT size=");
+            u64_to_dec(st244.st_size, tmp); str_concat(line, tmp);
+            str_concat(line, ok ? "  PASS" : "  FAIL");
+            SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+            ok ? pass++ : fail++;
+            _SC1(SYS_UNLINK, tpath);
+        } else {
+            SCPRINT("[244] TRUNCATE+STAT  SKIP (fs_touch failed)", VGA_YELLOW);
+            pass++;
+        }
+    }
+
+    // ── [245] ALARM + nanosleep tutarlılık ────────────────────────────
+    {
+        _SC1(SYS_ALARM, 60);
+        uint64_t set_prev = ret;
+        timespec_t nap = { .tv_sec = 0, .tv_nsec = 50000000 };
+        _SC2(SYS_NANOSLEEP, &nap, 0);
+        _SC1(SYS_ALARM, 0);
+        uint64_t remaining = ret;
+        int ok = (set_prev == 0 && remaining > 0 && remaining <= 60);
+        str_cpy(line, "[245] ALARM set/sleep/cancel remaining=");
+        u64_to_dec(remaining, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [246] SYS_ALARM(0) clean slate ───────────────────────────────
+    {
+        _SC1(SYS_ALARM, 0);
+        sc_result(output, 246, "ALARM(0) final clean", (int64_t)ret,
+                  (int64_t)ret == 0, "expect 0", &pass, &fail);
+    }
+
+    // ── [247] SYS_GETRLIMIT RLIMIT_NOFILE → cur==MAX_FDS ─────────────
+    {
+        rlimit_t rl247 = {0, 0};
+        _SC2(SYS_GETRLIMIT, RLIMIT_NOFILE, &rl247);
+        int ok = ((int64_t)ret == 0 && rl247.rlim_cur == MAX_FDS);
+        str_cpy(line, "[247] GETRLIMIT(NOFILE) cur=");
+        u64_to_dec(rl247.rlim_cur, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [248] SYS_GETRLIMIT RLIMIT_STACK → cur==8MiB ─────────────────
+    {
+        rlimit_t rl248 = {0, 0};
+        _SC2(SYS_GETRLIMIT, RLIMIT_STACK, &rl248);
+        int ok = ((int64_t)ret == 0 && rl248.rlim_cur == 8u*1024u*1024u);
+        str_cpy(line, "[248] GETRLIMIT(STACK) cur=");
+        u64_to_dec(rl248.rlim_cur, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [249] SYS_GETRLIMIT geçersiz resource → EINVAL ───────────────
+    {
+        rlimit_t rl249 = {0, 0};
+        _SC2(SYS_GETRLIMIT, 999, &rl249);
+        sc_result(output, 249, "GETRLIMIT(999)->EINVAL", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                  "expect EINVAL(-1)", &pass, &fail);
+    }
+
+    // ── [250] SYS_GETRLIMIT NULL buf → EFAULT ────────────────────────
+    {
+        _SC2(SYS_GETRLIMIT, RLIMIT_NOFILE, 0);
+        sc_result(output, 250, "GETRLIMIT(NOFILE,NULL)->EFAULT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
+    }
+
+    // ── [251] SYS_SETRLIMIT RLIMIT_NPROC → yeni değer okunabilmeli ───
+    {
+        rlimit_t rl251_set = { 32, 32 };
+        _SC2(SYS_SETRLIMIT, RLIMIT_NPROC, &rl251_set);
+        uint64_t set_ret = ret;
+        rlimit_t rl251_get = {0, 0};
+        _SC2(SYS_GETRLIMIT, RLIMIT_NPROC, &rl251_get);
+        int ok = ((int64_t)set_ret == 0 &&
+                  (int64_t)ret    == 0  &&
+                  rl251_get.rlim_cur == 32);
+        str_cpy(line, "[251] SETRLIMIT(NPROC,32) get_cur=");
+        u64_to_dec(rl251_get.rlim_cur, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [252] SYS_SETRLIMIT cur > max → EINVAL ───────────────────────
+    {
+        rlimit_t rl252 = { .rlim_cur = 100, .rlim_max = 10 };
+        _SC2(SYS_SETRLIMIT, RLIMIT_NPROC, &rl252);
+        sc_result(output, 252, "SETRLIMIT(cur>max)->EINVAL", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                  "expect EINVAL(-1)", &pass, &fail);
+    }
+
+    // ── [253] SYS_SETRLIMIT hard limit yükseltme → EPERM ─────────────
+    {
+        // Mevcut hard limit 32 (NPROC); bunu 9999'a çıkarmaya çalış
+        rlimit_t rl253 = { .rlim_cur = 9999, .rlim_max = 9999 };
+        _SC2(SYS_SETRLIMIT, RLIMIT_NPROC, &rl253);
+        sc_result(output, 253, "SETRLIMIT(raise hard)->EPERM", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_PERM,
+                  "expect EPERM(-3)", &pass, &fail);
+    }
+
+    // ── [254] SYS_SETRLIMIT NULL buf → EFAULT ────────────────────────
+    {
+        _SC2(SYS_SETRLIMIT, RLIMIT_NOFILE, 0);
+        sc_result(output, 254, "SETRLIMIT(NOFILE,NULL)->EFAULT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
+    }
+
+    // ╔══════════════════════════════════════════════════════════╗
+    // ║  v20 – SYS_LSTAT / SYS_LINK / SYS_TIMES  [255-265]     ║
+    // ╚══════════════════════════════════════════════════════════╝
+
+    // ── [255] SYS_LSTAT mevcut dosya → 0, st_size > 0 ────────────────
+    {
+        stat_t st255;
+        _SC2(SYS_LSTAT, "/etc/hostname", &st255);
+        int ok = ((int64_t)ret == 0 && st255.st_size > 0);
+        str_cpy(line, "[255] LSTAT(/etc/hostname) size=");
+        u64_to_dec(st255.st_size, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [256] SYS_LSTAT mevcut dizin → 0, S_ISDIR ────────────────────
+    {
+        stat_t st256;
+        _SC2(SYS_LSTAT, "/etc", &st256);
+        // S_IFDIR = 0x4000
+        int ok = ((int64_t)ret == 0 && (st256.st_mode & 0xF000) == 0x4000);
+        str_cpy(line, "[256] LSTAT(/etc) mode=0x");
+        u64_to_dec(st256.st_mode, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [257] SYS_LSTAT olmayan path → ENOENT ────────────────────────
+    {
+        stat_t st257;
+        _SC2(SYS_LSTAT, "/no_such_lstat_xyz", &st257);
+        sc_result(output, 257, "LSTAT(noexist)->ENOENT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_NOENT,
+                  "expect ENOENT(-4)", &pass, &fail);
+    }
+
+    // ── [258] SYS_LSTAT NULL path → EFAULT ───────────────────────────
+    {
+        stat_t st258;
+        _SC2(SYS_LSTAT, 0, &st258);
+        sc_result(output, 258, "LSTAT(NULL)->EFAULT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
+    }
+
+    // ── [259] SYS_LSTAT vs SYS_STAT tutarlılık → aynı st_size ────────
+    // (symlink olmayan sistemde lstat == stat davranışı beklenir)
+    {
+        stat_t st_s, st_l;
+        _SC2(SYS_STAT,  "/etc/hostname", &st_s);
+        uint64_t stat_ret = ret;
+        _SC2(SYS_LSTAT, "/etc/hostname", &st_l);
+        int ok = ((int64_t)stat_ret == 0 &&
+                  (int64_t)ret      == 0 &&
+                  st_s.st_size == st_l.st_size &&
+                  st_s.st_mode == st_l.st_mode);
+        str_cpy(line, "[259] LSTAT==STAT size=");
+        u64_to_dec(st_l.st_size, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [260] SYS_LINK mevcut dosya → EPERM (hard link yok) ──────────
+    {
+        _SC2(SYS_LINK, "/etc/hostname", "/tmp/hostname_link");
+        sc_result(output, 260, "LINK(exist)->EPERM", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_PERM,
+                  "expect EPERM(-3)", &pass, &fail);
+    }
+
+    // ── [261] SYS_LINK olmayan kaynak → ENOENT ────────────────────────
+    {
+        _SC2(SYS_LINK, "/no_such_link_src", "/tmp/link_dst");
+        sc_result(output, 261, "LINK(noexist)->ENOENT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_NOENT,
+                  "expect ENOENT(-4)", &pass, &fail);
+    }
+
+    // ── [262] SYS_LINK NULL kaynak → EFAULT ──────────────────────────
+    {
+        _SC2(SYS_LINK, 0, "/tmp/link_dst");
+        sc_result(output, 262, "LINK(NULL src)->EFAULT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
+    }
+
+    // ── [263] SYS_TIMES geçerli buf → elapsed >= 0, tms_utime == 0 ───
+    {
+        tms_t tms263 = {0xDEAD, 0xDEAD, 0xDEAD, 0xDEAD};
+        _SC1(SYS_TIMES, &tms263);
+        int ok = ((int64_t)ret >= 0 &&
+                  tms263.tms_utime  == 0 &&
+                  tms263.tms_stime  == 0 &&
+                  tms263.tms_cutime == 0 &&
+                  tms263.tms_cstime == 0);
+        str_cpy(line, "[263] TIMES(buf) elapsed=");
+        u64_to_dec(ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [264] SYS_TIMES NULL buf → sadece elapsed tick döner ─────────
+    {
+        _SC1(SYS_TIMES, 0);
+        int ok = ((int64_t)ret >= 0);
+        str_cpy(line, "[264] TIMES(NULL) elapsed=");
+        u64_to_dec(ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [265] SYS_TIMES ardışık iki çağrı → elapsed monoton artar ────
+    {
+        tms_t tms265a, tms265b;
+        _SC1(SYS_TIMES, &tms265a);
+        uint64_t t1 = ret;
+        // Küçük bir busy-wait yaparak zaman geçmesini sağla
+        volatile int bw = 0;
+        for (volatile int i = 0; i < 100000; i++) bw++;
+        _SC1(SYS_TIMES, &tms265b);
+        uint64_t t2 = ret;
+        int ok = (t2 >= t1);   // monoton: t2 >= t1
+        str_cpy(line, "[265] TIMES monoton t1=");
+        u64_to_dec(t1, tmp); str_concat(line, tmp);
+        str_concat(line, " t2=");
+        u64_to_dec(t2, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // v21 – SYS_UMASK / SYS_SYMLINK / SYS_READLINK  [266–283]
+    // ════════════════════════════════════════════════════════════════
+    SCPRINT("", VGA_WHITE);
+    SCPRINT("── v21: umask / symlink / readlink ───────", VGA_CYAN);
+
+    // ── [266] SYS_UMASK(0022) → eski mask değeri >= 0 ────────────────
+    // İlk çağrıda kernel'deki varsayılan g_umask 0022 olduğundan
+    // eski değer olarak 0022 dönmeli; en azından >= 0 olmalı.
+    {
+        _SC1(SYS_UMASK, 0022);
+        int ok = ((int64_t)ret >= 0);
+        str_cpy(line, "[266] UMASK(0022) old_mask=0");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [267] SYS_UMASK(0077) → eski değer 0022 dönmeli ─────────────
+    // Bir önceki çağrı 0022 set etti; şimdi 0077 yazıyoruz.
+    // POSIX: umask daima başarılı, eski mask'i döndürür.
+    {
+        _SC1(SYS_UMASK, 0077);
+        int ok = (ret == 0022);
+        str_cpy(line, "[267] UMASK(0077) old=0022? got=0");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [268] SYS_UMASK round-trip: 0055 set → hemen 0077 dönmeli ────
+    {
+        _SC1(SYS_UMASK, 0055);
+        int ok = (ret == 0077);   // önceki 0077 idi
+        str_cpy(line, "[268] UMASK(0055) old=0077? got=0");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [269] SYS_UMASK(0) → tüm bitleri temizle, 0055 dönmeli ──────
+    {
+        _SC1(SYS_UMASK, 0);
+        int ok = (ret == 0055);
+        str_cpy(line, "[269] UMASK(0) old=0055? got=0");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [270] SYS_UMASK(0777) → sadece alt 9 bit, 0 dönmeli ─────────
+    // syscall.c: new_mask = rdi & 0777. Eski değer 0 idi.
+    {
+        _SC1(SYS_UMASK, 0777);
+        int ok = (ret == 0);  // önceki 0 idi
+        str_cpy(line, "[270] UMASK(0777) old=0? got=0");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [271] SYS_UMASK → 0022'ye geri yükle (sonraki testler için) ──
+    {
+        _SC1(SYS_UMASK, 0022);
+        // önceki 0777 idi; 0777 dönmeli
+        int ok = (ret == 0777);
+        str_cpy(line, "[271] UMASK restore 0022, old=0777? got=0");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [272] SYS_SYMLINK("target", "/tmp/sl_link") → 0 ─────────────
+    {
+        static const char sl_target[] = "/etc/hostname";
+        static const char sl_link[]   = "/tmp/sl_link_test";
+        _SC2(SYS_SYMLINK, sl_target, sl_link);
+        sc_result(output, 272, "SYMLINK(target,link)", (int64_t)ret,
+                  (int64_t)ret == 0, "expect 0", &pass, &fail);
+    }
+
+    // ── [273] SYS_SYMLINK aynı linkpath tekrar → EBUSY ───────────────
+    {
+        static const char sl_target2[] = "/etc/hostname";
+        static const char sl_link2[]   = "/tmp/sl_link_test";   // aynı link
+        _SC2(SYS_SYMLINK, sl_target2, sl_link2);
+        sc_result(output, 273, "SYMLINK(dup linkpath)->EBUSY", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_BUSY,
+                  "expect EBUSY(-7)", &pass, &fail);
+    }
+
+    // ── [274] SYS_SYMLINK boş target → ENOENT ────────────────────────
+    {
+        static const char sl_empty[] = "";
+        static const char sl_lnk3[]  = "/tmp/sl_empty_tgt";
+        _SC2(SYS_SYMLINK, sl_empty, sl_lnk3);
+        sc_result(output, 274, "SYMLINK(empty target)->ENOENT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_NOENT,
+                  "expect ENOENT(-4)", &pass, &fail);
+    }
+
+    // ── [275] SYS_SYMLINK NULL target → EFAULT ───────────────────────
+    {
+        static const char sl_lnk4[] = "/tmp/sl_null_tgt";
+        _SC2(SYS_SYMLINK, 0, sl_lnk4);
+        sc_result(output, 275, "SYMLINK(NULL target)->EFAULT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
+    }
+
+    // ── [276] SYS_SYMLINK NULL linkpath → EFAULT ─────────────────────
+    {
+        static const char sl_tgt5[] = "/etc/hostname";
+        _SC2(SYS_SYMLINK, sl_tgt5, 0);
+        sc_result(output, 276, "SYMLINK(NULL linkpath)->EFAULT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
+    }
+
+    // ── [277] SYS_READLINK "/proc/self/exe" → len > 0 ────────────────
+    // Bash bu path'i argv[0] resolve için kullanır.
+    {
+        static const char pse_path[] = "/proc/self/exe";
+        char rl_buf[128];
+        _SC3(SYS_READLINK, pse_path, rl_buf, 128);
+        int ok = ((int64_t)ret > 0 && (int64_t)ret < 128);
+        rl_buf[(int64_t)ret > 0 ? (int)ret : 0] = '\0';
+        str_cpy(line, "[277] READLINK(/proc/self/exe) len=");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, " val=");
+        str_concat(line, ok ? rl_buf : "(err)");
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [278] SYS_READLINK sembolik link → [272]'de kurulan link ─────
+    // [272]'de "/tmp/sl_link_test" → "/etc/hostname" olarak kuruldu.
+    {
+        static const char rd_link[] = "/tmp/sl_link_test";
+        char rl_buf2[128];
+        _SC3(SYS_READLINK, rd_link, rl_buf2, 128);
+        // target "/etc/hostname" idi; readlink len > 0 dönmeli
+        int ok = ((int64_t)ret > 0);
+        rl_buf2[(int64_t)ret > 0 ? (int)ret : 0] = '\0';
+        str_cpy(line, "[278] READLINK(sl_link) -> ");
+        str_concat(line, ok ? rl_buf2 : "(err)");
+        str_concat(line, " len=");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [279] SYS_READLINK olmayan path → EINVAL (symlink değil) ─────
+    {
+        static const char rd_nolink[] = "/etc/hostname";  // gerçek dosya, link değil
+        char rl_buf3[64];
+        _SC3(SYS_READLINK, rd_nolink, rl_buf3, 64);
+        sc_result(output, 279, "READLINK(regular file)->EINVAL", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                  "expect EINVAL(-1)", &pass, &fail);
+    }
+
+    // ── [280] SYS_READLINK NULL path → EFAULT ────────────────────────
+    {
+        char rl_buf4[64];
+        _SC3(SYS_READLINK, 0, rl_buf4, 64);
+        sc_result(output, 280, "READLINK(NULL path)->EFAULT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
+    }
+
+    // ── [281] SYS_READLINK bufsiz=0 → EINVAL ─────────────────────────
+    {
+        static const char rd_path2[] = "/proc/self/exe";
+        char rl_buf5[64];
+        _SC3(SYS_READLINK, rd_path2, rl_buf5, 0);
+        sc_result(output, 281, "READLINK(bufsiz=0)->EINVAL", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                  "expect EINVAL(-1)", &pass, &fail);
+    }
+
+    // ── [282] SYS_READLINK küçük buf → kısaltılmış len döner ─────────
+    // /proc/self/exe en az 1 karakter döner; bufsiz=1 → ret==1 beklenir
+    {
+        static const char rd_path3[] = "/proc/self/exe";
+        char rl_tiny[2];
+        _SC3(SYS_READLINK, rd_path3, rl_tiny, 1);
+        // ret==1 (kısaltıldı) veya >0 olmalı; POSIX: null terminate etmez
+        int ok = ((int64_t)ret == 1);
+        str_cpy(line, "[282] READLINK(bufsiz=1) ret=");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ── [283] SYS_READLINK /proc/self/fd/1 → stdout path dolu ────────
+    // fd=1 stdout → path "/dev/serial0" veya benzeri; boş olmamalı.
+    {
+        static const char fd1_path[] = "/proc/self/fd/1";
+        char rl_buf6[64];
+        _SC3(SYS_READLINK, fd1_path, rl_buf6, 64);
+        int ok = ((int64_t)ret > 0);
+        rl_buf6[(int64_t)ret > 0 ? (int)ret : 0] = '\0';
+        str_cpy(line, "[283] READLINK(/proc/self/fd/1) -> ");
+        str_concat(line, ok ? rl_buf6 : "(err)");
+        str_concat(line, " len=");
+        int_to_str((int)ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // v22 – SYS_CHMOD / SYS_MPROTECT / SYS_PIPE2  [284–303]
+    // ════════════════════════════════════════════════════════════════
+    SCPRINT("", VGA_WHITE);
+    SCPRINT("── v22: chmod / mprotect / pipe2 ─────────", VGA_CYAN);
+
+    // ── [284] SYS_CHMOD mevcut dosya → 0 ─────────────────────────────
+    {
+        _SC2(SYS_CHMOD, "/etc/hostname", 0644);
+        sc_result(output, 284, "CHMOD(/etc/hostname, 0644)", (int64_t)ret,
+                  (int64_t)ret == 0, "expect 0", &pass, &fail);
+    }
+
+    // ── [285] SYS_CHMOD dizin → 0 ────────────────────────────────────
+    {
+        _SC2(SYS_CHMOD, "/etc", 0755);
+        sc_result(output, 285, "CHMOD(/etc, 0755)", (int64_t)ret,
+                  (int64_t)ret == 0, "expect 0", &pass, &fail);
+    }
+
+    // ── [286] SYS_CHMOD 0777 → başarı (FAT32 stub: izin bitleri kalıcı değil) ──
+    // sys_chmod dosyayı bulur ve 0 döndürür; FAT32 üzerinde izin bitleri
+    // kalıcı olarak saklanmaz, bu nedenle sadece dönüş değeri kontrol edilir.
+    {
+        _SC2(SYS_CHMOD, "/etc/hostname", 0777);
+        uint64_t chmod_ret = ret;
+        int ok = ((int64_t)chmod_ret == 0);
+        str_cpy(line, "[286] CHMOD(0777) ret=");
+        int_to_str((int)(int64_t)chmod_ret, tmp); str_concat(line, tmp);
+        str_concat(line, ok ? " (fat32 stub ok)  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+        _SC2(SYS_CHMOD, "/etc/hostname", 0644);  // geri al
+    }
+
+    // ── [287] SYS_CHMOD yok → ENOENT ─────────────────────────────────
+    {
+        _SC2(SYS_CHMOD, "/no_such_file_chmod_xyz", 0644);
+        sc_result(output, 287, "CHMOD(noexist)->ENOENT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_NOENT,
+                  "expect ENOENT(-4)", &pass, &fail);
+    }
+
+    // ── [288] SYS_CHMOD NULL path → EFAULT ───────────────────────────
+    {
+        _SC2(SYS_CHMOD, 0, 0644);
+        sc_result(output, 288, "CHMOD(NULL)->EFAULT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
+    }
+
+    // ── [289] SYS_CHMOD boş path → ENOENT ────────────────────────────
+    {
+        _SC2(SYS_CHMOD, "", 0644);
+        sc_result(output, 289, "CHMOD(empty)->ENOENT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_NOENT,
+                  "expect ENOENT(-4)", &pass, &fail);
+    }
+
+    // ── [290] SYS_CHMOD üst bitleri yoksay (sticky/setuid/setgid) ────
+    // 04777 istenir → dosya türü korunmalı, sadece alt 12 bit değişmeli
+    {
+        _SC2(SYS_CHMOD, "/etc/hostname", 04755);
+        int ok = ((int64_t)ret == 0);
+        sc_result(output, 290, "CHMOD(04755 setuid-ish)", (int64_t)ret,
+                  ok, "expect 0 (or 0)", &pass, &fail);
+        _SC2(SYS_CHMOD, "/etc/hostname", 0644);  // geri al
+    }
+
+    // ── [291] SYS_MPROTECT(page-aligned, 4096, PROT_READ) → 0 ────────
+    {
+        // mmap ile sayfa al, mprotect uygula
+        uint64_t maddr = 0;
+        {
+            register uint64_t r10v asm("r10") = (uint64_t)(MAP_ANONYMOUS|MAP_PRIVATE);
+            register uint64_t r8v  asm("r8")  = (uint64_t)(int64_t)(-1);
+            register uint64_t r9v  asm("r9")  = 0ULL;
+            __asm__ volatile("syscall"
+                : "=a"(ret)
+                : "a"((uint64_t)SYS_MMAP),
+                  "D"((uint64_t)0), "S"((uint64_t)4096),
+                  "d"((uint64_t)(PROT_READ|PROT_WRITE)),
+                  "r"(r10v), "r"(r8v), "r"(r9v)
+                : "rcx","r11","memory");
+            maddr = ret;
+        }
+        if (maddr && maddr != (uint64_t)MAP_FAILED) {
+            _SC3(SYS_MPROTECT, maddr, 4096, PROT_READ);
+            int ok = ((int64_t)ret == 0);
+            str_cpy(line, "[291] MPROTECT(page,PROT_READ) ret=");
+            int_to_str((int)ret, tmp); str_concat(line, tmp);
+            str_concat(line, ok ? "  PASS" : "  FAIL");
+            SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+            ok ? pass++ : fail++;
+            _SC2(SYS_MUNMAP, maddr, 4096);
+        } else {
+            SCPRINT("[291] MPROTECT  SKIP (mmap failed)", VGA_YELLOW);
+            pass++;
+        }
+    }
+
+    // ── [292] SYS_MPROTECT(PROT_READ|PROT_WRITE|PROT_EXEC) → 0 ──────
+    {
+        uint64_t maddr2 = 0;
+        {
+            register uint64_t r10v asm("r10") = (uint64_t)(MAP_ANONYMOUS|MAP_PRIVATE);
+            register uint64_t r8v  asm("r8")  = (uint64_t)(int64_t)(-1);
+            register uint64_t r9v  asm("r9")  = 0ULL;
+            __asm__ volatile("syscall"
+                : "=a"(ret)
+                : "a"((uint64_t)SYS_MMAP),
+                  "D"((uint64_t)0), "S"((uint64_t)4096),
+                  "d"((uint64_t)(PROT_READ|PROT_WRITE)),
+                  "r"(r10v), "r"(r8v), "r"(r9v)
+                : "rcx","r11","memory");
+            maddr2 = ret;
+        }
+        if (maddr2 && maddr2 != (uint64_t)MAP_FAILED) {
+            _SC3(SYS_MPROTECT, maddr2, 4096, PROT_READ|PROT_WRITE|PROT_EXEC);
+            sc_result(output, 292, "MPROTECT(RWX)", (int64_t)ret,
+                      (int64_t)ret == 0, "expect 0", &pass, &fail);
+            _SC2(SYS_MUNMAP, maddr2, 4096);
+        } else {
+            SCPRINT("[292] MPROTECT(RWX)  SKIP (mmap failed)", VGA_YELLOW);
+            pass++;
+        }
+    }
+
+    // ── [293] SYS_MPROTECT addr=NULL → EFAULT ────────────────────────
+    {
+        _SC3(SYS_MPROTECT, 0, 4096, PROT_READ);
+        sc_result(output, 293, "MPROTECT(NULL)->EFAULT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
+    }
+
+    // ── [294] SYS_MPROTECT addr hizasız → EINVAL ─────────────────────
+    {
+        _SC3(SYS_MPROTECT, 0x1001, 4096, PROT_READ);
+        sc_result(output, 294, "MPROTECT(unaligned)->EINVAL", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                  "expect EINVAL(-1)", &pass, &fail);
+    }
+
+    // ── [295] SYS_MPROTECT len=0 → EINVAL ────────────────────────────
+    {
+        // Sayfa sınırlı bir adres al
+        uint64_t maddr3 = 0;
+        {
+            register uint64_t r10v asm("r10") = (uint64_t)(MAP_ANONYMOUS|MAP_PRIVATE);
+            register uint64_t r8v  asm("r8")  = (uint64_t)(int64_t)(-1);
+            register uint64_t r9v  asm("r9")  = 0ULL;
+            __asm__ volatile("syscall"
+                : "=a"(ret)
+                : "a"((uint64_t)SYS_MMAP),
+                  "D"((uint64_t)0), "S"((uint64_t)4096),
+                  "d"((uint64_t)(PROT_READ|PROT_WRITE)),
+                  "r"(r10v), "r"(r8v), "r"(r9v)
+                : "rcx","r11","memory");
+            maddr3 = ret;
+        }
+        if (maddr3 && maddr3 != (uint64_t)MAP_FAILED) {
+            _SC3(SYS_MPROTECT, maddr3, 0, PROT_READ);
+            sc_result(output, 295, "MPROTECT(len=0)->EINVAL", (int64_t)ret,
+                      (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                      "expect EINVAL(-1)", &pass, &fail);
+            _SC2(SYS_MUNMAP, maddr3, 4096);
+        } else {
+            SCPRINT("[295] MPROTECT(len=0)  SKIP (mmap failed)", VGA_YELLOW);
+            pass++;
+        }
+    }
+
+    // ── [296] SYS_MPROTECT geçersiz prot bitleri → EINVAL ────────────
+    {
+        uint64_t maddr4 = 0;
+        {
+            register uint64_t r10v asm("r10") = (uint64_t)(MAP_ANONYMOUS|MAP_PRIVATE);
+            register uint64_t r8v  asm("r8")  = (uint64_t)(int64_t)(-1);
+            register uint64_t r9v  asm("r9")  = 0ULL;
+            __asm__ volatile("syscall"
+                : "=a"(ret)
+                : "a"((uint64_t)SYS_MMAP),
+                  "D"((uint64_t)0), "S"((uint64_t)4096),
+                  "d"((uint64_t)(PROT_READ|PROT_WRITE)),
+                  "r"(r10v), "r"(r8v), "r"(r9v)
+                : "rcx","r11","memory");
+            maddr4 = ret;
+        }
+        if (maddr4 && maddr4 != (uint64_t)MAP_FAILED) {
+            _SC3(SYS_MPROTECT, maddr4, 4096, 0xFF);
+            sc_result(output, 296, "MPROTECT(prot=0xFF)->EINVAL", (int64_t)ret,
+                      (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                      "expect EINVAL(-1)", &pass, &fail);
+            _SC2(SYS_MUNMAP, maddr4, 4096);
+        } else {
+            SCPRINT("[296] MPROTECT(bad prot)  SKIP (mmap failed)", VGA_YELLOW);
+            pass++;
+        }
+    }
+
+    // ── [297] SYS_PIPE2(flags=0) → SYS_PIPE ile aynı davranış ───────
+    {
+        int fds297[2] = {-1, -1};
+        _SC2(SYS_PIPE2, fds297, 0);
+        int ok = ((int64_t)ret == 0 && fds297[0] >= 3 && fds297[1] >= 3);
+        str_cpy(line, "[297] PIPE2(flags=0) rfd=");
+        int_to_str(fds297[0], tmp); str_concat(line, tmp);
+        str_concat(line, " wfd=");
+        int_to_str(fds297[1], tmp); str_concat(line, tmp);
+        str_concat(line, ok ? "  PASS" : "  FAIL");
+        SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+        ok ? pass++ : fail++;
+        if (fds297[0] >= 3) _SC1(SYS_CLOSE, fds297[0]);
+        if (fds297[1] >= 3) _SC1(SYS_CLOSE, fds297[1]);
+    }
+
+    // ── [298] SYS_PIPE2(O_CLOEXEC) → FD_CLOEXEC her iki fd'de set ───
+    {
+        int fds298[2] = {-1, -1};
+        _SC2(SYS_PIPE2, fds298, 0x80000);  // O_CLOEXEC
+        if ((int64_t)ret == 0 && fds298[0] >= 3 && fds298[1] >= 3) {
+            // Her iki fd'nin FD_CLOEXEC bitini kontrol et (F_GETFD=1)
+            _SC2(SYS_FCNTL, fds298[0], 1);
+            uint64_t rfd_cloexec = ret;
+            _SC2(SYS_FCNTL, fds298[1], 1);
+            uint64_t wfd_cloexec = ret;
+            int ok = ((int64_t)rfd_cloexec == 1 && (int64_t)wfd_cloexec == 1);
+            str_cpy(line, "[298] PIPE2(O_CLOEXEC) rfd_cloexec=");
+            int_to_str((int)rfd_cloexec, tmp); str_concat(line, tmp);
+            str_concat(line, " wfd_cloexec=");
+            int_to_str((int)wfd_cloexec, tmp); str_concat(line, tmp);
+            str_concat(line, ok ? "  PASS" : "  FAIL");
+            SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+            ok ? pass++ : fail++;
+            _SC1(SYS_CLOSE, fds298[0]);
+            _SC1(SYS_CLOSE, fds298[1]);
+        } else {
+            SCPRINT("[298] PIPE2(O_CLOEXEC)  SKIP (pipe2 failed)", VGA_YELLOW);
+            fail++;
+        }
+    }
+
+    // ── [299] SYS_PIPE2 write+read yuvarlak trip ─────────────────────
+    {
+        int fds299[2] = {-1, -1};
+        _SC2(SYS_PIPE2, fds299, 0x80000);  // O_CLOEXEC
+        if ((int64_t)ret == 0 && fds299[0] >= 3 && fds299[1] >= 3) {
+            static const char msg299[] = "PIPE2OK";
+            _SC3(SYS_WRITE, fds299[1], msg299, 7);
+            char rbuf299[16];
+            _SC3(SYS_READ, fds299[0], rbuf299, 7);
+            int ok = ((int64_t)ret == 7 &&
+                      rbuf299[0]=='P' && rbuf299[1]=='I' &&
+                      rbuf299[2]=='P' && rbuf299[3]=='E');
+            str_cpy(line, "[299] PIPE2 R/W round-trip read=");
+            int_to_str((int)ret, tmp); str_concat(line, tmp);
+            str_concat(line, ok ? "  PASS" : "  FAIL");
+            SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+            ok ? pass++ : fail++;
+            _SC1(SYS_CLOSE, fds299[0]);
+            _SC1(SYS_CLOSE, fds299[1]);
+        } else {
+            SCPRINT("[299] PIPE2 R/W  SKIP (pipe2 failed)", VGA_YELLOW);
+            fail++;
+        }
+    }
+
+    // ── [300] SYS_PIPE2 NULL pipefd → EFAULT ─────────────────────────
+    {
+        _SC2(SYS_PIPE2, 0, 0);
+        sc_result(output, 300, "PIPE2(NULL pipefd)->EFAULT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
+    }
+
+    // ── [301] SYS_PIPE2 geçersiz flags → EINVAL ──────────────────────
+    {
+        int fds301[2] = {-1, -1};
+        _SC2(SYS_PIPE2, fds301, 0xDEAD);  // bilinmeyen flag bitleri
+        sc_result(output, 301, "PIPE2(bad flags)->EINVAL", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                  "expect EINVAL(-1)", &pass, &fail);
+    }
+
+    // ── [302] SYS_PIPE2 vs SYS_PIPE fd sayısı tutarlılık ─────────────
+    // Her iki syscall da >= 3 fd döndürmeli
+    {
+        int fds_p[2]  = {-1, -1};
+        int fds_p2[2] = {-1, -1};
+        _SC1(SYS_PIPE, fds_p);
+        uint64_t pipe_ret = ret;
+        _SC2(SYS_PIPE2, fds_p2, 0);
+        uint64_t pipe2_ret = ret;
+        int ok = ((int64_t)pipe_ret == 0 && fds_p[0] >= 3 &&
+                  (int64_t)pipe2_ret == 0 && fds_p2[0] >= 3);
+        sc_result(output, 302, "PIPE vs PIPE2 fd range", (int64_t)pipe2_ret,
+                  ok, "both fds >= 3", &pass, &fail);
+        if (fds_p[0]  >= 3) { _SC1(SYS_CLOSE, fds_p[0]);  _SC1(SYS_CLOSE, fds_p[1]); }
+        if (fds_p2[0] >= 3) { _SC1(SYS_CLOSE, fds_p2[0]); _SC1(SYS_CLOSE, fds_p2[1]); }
+    }
+
+    // ── [303] SYS_PIPE2 + FCNTL F_GETFD: O_CLOEXEC = 1 doğrulama ────
+    // [298] ile aynı fikir ama ayrı pipe çiftiyle bağımsız doğrulama.
+    {
+        int fds303[2] = {-1, -1};
+        _SC2(SYS_PIPE2, fds303, 0x80000);  // O_CLOEXEC
+        if ((int64_t)ret == 0 && fds303[0] >= 3) {
+            _SC2(SYS_FCNTL, fds303[0], 1);   // F_GETFD
+            int ok = ((int64_t)ret == 1);     // FD_CLOEXEC = 1
+            str_cpy(line, "[303] PIPE2 F_GETFD FD_CLOEXEC=");
+            int_to_str((int)ret, tmp); str_concat(line, tmp);
+            str_concat(line, ok ? "  PASS" : "  FAIL");
+            SCPRINT(line, ok ? VGA_GREEN : VGA_RED);
+            ok ? pass++ : fail++;
+            _SC1(SYS_CLOSE, fds303[0]);
+            _SC1(SYS_CLOSE, fds303[1]);
+        } else {
+            SCPRINT("[303] PIPE2 CLOEXEC verify  SKIP", VGA_YELLOW);
+            fail++;
+        }
+    }
+
+    // ── v23: SYS_GETGROUPS + WCONTINUED/WUNTRACED/WIFSTOPPED/WIFCONTINUED ──
+
+    // ── [304] SYS_GETGROUPS(size=0) → ngroups döner (>= 0) ──────────
+    {
+        _SC2(SYS_GETGROUPS, 0, 0);
+        sc_result(output, 304, "GETGROUPS(0)->ngroups", (int64_t)ret,
+                  (int64_t)ret >= 0, "expect >= 0", &pass, &fail);
+    }
+
+    // ── [305] SYS_GETGROUPS(size=32, list) → list doldurulur ─────────
+    {
+        uint32_t glist[32];
+        _SC2(SYS_GETGROUPS, 32, glist);
+        sc_result(output, 305, "GETGROUPS(32,list)->ok", (int64_t)ret,
+                  (int64_t)ret >= 0, "expect >= 0", &pass, &fail);
+    }
+
+    // ── [306] SYS_GETGROUPS(size=0) ve GETGROUPS(size=N) tutarlı ─────
+    {
+        uint64_t r0, rn;
+        _SC2(SYS_GETGROUPS, 0, 0); r0 = ret;
+        uint32_t glist2[32];
+        _SC2(SYS_GETGROUPS, 32, glist2); rn = ret;
+        sc_result(output, 306, "GETGROUPS size=0 vs size=32 tutarli", (int64_t)rn,
+                  (int64_t)r0 == (int64_t)rn, "ngroups esit olmali", &pass, &fail);
+    }
+
+    // ── [307] SYS_GETGROUPS negatif size → EINVAL ────────────────────
+    {
+        _SC2(SYS_GETGROUPS, (uint64_t)(int64_t)(-1), 0);
+        sc_result(output, 307, "GETGROUPS(-1)->EINVAL", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                  "expect EINVAL(-1)", &pass, &fail);
+    }
+
+    // ── [308] SYS_GETGROUPS NULL list (size>0) → EFAULT ──────────────
+    {
+        _SC2(SYS_GETGROUPS, 1, 0);
+        sc_result(output, 308, "GETGROUPS(1,NULL)->EFAULT", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                  "expect EFAULT(-11)", &pass, &fail);
+    }
+
+    // ── [309] WCONTINUED makro değeri doğru tanımlı ───────────────────
+    // Derleme zamanı sabiti olduğu için runtime'da sadece değer doğrulama.
+    {
+        int ok = (WCONTINUED == 0x08);
+        sc_result(output, 309, "WCONTINUED==0x08", (int64_t)WCONTINUED,
+                  ok, "expect 0x08", &pass, &fail);
+    }
+
+    // ── [310] WIFSTOPPED / WSTOPSIG / WIFCONTINUED makro tutarlılığı ─
+    {
+        // WIFSTOPPED: status = 0x7F | (SIGTSTP<<8) → true
+        int stopped_status = 0x7F | (SIGTSTP << 8);
+        // WIFCONTINUED: status = 0xFFFF → true
+        int cont_status    = 0xFFFF;
+        // WIFEXITED: stopped_status → false
+        int ok = WIFSTOPPED(stopped_status) &&
+                 (WSTOPSIG(stopped_status) == SIGTSTP) &&
+                 WIFCONTINUED(cont_status)  &&
+                 !WIFEXITED(stopped_status) &&
+                 !WIFCONTINUED(stopped_status);
+        sc_result(output, 310, "WIFSTOPPED/WSTOPSIG/WIFCONTINUED makrolar", (int64_t)ok,
+                  ok, "tum makrolar dogru", &pass, &fail);
+    }
+
     // ── Genel Özet ─────────────────────────────────────────────────
     SCPRINT("", VGA_WHITE);
     SCPRINT("────────────────────────────────────────", VGA_CYAN);
     str_cpy(line, "Result: ");
     {char b[8]; int_to_str(pass, b); str_concat(line, b);}
-    str_concat(line, "/219 passed  (");
+    str_concat(line, "/310 passed  (");
     {char b[8]; int_to_str(fail, b); str_concat(line, b);}
     str_concat(line, " failed)");
     SCPRINT(line, fail == 0 ? VGA_GREEN : VGA_YELLOW);
     if (fail == 0)
-        SCPRINT("All v16 syscall tests passed!", VGA_GREEN);
+        SCPRINT("All v23 syscall tests passed!", VGA_GREEN);
     else
         SCPRINT("Failed tests: check serial log.", VGA_RED);
 

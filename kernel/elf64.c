@@ -168,6 +168,29 @@ int elf64_load(const uint8_t* buf, uint32_t buf_size,
     out->segment_count = seg_count;
     out->entry        = base + hdr->e_entry;
 
+    // ── Ring-3 erişimi için sayfa izinlerini güncelle ──────────
+    // elf64_load kernel kipinde çalışır; memcpy/memset sayfaları
+    // önceden kernel kimlik haritasında (PAGE_PRESENT|PAGE_WRITE, USER yok)
+    // olabilir. Ring-3 task'ın bu sayfalara erişebilmesi için
+    // PAGE_USER (bit 2) flagını da set etmeliyiz.
+    //
+    // load_min..load_max aralığındaki her 4KB sayfayı yeniden map ediyoruz.
+    {
+        extern int      vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
+        extern uint64_t vmm_get_physical_address(uint64_t virt);
+        // PAGE_PRESENT | PAGE_WRITE | PAGE_USER
+        const uint64_t USER_RW = 0x7ULL;
+        uint64_t page = min_vaddr & ~(uint64_t)0xFFF;  // 4KB hizala
+        uint64_t end  = (max_vaddr + 0xFFF) & ~(uint64_t)0xFFF;
+        while (page < end) {
+            uint64_t phys = vmm_get_physical_address(page);
+            if (phys) {
+                vmm_map_page(page, phys, USER_RW);
+            }
+            page += 0x1000;
+        }
+    }
+
     return ELF_OK;
 }
 

@@ -16,6 +16,7 @@ extern task_needs_switch
 extern task_get_current_context
 extern task_save_current_stack
 extern task_get_next_context
+extern tss_update_rsp0_from_context
 
 ; Syscall dispatcher (syscall.c)
 extern syscall_dispatch
@@ -151,6 +152,17 @@ isr_timer:
     call task_get_next_context
     test rax, rax
     jz .no_switch
+
+    ; ── TSS.RSP0 güncelle ────────────────────────────────────────
+    ; Yeni task Ring-3'e geçtikten sonra interrupt/syscall aldığında
+    ; CPU, TSS.RSP0'dan kernel stack pointer'ını alır.
+    ; Güncellenmezse yanlış stack → #DF → triple fault.
+    ; rax = cpu_context_t* (task_get_next_context dönüşü)
+    ; tss_update_rsp0_from_context(cpu_context_t*) → kernel_tss.rsp0 set eder.
+    push rax
+    mov rdi, rax
+    call tss_update_rsp0_from_context
+    pop rax
 
     mov rsp, [rax + 56]     ; Load RSP from cpu_context_t.rsp
 

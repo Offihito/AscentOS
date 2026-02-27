@@ -75,6 +75,10 @@ void get_scroll_info64(size_t* buffer_lines, size_t* offset);
 // Cursor güncelle (VESA modunda yazılımsal cursor)
 void update_cursor64(void);
 
+// Batch write: userland write() syscall'ı için optimize edilmiş
+// Tüm buffer'ı ANSI parser'dan geçirir, tek seferde framebuffer günceller
+void vesa_write_buf(const char* buf, int len);
+
 // VGA uyumluluk (eskiden kalan çağrıları kırmamak için stub)
 void reset_to_standard_mode(void);
 void set_extended_text_mode(void);

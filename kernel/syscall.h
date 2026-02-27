@@ -133,11 +133,90 @@
 #define SYS_GETGID       86  // getgid()                          -> gid
 #define SYS_GETEGID      87  // getegid()                         -> egid
 
+// ── v23 – Grup listesi (bash $GROUPS, id builtin) ────────────────────────
+#define SYS_GETGROUPS   106  // getgroups(size, list[])            -> ngroups | err
+
 // ── v15 – Zamanlama (bash sleep, $SECONDS) ───────────────────────────────
 #define SYS_NANOSLEEP    88  // nanosleep(*req, *rem)              -> 0 | err
 
 // ── v15 – Alternate sinyal yığını (bash SIGSEGV güvenliği) ──────────────
 #define SYS_SIGALTSTACK  89  // sigaltstack(*ss, *old_ss)          -> 0 | err
+
+// ── v17 – POSIX saat arayüzü (bash $SECONDS, time builtin, readline) ────
+#define SYS_CLOCK_GETTIME 90  // clock_gettime(clockid, *timespec) -> 0 | err
+#define SYS_CLOCK_GETRES  91  // clock_getres(clockid, *timespec)  -> 0 | err
+
+// ── v18 – Zamanlayıcı & dosya kırpma (bash read -t, history, heredoc) ───
+#define SYS_ALARM         92  // alarm(seconds)                    -> kalan_sn
+#define SYS_FTRUNCATE     93  // ftruncate(fd, length)             -> 0 | err
+#define SYS_TRUNCATE      94  // truncate(path, length)            -> 0 | err
+
+// ── v19 – Kaynak limitleri (bash fd limit, stack size sorgusu) ───────────
+#define SYS_GETRLIMIT     95  // getrlimit(resource, *rlimit)       -> 0 | err
+#define SYS_SETRLIMIT     96  // setrlimit(resource, *rlimit)       -> 0 | err
+
+// ── v20 – newlib uyumu & bash eksikleri ──────────────────────────────────
+#define SYS_LSTAT         97  // lstat(path, *stat_buf)  -> 0 | err  (symlink meta, bash [[ -L ]])
+#define SYS_LINK          98  // link(oldpath, newpath)  -> 0 | err  (newlib _link stub)
+#define SYS_TIMES         99  // times(*tms)             -> ticks | err (newlib _times, bash time)
+
+// ── v21 – bash port eksikleri (umask / symlink / readlink) ───────────────
+#define SYS_UMASK        100  // umask(mode)             -> old_mask   (bash init + umask builtin)
+#define SYS_SYMLINK      101  // symlink(target, linkpath) -> 0 | err  (ln -s, bash komut tamamlama)
+#define SYS_READLINK     102  // readlink(path, buf, size) -> nbytes | err  (bash argv[0] resolve, $0)
+
+// ── v22 – dosya/bellek izinleri + atomik pipe ─────────────────────────────
+#define SYS_CHMOD        103  // chmod(path, mode)           -> 0 | err  (bash dosya oluşturma sonrası)
+#define SYS_MPROTECT     104  // mprotect(addr, len, prot)   -> 0 | err  (ELF segment koruması, JIT)
+#define SYS_PIPE2        105  // pipe2(pipefd[2], flags)     -> 0 | err  (O_CLOEXEC atomik pipe)
+
+// clock_gettime() / clock_getres() clockid değerleri
+#define CLOCK_REALTIME            0   // Sistem saati (epoch'tan itibaren)
+#define CLOCK_MONOTONIC           1   // Monoton saat (önyüklemeden itibaren, geriye gitmez)
+#define CLOCK_PROCESS_CPUTIME_ID  2   // Bu process'in CPU süresi (stub: nanosleep gibi)
+#define CLOCK_THREAD_CPUTIME_ID   3   // Bu thread'in CPU süresi  (stub)
+
+// ============================================================
+// getrlimit() / setrlimit() — kaynak limit yapısı ve sabitleri
+// ============================================================
+typedef struct {
+    uint64_t rlim_cur;   // Soft limit (uyarı eşiği)
+    uint64_t rlim_max;   // Hard limit (üst tavan)
+} rlimit_t;
+
+#define RLIM_INFINITY    ((uint64_t)-1)   // Sınırsız
+
+// resource sabitleri (Linux x86-64 uyumlu numaralar)
+#define RLIMIT_CPU        0   // CPU süresi (saniye)
+#define RLIMIT_FSIZE      1   // Maksimum dosya boyutu (byte)
+#define RLIMIT_DATA       2   // Veri segmenti boyutu
+#define RLIMIT_STACK      3   // Stack boyutu
+#define RLIMIT_CORE       4   // Core dump boyutu
+#define RLIMIT_RSS        5   // Resident set size
+#define RLIMIT_NPROC      6   // Maksimum process sayısı
+#define RLIMIT_NOFILE     7   // Maksimum açık fd sayısı  ← bash bunu sorgular
+#define RLIMIT_MEMLOCK    8   // Kilitlenebilir bellek
+#define RLIMIT_AS         9   // Sanal adres alanı
+#define RLIMIT_LOCKS     10   // Dosya kilitleri
+#define RLIMIT_SIGPENDING 11  // Bekleyen sinyal sayısı
+#define RLIMIT_MSGQUEUE  12   // POSIX mesaj kuyruğu bayt sayısı
+#define RLIMIT_NICE      13   // nice değeri tavanı
+#define RLIMIT_RTPRIO    14   // Gerçek zamanlı öncelik tavanı
+#define RLIMIT_NLIMITS   15   // Toplam kaynak sayısı
+
+// ============================================================
+// times() — POSIX işlem süresi yapısı  (SYS_TIMES)
+// Tüm alanlar clock tick cinsindendir (CLK_TCK = 100 Hz varsayılan).
+// newlib _times() ve bash 'time' builtin bu struct'ı kullanır.
+// ============================================================
+typedef struct {
+    uint64_t tms_utime;   // Kullanıcı modu CPU süresi
+    uint64_t tms_stime;   // Kernel modu CPU süresi
+    uint64_t tms_cutime;  // Beklenmiş çocukların kullanıcı süresi
+    uint64_t tms_cstime;  // Beklenmiş çocukların kernel süresi
+} tms_t;
+
+#define CLK_TCK  100   // Saniyedeki tick sayısı (getconf CLK_TCK uyumlu)
 
 // access() mod bitleri
 #define F_OK   0   // dosya var mı?
@@ -145,7 +224,7 @@
 #define W_OK   2   // yazma izni var mı?
 #define X_OK   1   // çalıştırma izni var mı?
 
-#define SYSCALL_MAX      90
+#define SYSCALL_MAX      107  // v23: getgroups(106)
 
 // ============================================================
 // kill() sinyal numaraları (POSIX alt kümesi)
@@ -162,6 +241,7 @@
 #define SIGALRM   14   // Zamanlayıcı
 #define SIGUSR1   10   // Kullanıcı tanımlı 1
 #define SIGUSR2   12   // Kullanıcı tanımlı 2
+#define SIGWINCH  28   // Terminal pencere boyutu değişti (readline/bash için)
 #endif /* SIGNAL64_H */
 
 // ============================================================
@@ -231,13 +311,17 @@ typedef struct {
 
 
 #define WNOHANG          0x01   // Bloklanmadan döner; PID bitmemişse 0
-#define WUNTRACED        0x02   // Durdurulmuş çocukları da raporla (stub)
+#define WUNTRACED        0x02   // Durdurulmuş çocukları da raporla
+#define WCONTINUED       0x08   // SIGCONT ile devam eden çocukları raporla (bash job control)
 
 // waitpid status decode makroları
 #define WIFEXITED(s)     (((s) & 0xFF) == 0)
 #define WEXITSTATUS(s)   (((s) >> 8) & 0xFF)
 #define WIFSIGNALED(s)   (((s) & 0x7F) != 0 && ((s) & 0x7F) != 0x7F)
 #define WTERMSIG(s)      ((s) & 0x7F)
+#define WIFSTOPPED(s)    (((s) & 0xFF) == 0x7F)                  // SIGTSTP/SIGSTOP ile durdu
+#define WSTOPSIG(s)      (((s) >> 8) & 0xFF)                     // Durduran sinyal numarası
+#define WIFCONTINUED(s)  ((s) == 0xFFFF)                         // SIGCONT ile devam etti
 
 // ============================================================
 // lseek() whence değerleri  (SYS_LSEEK)
@@ -498,6 +582,7 @@ typedef struct {
 #define SYSCALL_ERR_FAULT   ((uint64_t)-11)  // -EFAULT  : geçersiz adres
 #define SYSCALL_ERR_NOSPC   ((uint64_t)-12)  // -ENOSPC  : alan yok (pipe tamponu)
 #define SYSCALL_ERR_RANGE   ((uint64_t)-13)  // -ERANGE  : değer aralık dışı
+#define SYSCALL_ERR_INTR    ((uint64_t)-14)  // -EINTR   : sinyal ile kesildi
 
 // ============================================================
 // Per-task File Descriptor Tablosu
@@ -538,9 +623,10 @@ typedef struct pipe_buf {
 
 typedef struct {
     uint8_t     type;        // FD_TYPE_*
-    uint8_t     flags;       // O_RDONLY, O_WRONLY vb. (dosya erisim modu)
     uint8_t     fd_flags;    // FD_CLOEXEC vb. (fcntl F_GETFD/F_SETFD)
+    uint16_t    flags;       // O_RDONLY, O_WRONLY vb. — uint16_t: O_TRUNC(0x200) sigmaz!
     uint8_t     is_open;     // 1 = acik
+    uint8_t     _pad[3];
     uint64_t    offset;      // dosya okuma/yazma ofseti
     char        path[52];    // açık dosyanın yolu (debug / gelecek VFS)
     pipe_buf_t* pipe;        // FD_TYPE_PIPE ise tampon; diğer türler için NULL
@@ -586,9 +672,16 @@ void syscall_dispatch(syscall_frame_t* frame);
 // Basit test rutini
 void syscall_test(void);
 
+// ── Alarm yardımcı API (scheduler entegrasyonu için) ───────────────
+// scheduler her tick'te alarm_is_active() kontrolü yaparak
+// deadline geçtiyse task'a SIGALRM inject eder.
+uint8_t  alarm_is_active(void);
+uint64_t alarm_get_deadline(void);
+void     alarm_clear(void);
+
 // ── fd tablosu yardımcı fonksiyonları ──────────────────────────
 void        fd_table_init(fd_entry_t* table);
-int         fd_alloc(fd_entry_t* table, uint8_t type, uint8_t flags,
+int         fd_alloc(fd_entry_t* table, uint8_t type, uint16_t flags,
                      const char* path);
 int         fd_alloc_pipe(fd_entry_t* table, uint8_t rw_flags,
                           pipe_buf_t* pbuf);   // pipe için özel ayırıcı

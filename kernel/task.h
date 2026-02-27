@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include "syscall.h"    // fd_entry_t, MAX_FDS
 #include "signal64.h"   // signal_table_t, syscall_frame_t (sinyal altyapisi)
+#include "elf64.h"      // ElfImage (task_create_from_elf icin)
 
 // ============================================================
 // Task States
@@ -272,6 +273,15 @@ task_t* task_create(const char* name,
 task_t* task_create_user(const char* name,
                          void (*entry_point)(void),
                          uint32_t priority);
+
+// ELF imajindan Ring-3 user task olustur.
+// elf64_load() ile doldurulmus ElfImage yapisini alir;
+// iretq frame'i ELF entry noktasina, RSP SysV ABI'ye uygun
+// sekilde hizalanmis user stack tepesine ayarlanir.
+// task_start() ile kuyruğa alinmalidir.
+task_t* task_create_from_elf(const char* name,
+                              const ElfImage* img,
+                              uint32_t priority);
 
 // Task'i zamanlayici kuyruklarina ekle ve READY durumuna getir.
 // task_create()'den sonra cagirilmali.
