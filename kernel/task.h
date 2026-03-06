@@ -9,6 +9,10 @@
 //   - TASK_STATE_SLEEPING        -> zamanlayici entegrasyonu
 //   - TASK_HAS_PARENT_PID define -> syscall.c konditif derleme
 //   - task_create_user() artik fd_table_init() cagiriyor
+//
+// v3 Degisiklikleri:
+//   - task_create_from_elf() artik argc/argv alıyor (SysV ABI stack kurulumu)
+//   - foreground_pid global eklendi (exec sırasında shell'i bekletmek için)
 
 #ifndef TASK_H
 #define TASK_H
@@ -190,40 +194,42 @@ typedef struct task {
     uint64_t user_stack_size;
 
     // ── Dosya Tanimlayici Tablosu ─────────────────────────────
-    // 0=stdin, 1=stdout, 2=stderr otomatik; 3..MAX_FDS-1 = acik dosyalar.
-    // task_create() / task_create_user() icinde fd_table_init() cagirilmali.
+    // stdin=0 / stdout=1 / stderr=2 otomatik olarak serial'a baglanir.
+    // SYS_OPEN yeni slot ayirir, SYS_CLOSE kapatir.
     fd_entry_t fd_table[MAX_FDS];
 
     // ── Sinyal Altyapisi (v10) ────────────────────────────────
-    // Her task kendi handler tablosunu, pending/masked bitmask'ini
-    // ve handler re-entry koruyucusunu burada tutar.
-    // task_create() / task_create_user() icinde signal_table_init() cagirilir.
-    signal_table_t signal_table;
+    signal_table_t  signal_table;        // Sinyal handler'lari + mask
+    syscall_frame_t signal_saved_frame;  // Signal delivery sirasinda kayit
+    uint64_t        signal_trampoline;   // rt_sigreturn trampolin adresi
 
-    // Handler oncesi syscall frame yedeği (ring-3 trampoline için)
-    syscall_frame_t signal_saved_frame;
-
-    // Userspace sigreturn trampoline adresi (ring-3 varsa set edilir)
-    uint64_t        signal_trampoline;
-
-    // ── Istatistik ────────────────────────────────────────────
-    uint64_t context_switches;  // Toplam context switch sayisi
-    uint64_t total_runtime;     // Toplam calisma suresi (tick)
-
-    // ── Bagli Liste ──────────────────────────────────────────
-    struct task* next;
+    // ── Zamanlayici Baglantisi ────────────────────────────────
+    struct task* next;          // ready_queue linked list
     struct task* prev;
+
+    // ── İstatistik ───────────────────────────────────────────
+    uint64_t context_switches;  // Bu task kac kez secildi
+    uint64_t total_ticks;       // Toplam harcanan tick
 } task_t;
 
-// ============================================================
-// Task Queue
-// Cifte bagli liste; head/tail O(1) push/pop saglar.
-// ============================================================
 typedef struct {
     task_t*  head;
     task_t*  tail;
     uint32_t count;
 } task_queue_t;
+
+// ============================================================
+// Foreground Task Yönetimi
+//
+// foreground_pid != 0 iken shell input almaz; tüm tuş vuruşları
+// ring buffer'a (kb_ring) yönlendirilir.
+// task_exit() / SYS_EXIT foreground_pid'i sıfırlar ve shell'i
+// geri getirir.
+// ============================================================
+extern volatile uint32_t foreground_pid;
+
+// Shell'i geri getir (ekrana prompt yaz). keyboard_unified.c'de tanımlı.
+extern void shell_restore_prompt(void);
 
 // ============================================================
 // TSS Yönetimi
@@ -278,10 +284,18 @@ task_t* task_create_user(const char* name,
 // elf64_load() ile doldurulmus ElfImage yapisini alir;
 // iretq frame'i ELF entry noktasina, RSP SysV ABI'ye uygun
 // sekilde hizalanmis user stack tepesine ayarlanir.
+//
+// argc / argv: SysV AMD64 ABI'ye uygun olarak user stack'a yazilir.
+//   argv[0] = program adi (genellikle dosya adi)
+//   argv[1..] = kullanicinin girdigi argümanlar
+//   argc = 0 ise stack'e sadece argc=0, NULL, NULL yazilir.
+//
 // task_start() ile kuyruğa alinmalidir.
 task_t* task_create_from_elf(const char* name,
                               const ElfImage* img,
-                              uint32_t priority);
+                              uint32_t priority,
+                              int argc,
+                              const char** argv);
 
 // Task'i zamanlayici kuyruklarina ekle ve READY durumuna getir.
 // task_create()'den sonra cagirilmali.
@@ -379,6 +393,7 @@ int task_do_setsid(task_t* t);
 void task_save_context(cpu_context_t* context);
 void task_load_context(cpu_context_t* context);
 void task_switch(task_t* from, task_t* to);
+void task_save_fs_base(void); // isr_timer oncesi mevcut task FS.base kaydet
 
 // Assembly implementasyonlari (interrupts64.asm)
 extern void task_switch_context(cpu_context_t* old_ctx, cpu_context_t* new_ctx);
