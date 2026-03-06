@@ -56,6 +56,23 @@ static struct idt_ptr   idtr;
 extern void isr_keyboard(void);
 extern void isr_timer(void);
 extern void isr_mouse(void);
+extern void isr_net(void);    // IRQ11 → RTL8139 ağ kartı
+
+// CPU exception handler'lar (interrupts64.asm)
+extern void isr0(void);  extern void isr1(void);  extern void isr2(void);
+extern void isr3(void);  extern void isr4(void);  extern void isr5(void);
+extern void isr6(void);  extern void isr7(void);  extern void isr8_df(void);
+extern void isr9(void);  extern void isr10(void); extern void isr11(void);
+extern void isr12(void); extern void isr13(void); extern void isr14(void);
+extern void isr15(void); extern void isr16(void); extern void isr17(void);
+extern void isr18(void); extern void isr19(void); extern void isr20(void);
+extern void isr21(void); extern void isr22(void); extern void isr23(void);
+extern void isr24(void); extern void isr25(void); extern void isr26(void);
+extern void isr27(void); extern void isr28(void); extern void isr29(void);
+extern void isr30(void); extern void isr31(void);
+
+// #DF IST1 stack + TSS base (interrupts64.asm / boot64_unified.asm)
+extern uint8_t df_stack_top[];
 extern void load_idt64(struct idt_ptr* ptr);
 
 // ============================================================================
@@ -150,6 +167,16 @@ void show_prompt64(void) {
     print_str64("$ ", VGA_GREEN);
 }
 
+// task_exit() tarafından çağrılır — ekranı temizleyip shell prompt'unu geri getirir.
+// foreground task bittiğinde shell'in kullanıcıya geri döndüğünü gösterir.
+void shell_restore_prompt(void) {
+    // Ekranı temizlemek yerine sadece yeni satır + prompt: kilo çıktıktan sonra
+    // terminal durumunu bozmamak için sade tutalım.
+    println64("", VGA_WHITE);
+    println64("[Shell] Program sonlandi.", VGA_YELLOW);
+    show_prompt64();
+}
+
 void process_command64(const char* cmd) {
     if (cmd[0] == '\0') { println64("", VGA_WHITE); show_prompt64(); return; }
     putchar64('\n', VGA_WHITE);
@@ -211,23 +238,80 @@ static void irq_enable(uint8_t irq) {
 }
 
 void init_interrupts64(void) {
+    // Tüm 256 girişi boşalt
     for (int i = 0; i < 256; i++) idt_set(i, 0, 0, 0);
+
+    // ── CPU Exception handler'ları (INT 0-31) ────────────────────────────────
+    // Bu gate'ler boş bırakılırsa herhangi bir CPU exception (örn. #GP, #PF,
+    // #DF) anında triple fault'a yol açar — CPU handler bulamaz, yeniden fault
+    // üretir, sonunda sistemi resetler.
+    idt_set(0,  (uint64_t)isr0,  0x08, 0x8E); // #DE Divide Error
+    idt_set(1,  (uint64_t)isr1,  0x08, 0x8E); // #DB Debug
+    idt_set(2,  (uint64_t)isr2,  0x08, 0x8E); // #NMI
+    idt_set(3,  (uint64_t)isr3,  0x08, 0x8E); // #BP Breakpoint
+    idt_set(4,  (uint64_t)isr4,  0x08, 0x8E); // #OF Overflow
+    idt_set(5,  (uint64_t)isr5,  0x08, 0x8E); // #BR Bound Range
+    idt_set(6,  (uint64_t)isr6,  0x08, 0x8E); // #UD Invalid Opcode
+    idt_set(7,  (uint64_t)isr7,  0x08, 0x8E); // #NM Device Not Available
+
+    // #DF Double Fault — IST1 kullan (ayrı, temiz stack)
+    // Normal exception path'te RSP bozuksa CPU #DF handler'ını çalıştırmak
+    // için yine o bozuk stack'i kullanır → ikinci fault → triple fault.
+    // IST=1 ile CPU, TSS.IST1'deki df_stack_top'a geçer — RSP'den bağımsız.
+    idt_set(8,  (uint64_t)isr8_df, 0x08, 0x8E);
+    idt[8].ist = 1;  // IST1 → TSS offset+36 = df_stack_top
+
+    idt_set(9,  (uint64_t)isr9,  0x08, 0x8E); // Coprocessor Overrun
+    idt_set(10, (uint64_t)isr10, 0x08, 0x8E); // #TS Invalid TSS
+    idt_set(11, (uint64_t)isr11, 0x08, 0x8E); // #NP Segment Not Present
+    idt_set(12, (uint64_t)isr12, 0x08, 0x8E); // #SS Stack Fault
+    idt_set(13, (uint64_t)isr13, 0x08, 0x8E); // #GP General Protection
+    idt_set(14, (uint64_t)isr14, 0x08, 0x8E); // #PF Page Fault
+    idt_set(15, (uint64_t)isr15, 0x08, 0x8E); // Reserved
+    idt_set(16, (uint64_t)isr16, 0x08, 0x8E); // #MF x87 FP Error
+    idt_set(17, (uint64_t)isr17, 0x08, 0x8E); // #AC Alignment Check
+    idt_set(18, (uint64_t)isr18, 0x08, 0x8E); // #MC Machine Check
+    idt_set(19, (uint64_t)isr19, 0x08, 0x8E); // #XF SIMD FP
+    idt_set(20, (uint64_t)isr20, 0x08, 0x8E); // #VE Virtualization
+    idt_set(21, (uint64_t)isr21, 0x08, 0x8E); // #CP Control Protection
+    idt_set(22, (uint64_t)isr22, 0x08, 0x8E);
+    idt_set(23, (uint64_t)isr23, 0x08, 0x8E);
+    idt_set(24, (uint64_t)isr24, 0x08, 0x8E);
+    idt_set(25, (uint64_t)isr25, 0x08, 0x8E);
+    idt_set(26, (uint64_t)isr26, 0x08, 0x8E);
+    idt_set(27, (uint64_t)isr27, 0x08, 0x8E);
+    idt_set(28, (uint64_t)isr28, 0x08, 0x8E);
+    idt_set(29, (uint64_t)isr29, 0x08, 0x8E);
+    idt_set(30, (uint64_t)isr30, 0x08, 0x8E); // #SX Security
+    idt_set(31, (uint64_t)isr31, 0x08, 0x8E);
+
+    // ── TSS.IST1 = df_stack_top ───────────────────────────────────────────────
+    // tss_t layout (Intel SDM): offset +36 = IST1 (8 byte, little-endian)
+    // kernel_tss boot64_unified.asm'de 104-byte sıfırlanmış alan olarak tanımlı.
+    *((uint64_t*)((uint8_t*)&kernel_tss + 36)) = (uint64_t)df_stack_top;
+
+    // ── PIC + IRQ handler'ları ───────────────────────────────────────────────
     pic_remap();
-    idt_set(32, (uint64_t)isr_timer,   0x08, 0x8E); // IRQ0 timer
+    idt_set(32, (uint64_t)isr_timer,    0x08, 0x8E); // IRQ0 timer
     idt_set(33, (uint64_t)isr_keyboard, 0x08, 0x8E); // IRQ1 klavye
-    idt_set(44, (uint64_t)isr_mouse,   0x08, 0x8E); // IRQ12 mouse
+    idt_set(43, (uint64_t)isr_net,      0x08, 0x8E); // IRQ11 RTL8139 ağ (0x20+11=43=0x2B)
+    idt_set(44, (uint64_t)isr_mouse,    0x08, 0x8E); // IRQ12 mouse
+
     idtr.limit = sizeof(idt) - 1;
     idtr.base  = (uint64_t)&idt;
     load_idt64(&idtr);
+
     irq_enable(0);   // timer
     irq_enable(1);   // klavye
-    irq_enable(2);   // cascade
+    irq_enable(2);   // cascade (slave PIC için zorunlu)
+    irq_enable(11);  // RTL8139 ağ kartı
     irq_enable(12);  // mouse
+
     // PIT 1000 Hz
     uint32_t div = 1193182 / 1000;
     outb(0x43, 0x36); outb(0x40, div & 0xFF); outb(0x40, (div >> 8) & 0xFF);
     __asm__ volatile("sti");
-    serial_print("[IRQ] IDT + PIC + Timer + KB + Mouse hazir\n");
+    serial_print("[IRQ] IDT + IST1(#DF) + PIC + Timer + KB + Net(IRQ11) + Mouse hazir\n");
 }
 
 // ============================================================================
@@ -410,8 +494,17 @@ void keyboard_handler64(void) {
         while (ci < buffer_pos) { cmd[ci] = input_buffer[ci]; ci++; }
         cmd[ci] = '\0';
         buffer_pos = 0;
-        if (kb_userland_mode) kb_ring_push('\r');
-        else process_command64(cmd);
+        if (kb_userland_mode) {
+            // termios ICANON kontrolü: raw modda '\n', canonical modda '\r'
+            // Lua REPL ve kilo gibi uygulamalar raw modda '\n' bekler.
+            extern termios_t kernel_termios;
+            int is_canonical = (kernel_termios.c_lflag & ICANON) ? 1 : 0;
+            if (is_canonical) {
+                kb_ring_push('\r');
+            } else {
+                kb_ring_push('\n');
+            }
+        } else process_command64(cmd);
         outb(0x20, 0x20); return;
     }
     // ESC tuşu → userland'a \x1b gönder (kilo search/quit için)
@@ -421,17 +514,17 @@ void keyboard_handler64(void) {
     }
     // Backspace
     if (sc == 0x0E) {
-        if (kb_userland_mode) { kb_ring_push('\x7f'); }  // DEL (127) — kilo BACKSPACE=127 bekler
-        else if (buffer_pos > 0) { buffer_pos--; putchar64('\b', VGA_WHITE); }
+        if (kb_userland_mode) {
+            kb_ring_push('\x7f');
+        } else if (buffer_pos > 0) { buffer_pos--; putchar64('\b', VGA_WHITE); }
         outb(0x20, 0x20); return;
     }
     // Karakter
     char c = sc_to_char(sc);
-    if (c && buffer_pos < 255) {
+    if (c) {
         if (kb_userland_mode) {
-            // Userland (kilo vb.) kendi echo'sunu yönetir — sadece ring'e push et
             kb_ring_push(c);
-        } else {
+        } else if (buffer_pos < 255) {
             input_buffer[buffer_pos++] = c;
             putchar64(c, VGA_WHITE);
         }
