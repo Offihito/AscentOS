@@ -72,11 +72,20 @@ vesa64.o: kernel/vesa64.c kernel/vesa64.h
 syscall.o: kernel/syscall.c kernel/syscall.h kernel/signal64.h
 	$(CC) $(CFLAGS) -c kernel/syscall.c -o syscall.o
 
-syscall_test.o: kernel/syscall_test.c kernel/syscall.h
-	$(CC) $(CFLAGS) -c kernel/syscall_test.c -o syscall_test.o
-
 signal64.o: kernel/signal64.c kernel/signal64.h kernel/syscall.h kernel/task.h
 	$(CC) $(CFLAGS) -c kernel/signal64.c -o signal64.o
+
+# ============================================================================
+# KERNEL PANIC — VESA framebuffer üzerinde exception ekranı
+# ============================================================================
+panic64.o: kernel/panic64.c
+	$(CC) $(CFLAGS) -c kernel/panic64.c -o panic64.o
+
+rtl8139.o: kernel/rtl8139.c kernel/rtl8139.h
+	$(CC) $(CFLAGS) -c kernel/rtl8139.c -o rtl8139.o
+
+arp.o: kernel/arp.c kernel/arp.h kernel/rtl8139.h
+	$(CC) $(CFLAGS) -c kernel/arp.c -o arp.o
 
 # ============================================================================
 # UNIFIED KERNEL OBJECTS
@@ -122,7 +131,8 @@ KERNEL_OBJS = boot64.o interrupts64.o \
               keyboard.o kernel64.o taskbar.o \
               commands64.o syscalltest64.o files64.o disk64.o elf64.o nano64.o \
               memory_unified.o vmm64.o timer.o task.o scheduler.o \
-              page_fault.o syscall.o syscall_test.o signal64.o
+              page_fault.o syscall.o signal64.o \
+              panic64.o rtl8139.o arp.o
 
 kernel64.elf: $(KERNEL_OBJS)
 	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o kernel64.elf
@@ -144,36 +154,36 @@ AscentOS.iso: kernel64.elf grub64.cfg disk.img
 
 
 # ============================================================================
-# NEWLIB — build (bir kez çalıştır, kütüphane cache'lenir)
+# MUSL — build (bir kez çalıştır, kütüphane cache'lenir)
 #
 #  Gereksinim: x86_64-elf-gcc PATH'te olmalı
-#  Çıktı:     userland/libc/newlib/lib/libc.a
-#             userland/libc/newlib/include/
+#  Çıktı:     userland/libc/musl/lib/libc.a
+#             userland/libc/musl/include/
 #
-#  Yalnızca libc.a yoksa ya da "make newlib" komutuyla çalışır.
+#  Yalnızca libc.a yoksa ya da "make musl" komutuyla çalışır.
 # ============================================================================
 
-NEWLIB_STAMP := userland/libc/newlib/lib/libc.a
+MUSL_STAMP := userland/libc/musl/lib/libc.a
 
-$(NEWLIB_STAMP):
-	@echo "🔨 newlib derleniyor (ilk seferde uzun sürer)..."
-	@chmod +x newlib-build.sh && ./newlib-build.sh
-	@echo "✓ newlib hazir: userland/libc/newlib/"
+$(MUSL_STAMP):
+	@echo "🔨 musl libc derleniyor (ilk seferde uzun sürer)..."
+	@chmod +x musl-build.sh && ./musl-build.sh
+	@echo "✓ musl hazir: userland/libc/musl/"
 
-newlib: $(NEWLIB_STAMP)
+musl: $(MUSL_STAMP)
 
 # ============================================================================
-# USERLAND BUILD — newlib destekli
+# USERLAND BUILD — musl libc destekli
 # ============================================================================
 
-NEWLIB_INC := userland/libc/newlib/include
-NEWLIB_LIB := userland/libc/newlib/lib
+MUSL_INC := userland/libc/musl/include
+MUSL_LIB := userland/libc/musl/lib
 
 # ── Userland compiler flags ───────────────────────────────────────────────────
 #   -ffreestanding  : host stdlib yok
 #   -nostdlib       : otomatik -lc ekleme
 #   -nostdinc       : host /usr/include kullanma
-#   -isystem        : newlib header'ları (sistem header'ı gibi davran, warning bastır)
+#   -isystem        : musl header'ları (sistem header'ı gibi davran, warning bastır)
 #   -ffunction/data-sections : kullanılmayan kodu linker temizlesin
 #   -mno-red-zone   : kernel ile aynı ABI tutarlılığı için
 USERLAND_CFLAGS := \
@@ -182,7 +192,7 @@ USERLAND_CFLAGS := \
 	-nostdlib               \
 	-nostdinc               \
 	-isystem $(GCC_INCLUDE)   \
-	-isystem $(NEWLIB_INC)    \
+	-isystem $(MUSL_INC)    \
 	-ffunction-sections     \
 	-fdata-sections         \
 	-fno-stack-protector    \
@@ -199,7 +209,9 @@ USERLAND_LDFLAGS := \
 	-T userland/libc/user.ld \
 	-static                  \
 	-nostdlib                \
-	--gc-sections
+	--gc-sections            \
+	-u ___errno_location     \
+	-u __errno_location
 
 USERLAND_CRT0   := userland/libc/crt0.o
 SYSCALLS_OBJ    := userland/out/syscalls.o
@@ -209,8 +221,8 @@ USERLAND_ELFS   := $(addprefix userland/out/, $(addsuffix .elf, $(USERLAND_APPS)
 .PRECIOUS: userland/out/%.o userland/out/%.elf userland/libc/crt0.o $(SYSCALLS_OBJ)
 
 # ── userland ana hedef ───────────────────────────────────────────────────────
-userland: $(NEWLIB_STAMP) userland/out $(USERLAND_CRT0) $(SYSCALLS_OBJ) $(USERLAND_ELFS)
-	@echo "✓ Userland (newlib) derlendi → userland/out/"
+userland: $(MUSL_STAMP) userland/out $(USERLAND_CRT0) $(SYSCALLS_OBJ) $(USERLAND_ELFS)
+	@echo "✓ Userland (musl) derlendi → userland/out/"
 	@ls -lh userland/out/*.elf
 
 userland/out:
@@ -220,32 +232,44 @@ userland/out:
 userland/libc/crt0.o: userland/libc/crt0.asm
 	$(AS) $(USERLAND_ASFLAGS) -o $@ $<
 
+
+
 # ── syscalls.o — bir kez derle, her ELF'e link et ────────────────────────────
-#   syscalls.c kendi tiplerini tanımlar, newlib header'ına ihtiyaç duymaz.
+#   syscalls.c kendi tiplerini tanımlar, musl header'ına ihtiyaç duymaz.
 $(SYSCALLS_OBJ): userland/libc/syscalls.c | userland/out
 	$(USERLAND_CC) -m64 -ffreestanding -nostdlib -nostdinc -isystem $(GCC_INCLUDE) -fno-stack-protector \
 	      -ffunction-sections -fdata-sections -O2 -Wall \
+	      -Wno-builtin-declaration-mismatch \
+	      -fno-builtin-malloc -fno-builtin-free \
 	      -c -o $@ $<
 
 # ── Uygulama .o ──────────────────────────────────────────────────────────────
-userland/out/%.o: userland/apps/%.c | $(NEWLIB_STAMP)
+userland/out/%.o: userland/apps/%.c | $(MUSL_STAMP)
 	$(USERLAND_CC) $(USERLAND_CFLAGS) -c -o $@ $<
 
 # ── ELF linkleme ─────────────────────────────────────────────────────────────
 #   Link sırası kritik:
 #     crt0.o   → _start tanımı
 #     app.o    → main + uygulama kodu
-#     syscalls.o → _write, _sbrk, _exit ... (newlib'in çağırdığı stub'lar)
-#     -lc      → newlib libc.a (malloc, printf, string...)
+#     syscalls.o → _write, _sbrk, _exit ... (musl'ün çağırdığı stub'lar)
+#     -lc      → musl libc.a (malloc, printf, string...)
 #     -lgcc    → compiler runtime (__udivdi3, soft-float...)
-userland/out/%.elf: userland/out/%.o $(USERLAND_CRT0) $(SYSCALLS_OBJ) | $(NEWLIB_STAMP)
+userland/out/%.elf: userland/out/%.o $(USERLAND_CRT0) $(SYSCALLS_OBJ) | $(MUSL_STAMP)
 	$(USERLAND_LD) $(USERLAND_LDFLAGS) -m elf_x86_64 \
+	    --allow-multiple-definition \
 	    $(USERLAND_CRT0)           \
 	    $<                         \
 	    $(SYSCALLS_OBJ)            \
-	    -L$(NEWLIB_LIB) -lc $(LIBGCC) \
+	    -L$(MUSL_LIB) -lc $(LIBGCC) \
 	    -o $@
 	@echo "  ✓ $@ hazir"
+
+# ── Tekil uygulama hedefleri (kolaylık) ──────────────────────────────────────
+hello: userland/out/hello.elf
+	@echo "  ✓ hello.elf hazir"
+
+calculator: userland/out/calculator.elf
+	@echo "  ✓ calculator.elf hazir"
 
 # ── install-userland ──────────────────────────────────────────────────────────
 install-userland: userland
@@ -269,6 +293,24 @@ run: AscentOS.iso disk.img install-userland
 	  -m 1024M -cpu qemu64 -boot d \
 	  -serial stdio -vga std \
 	  -usb -device usb-tablet \
+	  -netdev user,id=net0,restrict=off \
+	  -device rtl8139,netdev=net0 \
+	  -display gtk,zoom-to-fit=off
+
+# ARP paketi doğrulama: pcap dump ile gelen/giden frame'leri yakala
+# Çalıştırdıktan sonra: tcpdump -r /tmp/ascent_net.pcap arp
+net-test: AscentOS.iso disk.img install-userland
+	@echo "▶  Ağ testi — ARP paketleri /tmp/ascent_net.pcap'e yakalanıyor..."
+	@echo "   Sonuç için: tcpdump -r /tmp/ascent_net.pcap arp"
+	qemu-system-x86_64 \
+	  -cdrom AscentOS.iso \
+	  -drive file=disk.img,format=raw,if=ide,cache=writeback \
+	  -m 1024M -cpu qemu64 -boot d \
+	  -serial stdio -vga std \
+	  -usb -device usb-tablet \
+	  -netdev user,id=net0,restrict=off \
+	  -device rtl8139,netdev=net0 \
+	  -object filter-dump,id=dump0,netdev=net0,file=/tmp/ascent_net.pcap \
 	  -display gtk,zoom-to-fit=off
 
 debug: AscentOS.iso disk.img
@@ -278,6 +320,8 @@ debug: AscentOS.iso disk.img
 	  -m 512M -cpu qemu64 -boot d \
 	  -serial stdio -vga std \
 	  -usb -device usb-tablet \
+	  -netdev user,id=net0,restrict=off \
+	  -device rtl8139,netdev=net0 \
 	  -s -S
 
 gdb:
@@ -290,7 +334,7 @@ gdb:
 # CLEAN
 # ============================================================================
 
-# Kernel + userland object ve ELF'leri temizle (newlib cache'ini korur)
+# Kernel + userland object ve ELF'leri temizle (musl cache'ini korur)
 clean:
 	@echo "🧹 Build dosyaları temizleniyor..."
 	rm -rf *.o *.elf
@@ -300,16 +344,16 @@ clean:
 	rm -rf userland/out userland/libc/crt0.o
 	@echo "✓ Temizlendi!"
 
-# newlib cache'ini de temizle (yeniden derlemek için)
-newlib-clean:
-	@echo "🧹 newlib cache temizleniyor..."
-	rm -rf userland/libc/newlib
-	rm -rf build-newlib
-	rm -f  newlib-*.tar.gz
-	@echo "✓ newlib temizlendi. Sonraki 'make userland' yeniden derler."
+# musl cache'ini de temizle (yeniden derlemek için)
+musl-clean:
+	@echo "🧹 musl cache temizleniyor..."
+	rm -rf userland/libc/musl
+	rm -rf build-musl
+	rm -f  musl-*.tar.gz
+	@echo "✓ musl temizlendi. Sonraki 'make userland' yeniden derler."
 
 # Her şeyi sıfırla
-clean-all: clean newlib-clean
+clean-all: clean musl-clean
 	@echo "✓ Tam temizlik tamamlandi."
 
 # ============================================================================
@@ -318,10 +362,10 @@ clean-all: clean newlib-clean
 
 info:
 	@echo "╔════════════════════════════════════════════════════════════╗"
-	@echo "║   AscentOS Build Information - newlib + SYSCALL Edition   ║"
+	@echo "║   AscentOS Build Information - musl + SYSCALL Edition   ║"
 	@echo "╠════════════════════════════════════════════════════════════╣"
 	@echo "║                                                            ║"
-	@echo "║  📦 Userland (newlib):                                     ║"
+	@echo "║  📦 Userland (musl):                                     ║"
 	@echo "║    • malloc, free, realloc                                 ║"
 	@echo "║    • printf, fprintf, sprintf, snprintf                    ║"
 	@echo "║    • strlen, memcpy, memset, strcmp, strcpy                ║"
@@ -338,10 +382,10 @@ info:
 	@echo "║                                                            ║"
 	@echo "║  📋 Build Targets:                                         ║"
 	@echo "║    make              Kernel + userland derle              ║"
-	@echo "║    make newlib       newlib'i derle (ilk kurulum)         ║"
+	@echo "║    make musl        musl libc'i derle (ilk kurulum)         ║"
 	@echo "║    make userland     Userland ELF'leri derle              ║"
 	@echo "║    make run          QEMU'da çalıştır                     ║"
-	@echo "║    make clean        Build temizle (newlib korunur)       ║"
+	@echo "║    make clean        Build temizle (musl korunur)       ║"
 	@echo "║    make clean-all    Her şeyi sıfırla                     ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
 
@@ -351,21 +395,21 @@ info:
 
 help:
 	@echo "╔════════════════════════════════════════════════════════════╗"
-	@echo "║   AscentOS Makefile — newlib + SYSCALL + Bash Edition     ║"
+	@echo "║   AscentOS Makefile — musl + SYSCALL + Bash Edition     ║"
 	@echo "╠════════════════════════════════════════════════════════════╣"
 	@echo "║                                                            ║"
 	@echo "║  İlk kurulum:                                              ║"
-	@echo "║    make newlib       newlib'i cross-compile et            ║"
+	@echo "║    make musl        musl libc'i cross-compile et            ║"
 	@echo "║    make              Her şeyi derle                       ║"
-	@echo "║                                                            ║" 
+	@echo "║                                                            ║"
 	@echo "║                                                            ║"
 	@echo "║  Geliştirme:                                               ║"
 	@echo "║    make userland     Sadece userland ELF'leri derle       ║"
 	@echo "║    make run          QEMU'da çalıştır                     ║"               
 	@echo "║                                                            ║"
 	@echo "║  Temizlik:                                                 ║"
-	@echo "║    make clean        Build dosyaları (newlib korunur)     ║"
-	@echo "║    make newlib-clean newlib cache sil                     ║"
+	@echo "║    make clean        Build dosyaları (musl korunur)     ║"
+	@echo "║    make musl-clean    musl cache sil                     ║"
 	@echo "║    make clean-all    Tam sıfırlama                        ║"
 	@echo "║                                                            ║"
 	@echo "║  Kernel shell komutları:                                   ║"
@@ -376,5 +420,5 @@ help:
 # PHONY
 # ============================================================================
 
-.PHONY: all run debug gdb newlib userland install-userland \
-        clean newlib-clean clean-all info help
+.PHONY: all run debug net-test gdb musl userland install-userland \
+        clean musl-clean clean-all info help
