@@ -1,39 +1,79 @@
-/* user.ld — AscentOS Userland Linker Script
- *
- * Değişiklik (newlib port):
- *   __heap_start sembolü eklendi → _sbrk() bu adresten başlar
- *   __heap_end   sembolü eklendi → stack tabanı (isteğe bağlı guard)
- */
+/* ═══════════════════════════════════════════════════════════════
+   AscentOS — user.ld  (x86_64 userland)
+   PT_LOAD #1  R+X  → .text, .rodata, init/fini array
+   PT_LOAD #2  R+W  → .data, .bss
+   ═══════════════════════════════════════════════════════════════ */
 
 OUTPUT_FORMAT(elf64-x86-64)
+OUTPUT_ARCH(i386:x86-64)
 ENTRY(_start)
 
-SECTIONS {
-    . = 0x400000;           /* Kod buradan başlar */
+BASE_ADDR = 0x400000;
 
-    .text  : {
-        *(.text.unlikely .text.unlikely.*)
+/* PHDRS — sections'tan ÖNCE tanımlanmalı */
+PHDRS
+{
+    text  PT_LOAD FLAGS(5);   /* R+X */
+    data  PT_LOAD FLAGS(6);   /* R+W */
+}
+
+SECTIONS
+{
+    . = BASE_ADDR;
+
+    /* ── R+X ── */
+    .text : ALIGN(0x1000)
+    {
+        *(.text._start)
         *(.text*)
+        *(.gnu.linkonce.t*)
+    } :text
+
+    .rodata : ALIGN(0x10)
+    {
         *(.rodata*)
-    }
+        *(.gnu.linkonce.r*)
+    } :text
 
-    .data  : { *(.data*) }
+    .init_array : ALIGN(0x10)
+    {
+        PROVIDE_HIDDEN(__init_array_start = .);
+        KEEP(*(.init_array*))
+        PROVIDE_HIDDEN(__init_array_end = .);
+    } :text
 
-    .bss   : {
+    .fini_array : ALIGN(0x10)
+    {
+        PROVIDE_HIDDEN(__fini_array_start = .);
+        KEEP(*(.fini_array*))
+        PROVIDE_HIDDEN(__fini_array_end = .);
+    } :text
+
+    /* ── R+W ── */
+    . = ALIGN(0x1000);
+
+    .data : ALIGN(0x1000)
+    {
+        *(.data*)
+        *(.gnu.linkonce.d*)
+    } :data
+
+    .bss : ALIGN(0x10)
+    {
+        __bss_start = .;
         *(.bss*)
         *(COMMON)
+        __bss_end = .;
+    } :data
+
+    . = ALIGN(0x1000);
+
+    /DISCARD/ :
+    {
+        *(.note.GNU-stack)
+        *(.note*)
+        *(.comment*)
+        *(.eh_frame*)
+        *(.debug*)
     }
-
-    /* ── newlib _sbrk için heap sınırı ────────────────────────
-     * SBRK_MODE 0 (kernel sbrk): bu sembol kullanılmaz ama
-     *   olması iyi pratik — kernel heap başlangıcını buradan alabilir.
-     * SBRK_MODE 1 (userspace bump): _sbrk() bu adresten başlar.
-     * ─────────────────────────────────────────────────────── */
-    . = ALIGN(4096);
-    PROVIDE(__heap_start = .);
-
-    /* Stack üstü — opsiyonel, guard için kullanılabilir */
-    PROVIDE(__heap_end   = 0x800000);   /* 8 MB kullanıcı alanı varsayılan */
-
-    /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) }
 }
