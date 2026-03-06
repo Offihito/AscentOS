@@ -1,44 +1,37 @@
-; crt0.asm — AscentOS Userland Runtime Start
-; execve() sonrası kernel stack'i şu şekilde kurar (user.ld @ 0x400000):
-;
-;   [RSP+0]  = argc          (uint64_t)
-;   [RSP+8]  = argv[0]       (char*)
-;   ...
-;   [RSP+8*(argc+1)] = NULL  (argv sentinel)
-;   ...sonrası envp[]...
-;
-; _start → main(argc, argv, envp) → exit()
+; ═══════════════════════════════════════════════════════════════
+;  AscentOS — crt0.asm  (x86_64, ELF64)
+;  _start → main → exit (musl atexit zinciri)
+; ═══════════════════════════════════════════════════════════════
+
+bits 64
 
 section .text
-global  _start
-extern  main
-extern  _exit
-extern  environ         ; syscalls.c'deki global char **environ
+extern main
+extern exit
 
+global _start
 _start:
-    ; ── Stack hizalama ──────────────────────────────────────────
-    ; RSP'yi 16-byte sınırına hizala (syscall frame bunu garanti etmez)
-    and     rsp, ~15
+    xor     rbp, rbp              ; ABI: frame pointer sıfırla
 
-    ; ── argc / argv / envp oku ──────────────────────────────────
-    ; execve_build_stack() şunu koydu:
-    ;   [RSP]    = argc
-    ;   [RSP+8]  = argv base ptr
-    ;   [RSP+16] = envp base ptr
-    mov     rdi, [rsp]       ; argc  → arg1
-    mov     rsi, [rsp + 8]   ; argv  → arg2
-    mov     rdx, [rsp + 16]  ; envp  → arg3
+    ; argc, argv, envp — System V AMD64 stack düzeni
+    pop     rdi                   ; argc
+    mov     rsi, rsp              ; argv
+    lea     rdx, [rsi + rdi*8 + 8] ; envp
 
-    ; ── environ global'ını kur ──────────────────────────────────
-    mov     [rel environ], rdx
+    and     rsp, ~0xF             ; 16-byte hizala
 
-    ; ── main() çağır ────────────────────────────────────────────
-    call    main
+    call    main                  ; rax = exit code
 
-    ; ── main'den dönüş: exit(retval) ────────────────────────────
-    mov     rdi, rax         ; dönüş kodu → exit kodu
-    mov     rax, 3           ; SYS_EXIT
+    mov     rdi, rax
+    call    exit                  ; musl exit → atexit → sys_exit
+
+    ; Fallback
+    mov     rax, 60
+    xor     rdi, rdi
     syscall
+    ud2
 
-    ; Buraya ulaşılmamalı
-    hlt
+; ── GNU-stack notu: yığın çalıştırılabilir DEĞİL ─────────────
+; Bu section linker'a "executable stack istemiyoruz" der.
+; NASM otomatik eklemez — elle tanımlanmalı.
+section .note.GNU-stack noalloc noexec nowrite progbits
