@@ -47,134 +47,269 @@
 //   Dönüş: RAX = sonuç (negatif = hata kodu)
 // ============================================================
 
-// ── Mevcut syscall'lar (v1/v2) ───────────────────────────────
-#define SYS_WRITE        1   // write(fd, buf, len)           -> bytes_written | err
-#define SYS_READ         2   // read(fd, buf, len)             -> bytes_read    | err
-#define SYS_EXIT         3   // exit(code)                     -> noreturn
-#define SYS_GETPID       4   // getpid()                       -> pid
-#define SYS_YIELD        5   // yield()                        -> 0
-#define SYS_SLEEP        6   // sleep(ticks)                   -> 0
-#define SYS_UPTIME       7   // uptime()                       -> system_ticks
-#define SYS_DEBUG        8   // debug(msg)                     -> 0
-#define SYS_OPEN         9   // open(path, flags)              -> fd | err
-#define SYS_CLOSE        10  // close(fd)                      -> 0  | err
-#define SYS_GETPPID      11  // getppid()                      -> parent_pid
-#define SYS_SBRK         12  // sbrk(increment)                -> old_brk | err
-#define SYS_GETPRIORITY  13  // getpriority()                  -> priority
-#define SYS_SETPRIORITY  14  // setpriority(prio)              -> 0 | err
-#define SYS_GETTICKS     15  // getticks()                     -> ticks
+// ── Linux x86-64 Syscall Numaraları ──────────────────────────
+//
+// Numaralar Linux x86-64 ABI ile birebir uyumludur.
+// Kaynak: arch/x86/entry/syscalls/syscall_64.tbl (Linux 6.x)
+//
+// AscentOS'a özgü syscall'lar (Linux'ta karşılığı olmayanlar)
+// 400+ aralığında tutulur; hiçbir zaman Linux numaralarıyla çakışmaz.
+// ─────────────────────────────────────────────────────────────
 
-// ── Yeni syscall'lar (v3) ─────────────────────────────────────
-#define SYS_MMAP         16  // mmap(addr,len,prot,flags,fd,off)-> mapped_addr | err
-#define SYS_MUNMAP       17  // munmap(addr, len)              -> 0 | err
-#define SYS_BRK          18  // brk(addr)                      -> new_brk | err
-#define SYS_FORK         19  // fork()                         -> child_pid | 0 | err
-#define SYS_EXECVE       20  // execve(path, argv, envp)       -> err (başarıda dönmez)
-#define SYS_WAITPID      21  // waitpid(pid, *status, options) -> waited_pid | err
-#define SYS_PIPE         22  // pipe(fd[2])                    -> 0 | err
-#define SYS_DUP2         23  // dup2(oldfd, newfd)             -> newfd | err
+// ── Temel I/O ────────────────────────────────────────────────
+#define SYS_READ          0   // read(fd, buf, len)               -> bytes_read    | err
+#define SYS_WRITE         1   // write(fd, buf, len)              -> bytes_written | err
+#define SYS_OPEN          2   // open(path, flags)                -> fd | err
+#define SYS_CLOSE         3   // close(fd)                        -> 0  | err
+#define SYS_STAT          4   // stat(path, *stat_buf)            -> 0 | err
+#define SYS_FSTAT         5   // fstat(fd, *stat)                 -> 0 | err
+#define SYS_LSTAT         6   // lstat(path, *stat_buf)           -> 0 | err  (symlink meta)
+#define SYS_POLL          7   // poll(fds, nfds, timeout_ms)      -> nready | err
+#define SYS_LSEEK         8   // lseek(fd, offset, whence)        -> new_offset | err
+#define SYS_MMAP          9   // mmap(addr,len,prot,flags,fd,off) -> mapped_addr | err
+#define SYS_MPROTECT     10   // mprotect(addr, len, prot)        -> 0 | err
+#define SYS_MUNMAP       11   // munmap(addr, len)                -> 0 | err
+#define SYS_BRK          12   // brk(addr)                        -> new_brk | err
+#define SYS_SIGACTION    13   // sigaction(signo, *new_sa, *old)  -> 0 | err
+#define SYS_SIGPROCMASK  14   // sigprocmask(how, *set, *oldset)  -> 0 | err
+#define SYS_SIGRETURN    15   // sigreturn() — trampoline tarafından çağrılır
+#define SYS_IOCTL        16   // ioctl(fd, request, arg)          -> 0 | err
+#define SYS_ACCESS       21   // access(path, mode)               -> 0 | err
+#define SYS_PIPE         22   // pipe(fd[2])                      -> 0 | err
+#define SYS_SELECT       23   // select(nfds,rd,wr,ex,tv)         -> nready | err
+#define SYS_SCHED_YIELD  24   // sched_yield() / AscentOS yield() -> 0  [Linux: sched_yield]
+#define SYS_YIELD        SYS_SCHED_YIELD  // takma ad
+#define SYS_DUP          32   // dup(fd)                          -> newfd | err
+#define SYS_DUP2         33   // dup2(oldfd, newfd)               -> newfd | err
+#define SYS_NANOSLEEP    35   // nanosleep(*req, *rem)            -> 0 | err
+#define SYS_SLEEP        406  // sleep(ticks) — AscentOS özel     -> 0 [AscentOS özel]
+#define SYS_ALARM        37   // alarm(seconds)                   -> kalan_sn
+#define SYS_GETPID       39   // getpid()                         -> pid
+#define SYS_FORK         57   // fork()                           -> child_pid | 0 | err
+#define SYS_EXECVE       59   // execve(path, argv, envp)         -> err (dönmez)
+#define SYS_EXIT         60   // exit(code)                       -> noreturn
+#define SYS_WAITPID      61   // wait4(pid,*st,opt,*ru) → waitpid -> waited_pid | err
+#define SYS_KILL         62   // kill(pid, sig)                   -> 0 | err
+#define SYS_UNAME        63   // uname(*utsname_t)                -> 0 | err
+#define SYS_FCNTL        72   // fcntl(fd, cmd, arg)              -> val | err
+#define SYS_TRUNCATE     76   // truncate(path, length)           -> 0 | err
+#define SYS_FTRUNCATE    77   // ftruncate(fd, length)            -> 0 | err
+#define SYS_GETCWD       79   // getcwd(buf, size)                -> buf | NULL
+#define SYS_CHDIR        80   // chdir(path)                      -> 0 | err
+#define SYS_RENAME       82   // rename(oldpath, newpath)         -> 0 | err
+#define SYS_MKDIR        83   // mkdir(path, mode)                -> 0 | err
+#define SYS_RMDIR        84   // rmdir(path)                      -> 0 | err
+#define SYS_LINK         86   // link(oldpath, newpath)           -> 0 | err
+#define SYS_UNLINK       87   // unlink(path)                     -> 0 | err
+#define SYS_SYMLINK      88   // symlink(target, linkpath)        -> 0 | err
+#define SYS_READLINK     89   // readlink(path, buf, size)        -> nbytes | err
+#define SYS_CHMOD        90   // chmod(path, mode)                -> 0 | err
+#define SYS_GETUID       102  // getuid()                         -> uid
+#define SYS_SYSLOG       103  // syslog / AscentOS debug(msg)     -> 0
+#define SYS_DEBUG        SYS_SYSLOG  // takma ad
+#define SYS_GETGID       104  // getgid()                         -> gid
+#define SYS_SETPGID      109  // setpgid(pid, pgid)               -> 0 | err
+#define SYS_TIMES        100  // times(*tms)                      -> ticks | err
+#define SYS_GETPPID      110  // getppid()                        -> parent_pid
+#define SYS_GETPGRP      111  // getpgrp() (takma ad: getpgid(0)) -> pgid
+#define SYS_SETSID       112  // setsid()                         -> new_sid | err
+#define SYS_GETGROUPS    115  // getgroups(size, list[])          -> ngroups | err
+#define SYS_SETGROUPS    116  // setgroups (gelecekte)
+#define SYS_GETEUID      107  // geteuid()                        -> euid
+#define SYS_GETEGID      108  // getegid()                        -> egid
+#define SYS_SIGALTSTACK  131  // sigaltstack(*ss, *old_ss)        -> 0 | err
+#define SYS_GETDENTS     78   // getdents(dirfd, buf, count)      -> nbytes | err
+#define SYS_GETTIMEOFDAY 96   // gettimeofday(*tv, *tz)           -> 0 | err
+#define SYS_GETRLIMIT    97   // getrlimit(resource, *rlimit)     -> 0 | err
+#define SYS_SETRLIMIT    160  // setrlimit(resource, *rlimit)     -> 0 | err
+#define SYS_SYSINFO      99   // sysinfo / AscentOS uptime()      -> system_ticks  [Linux: sysinfo]
+#define SYS_UPTIME       SYS_SYSINFO  // takma ad
+#define SYS_UMASK        95   // umask(mode)                      -> old_mask
+#define SYS_SIGPENDING   127  // sigpending(*set)                 -> 0 | err
+#define SYS_SIGSUSPEND   130  // sigsuspend(*mask)                -> 0 | err
+#define SYS_PIPE2        293  // pipe2(pipefd[2], flags)          -> 0 | err
+#define SYS_CLOCK_GETTIME 228 // clock_gettime(clockid, *timespec)-> 0 | err
+#define SYS_CLOCK_GETRES  229 // clock_getres(clockid, *timespec) -> 0 | err
+#define SYS_GETPGID      121  // getpgid(pid)                     -> pgid | err
+#define SYS_FUTEX        202  // futex(uaddr,op,val,timeout,uaddr2,val3) -> 0|waiters|err  [Linux 202]
+#define SYS_GETRANDOM    318  // getrandom(buf, buflen, flags)    -> bytes_read | err       [Linux 318]
+#define SYS_ARCH_PRCTL    158 // arch_prctl(code, addr)           -> 0 | err                [Linux 158]
+#define SYS_CLONE          56 // clone(flags,stack,ptid,ctid,tls) -> child_pid | 0 | err    [Linux 56]
+#define SYS_SET_TID_ADDRESS 218 // set_tid_address(tidptr)        -> tid                    [Linux 218]
+#define SYS_SET_ROBUST_LIST 273 // set_robust_list(head, len)     -> 0 | err                [Linux 273]
 
-// ── Yeni syscall'lar (v4) ─────────────────────────────────────
-#define SYS_LSEEK        24  // lseek(fd, offset, whence)      -> new_offset | err
-#define SYS_FSTAT        25  // fstat(fd, *stat)               -> 0 | err
-#define SYS_IOCTL        26  // ioctl(fd, request, arg)        -> 0 | err
+// ── musl libc başlatma için gerekli syscall'lar ───────────────────────────
+#define SYS_WRITEV        20  // writev(fd, iov, iovcnt)          -> bytes_written | err    [Linux 20]
+#define SYS_MADVISE       28  // madvise(addr, len, advice)       -> 0 | err                [Linux 28]
+#define SYS_EXIT_GROUP   231  // exit_group(code)                 -> noreturn               [Linux 231]
+#define SYS_OPENAT       257  // openat(dirfd, path, flags, mode) -> fd | err               [Linux 257]
+#define SYS_NEWFSTATAT   262  // newfstatat(dirfd,path,*stat,flg) -> 0 | err                [Linux 262]
+#define SYS_PRLIMIT64    302  // prlimit64(pid,res,*new,*old)     -> 0 | err                [Linux 302]
 
-// ── Yeni syscall'lar (v5) ─────────────────────────────────────
-#define SYS_SELECT       27  // select(nfds,rd,wr,ex,tv)       -> nready | err
-#define SYS_POLL         28  // poll(fds, nfds, timeout_ms)    -> nready | err
+// tcsetpgrp / tcgetpgrp — Linux'ta ioctl(TIOCSPGRP/TIOCGPGRP) ile yapılır;
+// AscentOS convenience syscall'ları yüksek numarada tutulur.
+#define SYS_TCSETPGRP    400  // tcsetpgrp(fd, pgrp)              -> 0 | err   [AscentOS özel]
+#define SYS_TCGETPGRP    401  // tcgetpgrp(fd)                    -> pgrp | err [AscentOS özel]
 
-// ── Yeni syscall'lar (v6 – newlib uyumu) ──────────────────────
-#define SYS_KILL         29  // kill(pid, sig)                  -> 0 | err
-#define SYS_GETTIMEOFDAY 30  // gettimeofday(*tv, *tz)          -> 0 | err
+// opendir / closedir — Linux'ta userspace libc wrapper'ı; AscentOS kernel'da tutuyor.
+#define SYS_OPENDIR      402  // opendir(path)                    -> dirfd  | err [AscentOS özel]
+#define SYS_CLOSEDIR     403  // closedir(dirfd)                  -> 0      | err [AscentOS özel]
 
-// ── v7 – Bash temel dizin syscall'ları ───────────────────────────
-#define SYS_GETCWD       43  // getcwd(buf, size)               -> buf | NULL
-#define SYS_CHDIR        44  // chdir(path)                     -> 0 | err
+// AscentOS'a özgü: doğrudan zamanlayıcı tick'i
+#define SYS_GETTICKS     404  // getticks()                       -> ticks        [AscentOS özel]
 
-// ── v8 – Bash dosya sorgulama syscall'ları ───────────────────────
-#define SYS_STAT         31  // stat(path, *stat_buf)           -> 0 | err
-#define SYS_ACCESS       42  // access(path, mode)              -> 0 | err
+// AscentOS'a özgü: görev önceliği
+#define SYS_GETPRIORITY  140  // getpriority(which, who)          -> priority  [Linux 140 ile aynı!]
+#define SYS_SETPRIORITY  141  // setpriority(which, who, prio)    -> 0 | err   [Linux 141 ile aynı!]
 
-// ── v9 – Bash dizin okuma ────────────────────────────────────────
-#define SYS_GETDENTS     58  // getdents(dirfd, buf, count)     -> nbytes | err
-#define SYS_OPENDIR      59  // opendir(path)                   -> dirfd  | err
-#define SYS_CLOSEDIR     60  // closedir(dirfd)                 -> 0      | err
-
-// ── v11 – fcntl + dup (bash fd yönetimi) ───────────────────────────
-#define SYS_FCNTL        66  // fcntl(fd, cmd, arg)                -> val | err
-#define SYS_DUP          67  // dup(fd)                            -> newfd | err
-
-// ── v12 – Process Group & Session (bash iş kontrolü) ────────────────
-#define SYS_SETPGID      68  // setpgid(pid, pgid)                 -> 0 | err
-#define SYS_GETPGID      69  // getpgid(pid)                       -> pgid | err
-#define SYS_SETSID       70  // setsid()                           -> new_sid | err
-#define SYS_TCSETPGRP    71  // tcsetpgrp(fd, pgrp)                -> 0 | err
-#define SYS_TCGETPGRP    72  // tcgetpgrp(fd)                      -> pgrp | err
-
-// ── v10 – Sinyal altyapısı (bash için kritik) ────────────────────
-#define SYS_SIGACTION    61  // sigaction(signo, *new_sa, *old_sa) -> 0 | err
-#define SYS_SIGPROCMASK  62  // sigprocmask(how, *set, *oldset)    -> 0 | err
-#define SYS_SIGRETURN    63  // sigreturn()  — trampoline tarafından çağrılır
-#define SYS_SIGPENDING   64  // sigpending(*set)                   -> 0 | err
-#define SYS_SIGSUSPEND   65  // sigsuspend(*mask) — sinyal gelene kadar bekle
-
-// ── v13 – Sistem bilgisi (bash $MACHTYPE, $HOSTTYPE, PS1 \s/\v) ─────────
-#define SYS_UNAME        73  // uname(*utsname_t)                  -> 0 | err
-
-// ── v14 – Dosya sistemi yazma (bash mkdir/rm/mv, geçici dosyalar) ───────
-#define SYS_MKDIR        80  // mkdir(path, mode)                  -> 0 | err
-#define SYS_RMDIR        81  // rmdir(path)                        -> 0 | err
-#define SYS_UNLINK       82  // unlink(path)                       -> 0 | err
-#define SYS_RENAME       83  // rename(oldpath, newpath)           -> 0 | err
-
-// ── v15 – Kullanıcı kimliği (bash $UID/$EUID, root kontrolü) ────────────
-#define SYS_GETUID       84  // getuid()                           -> uid
-#define SYS_GETEUID      85  // geteuid()                          -> euid
-#define SYS_GETGID       86  // getgid()                          -> gid
-#define SYS_GETEGID      87  // getegid()                         -> egid
-
-// ── v23 – Grup listesi (bash $GROUPS, id builtin) ────────────────────────
-#define SYS_GETGROUPS   106  // getgroups(size, list[])            -> ngroups | err
-
-// ── v15 – Zamanlama (bash sleep, $SECONDS) ───────────────────────────────
-#define SYS_NANOSLEEP    88  // nanosleep(*req, *rem)              -> 0 | err
-
-// ── v15 – Alternate sinyal yığını (bash SIGSEGV güvenliği) ──────────────
-#define SYS_SIGALTSTACK  89  // sigaltstack(*ss, *old_ss)          -> 0 | err
-
-// ── v17 – POSIX saat arayüzü (bash $SECONDS, time builtin, readline) ────
-#define SYS_CLOCK_GETTIME 90  // clock_gettime(clockid, *timespec) -> 0 | err
-#define SYS_CLOCK_GETRES  91  // clock_getres(clockid, *timespec)  -> 0 | err
-
-// ── v18 – Zamanlayıcı & dosya kırpma (bash read -t, history, heredoc) ───
-#define SYS_ALARM         92  // alarm(seconds)                    -> kalan_sn
-#define SYS_FTRUNCATE     93  // ftruncate(fd, length)             -> 0 | err
-#define SYS_TRUNCATE      94  // truncate(path, length)            -> 0 | err
-
-// ── v19 – Kaynak limitleri (bash fd limit, stack size sorgusu) ───────────
-#define SYS_GETRLIMIT     95  // getrlimit(resource, *rlimit)       -> 0 | err
-#define SYS_SETRLIMIT     96  // setrlimit(resource, *rlimit)       -> 0 | err
-
-// ── v20 – newlib uyumu & bash eksikleri ──────────────────────────────────
-#define SYS_LSTAT         97  // lstat(path, *stat_buf)  -> 0 | err  (symlink meta, bash [[ -L ]])
-#define SYS_LINK          98  // link(oldpath, newpath)  -> 0 | err  (newlib _link stub)
-#define SYS_TIMES         99  // times(*tms)             -> ticks | err (newlib _times, bash time)
-
-// ── v21 – bash port eksikleri (umask / symlink / readlink) ───────────────
-#define SYS_UMASK        100  // umask(mode)             -> old_mask   (bash init + umask builtin)
-#define SYS_SYMLINK      101  // symlink(target, linkpath) -> 0 | err  (ln -s, bash komut tamamlama)
-#define SYS_READLINK     102  // readlink(path, buf, size) -> nbytes | err  (bash argv[0] resolve, $0)
-
-// ── v22 – dosya/bellek izinleri + atomik pipe ─────────────────────────────
-#define SYS_CHMOD        103  // chmod(path, mode)           -> 0 | err  (bash dosya oluşturma sonrası)
-#define SYS_MPROTECT     104  // mprotect(addr, len, prot)   -> 0 | err  (ELF segment koruması, JIT)
-#define SYS_PIPE2        105  // pipe2(pipefd[2], flags)     -> 0 | err  (O_CLOEXEC atomik pipe)
+// sbrk — Linux'ta yoktur (brk() ile yapılır); newlib uyumu için AscentOS özel alanda.
+#define SYS_SBRK         405  // sbrk(increment)                  -> old_brk | err [AscentOS özel]
 
 // clock_gettime() / clock_getres() clockid değerleri
 #define CLOCK_REALTIME            0   // Sistem saati (epoch'tan itibaren)
 #define CLOCK_MONOTONIC           1   // Monoton saat (önyüklemeden itibaren, geriye gitmez)
 #define CLOCK_PROCESS_CPUTIME_ID  2   // Bu process'in CPU süresi (stub: nanosleep gibi)
 #define CLOCK_THREAD_CPUTIME_ID   3   // Bu thread'in CPU süresi  (stub)
+
+// ============================================================
+// futex() — Linux x86-64 uyumlu futex işlem sabitleri  (SYS_FUTEX = 202)
+//
+// Temel kullanım: futex(uaddr, FUTEX_WAIT, val, timeout, NULL, 0)
+//                 futex(uaddr, FUTEX_WAKE, nwake, NULL, NULL, 0)
+// ============================================================
+#define FUTEX_WAIT          0    // *uaddr == val ise uyut
+#define FUTEX_WAKE          1    // En fazla val kadar thread'i uyandır
+#define FUTEX_FD            2    // (eski, kullanımdan kalktı)
+#define FUTEX_REQUEUE       3    // Kuyruğu başka bir futex'e taşı
+#define FUTEX_CMP_REQUEUE   4    // Koşullu requeue
+#define FUTEX_WAKE_OP       5    // Atomik OP + wake
+
+#define FUTEX_PRIVATE_FLAG  128  // Sadece bu process'in thread'leri için
+#define FUTEX_CLOCK_REALTIME 256 // timeout için CLOCK_REALTIME kullan
+
+// Yaygın bileşik işlemler
+#define FUTEX_WAIT_PRIVATE  (FUTEX_WAIT | FUTEX_PRIVATE_FLAG)
+#define FUTEX_WAKE_PRIVATE  (FUTEX_WAKE | FUTEX_PRIVATE_FLAG)
+
+// ============================================================
+// getrandom() — Linux x86-64 uyumlu rastgele veri sabitleri  (SYS_GETRANDOM = 318)
+//
+// Kullanım: getrandom(buf, buflen, flags) -> bytes_read | err
+// ============================================================
+#define GRND_NONBLOCK  0x0001   // Bloklamak yerine EAGAIN döndür
+#define GRND_RANDOM    0x0002   // /dev/random kalite entropisi kullan
+
+// ============================================================
+// writev() — scatter/gather I/O  (SYS_WRITEV = 20)
+// ============================================================
+typedef struct {
+    void*    iov_base;   // Tampon başlangıcı
+    uint64_t iov_len;    // Tampon uzunluğu
+} iovec_t;
+
+// ============================================================
+// madvise() — bellek kullanım tavsiyesi  (SYS_MADVISE = 28)
+// musl malloc/free tarafından çağrılır; çoğu tavsiye stub olarak 0 döner.
+// ============================================================
+#define MADV_NORMAL       0   // Varsayılan davranış
+#define MADV_RANDOM       1   // Rastgele erişim bekleniyor
+#define MADV_SEQUENTIAL   2   // Sıralı erişim bekleniyor
+#define MADV_WILLNEED     3   // Yakında kullanılacak — prefetch
+#define MADV_DONTNEED     4   // Artık gerekmez — serbest bırak
+#define MADV_FREE         8   // Sayfa içeriği önemsiz (Linux 4.5+)
+#define MADV_HUGEPAGE    14   // THP tercih et
+#define MADV_NOHUGEPAGE  15   // THP kullanma
+
+// ============================================================
+// openat() — dizin-göreceli dosya açma  (SYS_OPENAT = 257)
+// musl open() wrapper'ı her zaman openat(AT_FDCWD, ...) çağırır.
+// ============================================================
+#define AT_FDCWD          (-100)  // Geçerli çalışma dizinini temsil eder
+#define AT_SYMLINK_NOFOLLOW 0x100 // Sembolik bağları takip etme
+#define AT_REMOVEDIR      0x200   // rmdir gibi davran (unlinkat için)
+#define AT_EACCESS        0x200   // faccessat: gerçek yerine etkin UID kullan
+
+// ============================================================
+// newfstatat() — dizin-göreceli stat  (SYS_NEWFSTATAT = 262)
+// musl stat() wrapper'ı bunu çağırır.
+// ============================================================
+#define AT_EMPTY_PATH     0x1000  // boş path → dirfd'nin kendisini stat et
+
+// ============================================================
+// prlimit64() — işlem kaynak limiti al/set  (SYS_PRLIMIT64 = 302)
+// musl getrlimit/setrlimit yerine bunu tercih eder.
+// ============================================================
+typedef struct {
+    uint64_t rlim_cur;   // Soft limit
+    uint64_t rlim_max;   // Hard limit
+} rlimit64_t;
+
+// ============================================================
+// set_tid_address — musl __init_tp() tarafından ilk çağrılan syscall  (SYS_SET_TID_ADDRESS = 218)
+//
+// musl, thread pointer (TP) kurulumu sırasında kernel'e clear_child_tid
+// adresini bildirir. Thread çıkışında kernel *tidptr = 0 yazar ve
+// futex_wake ile bekleyenleri uyandırır.
+//
+// AscentOS implementasyonu:
+//   - tidptr task_t içinde saklanır
+//   - Dönüş: mevcut task'ın TID (PID) değeri
+// ============================================================
+
+// ============================================================
+// set_robust_list — pthreads mutex recovery  (SYS_SET_ROBUST_LIST = 273)
+//
+// musl her thread için kernel'e robust futex listesi başını bildirir.
+// Thread anormal çıkışında kernel listedeki futex'leri otomatik release eder.
+//
+// AscentOS implementasyonu: liste adresi kaydedilir, 0 döner.
+// (Gerçek robust futex işlemi gelecek; şimdilik kayıt + ENOSYS yerine 0.)
+// ============================================================
+#define ROBUST_LIST_HEAD_SIZE  24   // sizeof(struct robust_list_head) — 64-bit
+
+// ============================================================
+// arch_prctl() — x86-64'e özgü işlem/thread kontrol  (SYS_ARCH_PRCTL = 158)
+//
+// Temel kullanım: arch_prctl(ARCH_SET_FS, addr) → FS.base = addr
+//                 arch_prctl(ARCH_GET_FS, *addr) → *addr = FS.base
+// ============================================================
+#define ARCH_SET_GS        0x1001   // GS.base yaz
+#define ARCH_SET_FS        0x1002   // FS.base yaz  (TLS pointer — en yaygın kullanım)
+#define ARCH_GET_FS        0x1003   // FS.base oku
+#define ARCH_GET_GS        0x1004   // GS.base oku
+#define ARCH_GET_CPUID     0x1011   // CPUID izni sorgula
+#define ARCH_SET_CPUID     0x1012   // CPUID iznini aç/kapat
+
+// ============================================================
+// clone() — Linux x86-64 uyumlu thread/process oluşturma  (SYS_CLONE = 56)
+//
+// Kullanım: clone(flags, child_stack, ptid, ctid, tls) -> child_pid | 0 | err
+// AscentOS stub: CLONE_THREAD içermeyen çağrılar → fork() gibi davranır.
+// CLONE_THREAD içerenlerde TLS kurulumu yapılır, scheduler'a yeni task eklenir.
+// ============================================================
+#define CLONE_VM           0x00000100  // VM'i paylaş (thread)
+#define CLONE_FS           0x00000200  // Dosya sistemi bilgisini paylaş
+#define CLONE_FILES        0x00000400  // fd tablosunu paylaş
+#define CLONE_SIGHAND      0x00000800  // Sinyal handler'larını paylaş
+#define CLONE_PTRACE       0x00002000  // Trace'i miras al
+#define CLONE_VFORK        0x00004000  // Parent MM kilidi (vfork semantiği)
+#define CLONE_PARENT       0x00008000  // Aynı parent'ı paylaş
+#define CLONE_THREAD       0x00010000  // Aynı thread grubuna gir
+#define CLONE_NEWNS        0x00020000  // Yeni mount namespace
+#define CLONE_SYSVSEM      0x00040000  // SysV semaphore listesini paylaş
+#define CLONE_SETTLS       0x00080000  // TLS'i R8'deki değerle kur (FS.base)
+#define CLONE_PARENT_SETTID 0x00100000 // Parent'ta *ptid = child_tid
+#define CLONE_CHILD_CLEARTID 0x00200000 // Child çıkışında *ctid = 0 + futex_wake
+#define CLONE_DETACHED     0x00400000  // (kullanımdan kalktı)
+#define CLONE_UNTRACED     0x00800000  // CLONE_PTRACE zorlanamaz
+#define CLONE_CHILD_SETTID 0x01000000  // Child'da *ctid = child_tid
+#define CLONE_NEWCGROUP    0x02000000  // Yeni cgroup namespace
+#define CLONE_NEWUTS       0x04000000  // Yeni UTS namespace
+#define CLONE_NEWIPC       0x08000000  // Yeni IPC namespace
+#define CLONE_NEWUSER      0x10000000  // Yeni kullanıcı namespace
+#define CLONE_NEWPID       0x20000000  // Yeni PID namespace
+#define CLONE_NEWNET       0x40000000  // Yeni ağ namespace
+#define CLONE_IO           0x80000000  // I/O context kopyala
 
 // ============================================================
 // getrlimit() / setrlimit() — kaynak limit yapısı ve sabitleri
@@ -224,7 +359,8 @@ typedef struct {
 #define W_OK   2   // yazma izni var mı?
 #define X_OK   1   // çalıştırma izni var mı?
 
-#define SYSCALL_MAX      107  // v23: getgroups(106)
+// AscentOS özel syscall'lar 400-405 aralığında; Linux syscall'ları max ~450'de bitiyor.
+#define SYSCALL_MAX      407  // AscentOS özel alan üst sınırı (SYS_SLEEP=406)
 
 // ============================================================
 // kill() sinyal numaraları (POSIX alt kümesi)
@@ -565,24 +701,39 @@ typedef struct {
 #define STDERR_FD   2
 
 // ============================================================
-// Hata Kodları
-// Negatif uint64 olarak döner; kullanıcı tarafında (int64_t) cast edilmeli.
+// Hata Kodları  ── Linux x86-64 ABI ile BİREBİR UYUMLU
+//
+// Değerler Linux kernel'inin include/uapi/asm-generic/errno-base.h
+// ve errno.h dosyalarından alınmıştır.  Negatif uint64 olarak döner;
+// kullanıcı tarafında (int64_t) cast edilmeli.
+//
+// syscalls.c artık hiçbir dönüşüm yapmaz:
+//   if (ret < 0) { errno = (int)(-ret); return -1; }
 // ============================================================
 #define SYSCALL_OK          ((uint64_t)0)
-#define SYSCALL_ERR_INVAL   ((uint64_t)-1)   // -EINVAL  : geçersiz argüman
-#define SYSCALL_ERR_NOSYS   ((uint64_t)-2)   // -ENOSYS  : implemente edilmedi
-#define SYSCALL_ERR_PERM    ((uint64_t)-3)   // -EPERM   : yetki yok
-#define SYSCALL_ERR_NOENT   ((uint64_t)-4)   // -ENOENT  : dosya bulunamadı
-#define SYSCALL_ERR_BADF    ((uint64_t)-5)   // -EBADF   : geçersiz fd
-#define SYSCALL_ERR_NOMEM   ((uint64_t)-6)   // -ENOMEM  : bellek yok
-#define SYSCALL_ERR_BUSY    ((uint64_t)-7)   // -EBUSY   : kaynak meşgul
-#define SYSCALL_ERR_MFILE   ((uint64_t)-8)   // -EMFILE  : fd tablosu dolu
-#define SYSCALL_ERR_AGAIN   ((uint64_t)-9)   // -EAGAIN  : tekrar dene
+#define SYSCALL_ERR_PERM    ((uint64_t)-1)   // -EPERM   : yetki yok
+#define SYSCALL_ERR_NOENT   ((uint64_t)-2)   // -ENOENT  : dosya bulunamadı
+#define SYSCALL_ERR_SRCH    ((uint64_t)-3)   // -ESRCH   : süreç bulunamadı
+#define SYSCALL_ERR_INTR    ((uint64_t)-4)   // -EINTR   : sinyal ile kesildi
+#define SYSCALL_ERR_IO      ((uint64_t)-5)   // -EIO     : I/O hatası
+#define SYSCALL_ERR_AGAIN   ((uint64_t)-11)  // -EAGAIN  : tekrar dene  (=EWOULDBLOCK)
+#define SYSCALL_ERR_NOMEM   ((uint64_t)-12)  // -ENOMEM  : bellek yok
+#define SYSCALL_ERR_FAULT   ((uint64_t)-14)  // -EFAULT  : geçersiz adres
+#define SYSCALL_ERR_BUSY    ((uint64_t)-16)  // -EBUSY   : kaynak meşgul
+#define SYSCALL_ERR_NODEV   ((uint64_t)-19)  // -ENODEV  : aygıt yok
+#define SYSCALL_ERR_INVAL   ((uint64_t)-22)  // -EINVAL  : geçersiz argüman
+#define SYSCALL_ERR_MFILE   ((uint64_t)-24)  // -EMFILE  : fd tablosu dolu
+#define SYSCALL_ERR_NOSPC   ((uint64_t)-28)  // -ENOSPC  : alan yok
+#define SYSCALL_ERR_RANGE   ((uint64_t)-34)  // -ERANGE  : değer aralık dışı
+#define SYSCALL_ERR_NOSYS   ((uint64_t)-38)  // -ENOSYS  : implemente edilmedi
 #define SYSCALL_ERR_CHILD   ((uint64_t)-10)  // -ECHILD  : çocuk yok / bulunamadı
-#define SYSCALL_ERR_FAULT   ((uint64_t)-11)  // -EFAULT  : geçersiz adres
-#define SYSCALL_ERR_NOSPC   ((uint64_t)-12)  // -ENOSPC  : alan yok (pipe tamponu)
-#define SYSCALL_ERR_RANGE   ((uint64_t)-13)  // -ERANGE  : değer aralık dışı
-#define SYSCALL_ERR_INTR    ((uint64_t)-14)  // -EINTR   : sinyal ile kesildi
+#define SYSCALL_ERR_BADF    ((uint64_t)-9)   // -EBADF   : geçersiz fd
+#define SYSCALL_ERR_PIPE    ((uint64_t)-32)  // -EPIPE   : broken pipe
+#define SYSCALL_ERR_NAMETOOLONG ((uint64_t)-36) // -ENAMETOOLONG
+
+// ── Takma adlar (geriye dönük uyumluluk için; eski sabitleri kullanan
+//    kernel kodunu kırmaz, sadece değerleri artık Linux ile örtüşür) ───────
+#define SYSCALL_ERR_WOULDBLOCK  SYSCALL_ERR_AGAIN  // -EWOULDBLOCK == -EAGAIN
 
 // ============================================================
 // Per-task File Descriptor Tablosu
