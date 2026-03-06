@@ -1,6 +1,7 @@
 // task.c - Task Management Implementation
 // Ring-0 + Ring-3 (SYSRET) + TSS destekli versiyon
 // v2: task_create_from_elf() eklendi
+// v3: argc/argv SysV ABI stack kurulumu + foreground_pid yönetimi
 #include "task.h"
 #include "signal64.h"
 #include "memory_unified.h"
@@ -48,6 +49,16 @@ static int          task_system_initialized = 0;
 // task_exit() icin: onceki task (static — scheduler'daki previous_task ile catismasin)
 static task_t* task_exit_previous = NULL;
 
+// ============================================================
+// FOREGROUND TASK YÖNETİMİ
+//
+// foreground_pid != 0 → bir ELF task ön planda çalışıyor.
+// keyboard_unified.c bu değeri okuyarak tuş girdisini
+// doğrudan kb_ring'e yönlendirir (shell prompt'una değil).
+// task_exit() bu değeri sıfırlar ve shell'i geri getirir.
+// ============================================================
+volatile uint32_t foreground_pid = 0;
+
 // ===========================================
 // YARDIMCI FONKSIYONLAR
 // ===========================================
@@ -57,10 +68,23 @@ static void* memset_task(void* dest, int val, uint64_t n) {
     return dest;
 }
 
+static void* memcpy_task(void* dest, const void* src, uint64_t n) {
+    uint8_t* d = (uint8_t*)dest;
+    const uint8_t* s = (const uint8_t*)src;
+    while (n--) *d++ = *s++;
+    return dest;
+}
+
 static void str_copy_safe(char* dest, const char* src, int max_len) {
     int i = 0;
     while (src[i] && i < max_len - 1) { dest[i] = src[i]; i++; }
     dest[i] = '\0';
+}
+
+static int str_len_local(const char* s) {
+    int n = 0;
+    while (s[n]) n++;
+    return n;
 }
 
 // ============================================================
@@ -563,24 +587,25 @@ task_t* task_create_user(const char* name, void (*entry_point)(void), uint32_t p
 // ELF'TEN USER TASK OLUSTURMA (Ring-3)
 // ===========================================
 //
-// elf64_load() ile belleğe yüklenmiş bir ELF imajından
-// düzgün yapılandırılmış Ring-3 task oluşturur.
+// SysV AMD64 ABI — user stack düzeni (task çalışmadan önce):
 //
-// Fark: task_create_user()'a göre iretq frame'deki RIP
-// ELF entry noktasına, RSP SysV ABI'ye uygun şekilde
-// hizalanmış user stack tepesine ayarlanır.
-// argc/argv/envp sıfır olarak başlatılır.
+//   [rsp + 0]         argc
+//   [rsp + 8]         argv[0]   ← program adı pointer'ı
+//   [rsp + 16]        argv[1]   ← 1. argüman pointer'ı (varsa)
+//   ...
+//   [rsp + (n+1)*8]   NULL      ← argv sonu
+//   [rsp + (n+2)*8]   NULL      ← envp sonu
+//   ...               string verileri (argv stringleri burada)
 //
-// Kullanım:
-//   ElfImage img;
-//   elf64_exec_from_fat32("CALC", 0x400000, &img, cout);
-//   task_t* t = task_create_from_elf("CALC.ELF", &img, TASK_PRIORITY_NORMAL);
-//   if (t) task_start(t);
+// argc=0 geçilirse kilo "Usage: kilo <filename>" basıp çıkar.
+// argv[0]="KILO.ELF", argv[1]="dosya.txt" şeklinde geçin.
 // ===========================================
 
 task_t* task_create_from_elf(const char* name,
                               const ElfImage* img,
-                              uint32_t priority)
+                              uint32_t priority,
+                              int argc,
+                              const char** argv)
 {
     if (!name || !img) {
         serial_print("[TASK_ELF] NULL argument!\n");
@@ -597,6 +622,9 @@ task_t* task_create_from_elf(const char* name,
     char buf[24];
     uint64_to_string(img->entry, buf);
     serial_print(buf);
+    serial_print(" argc=");
+    int_to_str(argc, buf);
+    serial_print(buf);
     serial_print("\n");
 
     // ── 1. TCB + stack'leri task_create_user ile oluştur ────────
@@ -609,34 +637,75 @@ task_t* task_create_from_elf(const char* name,
         return NULL;
     }
 
-    // ── 2. Kernel stack'teki iretq frame'ini ELF için düzelt ────
+    // ── 2. SysV ABI: argv stringlerini + pointer tablosunu user stack'a yaz ──
+    //
+    // User stack'ın üst kısmına (tepeden aşağı) yaz:
+    //   1. Önce string verileri (argv[argc-1]..argv[0])
+    //   2. 16-byte hizala
+    //   3. NULL (envp sonu)
+    //   4. NULL (argv sonu)
+    //   5. argv pointer'ları (argv[argc-1]..argv[0])
+    //   6. argc
+    //   → RSP buraya işaret eder
+
+    // Sınır: max 8 argüman, her biri max 128 karakter
+    #define MAX_ARGV 8
+    #define MAX_ARG_LEN 128
+
+    uint64_t sp = task->user_stack_top;
+
+    // Stringleri stack'e kopyala (yukarıdan aşağı)
+    uint64_t str_ptrs[MAX_ARGV];
+    int real_argc = (argc > MAX_ARGV) ? MAX_ARGV : argc;
+
+    for (int i = real_argc - 1; i >= 0; i--) {
+        const char* arg = argv[i];
+        int len = str_len_local(arg) + 1;  // null terminator dahil
+        sp -= (uint64_t)len;
+        memcpy_task((void*)sp, arg, (uint64_t)len);
+        str_ptrs[i] = sp;
+        serial_print("[TASK_ELF]   argv[");
+        int_to_str(i, buf); serial_print(buf);
+        serial_print("]=\""); serial_print(arg);
+        serial_print("\" @ 0x"); uint64_to_string(sp, buf); serial_print(buf);
+        serial_print("\n");
+    }
+
+    // 16-byte hizala
+    sp &= ~(uint64_t)0xF;
+
+    // envp sonu = NULL
+    sp -= 8;
+    *((uint64_t*)sp) = 0;
+
+    // argv sonu = NULL
+    sp -= 8;
+    *((uint64_t*)sp) = 0;
+
+    // argv pointer'larını yaz (sondan başa)
+    for (int i = real_argc - 1; i >= 0; i--) {
+        sp -= 8;
+        *((uint64_t*)sp) = str_ptrs[i];
+    }
+
+    // argc
+    sp -= 8;
+    *((uint64_t*)sp) = (uint64_t)real_argc;
+
+    // ── 3. Kernel stack'teki iretq frame'ini ELF için düzelt ────
     //
     // task_create_user'ın oluşturduğu kernel stack düzeni
     // (yüksekten alçağa, context.rsp = en alt — 15 register'ın başı):
     //
     //   [kernel_stack_top - 8]   SS      (0x1B)
-    //   [kernel_stack_top - 16]  RSP     (user_stack_top)   ← bunu düzeltiyoruz
+    //   [kernel_stack_top - 16]  RSP     (user_stack_top)   ← argv RSP ile değiştir
     //   [kernel_stack_top - 24]  RFLAGS  (0x202)
     //   [kernel_stack_top - 32]  CS      (0x23)
-    //   [kernel_stack_top - 40]  RIP     (entry_point)      ← bunu düzeltiyoruz
+    //   [kernel_stack_top - 40]  RIP     (entry_point)      ← ELF entry ile değiştir
     //   [context.rsp + 14*8]     r15     (0)
     //   ...
     //   [context.rsp + 0]        rax     (0)
-    //
-    // context.rsp → kernel stack'teki 15-register bloğunun tabanı.
-    // BU DEĞER DEĞİŞMEMELİ — scheduler bu pointer'ı RSP'ye yükler,
-    // ardından 15x pop + iretq yapar.
-    //
-    // Sadece iretq frame içindeki RIP ve RSP alanlarını güncelliyoruz.
 
-    // SysV AMD64 ABI: RSP % 16 == 0 olmalı çağrı anında,
-    // yani iretq'dan hemen sonra (call'dan önce) 16 hizalı.
-    // iretq RSP'yi doğrudan yükler — %16 == 0 bırakıyoruz.
-    uint64_t abi_rsp = task->user_stack_top & ~(uint64_t)0xF;
-
-    // iretq frame: kernel_stack_top'tan aşağı doğru SS, RSP, RFLAGS, CS, RIP
-    // context.rsp = kernel_stack_top - (15+5)*8 = iretq frame'in tabanı - 15*8
-    // Yani iretq frame'in ilk kelimesi (RIP) = context.rsp + 15*8
     uint64_t* frame_rip = (uint64_t*)(task->context.rsp + 15 * 8);
     uint64_t* frame_cs  = frame_rip + 1;
     uint64_t* frame_rfl = frame_rip + 2;
@@ -646,33 +715,37 @@ task_t* task_create_from_elf(const char* name,
     *frame_rip = img->entry;            // ELF entry point
     *frame_cs  = GDT_USER_CODE_RPL3;   // 0x23 — Ring-3 code
     *frame_rfl = 0x202;                 // IF=1
-    *frame_rsp = abi_rsp;              // Ring-3 user stack (16-byte hizalı)
+    *frame_rsp = sp;                    // argv kurulmuş RSP
     *frame_ss  = GDT_USER_DATA_RPL3;   // 0x1B — Ring-3 data
 
-    // ── 3. cpu_context: sadece RIP/CS/SS güncellenir ────────────
+    // ── 4. cpu_context güncelle ──────────────────────────────────
     // CRITICAL: context.rsp DEĞİŞMEZ — kernel stack frame pointer'ı!
-    // task_switch_context / task_load_and_jump_context bu değeri
-    // RSP'ye yükleyip 15x pop + iretq yapar. Yanlış değer = triple fault.
     task->context.rip    = img->entry;
-    // context.rsp = task_create_user'ın kurduğu kernel stack pointer — DOKUNMA
     task->context.rflags = 0x202;
     task->context.cs     = GDT_USER_CODE_RPL3;
     task->context.ss     = GDT_USER_DATA_RPL3;
 
-    // ── 4. SysV ABI: argc=0, argv=NULL, envp=NULL ───────────────
-    task->context.rdi = 0;
-    task->context.rsi = 0;
-    task->context.rdx = 0;
+    // SysV ABI: _start beklentisi — rdi=argc, rsi=argv, rdx=envp
+    // (musl crt0 bunları okur)
+    task->context.rdi = (uint64_t)real_argc;
+    task->context.rsi = sp + 8;          // argv pointer dizisinin başı
+    task->context.rdx = sp + 8 + (uint64_t)(real_argc + 1) * 8; // envp
 
     serial_print("[TASK_ELF] Task '");
     serial_print(name);
     serial_print("' ready. PID=");
     int_to_str((int)task->pid, buf);
     serial_print(buf);
-    serial_print(" abi_rsp=0x");
-    uint64_to_string(abi_rsp, buf);
+    serial_print(" user_rsp=0x");
+    uint64_to_string(sp, buf);
+    serial_print(buf);
+    serial_print(" argc=");
+    int_to_str(real_argc, buf);
     serial_print(buf);
     serial_print("\n");
+
+    #undef MAX_ARGV
+    #undef MAX_ARG_LEN
 
     return task;
 }
@@ -716,6 +789,17 @@ void task_exit(void) {
     serial_print("' exiting (PID=");
     char _b[12]; int_to_str((int)current_task->pid, _b); serial_print(_b);
     serial_print(")\n");
+
+    // ── Foreground temizle; shell'i geri getir ────────────────
+    if (foreground_pid != 0 && foreground_pid == current_task->pid) {
+        foreground_pid = 0;
+        serial_print("[TASK] foreground_pid cleared, shell restored\n");
+        // Klavyeyi shell moduna döndür ve prompt'u yeniden göster
+        extern void kb_set_userland_mode(int on);
+        kb_set_userland_mode(0);
+        shell_restore_prompt();
+    }
+
     current_task->state = TASK_STATE_TERMINATED;
     task_t* next = task_get_next();
     if (!next) next = idle_task;
