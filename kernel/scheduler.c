@@ -306,7 +306,11 @@ void scheduler_yield(void) {
     
     if (current->pid != 0) {
         current->time_used = 0;
-        current->state = TASK_STATE_READY;
+        // SLEEPING state'i koru — task_sleep() sonrası yield yapılıyorsa
+        // state'i READY'e çevirme; scheduler_tick() wake_tick dolunca uyandırır.
+        if (current->state != TASK_STATE_SLEEPING) {
+            current->state = TASK_STATE_READY;
+        }
         scheduler_add_task(current);
     }
     
