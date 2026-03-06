@@ -25,97 +25,110 @@ typedef long           ptrdiff_t;
 
 // ── AscentOS Syscall Numaraları (syscall.h ile birebir aynı) ─────────────
 // v1-v2: Temel I/O ve süreç
-#define SYS_WRITE        1
-#define SYS_READ         2
-#define SYS_EXIT         3
-#define SYS_GETPID       4
-#define SYS_YIELD        5
-#define SYS_SLEEP        6
-#define SYS_UPTIME       7
-#define SYS_DEBUG        8
-#define SYS_OPEN         9
-#define SYS_CLOSE        10
-#define SYS_GETPPID      11
-#define SYS_SBRK         12
-#define SYS_GETPRIORITY  13
-#define SYS_SETPRIORITY  14
-#define SYS_GETTICKS     15
+#define SYS_WRITE         1
+#define SYS_READ          0
+#define SYS_EXIT         60
+#define SYS_GETPID       39
+#define SYS_YIELD        24
+#define SYS_SLEEP       406
+#define SYS_UPTIME       99
+#define SYS_DEBUG       103
+#define SYS_OPEN          2
+#define SYS_CLOSE         3
+#define SYS_GETPPID     110
+#define SYS_SBRK        405
+#define SYS_GETPRIORITY 140
+#define SYS_SETPRIORITY 141
+#define SYS_GETTICKS    404
 // v3: Bellek ve süreç
-#define SYS_MMAP         16
-#define SYS_MUNMAP       17
-#define SYS_BRK          18
-#define SYS_FORK         19
-#define SYS_EXECVE       20
-#define SYS_WAITPID      21
+#define SYS_MMAP          9
+#define SYS_MUNMAP       11
+#define SYS_BRK          12
+#define SYS_FORK         57
+#define SYS_EXECVE       59
+#define SYS_WAITPID      61
 #define SYS_PIPE         22
-#define SYS_DUP2         23
+#define SYS_DUP2         33
 // v4: Dosya I/O
-#define SYS_LSEEK        24
-#define SYS_FSTAT        25
-#define SYS_IOCTL        26
+#define SYS_LSEEK         8
+#define SYS_FSTAT         5
+#define SYS_IOCTL        16
 // v5: Çoğullama
-#define SYS_SELECT       27
-#define SYS_POLL         28
+#define SYS_SELECT       23
+#define SYS_POLL          7
 // v6: Newlib uyumu
-#define SYS_KILL         29
-#define SYS_GETTIMEOFDAY 30
+#define SYS_KILL         62
+#define SYS_GETTIMEOFDAY 96
 // v8: Dosya sorgulama
-#define SYS_STAT         31
-#define SYS_ACCESS       42
+#define SYS_STAT          4
+#define SYS_ACCESS       21
 // v7: Dizin
-#define SYS_GETCWD       43
-#define SYS_CHDIR        44
+#define SYS_GETCWD       79
+#define SYS_CHDIR        80
 // v9: Dizin okuma
-#define SYS_GETDENTS     58
-#define SYS_OPENDIR      59
-#define SYS_CLOSEDIR     60
+#define SYS_GETDENTS     78
+#define SYS_OPENDIR     402
+#define SYS_CLOSEDIR    403
 // v10: Sinyal
-#define SYS_SIGACTION    61
-#define SYS_SIGPROCMASK  62
-#define SYS_SIGRETURN    63
-#define SYS_SIGPENDING   64
-#define SYS_SIGSUSPEND   65
+#define SYS_SIGACTION    13
+#define SYS_SIGPROCMASK  14
+#define SYS_SIGRETURN    15
+#define SYS_SIGPENDING  127
+#define SYS_SIGSUSPEND  130
 // v11: fd yönetimi
-#define SYS_FCNTL        66
-#define SYS_DUP          67
+#define SYS_FCNTL        72
+#define SYS_DUP          32
 // v12: Process group & session (bash iş kontrolü)
-#define SYS_SETPGID      68
-#define SYS_GETPGID      69
-#define SYS_SETSID       70
-#define SYS_TCSETPGRP    71
-#define SYS_TCGETPGRP    72
+#define SYS_SETPGID     109
+#define SYS_GETPGID     121
+#define SYS_SETSID      112
+#define SYS_TCSETPGRP   400
+#define SYS_TCGETPGRP   401
 // v13: Sistem bilgisi
-#define SYS_UNAME        73
+#define SYS_UNAME        63
 // v14: Dosya sistemi yazma (bash mkdir/rm/mv)
-#define SYS_MKDIR        80
-#define SYS_RMDIR        81
-#define SYS_UNLINK       82
-#define SYS_RENAME       83
+#define SYS_MKDIR        83
+#define SYS_RMDIR        84
+#define SYS_UNLINK       87
+#define SYS_RENAME       82
 // v15: Kullanıcı kimliği / zamanlama / sinyal yığını
-#define SYS_GETUID       84
-#define SYS_GETEUID      85
-#define SYS_GETGID       86
-#define SYS_GETEGID      87
-#define SYS_NANOSLEEP    88
-#define SYS_SIGALTSTACK  89
+#define SYS_GETUID      102
+#define SYS_GETEUID     107
+#define SYS_GETGID      104
+#define SYS_GETEGID     108
+#define SYS_NANOSLEEP    35
+#define SYS_SIGALTSTACK 131
 // v16: clock, alarm, truncate, rlimit, lstat, link, umask, symlink, readlink, chmod, mprotect, pipe2, times, getgroups
-#define SYS_CLOCK_GETTIME 90
-#define SYS_CLOCK_GETRES  91
-#define SYS_ALARM         92
-#define SYS_FTRUNCATE     93
-#define SYS_TRUNCATE      94
-#define SYS_GETRLIMIT     95
-#define SYS_SETRLIMIT     96
-#define SYS_LSTAT         97
-#define SYS_LINK          98
-#define SYS_TIMES         99
-#define SYS_UMASK        100
-#define SYS_SYMLINK      101
-#define SYS_READLINK     102
-#define SYS_CHMOD        103
-#define SYS_MPROTECT     104
-#define SYS_PIPE2        105
+#define SYS_CLOCK_GETTIME 228
+#define SYS_CLOCK_GETRES  229
+#define SYS_ALARM        37
+#define SYS_FTRUNCATE    77
+#define SYS_TRUNCATE     76
+#define SYS_GETRLIMIT    97
+#define SYS_SETRLIMIT   160
+#define SYS_LSTAT         6
+#define SYS_LINK         86
+#define SYS_TIMES       100
+#define SYS_UMASK        95
+#define SYS_SYMLINK      88
+#define SYS_READLINK     89
+#define SYS_CHMOD        90
+#define SYS_MPROTECT     10
+#define SYS_PIPE2       293
 #define SYS_GETGROUPS    106
+// v27: musl libc başlatma ve gelişmiş syscall'lar
+#define SYS_FUTEX         202
+#define SYS_GETRANDOM     318
+#define SYS_ARCH_PRCTL    158
+#define SYS_CLONE          56
+#define SYS_SET_TID_ADDRESS 218
+#define SYS_SET_ROBUST_LIST 273
+#define SYS_WRITEV         20
+#define SYS_MADVISE        28
+#define SYS_EXIT_GROUP    231
+#define SYS_OPENAT        257
+#define SYS_NEWFSTATAT    262
+#define SYS_PRLIMIT64     302
 
 // ── open() flags ─────────────────────────────────────────────────────────
 #define O_RDONLY    0x00
@@ -127,8 +140,21 @@ typedef long           ptrdiff_t;
 #define O_NONBLOCK  0x800
 #define O_CLOEXEC   0x80000
 
-// errno forward declaration (tanım dosyanın sonunda)
-extern int _errno_val;
+// ── errno storage ────────────────────────────────────────────────────────
+// syscalls.c musl header'ları olmadan derlenir (sadece GCC include).
+// Bu yüzden __errno_location'ı burada __attribute__((weak)) olarak tanımlarız.
+//   • Weak sembol: musl libc.a linklendiğinde musl'ünkü geçerli olur (strong).
+//   • musl olmadığında (bare metal test vs.) bizimki çalışır.
+// Sonuç: ne çift tanım hatası, ne de implicit declaration uyarısı.
+static int _errno_storage = 0;
+
+__attribute__((weak))
+int *__errno_location(void) { return &_errno_storage; }
+
+// ── Linux uyumlu errno set makrosu ───────────────────────────────────────
+#define SET_ERRNO(ret)       do { if ((ret) < 0) *__errno_location() = (int)(-(ret)); } while(0)
+#define SET_ERRNO_RET(ret, errval) \
+    do { if ((ret) < 0) { *__errno_location() = (int)(-(ret)); return (errval); } } while(0)
 
 // ── access() modları ─────────────────────────────────────────────────────
 #define F_OK   0
@@ -465,12 +491,14 @@ static inline long _sc6(long nr, long a1, long a2, long a3,
 
 ssize_t write(int fd, const void *buf, size_t len) {
     long ret = _sc3(SYS_WRITE, (long)fd, (long)buf, (long)len);
-    if (ret < 0) { _errno_val = (ret == -9) ? 9 : 22; return -1; }
+    if (ret < 0) { *__errno_location() = (int)(-ret); return -1; }
     return (ssize_t)ret;
 }
 
 ssize_t read(int fd, void *buf, size_t len) {
-    return (ssize_t)_sc3(SYS_READ, (long)fd, (long)buf, (long)len);
+    long ret = _sc3(SYS_READ, (long)fd, (long)buf, (long)len);
+    SET_ERRNO_RET(ret, -1);
+    return (ssize_t)ret;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -485,71 +513,84 @@ int open(const char *path, int flags, ...) {
     unsigned int mode = 0644;
     long ret = _sc3(SYS_OPEN, (long)path, (long)clean_flags, (long)mode);
     if (ret < 0) {
-        // Kernel AscentOS hata kodlarını (-1..-14) errno değerlerine çevir
-        // SYSCALL_ERR_INVAL=-1→EINVAL, SYSCALL_ERR_NOENT=-4→ENOENT vb.
-        int e = (int)(-ret);
-        switch (e) {
-            case 1:  _errno_val = 22; break; // EINVAL
-            case 2:  _errno_val = 38; break; // ENOSYS
-            case 3:  _errno_val = 1;  break; // EPERM
-            case 4:  _errno_val = 2;  break; // ENOENT
-            case 5:  _errno_val = 9;  break; // EBADF
-            case 6:  _errno_val = 12; break; // ENOMEM
-            case 8:  _errno_val = 24; break; // EMFILE
-            default: _errno_val = 22; break; // EINVAL
-        }
+        // Kernel artık Linux değerleri döndürüyor: -ret == Linux errno
+        *__errno_location() = (int)(-ret);
         return -1;
     }
     return (int)ret;
 }
 
 int close(int fd) {
-    return (int)_sc1(SYS_CLOSE, (long)fd);
+    long ret = _sc1(SYS_CLOSE, (long)fd);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 off_t lseek(int fd, off_t offset, int whence) {
-    return (off_t)_sc3(SYS_LSEEK, (long)fd, (long)offset, (long)whence);
+    long ret = _sc3(SYS_LSEEK, (long)fd, (long)offset, (long)whence);
+    SET_ERRNO_RET(ret, (off_t)-1);
+    return (off_t)ret;
 }
 
 int stat(const char *path, struct stat *buf) {
-    return (int)_sc2(SYS_STAT, (long)path, (long)buf);
+    long ret = _sc2(SYS_STAT, (long)path, (long)buf);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int fstat(int fd, struct stat *buf) {
-    return (int)_sc2(SYS_FSTAT, (long)fd, (long)buf);
+    long ret = _sc2(SYS_FSTAT, (long)fd, (long)buf);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int lstat(const char *path, struct stat *buf) {
-    return (int)_sc2(SYS_LSTAT, (long)path, (long)buf);
+    long ret = _sc2(SYS_LSTAT, (long)path, (long)buf);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int access(const char *path, int mode) {
-    return (int)_sc2(SYS_ACCESS, (long)path, (long)mode);
+    long ret = _sc2(SYS_ACCESS, (long)path, (long)mode);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int ioctl(int fd, unsigned long req, void *arg) {
-    return (int)_sc3(SYS_IOCTL, (long)fd, (long)req, (long)arg);
+    long ret = _sc3(SYS_IOCTL, (long)fd, (long)req, (long)arg);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int fcntl(int fd, int cmd, long arg) {
-    return (int)_sc3(SYS_FCNTL, (long)fd, (long)cmd, (long)arg);
+    long ret = _sc3(SYS_FCNTL, (long)fd, (long)cmd, (long)arg);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int dup(int fd) {
-    return (int)_sc1(SYS_DUP, (long)fd);
+    long ret = _sc1(SYS_DUP, (long)fd);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int dup2(int oldfd, int newfd) {
-    return (int)_sc2(SYS_DUP2, (long)oldfd, (long)newfd);
+    long ret = _sc2(SYS_DUP2, (long)oldfd, (long)newfd);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int pipe(int fd[2]) {
-    return (int)_sc1(SYS_PIPE, (long)fd);
+    long ret = _sc1(SYS_PIPE, (long)fd);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 // pipe2: O_CLOEXEC bayrağını atomik destekler
 int pipe2(int fd[2], int flags) {
-    return (int)_sc2(SYS_PIPE2, (long)fd, (long)flags);
+    long ret = _sc2(SYS_PIPE2, (long)fd, (long)flags);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -562,23 +603,33 @@ char *getcwd(char *buf, size_t size) {
 }
 
 int chdir(const char *path) {
-    return (int)_sc1(SYS_CHDIR, (long)path);
+    long ret = _sc1(SYS_CHDIR, (long)path);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int mkdir(const char *path, mode_t mode) {
-    return (int)_sc2(SYS_MKDIR, (long)path, (long)mode);
+    long ret = _sc2(SYS_MKDIR, (long)path, (long)mode);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int rmdir(const char *path) {
-    return (int)_sc1(SYS_RMDIR, (long)path);
+    long ret = _sc1(SYS_RMDIR, (long)path);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int unlink(const char *path) {
-    return (int)_sc1(SYS_UNLINK, (long)path);
+    long ret = _sc1(SYS_UNLINK, (long)path);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int rename(const char *old, const char *newpath) {
-    return (int)_sc2(SYS_RENAME, (long)old, (long)newpath);
+    long ret = _sc2(SYS_RENAME, (long)old, (long)newpath);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 // ── getdents (opendir/readdir/closedir temel altyapısı) ──────────────────
@@ -657,11 +708,14 @@ pid_t fork(void) {
         : "r"(_rax)
         : "rcx", "r11", "memory"
     );
+    SET_ERRNO(ret);
     return (pid_t)ret;
 }
 
 int execve(const char *path, char *const argv[], char *const envp[]) {
-    return (int)_sc3(SYS_EXECVE, (long)path, (long)argv, (long)envp);
+    long ret = _sc3(SYS_EXECVE, (long)path, (long)argv, (long)envp);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int execv(const char *path, char *const argv[]) {
@@ -689,7 +743,9 @@ int execvp(const char *file, char *const argv[]) {
 }
 
 pid_t waitpid(pid_t pid, int *status, int opts) {
-    return (pid_t)_sc3(SYS_WAITPID, (long)pid, (long)status, (long)opts);
+    long ret = _sc3(SYS_WAITPID, (long)pid, (long)status, (long)opts);
+    SET_ERRNO(ret);
+    return (pid_t)ret;
 }
 
 pid_t wait(int *status) {
@@ -699,11 +755,15 @@ pid_t wait(int *status) {
 // ── Process Group & Session ───────────────────────────────────────────────
 
 int setpgid(pid_t pid, pid_t pgid) {
-    return (int)_sc2(SYS_SETPGID, (long)pid, (long)pgid);
+    long ret = _sc2(SYS_SETPGID, (long)pid, (long)pgid);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 pid_t getpgid(pid_t pid) {
-    return (pid_t)_sc1(SYS_GETPGID, (long)pid);
+    long ret = _sc1(SYS_GETPGID, (long)pid);
+    SET_ERRNO(ret);
+    return (pid_t)ret;
 }
 
 pid_t getpgrp(void) {
@@ -711,7 +771,9 @@ pid_t getpgrp(void) {
 }
 
 pid_t setsid(void) {
-    return (pid_t)_sc0(SYS_SETSID);
+    long ret = _sc0(SYS_SETSID);
+    SET_ERRNO(ret);
+    return (pid_t)ret;
 }
 
 pid_t getsid(pid_t pid) {
@@ -720,17 +782,23 @@ pid_t getsid(pid_t pid) {
 }
 
 int tcsetpgrp(int fd, pid_t pgrp) {
-    return (int)_sc2(SYS_TCSETPGRP, (long)fd, (long)pgrp);
+    long ret = _sc2(SYS_TCSETPGRP, (long)fd, (long)pgrp);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 pid_t tcgetpgrp(int fd) {
-    return (pid_t)_sc1(SYS_TCGETPGRP, (long)fd);
+    long ret = _sc1(SYS_TCGETPGRP, (long)fd);
+    SET_ERRNO(ret);
+    return (pid_t)ret;
 }
 
 // ── kill / pause ──────────────────────────────────────────────────────────
 
 int kill(pid_t pid, int sig) {
-    return (int)_sc2(SYS_KILL, (long)pid, (long)sig);
+    long ret = _sc2(SYS_KILL, (long)pid, (long)sig);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int raise(int sig) {
@@ -754,19 +822,27 @@ int pause(void) {
 
 int sigaction(int signo, const struct sigaction *new_sa,
               struct sigaction *old_sa) {
-    return (int)_sc3(SYS_SIGACTION, (long)signo, (long)new_sa, (long)old_sa);
+    long ret = _sc3(SYS_SIGACTION, (long)signo, (long)new_sa, (long)old_sa);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
-    return (int)_sc3(SYS_SIGPROCMASK, (long)how, (long)set, (long)oldset);
+    long ret = _sc3(SYS_SIGPROCMASK, (long)how, (long)set, (long)oldset);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int sigpending(sigset_t *set) {
-    return (int)_sc1(SYS_SIGPENDING, (long)set);
+    long ret = _sc1(SYS_SIGPENDING, (long)set);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int sigsuspend(const sigset_t *mask) {
-    return (int)_sc1(SYS_SIGSUSPEND, (long)mask);
+    long ret = _sc1(SYS_SIGSUSPEND, (long)mask);
+    SET_ERRNO(ret);   // sigsuspend her zaman -1 döner (EINTR beklenir)
+    return -1;
 }
 
 // signal() — basit sarıcı
@@ -854,14 +930,97 @@ void *sbrk(long incr) {
     return (void*)prev;
 }
 
+// ── Userland mmap pool ────────────────────────────────────────────────────
+// musl libc her malloc/free için mmap+munmap syscall'ı yapar.
+// Bu pool, 4KB'lık anonim sayfaları kernel'a gitmeden karşılar.
+// Sonuç: tuş başına onlarca syscall → 0 syscall.
+//
+// Tasarım:
+//   - MMAP_POOL_PAGES adet 4KB sayfa BSS'te statik olarak tutulur (~2MB).
+//   - Her sayfa "kullanımda mı?" bilgisi 1 bitlik slot dizisiyle takip edilir.
+//   - Yalnızca MAP_ANONYMOUS|MAP_PRIVATE, addr=NULL, len=4096 istekleri
+//     pool'dan karşılanır; diğerleri doğrudan kernel'a iletilir.
+//   - munmap: pool aralığına düşüyorsa slot serbest bırakılır, kernel'a gidilmez.
+
+#define MMAP_POOL_PAGES   512          // 512 × 4KB = 2MB statik pool
+#define MMAP_PAGE_SIZE    4096
+
+// Hizalamalı statik sayfa dizisi (BSS — sıfır başlatılır)
+static unsigned char _mmap_pool[MMAP_POOL_PAGES][MMAP_PAGE_SIZE]
+    __attribute__((aligned(MMAP_PAGE_SIZE)));
+
+// Kullanım bitmap'i: 1 bit = 1 sayfa (0=boş, 1=kullanımda)
+static unsigned long _mmap_used[(MMAP_POOL_PAGES + 63) / 64];
+
+static inline int _pool_slot_used(int i) {
+    return (_mmap_used[i / 64] >> (i % 64)) & 1;
+}
+static inline void _pool_slot_set(int i, int v) {
+    if (v) _mmap_used[i / 64] |=  (1UL << (i % 64));
+    else   _mmap_used[i / 64] &= ~(1UL << (i % 64));
+}
+
+// Pool'dan boş bir sayfa bul ve döndür
+static void *_pool_alloc(void) {
+    for (int i = 0; i < MMAP_POOL_PAGES; i++) {
+        if (!_pool_slot_used(i)) {
+            _pool_slot_set(i, 1);
+            // Sayfayı sıfırla (mmap anonim sayfalar sıfır gelir)
+            unsigned char *p = _mmap_pool[i];
+            for (int j = 0; j < MMAP_PAGE_SIZE; j++) p[j] = 0;
+            return (void*)p;
+        }
+    }
+    return (void*)0;  // Pool dolu
+}
+
+// Adresin pool aralığında olup olmadığını kontrol et
+static int _pool_contains(void *addr) {
+    unsigned char *p = (unsigned char*)addr;
+    unsigned char *base = _mmap_pool[0];
+    unsigned char *end  = _mmap_pool[MMAP_POOL_PAGES - 1] + MMAP_PAGE_SIZE;
+    return (p >= base && p < end);
+}
+
+// Pool'daki sayfayı serbest bırak
+static int _pool_free(void *addr) {
+    unsigned char *p    = (unsigned char*)addr;
+    unsigned char *base = _mmap_pool[0];
+    size_t offset = (size_t)(p - base);
+    int slot = (int)(offset / MMAP_PAGE_SIZE);
+    if (slot < 0 || slot >= MMAP_POOL_PAGES) return -1;
+    _pool_slot_set(slot, 0);
+    return 0;
+}
+
 void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
-    return (void*)_sc6(SYS_MMAP,
+    // Anonim, sabit adressiz, tam sayfa istekleri pool'dan karşıla
+    if (addr == (void*)0
+        && (flags & MAP_ANONYMOUS)
+        && !(flags & MAP_FIXED)
+        && fd == -1
+        && len <= MMAP_PAGE_SIZE)
+    {
+        void *p = _pool_alloc();
+        if (p) return p;
+        // Pool dolduysa kernel'a düş
+    }
+    long ret = _sc6(SYS_MMAP,
         (long)addr, (long)len, (long)prot,
         (long)flags, (long)fd, (long)off);
+    if (ret < 0) { *__errno_location() = (int)(-ret); return MAP_FAILED; }
+    return (void*)ret;
 }
 
 int munmap(void *addr, size_t len) {
-    return (int)_sc2(SYS_MUNMAP, (long)addr, (long)len);
+    // Pool aralığındaysa sadece slot'u serbest bırak, kernel'a gitme
+    if (_pool_contains(addr)) {
+        _pool_free(addr);
+        return 0;
+    }
+    long ret = _sc2(SYS_MUNMAP, (long)addr, (long)len);
+    if (ret < 0) { *__errno_location() = (int)(-ret); return -1; }
+    return 0;
 }
 
 void *brk_syscall(void *addr) {
@@ -920,18 +1079,26 @@ gid_t getegid(void) { return (gid_t)_sc0(SYS_GETEGID); }
 
 // symlink/link/readlink: FAT32'de yok
 int symlink(const char *target, const char *linkpath) {
-    return (int)_sc2(SYS_SYMLINK, (long)target, (long)linkpath);
+    long ret = _sc2(SYS_SYMLINK, (long)target, (long)linkpath);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 int link(const char *oldpath, const char *newpath) {
-    return (int)_sc2(SYS_LINK, (long)oldpath, (long)newpath);
+    long ret = _sc2(SYS_LINK, (long)oldpath, (long)newpath);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 ssize_t readlink(const char *path, char *buf, size_t size) {
-    return (ssize_t)_sc3(SYS_READLINK, (long)path, (long)buf, (long)size);
+    long ret = _sc3(SYS_READLINK, (long)path, (long)buf, (long)size);
+    SET_ERRNO_RET(ret, -1);
+    return (ssize_t)ret;
 }
 
 // chmod/chown: tek kullanıcılı sistem
 int chmod(const char *path, mode_t mode) {
-    return (int)_sc2(SYS_CHMOD, (long)path, (long)mode);
+    long ret = _sc2(SYS_CHMOD, (long)path, (long)mode);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 int chown(const char *p, uid_t u, gid_t g) { (void)p;(void)u;(void)g; return 0; }
 int fchmod(int fd, mode_t m)               { (void)fd;(void)m; return 0; }
@@ -995,11 +1162,15 @@ int uname(struct utsname *buf) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 int nanosleep(const struct timespec *req, struct timespec *rem) {
-    return (int)_sc2(SYS_NANOSLEEP, (long)req, (long)rem);
+    long ret = _sc2(SYS_NANOSLEEP, (long)req, (long)rem);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int sigaltstack(const stack_t *ss, stack_t *old_ss) {
-    return (int)_sc2(SYS_SIGALTSTACK, (long)ss, (long)old_ss);
+    long ret = _sc2(SYS_SIGALTSTACK, (long)ss, (long)old_ss);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1029,11 +1200,15 @@ int clock_getres(int clockid, struct timespec *res) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 int ftruncate(int fd, off_t length) {
-    return (int)_sc2(SYS_FTRUNCATE, (long)fd, (long)length);
+    long ret = _sc2(SYS_FTRUNCATE, (long)fd, (long)length);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int truncate(const char *path, off_t length) {
-    return (int)_sc2(SYS_TRUNCATE, (long)path, (long)length);
+    long ret = _sc2(SYS_TRUNCATE, (long)path, (long)length);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1057,11 +1232,15 @@ typedef struct {
 } rlimit_t;
 
 int getrlimit(int resource, rlimit_t *rlim) {
-    return (int)_sc2(SYS_GETRLIMIT, (long)resource, (long)rlim);
+    long ret = _sc2(SYS_GETRLIMIT, (long)resource, (long)rlim);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 int setrlimit(int resource, const rlimit_t *rlim) {
-    return (int)_sc2(SYS_SETRLIMIT, (long)resource, (long)rlim);
+    long ret = _sc2(SYS_SETRLIMIT, (long)resource, (long)rlim);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1073,7 +1252,9 @@ mode_t umask(mode_t mask) {
 }
 
 int mprotect(void *addr, size_t len, int prot) {
-    return (int)_sc3(SYS_MPROTECT, (long)addr, (long)len, (long)prot);
+    long ret = _sc3(SYS_MPROTECT, (long)addr, (long)len, (long)prot);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1083,13 +1264,200 @@ int mprotect(void *addr, size_t len, int prot) {
 // getgroups: sürecin ek grup listesini döndürür
 // Tek kullanıcılı AscentOS'ta genellikle 0 grup döner.
 int getgroups(int size, gid_t list[]) {
-    return (int)_sc2(SYS_GETGROUPS, (long)size, (long)list);
+    long ret = _sc2(SYS_GETGROUPS, (long)size, (long)list);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
 }
 
-// ── errno emülasyonu ──────────────────────────────────────────────────────
-// Kernel negatif hata kodu döndürür; newlib errno'yu bu değerden alır.
-// newlib'in _errno() fonksiyonu global errno'ya pointer döndürür.
-int _errno_val = 0;
-int *__errno_location(void) { return &_errno_val; }
-// newlib bazı platformlarda bunu kullanır:
-int *_errno(void) { return &_errno_val; }
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 18: FUTEX (v24)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// futex işlem sabitleri (Linux uyumlu)
+#define FUTEX_WAIT          0
+#define FUTEX_WAKE          1
+#define FUTEX_REQUEUE       3
+#define FUTEX_CMP_REQUEUE   4
+#define FUTEX_PRIVATE_FLAG  128
+#define FUTEX_WAIT_PRIVATE  (FUTEX_WAIT | FUTEX_PRIVATE_FLAG)
+#define FUTEX_WAKE_PRIVATE  (FUTEX_WAKE | FUTEX_PRIVATE_FLAG)
+
+long futex(int *uaddr, int op, int val, const struct timespec *timeout,
+           int *uaddr2, int val3) {
+    long ret = _sc6(SYS_FUTEX, (long)uaddr, (long)op, (long)val,
+                    (long)timeout, (long)uaddr2, (long)val3);
+    SET_ERRNO(ret);
+    return ret;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 19: GETRANDOM (v24)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#define GRND_NONBLOCK 0x0001
+#define GRND_RANDOM   0x0002
+
+ssize_t getrandom(void *buf, size_t buflen, unsigned int flags) {
+    long ret = _sc3(SYS_GETRANDOM, (long)buf, (long)buflen, (long)flags);
+    SET_ERRNO_RET(ret, -1);
+    return (ssize_t)ret;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 20: ARCH_PRCTL (v25)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#define ARCH_SET_GS   0x1001
+#define ARCH_SET_FS   0x1002
+#define ARCH_GET_FS   0x1003
+#define ARCH_GET_GS   0x1004
+#define ARCH_GET_CPUID 0x1011
+#define ARCH_SET_CPUID 0x1012
+
+int arch_prctl(int code, unsigned long addr) {
+    long ret = _sc2(SYS_ARCH_PRCTL, (long)code, (long)addr);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 21: CLONE (v25)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// clone() bayrakları (Linux uyumlu)
+#define CLONE_VM           0x00000100
+#define CLONE_FS           0x00000200
+#define CLONE_FILES        0x00000400
+#define CLONE_SIGHAND      0x00000800
+#define CLONE_THREAD       0x00010000
+#define CLONE_SETTLS       0x00080000
+#define CLONE_PARENT_SETTID  0x00100000
+#define CLONE_CHILD_CLEARTID 0x00200000
+#define CLONE_CHILD_SETTID   0x01000000
+
+// Not: clone() çağrı kuralı Linux x86-64'e özgüdür.
+// child_stack, ptid, ctid, tls argümanları sırasıyla
+// RSI, RDX, R10, R8 registerlarına gider.
+long clone(unsigned long flags, void *child_stack,
+           int *ptid, int *ctid, unsigned long tls) {
+    long ret = _sc6(SYS_CLONE, (long)flags, (long)child_stack,
+                    (long)ptid, (long)ctid, (long)tls, 0);
+    SET_ERRNO(ret);
+    return ret;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 22: SET_TID_ADDRESS & SET_ROBUST_LIST (v26)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#define ROBUST_LIST_HEAD_SIZE 24
+
+long set_tid_address(int *tidptr) {
+    return _sc1(SYS_SET_TID_ADDRESS, (long)tidptr);
+}
+
+int set_robust_list(void *head, size_t len) {
+    long ret = _sc2(SYS_SET_ROBUST_LIST, (long)head, (long)len);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 23: WRITEV (v27)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// iovec yapısı
+struct iovec {
+    void   *iov_base;
+    size_t  iov_len;
+};
+
+ssize_t writev(int fd, const struct iovec *iov, int iovcnt) {
+    long ret = _sc3(SYS_WRITEV, (long)fd, (long)iov, (long)iovcnt);
+    SET_ERRNO_RET(ret, -1);
+    return (ssize_t)ret;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 24: MADVISE (v27)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#define MADV_NORMAL     0
+#define MADV_RANDOM     1
+#define MADV_SEQUENTIAL 2
+#define MADV_WILLNEED   3
+#define MADV_DONTNEED   4
+#define MADV_FREE       8
+
+int madvise(void *addr, size_t len, int advice) {
+    // AscentOS kernel madvise'ı henüz implemente etmemiş olabilir.
+    // musl free() → madvise(MADV_FREE) çağırır; kernel patlarsa tüm
+    // uygulama çöker. Güvenli stub: sessizce başarılı dön.
+    (void)addr; (void)len; (void)advice;
+    return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 25: EXIT_GROUP (v27)
+// ═══════════════════════════════════════════════════════════════════════════
+
+__attribute__((noreturn))
+void exit_group(int code) {
+    _sc1(SYS_EXIT_GROUP, (long)code);
+    __builtin_unreachable();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 26: OPENAT & NEWFSTATAT (v27)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// openat() dirfd sabitleri
+#define AT_FDCWD             (-100)
+#define AT_SYMLINK_NOFOLLOW  0x100
+#define AT_REMOVEDIR         0x200
+#define AT_EMPTY_PATH        0x1000
+
+int openat(int dirfd, const char *path, int flags, ...) {
+    unsigned int mode = 0644;
+    long ret = _sc4(SYS_OPENAT, (long)dirfd, (long)path, (long)flags, (long)mode);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
+}
+
+int newfstatat(int dirfd, const char *path, struct stat *buf, int flags) {
+    long ret = _sc4(SYS_NEWFSTATAT, (long)dirfd, (long)path, (long)buf, (long)flags);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
+}
+
+// fstatat: newfstatat için alias (POSIX ismi)
+int fstatat(int dirfd, const char *path, struct stat *buf, int flags) {
+    return newfstatat(dirfd, path, buf, flags);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BÖLÜM 27: PRLIMIT64 (v27)
+// ═══════════════════════════════════════════════════════════════════════════
+
+typedef struct {
+    unsigned long rlim_cur;
+    unsigned long rlim_max;
+} rlimit64_t;
+
+int prlimit64(pid_t pid, int resource,
+              const rlimit64_t *new_limit, rlimit64_t *old_limit) {
+    long ret = _sc4(SYS_PRLIMIT64, (long)pid, (long)resource,
+                    (long)new_limit, (long)old_limit);
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
+}
+
+// prlimit: prlimit64 için takma ad (musl bu ismi kullanır)
+int prlimit(pid_t pid, int resource,
+            const rlimit64_t *new_limit, rlimit64_t *old_limit) {
+    return prlimit64(pid, resource, new_limit, old_limit);
+}
+
+// ── errno notu ────────────────────────────────────────────────────────────
+// __errno_location weak sembol olarak yukarıda tanımlıdır.
+// musl libc.a strong tanımı link aşamasında bizimkini override eder.
