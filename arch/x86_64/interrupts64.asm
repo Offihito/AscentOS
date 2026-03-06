@@ -1,9 +1,11 @@
 ; interrupts64.asm - Interrupt & Syscall Handlers (Ring-3 SYSRET destekli)
+; + Kernel Panic: CPU exception'ları artık kernel_panic_handler'a yönlendirilir.
 
 global load_idt64
 global isr_keyboard
 global isr_timer
 global syscall_entry
+global isr_net
 
 %ifndef TEXT_MODE_BUILD
 global isr_mouse
@@ -11,6 +13,7 @@ extern mouse_handler64
 %endif
 
 extern keyboard_handler64
+extern rtl8139_irq_handler
 extern scheduler_tick
 extern task_needs_switch
 extern task_get_current_context
@@ -20,6 +23,9 @@ extern tss_update_rsp0_from_context
 
 ; Syscall dispatcher (syscall.c)
 extern syscall_dispatch
+
+; Kernel panic handler (panic64.c)
+extern kernel_panic_handler
 
 section .text
 bits 64
@@ -119,6 +125,53 @@ isr_mouse:
 
     iretq
 %endif
+
+; ============================================================================
+; AĞ INTERRUPT (IRQ11 → INT 0x2B) — RTL8139
+; IRQ11 slave PIC'e bağlıdır (IRQ8-15).
+; EOI sırası: önce slave (0xA0), sonra master (0x20).
+; keyboard_unified.c → init_interrupts64() idt_set(43,...) ile IDT vektör 0x2B'ye kurulur.
+; ============================================================================
+isr_net:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    call rtl8139_irq_handler
+
+    mov al, 0x20
+    out 0xA0, al    ; Slave PIC EOI  (IRQ11 → slave)
+    out 0x20, al    ; Master PIC EOI
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+
+    iretq
 
 ; ============================================================================
 ; TIMER INTERRUPT (IRQ0) - Context switch destekli
@@ -388,24 +441,69 @@ task_load_and_jump_context:
     iretq
 
 ; ============================================================================
-; CPU EXCEPTION HANDLER'LAR
+; CPU EXCEPTION HANDLER'LAR — PANIC DESTEKLI
+;
+; Stack düzeni (isr_panic_common'a gelince):
+;
+;   ISR_NOERRCODE için CPU push sırası:
+;     [RSP+0]  = isr_num    (makro push etti)
+;     [RSP+8]  = 0          (pseudo err_code, makro push etti)
+;     [RSP+16] = RIP        \
+;     [RSP+24] = CS          | CPU'nun otomatik push ettiği iretq frame
+;     [RSP+32] = RFLAGS     /
+;     [RSP+40] = RSP*        \ (sadece privilege değişiminde CPU push eder)
+;     [RSP+48] = SS*         /
+;
+;   ISR_ERRCODE için:
+;     CPU önce err_code'u push eder, sonra makro isr_num push eder.
+;     Düzen aynı kalır.
+;
+;   isr_panic_common tüm GPR'leri push ettikten sonra stack:
+;     [RSP+0]   r15  \
+;     [RSP+8]   r14   |
+;     [RSP+16]  r13   |
+;     [RSP+24]  r12   |  exception_frame_t*  (rdi = rsp)
+;     [RSP+32]  r11   |
+;     [RSP+40]  r10   |
+;     [RSP+48]  r9    |
+;     [RSP+56]  r8    |
+;     [RSP+64]  rbp   |
+;     [RSP+72]  rdi   |
+;     [RSP+80]  rsi   |
+;     [RSP+88]  rdx   |
+;     [RSP+96]  rcx   |
+;     [RSP+104] rbx   |
+;     [RSP+112] rax  /
+;     [RSP+120] err_code
+;     [RSP+128] isr_num
+;     [RSP+136] RIP    \
+;     [RSP+144] CS      | CPU iretq frame
+;     [RSP+152] RFLAGS  |
+;     [RSP+160] RSP*    |
+;     [RSP+168] SS*    /
+;
+;   Bu layout panic64.c'deki exception_frame_t ile BİREBİR eşleşmeli.
 ; ============================================================================
+
 %macro ISR_NOERRCODE 1
 global isr%1
 isr%1:
-    push 0
-    push %1
-    jmp isr_common
+    push 0      ; pseudo err_code (CPU bu exception için push etmez)
+    push %1     ; isr_num
+    jmp isr_panic_common
 %endmacro
 
 %macro ISR_ERRCODE 1
 global isr%1
 isr%1:
-    push %1
-    jmp isr_common
+    ; CPU bu exception için err_code'u zaten push etti
+    push %1     ; isr_num
+    jmp isr_panic_common
 %endmacro
 
-isr_common:
+; ── Ortak panic giriş noktası ────────────────────────────────────────────────
+isr_panic_common:
+    ; Tüm GPR'leri push et (exception_frame_t.r15 → rax sırası)
     push rax
     push rbx
     push rcx
@@ -421,47 +519,57 @@ isr_common:
     push r13
     push r14
     push r15
-    mov rdi, rsp
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-    add rsp, 16
-    iretq
 
-ISR_NOERRCODE 0
-ISR_NOERRCODE 1
-ISR_NOERRCODE 2
-ISR_NOERRCODE 3
-ISR_NOERRCODE 4
-ISR_NOERRCODE 5
-ISR_NOERRCODE 6
-ISR_NOERRCODE 7
-ISR_ERRCODE   8
-ISR_NOERRCODE 9
-ISR_ERRCODE   10
-ISR_ERRCODE   11
-ISR_ERRCODE   12
-ISR_ERRCODE   13
-ISR_ERRCODE   14
-ISR_NOERRCODE 15
-ISR_NOERRCODE 16
-ISR_ERRCODE   17
-ISR_NOERRCODE 18
-ISR_NOERRCODE 19
-ISR_NOERRCODE 20
-ISR_NOERRCODE 21
+    ; RSP şu an exception_frame_t*'ın başını gösteriyor
+    mov  rdi, rsp
+    call kernel_panic_handler   ; kernel_panic_handler(exception_frame_t*)
+                                ; bu fonksiyon CLI+HLT ile sistemi dondurur, dönmez
+
+    ; Buraya hiçbir zaman gelinmemeli — güvenlik için yine de halt
+    cli
+.hang:
+    hlt
+    jmp .hang
+
+; ── Exception tablosu ────────────────────────────────────────────────────────
+ISR_NOERRCODE 0    ; #DE Divide Error
+ISR_NOERRCODE 1    ; #DB Debug
+ISR_NOERRCODE 2    ; #NMI Non-Maskable Interrupt
+ISR_NOERRCODE 3    ; #BP Breakpoint
+ISR_NOERRCODE 4    ; #OF Overflow
+ISR_NOERRCODE 5    ; #BR Bound Range Exceeded
+ISR_NOERRCODE 6    ; #UD Invalid Opcode
+ISR_NOERRCODE 7    ; #NM Device Not Available
+; #DF handled by isr8_df below (IST1 stack)
+
+; ── #DF Double Fault — IST1 stack kullanır ──────────────────────────────────
+; Triple fault sebebi: RSP bozukken #DF handler çalışmaya çalışırsa CPU
+; ikinci fault üretir → triple fault. Çözüm: IDT gate IST=1. CPU o zaman
+; TSS.IST1'deki temiz, ayrı stack'e geçer — bozuk RSP'den bağımsız.
+;
+; Gerekli kurulum:
+;   tss.ist1 = (uint64_t)df_stack_top   ← tss_init() içinde
+;   idt[8] gate IST field = 1           ← init_interrupts64() içinde
+global isr8_df
+isr8_df:
+    ; CPU IST1 stack'ine geçti, RSP temiz.
+    ; #DF err_code her zaman 0'dir (CPU zaten push etti).
+    push 8          ; isr_num
+    jmp isr_panic_common
+
+ISR_NOERRCODE 9    ; #09 Coprocessor Segment Overrun
+ISR_ERRCODE   10   ; #TS Invalid TSS
+ISR_ERRCODE   11   ; #NP Segment Not Present
+ISR_ERRCODE   12   ; #SS Stack-Segment Fault
+ISR_ERRCODE   13   ; #GP General Protection
+ISR_ERRCODE   14   ; #PF Page Fault          ← CR2 = fault address
+ISR_NOERRCODE 15   ; #15 Reserved
+ISR_NOERRCODE 16   ; #MF x87 FP Error
+ISR_ERRCODE   17   ; #AC Alignment Check
+ISR_NOERRCODE 18   ; #MC Machine Check
+ISR_NOERRCODE 19   ; #XF SIMD FP Exception
+ISR_NOERRCODE 20   ; #VE Virtualization Exception
+ISR_NOERRCODE 21   ; #CP Control Protection
 ISR_NOERRCODE 22
 ISR_NOERRCODE 23
 ISR_NOERRCODE 24
@@ -470,7 +578,7 @@ ISR_NOERRCODE 26
 ISR_NOERRCODE 27
 ISR_NOERRCODE 28
 ISR_NOERRCODE 29
-ISR_ERRCODE   30
+ISR_ERRCODE   30   ; #SX Security Exception
 ISR_NOERRCODE 31
 
 ; ============================================================================
@@ -652,7 +760,9 @@ syscall_entry:
     push r14
     ; r15 zaten push edildi
 
-    ; syscall_frame_t insa et
+    ; syscall_frame_t insa et (syscall.h ile eslesmeli, +0..+72)
+    ; user_rsp (+72): execve yeni RSP yazarsa SYSRET oncesi kullanilir
+    push qword 0    ; frame.user_rsp (+72) — dispatch override edebilir
     push r11        ; frame.r11  (+64)
     push rcx        ; frame.rcx  (+56)
     push r9         ; frame.r9   (+48)
@@ -667,35 +777,59 @@ syscall_entry:
     mov rdi, rsp
     call syscall_dispatch
 
-    ; donus degerini al, frame temizle
-    pop rax
-    pop rdi
-    pop rsi
-    pop rdx
-    pop r10
-    pop r8
-    pop r9
-    pop rcx         ; RCX = saved RIP  (SYSRET icin)
-    pop r11         ; R11 = saved RFLAGS (SYSRET icin)
+    ; user_rsp override kontrolu (execve yeni RSP yazdiysa kullan)
+    ; frame.user_rsp ofset = +72, frame basini gosterir rsp
+    mov r14, [rsp + 72]     ; r14 = frame.user_rsp (callee-saved)
 
-    ; callee-saved geri yukle (r15 dahil = user RSP)
+    ; frame temizle: rax..r11 (10 alan = 80 byte)
+    pop rax         ; +0  donus degeri
+    pop rdi         ; +8
+    pop rsi         ; +16
+    pop rdx         ; +24
+    pop r10         ; +32
+    pop r8          ; +40
+    pop r9          ; +48
+    pop rcx         ; +56 saved RIP (SYSRET icin)
+    pop r11         ; +64 saved RFLAGS (SYSRET icin)
+    add rsp, 8      ; +72 user_rsp slot'unu atla
+
+    ; callee-saved geri yukle
+    ; r14'u dispatch oncesi user_rsp icin kullandik,
+    ; simdi stack'ten gercek degerini geri alalim
     pop r14
     pop r13
     pop r12
     pop rbp
     pop rbx
-    pop r15         ; r15 = user RSP
+    pop r15         ; r15 = user RSP (orijinal)
 
-    ; DS/ES/FS/GS -> Ring-3 (SYSRET CS/SS'yi ayarlar ama bunlara dokunmaz)
+    ; DS/ES/FS/GS -> Ring-3
     mov ax, 0x1B
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
 
-    ; User RSP'ye don
-    mov rsp, r15
+    ; user_rsp override: execve yazdiysa (0 degilse) yeni stack kullan
+    test r14, r14
+    jnz .use_new_rsp
+    mov rsp, r15    ; normal path: orijinal user RSP
+    jmp .do_sysret
 
+.use_new_rsp:
+    mov rsp, r14    ; execve path: yeni user stack
+
+.do_sysret:
     ; 64-bit SYSRET -> Ring-3
     ; CS = STAR[63:48]+16|3 = 0x23, SS = STAR[63:48]+8|3 = 0x1B
     o64 sysret
+
+; ============================================================================
+; #DF için IST1 stack — 16 KB, TSS.IST1'e set edilmeli
+; ============================================================================
+section .bss
+align 16
+df_stack_bottom:
+    resb 16384          ; 16 KB — stack overflow testleri için yeterli
+global df_stack_top
+df_stack_top:
