@@ -92,6 +92,11 @@ void cmd_vmm(const char* args, CommandOutput* output);
 void cmd_exec(const char* args, CommandOutput* output);
 void cmd_elfinfo(const char* args, CommandOutput* output);
 
+// ELF kısayol komutları (KILO.ELF / LUA.ELF otomatik çağırır)
+// Kullanım: kilo <dosya>   veya   lua <script.lua>
+// Bu fonksiyonlar execute_command64 içinde doğrudan işlenir,
+// ayrı bir handler'a gerek yoktur.
+
 // Multitasking commands
 void cmd_ps(const char* args, CommandOutput* output);
 void cmd_taskinfo(const char* args, CommandOutput* output);
