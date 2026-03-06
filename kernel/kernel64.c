@@ -317,6 +317,17 @@ void init_keyboard64(void);
 void init_commands64(void);
 void show_prompt64(void);
 
+// RTL8139 ağ sürücüsü (kernel/rtl8139.c)
+extern bool rtl8139_init(void);
+extern void rtl8139_set_packet_handler(void* handler);
+
+// commands64.c'de tanımlı — rtl8139 başarıyla başlatıldıktan sonra
+// packet handler'ı kaydet ve g_net_initialized'ı güncelle.
+extern void net_register_packet_handler(void);
+
+// ARP katmanı (kernel/arp.c) — IP adresi kernel_main'de atanmaz,
+// kullanıcı 'ipconfig' komutuyla atar. Sadece extern bildirimi yeterli.
+
 // ============================================================================
 // KERNEL MAIN
 // ============================================================================
@@ -338,6 +349,15 @@ void kernel_main(uint64_t multiboot_info) {
     init_interrupts64();
     init_keyboard64();
     init_commands64();
+
+    // RTL8139 ağ kartını başlat (PCI taraması + IRQ kurulumu)
+    // Kart QEMU'da yoksa sessizce geçer, 'netinit' komutu tekrar denenebilir.
+    if (rtl8139_init()) {
+        net_register_packet_handler();   // packet handler'ı kaydet, g_net_initialized=1 yap
+        serial_print("[NET] RTL8139 baslatildi, 'netstat' ile durumu gor.\n");
+    } else {
+        serial_print("[NET] RTL8139 bulunamadi (QEMU -device rtl8139 eklenmeli).\n");
+    }
 
     // gui64 framebuffer ptr'yi kur (henüz ekrana çizme)
     gui_init();
