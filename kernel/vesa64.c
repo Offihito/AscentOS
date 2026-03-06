@@ -163,6 +163,11 @@ static size_t rows = 0;  // satır sayısı
 static size_t cur_col = 0;
 static size_t cur_row = 0;
 
+// Pending wrap: satır sonuna ulaşıldı ama henüz newline yapılmadı.
+// Bir sonraki yazdırılabilir karakter gelince newline tetiklenir.
+// Cursor hareketi komutları (CUP, CUU, CUD vb.) bu flag'i temizler.
+static int pending_wrap = 0;
+
 // Mevcut renk (VGA renk byte'ı: yüksek nibble = bg, düşük nibble = fg)
 static uint8_t cur_color = 0x07;  // açık gri ön plan, siyah arka plan
 
@@ -397,6 +402,7 @@ void clear_screen64(void) {
     }
     cur_row = 0;
     cur_col = 0;
+    pending_wrap = 0;
     scroll_view_offset = 0;
 
     // Framebuffer'ı arkaplan rengiyle doldur
@@ -414,6 +420,7 @@ void set_position64(size_t row, size_t col) {
     if (row >= rows) row = rows - 1;
     if (col >= cols) col = cols - 1;
     erase_cursor();
+    pending_wrap = 0;
     cur_row = row;
     cur_col = col;
     update_cursor64();
@@ -431,9 +438,10 @@ void get_screen_size64(size_t* width, size_t* height) {
 
 // Sadece hücre dizisini günceller, framebuffer'a yazmaz
 static void putchar_cell(char c, uint8_t color) {
-    if (c == '\n') { do_newline(); return; }
-    if (c == '\r') { cur_col = 0; return; }
+    if (c == '\n') { pending_wrap = 0; do_newline(); return; }
+    if (c == '\r') { pending_wrap = 0; cur_col = 0; return; }
     if (c == '\t') {
+        pending_wrap = 0;
         size_t next_tab = (cur_col + 4) & ~(size_t)3;
         if (next_tab >= cols) next_tab = cols - 1;
         while (cur_col < next_tab) {
@@ -445,6 +453,7 @@ static void putchar_cell(char c, uint8_t color) {
         return;
     }
     if (c == '\b') {
+        pending_wrap = 0;
         if (cur_col > 0) {
             cur_col--;
             screen_cells[cur_row][cur_col].ch    = ' ';
@@ -453,11 +462,20 @@ static void putchar_cell(char c, uint8_t color) {
         }
         return;
     }
+    // Yazdırılabilir karakter: önce bekleyen wrap'i uygula
+    if (pending_wrap) {
+        pending_wrap = 0;
+        do_newline();
+    }
     screen_cells[cur_row][cur_col].ch    = c;
     screen_cells[cur_row][cur_col].color = color;
     screen_cells[cur_row][cur_col].dirty = 1;
     cur_col++;
-    if (cur_col >= cols) do_newline();
+    // Satır sonuna ulaşıldı: hemen newline yapmak yerine flag set et
+    if (cur_col >= cols) {
+        cur_col = cols - 1;
+        pending_wrap = 1;
+    }
 }
 
 // ============================================================================
@@ -586,6 +604,7 @@ static void ansi_dispatch(char cmd) {
         int row = (p0 > 0 ? p0 : 1) - 1;
         int col = (p1 > 0 ? p1 : 1) - 1;
         erase_cursor();
+        pending_wrap = 0;
         cur_row = (size_t)(row < 0 ? 0 : (row >= (int)rows ? (int)rows-1 : row));
         cur_col = (size_t)(col < 0 ? 0 : (col >= (int)cols ? (int)cols-1 : col));
         break;
@@ -593,12 +612,14 @@ static void ansi_dispatch(char cmd) {
     case 'A': { // CUU: cursor up
         int n = p0 > 0 ? p0 : 1;
         erase_cursor();
+        pending_wrap = 0;
         cur_row = (size_t)(cur_row >= (size_t)n ? cur_row - n : 0);
         break;
     }
     case 'B': { // CUD: cursor down
         int n = p0 > 0 ? p0 : 1;
         erase_cursor();
+        pending_wrap = 0;
         cur_row += n;
         if (cur_row >= rows) cur_row = rows - 1;
         break;
@@ -606,6 +627,7 @@ static void ansi_dispatch(char cmd) {
     case 'C': { // CUF: cursor right
         int n = p0 > 0 ? p0 : 1;
         erase_cursor();
+        pending_wrap = 0;
         cur_col += n;
         if (cur_col >= cols) cur_col = cols - 1;
         break;
@@ -613,6 +635,7 @@ static void ansi_dispatch(char cmd) {
     case 'D': { // CUB: cursor left
         int n = p0 > 0 ? p0 : 1;
         erase_cursor();
+        pending_wrap = 0;
         cur_col = (size_t)(cur_col >= (size_t)n ? cur_col - n : 0);
         break;
     }
@@ -622,6 +645,7 @@ static void ansi_dispatch(char cmd) {
         break;
     case 'u': // cursor geri yükle
         erase_cursor();
+        pending_wrap = 0;
         cur_row = saved_row;
         cur_col = saved_col;
         break;
@@ -829,11 +853,15 @@ void putchar64(char c, uint8_t color) {
                     redraw_cell(r, cc);
                     screen_cells[r][cc].dirty = 0;
                 }
-        } else if (c == '\n' || c == '\r' || c == '\b' || c == '\t') {
-            for (size_t col = 0; col < cols; col++)
-                redraw_cell(cur_row > 0 ? cur_row - 1 : 0, col);
+        } else if (c == '\n' || c == '\r' || c == '\t') {
+            // Sadece mevcut satırı çiz (do_newline() cur_row'u zaten güncelledi)
             for (size_t col = 0; col < cols; col++)
                 redraw_cell(cur_row, col);
+        } else if (c == '\b') {
+            // Backspace: geri gidilen sütunu (cur_col) ve mevcut sütunu çiz
+            redraw_cell(cur_row, cur_col);
+            if (cur_col + 1 < cols)
+                redraw_cell(cur_row, cur_col + 1);
         } else if (c >= 0x20) {
             size_t drawn_col = cur_col > 0 ? cur_col - 1 : 0;
             redraw_cell(cur_row, drawn_col);
