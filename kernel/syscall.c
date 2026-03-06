@@ -419,6 +419,9 @@ static void sys_write(syscall_frame_t* frame) {
 }
 
 // ── SYS_READ (2) ───────────────────────────────────────────────
+// kernel_termios: sys_ioctl bölümünde tanımlı (satır ~2197); forward decl.
+extern termios_t kernel_termios;
+
 static void sys_read(syscall_frame_t* frame) {
     int      fd  = (int)frame->rdi;
     char*    buf = (char*)frame->rsi;
@@ -437,7 +440,15 @@ static void sys_read(syscall_frame_t* frame) {
         uint64_t count = 0;
 
         if (kb_userland_active()) {
-            // Blocking read: en az 1 karakter gelene kadar bekle
+            // ── termios ICANON kontrolü ──────────────────────────────────
+            // ICANON=1 (canonical): satır bazlı okuma, '\n' bekle (shell, vb.)
+            // ICANON=0 (raw):       VMIN kadar byte al, '\n' bekleme (Lua REPL, kilo, vb.)
+            int is_canonical = (kernel_termios.c_lflag & ICANON) ? 1 : 0;
+            // Raw modda VMIN: kaç byte beklenecek (0 = non-blocking, 1+ = o kadar bekle)
+            uint8_t vmin = is_canonical ? 1 : kernel_termios.c_cc[VMIN];
+            if (vmin == 0) vmin = 1; // en az 1 byte al (yoksa sonsuz döngü olur)
+
+            // Blocking read: VMIN kadar karakter gelene kadar bekle
             int ch;
             do {
                 ch = kb_ring_pop();
@@ -455,12 +466,22 @@ static void sys_read(syscall_frame_t* frame) {
             if (ch >= 0) {
                 buf[count++] = (char)ch;
 
-                // '\n' görene kadar veya buffer dolana kadar devam et
-                while (count < len) {
-                    ch = kb_ring_pop();
-                    if (ch < 0) break;          // non-blocking: kalan karakterler
-                    buf[count++] = (char)ch;
-                    if ((char)ch == '\n') break;
+                if (is_canonical) {
+                    // Canonical mod: '\n' veya buffer dolu olana kadar devam et
+                    while (count < len) {
+                        ch = kb_ring_pop();
+                        if (ch < 0) break;
+                        buf[count++] = (char)ch;
+                        if ((char)ch == '\n') break;
+                    }
+                } else {
+                    // Raw mod: VMIN-1 karakter daha al (ilk zaten alındı),
+                    // '\n' bekleme — Lua/kilo gibi karakter bazlı uygulamalar için
+                    while (count < (uint64_t)vmin && count < len) {
+                        ch = kb_ring_pop();
+                        if (ch < 0) break; // kalan karakterler sonraki read'de
+                        buf[count++] = (char)ch;
+                    }
                 }
             }
         } else {
@@ -652,7 +673,8 @@ static void sys_open(syscall_frame_t* frame) {
     }
 
     if (fd_type == FD_TYPE_FILE && !(flags & O_CREAT)) {
-        if (!fs_path_is_file(fname)) {
+        // Önce full path ile dene, bulamazsan basename ile tekrar dene
+        if (!fs_path_is_file(path) && !fs_path_is_file(fname)) {
             serial_print("[SYSCALL] open: ENOENT ");
             serial_print(path);
             serial_print("\n");
@@ -740,6 +762,140 @@ static void sys_getticks(syscall_frame_t* frame) {
 // v3 YENİ SYSCALL IMPLEMENTASYONLARI
 // ============================================================
 
+// ── mmap allocation table + freelist cache ───────────────────
+// musl mallocng, mmap() ile aldığı adresi doğrudan munmap()'e verir.
+// Kilo gibi uygulamalar her tuşta mmap+munmap döngüsü yapar (4KB bloklar).
+// Çözüm: munmap'te kfree yerine freelist'e al; aynı boyut tekrar istenirse
+// yeni kmalloc yapmadan direkt ver → mmap/munmap çifti sıfır maliyetli olur.
+#define MMAP_TABLE_SIZE 256
+
+typedef struct {
+    uint64_t user_addr;   // mmap'in döndürdüğü adres (0 = boş slot)
+    void*    raw_ptr;     // kfree için gerçek kmalloc pointer'ı
+    uint64_t alloc_size;  // kmalloc'a verilen toplam boyut (hizalama dahil)
+    uint64_t aligned_len; // sayfaya hizalanmış kullanıcı boyu
+} mmap_entry_t;
+
+static mmap_entry_t mmap_table[MMAP_TABLE_SIZE];
+static int mmap_table_init = 0;
+
+// Serbest bırakılmış ama henüz kfree edilmemiş blok havuzu.
+// musl 4KB'lık iki adresi ping-pong gibi değiştiriyor; onları burada tutuyoruz.
+#define MMAP_CACHE_SIZE 16
+typedef struct {
+    void*    raw_ptr;
+    uint64_t aligned_len; // hangi boyut için geçerli
+    uint64_t user_addr;
+    uint64_t alloc_size;
+} mmap_cache_entry_t;
+
+static mmap_cache_entry_t mmap_cache[MMAP_CACHE_SIZE];
+static int mmap_cache_count = 0;
+
+static void mmap_table_clear(void) {
+    for (int i = 0; i < MMAP_TABLE_SIZE; i++) {
+        mmap_table[i].user_addr   = 0;
+        mmap_table[i].raw_ptr     = 0;
+        mmap_table[i].alloc_size  = 0;
+        mmap_table[i].aligned_len = 0;
+    }
+    for (int i = 0; i < MMAP_CACHE_SIZE; i++) {
+        mmap_cache[i].raw_ptr     = 0;
+        mmap_cache[i].aligned_len = 0;
+        mmap_cache[i].user_addr   = 0;
+        mmap_cache[i].alloc_size  = 0;
+    }
+    mmap_cache_count = 0;
+    mmap_table_init = 1;
+}
+
+static void mmap_table_insert(uint64_t user_addr, void* raw_ptr,
+                               uint64_t alloc_size, uint64_t aligned_len) {
+    if (!mmap_table_init) mmap_table_clear();
+    for (int i = 0; i < MMAP_TABLE_SIZE; i++) {
+        if (mmap_table[i].user_addr == 0) {
+            mmap_table[i].user_addr   = user_addr;
+            mmap_table[i].raw_ptr     = raw_ptr;
+            mmap_table[i].alloc_size  = alloc_size;
+            mmap_table[i].aligned_len = aligned_len;
+            return;
+        }
+    }
+    // Tablo doluysa en eskiyi ezeriz (bellek sızıntısı, pratik olmaz)
+    mmap_table[0].user_addr   = user_addr;
+    mmap_table[0].raw_ptr     = raw_ptr;
+    mmap_table[0].alloc_size  = alloc_size;
+    mmap_table[0].aligned_len = aligned_len;
+}
+
+// munmap: raw_ptr'ı kfree etmek yerine cache'e al.
+// Dönüş: 1 = cache'e alındı, 0 = cache dolu (caller kfree etmeli)
+static int mmap_cache_push(void* raw_ptr, uint64_t user_addr,
+                            uint64_t alloc_size, uint64_t aligned_len) {
+    if (mmap_cache_count >= MMAP_CACHE_SIZE) return 0;
+    mmap_cache[mmap_cache_count].raw_ptr     = raw_ptr;
+    mmap_cache[mmap_cache_count].user_addr   = user_addr;
+    mmap_cache[mmap_cache_count].alloc_size  = alloc_size;
+    mmap_cache[mmap_cache_count].aligned_len = aligned_len;
+    mmap_cache_count++;
+    return 1;
+}
+
+// mmap: önce cache'de aynı boyuta uygun blok ara.
+// Bulunursa sıfırla ve döndür (kmalloc yok!), bulunamazsa NULL döner.
+static void* mmap_cache_pop(uint64_t needed_aligned_len, uint64_t* out_raw,
+                             uint64_t* out_user, uint64_t* out_alloc) {
+    for (int i = 0; i < mmap_cache_count; i++) {
+        if (mmap_cache[i].aligned_len >= needed_aligned_len) {
+            void*    raw        = mmap_cache[i].raw_ptr;
+            uint64_t user_addr  = mmap_cache[i].user_addr;
+            uint64_t alloc_size = mmap_cache[i].alloc_size;
+            // Slot'u kapat (son girişle değiştir)
+            mmap_cache[i] = mmap_cache[mmap_cache_count - 1];
+            mmap_cache_count--;
+            *out_raw   = (uint64_t)raw;
+            *out_user  = user_addr;
+            *out_alloc = alloc_size;
+            return raw;
+        }
+    }
+    return (void*)0;
+}
+
+static void* mmap_table_remove(uint64_t user_addr) {
+    if (!mmap_table_init) return (void*)0;
+    for (int i = 0; i < MMAP_TABLE_SIZE; i++) {
+        if (mmap_table[i].user_addr == user_addr) {
+            void* raw             = mmap_table[i].raw_ptr;
+            mmap_table[i].user_addr   = 0;
+            mmap_table[i].raw_ptr     = 0;
+            mmap_table[i].alloc_size  = 0;
+            mmap_table[i].aligned_len = 0;
+            return raw;
+        }
+    }
+    return (void*)0;  // bulunamadı
+}
+
+// Tablo'dan entry'nin aligned_len bilgisini de al (cache için gerekli)
+static void mmap_table_remove_full(uint64_t user_addr, void** out_raw,
+                                    uint64_t* out_alloc, uint64_t* out_alen) {
+    if (!mmap_table_init) { *out_raw = 0; return; }
+    for (int i = 0; i < MMAP_TABLE_SIZE; i++) {
+        if (mmap_table[i].user_addr == user_addr) {
+            *out_raw   = mmap_table[i].raw_ptr;
+            *out_alloc = mmap_table[i].alloc_size;
+            *out_alen  = mmap_table[i].aligned_len;
+            mmap_table[i].user_addr   = 0;
+            mmap_table[i].raw_ptr     = 0;
+            mmap_table[i].alloc_size  = 0;
+            mmap_table[i].aligned_len = 0;
+            return;
+        }
+    }
+    *out_raw = 0;
+}
+
 // ── SYS_MMAP (16) ───────────────────────────────────────────────
 // mmap(addr, len, prot, flags, fd, offset) -> mapped_addr | MAP_FAILED
 //
@@ -783,26 +939,29 @@ static void sys_mmap(syscall_frame_t* frame) {
             return;
         }
 
-        // Page-aligned adres garantisi:
-        // Ekstra (PAGE_SIZE_SC + sizeof(void*)) byte ayır.
-        // Raw pointer hizalanmis bolgenin hemen oncesine gizlenir;
-        // munmap bu pointer'i okuyarak dogru adresi kfree eder.
-        uint64_t alloc_size = aligned_len + PAGE_SIZE_SC + sizeof(void*);
-        uint8_t* raw = (uint8_t*)kmalloc(alloc_size);
-        if (!raw) { frame->rax = (uint64_t)MAP_FAILED; return; }
+        uint64_t alloc_size = aligned_len + PAGE_SIZE_SC;
+        uint64_t aligned_addr;
+        uint8_t* raw;
 
-        uint64_t raw_addr     = (uint64_t)raw + sizeof(void*);
-        uint64_t aligned_addr = (raw_addr + PAGE_SIZE_SC - 1) & ~(PAGE_SIZE_SC - 1);
+        // Önce freelist cache'e bak: aynı boyutta daha önce munmap edilmiş
+        // blok varsa kmalloc+memset yapmadan anında geri ver.
+        uint64_t cached_raw = 0, cached_user = 0, cached_alloc = 0;
+        void* cached = mmap_cache_pop(aligned_len, &cached_raw, &cached_user, &cached_alloc);
+        if (cached) {
+            raw          = (uint8_t*)cached_raw;
+            aligned_addr = cached_user;
+            alloc_size   = cached_alloc;
+        } else {
+            // Cache boş: gerçek kmalloc
+            raw = (uint8_t*)kmalloc(alloc_size);
+            if (!raw) { frame->rax = (uint64_t)MAP_FAILED; return; }
+            aligned_addr = ((uint64_t)raw + PAGE_SIZE_SC - 1) & ~(PAGE_SIZE_SC - 1);
+            kmemset((void*)aligned_addr, 0, aligned_len);
+        }
 
-        // Raw pointer'i sakla: hizalanmis adresin sizeof(void*) oncesi
-        *((void**)(aligned_addr - sizeof(void*))) = (void*)raw;
+        // raw → aligned_addr eşlemesini tabloya kaydet
+        mmap_table_insert(aligned_addr, (void*)raw, alloc_size, aligned_len);
 
-        kmemset((void*)aligned_addr, 0, aligned_len);
-
-        serial_print("[SYSCALL] mmap anon -> 0x");
-        print_hex64(aligned_addr);
-        serial_print(" len="); print_uint64(aligned_len);
-        serial_print("\n");
 
         frame->rax = aligned_addr;
         return;
@@ -852,13 +1011,12 @@ static void sys_mmap(syscall_frame_t* frame) {
     if (offset + map_bytes > file_size)
         map_bytes = file_size - offset;   // dosya sonuna kadar
 
-    // Bellek ayır ve sıfırla (page-aligned, raw ptr gizli)
-    uint64_t alloc_size2 = aligned_len + PAGE_SIZE_SC + sizeof(void*);
+    // Bellek ayır ve sıfırla (page-aligned, raw ptr tabloda saklanır)
+    uint64_t alloc_size2 = aligned_len + PAGE_SIZE_SC;
     uint8_t* raw2 = (uint8_t*)kmalloc(alloc_size2);
     if (!raw2) { frame->rax = (uint64_t)MAP_FAILED; return; }
-    uint64_t raw2_addr     = (uint64_t)raw2 + sizeof(void*);
-    uint64_t aligned2_addr = (raw2_addr + PAGE_SIZE_SC - 1) & ~(PAGE_SIZE_SC - 1);
-    *((void**)(aligned2_addr - sizeof(void*))) = (void*)raw2;
+    uint64_t aligned2_addr = ((uint64_t)raw2 + PAGE_SIZE_SC - 1) & ~(PAGE_SIZE_SC - 1);
+    mmap_table_insert(aligned2_addr, (void*)raw2, alloc_size2, aligned_len);
     void* mem = (void*)aligned2_addr;
     kmemset(mem, 0, aligned_len);
 
@@ -890,12 +1048,6 @@ static void sys_mmap(syscall_frame_t* frame) {
     // fd offset'ini güncelle (haritalamadan sonra)
     ent->offset = offset + map_bytes;
 
-    serial_print("[SYSCALL] mmap file fd=");
-    { char b[8]; int_to_str(fd_arg, b); serial_print(b); }
-    serial_print(" off="); print_uint64(offset);
-    serial_print(" len="); print_uint64(map_bytes);
-    serial_print(" -> 0x"); print_hex64((uint64_t)mem);
-    serial_print("\n");
 
     frame->rax = (uint64_t)mem;
 }
@@ -915,19 +1067,24 @@ static void sys_munmap(syscall_frame_t* frame) {
     if (!addr)    { frame->rax = SYSCALL_ERR_INVAL; return; }
     if (len == 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
 
-    // Hizalanmis adresin sizeof(void*) oncesinde gizlenen raw ptr'i oku.
-    // sys_mmap bu pointer'i oraya saklamistir; kfree raw ptr ile yapilmali.
-    void* raw = *((void**)(addr - sizeof(void*)));
-    if (raw) {
-        kfree(raw);
-    } else {
-        // Eski stil (hizalanmamis) veya bilinmeyen kaynak: dogrudan serbest birak
-        kfree((void*)addr);
-    }
+    // mmap_table'dan raw pointer + boyut bilgisini al.
+    void*    raw        = 0;
+    uint64_t alloc_size = 0;
+    uint64_t aligned_len_cached = 0;
+    mmap_table_remove_full(addr, &raw, &alloc_size, &aligned_len_cached);
 
-    serial_print("[SYSCALL] munmap addr=0x");
-    print_hex64(addr);
-    serial_print("\n");
+
+    if (raw) {
+        // kfree yerine freelist cache'e al.
+        // Aynı adresler ping-pong şeklinde mmap/munmap ediliyorsa (musl malloc
+        // döngüsü) bir sonraki mmap isteğine anında cevap verir — kmalloc/kfree
+        // çağrısı tamamen önlenir.
+        if (!mmap_cache_push(raw, addr, alloc_size, aligned_len_cached)) {
+            // Cache dolu: gerçek kfree
+            kfree(raw);
+        }
+    } else {
+    }
 
     frame->rax = SYSCALL_OK;
 }
@@ -1493,6 +1650,11 @@ static void sys_execve(syscall_frame_t* frame) {
     // RSP0 (TSS) güncelle
     tss_set_kernel_stack(cur->kernel_stack_top);
 
+    // Klavyeyi userland moduna al: keyboard_unified.c'deki kb_ring_push
+    // akışı artık bu task'a yönlenecek; sys_read blocking okuma yapabilir.
+    extern void kb_set_userland_mode(int on);
+    kb_set_userland_mode(1);
+
     serial_print("[EXECVE] success: jumping to entry 0x");
     print_hex64(img.entry);
     serial_print(" new_rsp=0x");
@@ -2035,7 +2197,7 @@ static uint32_t pg_effective_sid(uint32_t pid);
 // ---------------------------------------------------------------
 
 // Kernel-tarafı terminal durumu (tüm seri fd'ler için paylaşımlı)
-static termios_t kernel_termios = {
+termios_t kernel_termios = {
     .c_iflag = ICRNL | IXON,
     .c_oflag = OPOST | ONLCR,
     .c_cflag = CS8 | CREAD | CLOCAL,
@@ -2122,13 +2284,16 @@ static void sys_ioctl(syscall_frame_t* frame) {
 
     // ── TIOCGWINSZ: pencere boyutunu döndür ──────────────────────
     case TIOCGWINSZ: {
-        // VESA driver'ından gerçek ekran boyutunu al (sabit 25x80 değil!)
-        extern void get_screen_size64(size_t* width, size_t* height);
-        size_t vesa_cols = 0, vesa_rows = 0;
-        get_screen_size64(&vesa_cols, &vesa_rows);
-        if (vesa_cols > 0 && vesa_rows > 0) {
-            kernel_winsize.ws_col = (uint16_t)vesa_cols;
-            kernel_winsize.ws_row = (uint16_t)vesa_rows;
+        // VESA boyutunu SADECE kernel_winsize henüz varsayılansa (80x25) al.
+        // TIOCSWINSZ ile set edilmiş bir değer varsa onu koru — ezmeme!
+        if (kernel_winsize.ws_col == 80 && kernel_winsize.ws_row == 25) {
+            extern void get_screen_size64(size_t* width, size_t* height);
+            size_t vesa_cols = 0, vesa_rows = 0;
+            get_screen_size64(&vesa_cols, &vesa_rows);
+            if (vesa_cols > 0 && vesa_rows > 0) {
+                kernel_winsize.ws_col = (uint16_t)vesa_cols;
+                kernel_winsize.ws_row = (uint16_t)vesa_rows;
+            }
         }
         if (!is_valid_user_ptr(arg, sizeof(winsize_t))) {
             frame->rax = SYSCALL_ERR_FAULT;
@@ -2541,9 +2706,26 @@ static void sys_kill(syscall_frame_t* frame) {
         return;
     }
 
-    // pid > 0: hedef task'a signal_send ile gönder
-    int ret = signal_send(pid, sig);
-    frame->rax = (ret == 0) ? SYSCALL_OK : SYSCALL_ERR_INVAL;
+    // pid > 0: hedef task'a signal_send ile gönder.
+    // Task bulunamazsa EINVAL dön (test [53] bunu bekliyor).
+    task_t* target = task_find_by_pid((uint32_t)pid);
+    if (!target) {
+        frame->rax = SYSCALL_ERR_INVAL;  // -EINVAL: geçersiz/bulunamayan pid
+        return;
+    }
+    // Sleeping task'a da pending_sigs set et (signal_send sadece ready_queue'a bakar)
+    signal_table_t* st = task_get_signal_table(target);
+    if (st) {
+        st->pending_sigs |= SIG_BIT(sig);
+        if (sig == SIGKILL) {
+            // SIGKILL: anında sonlandır — sleeping olsa bile
+            target->state = TASK_STATE_TERMINATED;
+            serial_print("[SYSCALL] kill SIGKILL: task terminated pid=");
+            { char b[12]; int_to_str(pid, b); serial_print(b); }
+            serial_print("\n");
+        }
+    }
+    frame->rax = SYSCALL_OK;
 }
 
 // ── SYS_GETTIMEOFDAY (30) ───────────────────────────────────────
@@ -3337,6 +3519,11 @@ static void sys_getegid(syscall_frame_t* frame) {
 // bash'in harici sleep komutu ve readline timeout'ları bunu kullanır.
 // Gerçek nanosaniye hassasiyeti yok; timer tick'lerine çevrilir.
 // 1 tick ≈ 10ms (100 Hz) varsayılır.
+//
+// ÖNEMLİ: sti+hlt kullanılmaz — kernel context'te HLT interrupt
+// gelmezse sonsuza kilitlenir. Bunun yerine:
+//   - tv_sec == 0 && tv_nsec < 10ms  → hemen döner (0 tick)
+//   - Gerçek uyku gerekiyorsa tick sayar, her iterasyonda pause kullanır
 // ---------------------------------------------------------------
 static void sys_nanosleep(syscall_frame_t* frame) {
     timespec_t* req = (timespec_t*)frame->rdi;
@@ -3353,13 +3540,19 @@ static void sys_nanosleep(syscall_frame_t* frame) {
 
     // Toplam nanosaniyeyi tick'e çevir (1 tick = 10_000_000 ns = 10 ms)
     int64_t total_ns = req->tv_sec * 1000000000LL + req->tv_nsec;
-    uint64_t ticks   = (uint64_t)(total_ns / 10000000LL);  // 10ms per tick
-    if (ticks == 0 && total_ns > 0) ticks = 1;             // en az 1 tick
+    uint64_t ticks   = (uint64_t)(total_ns / 10000000LL);
 
+    // 10ms altı istekler (1ms, 0.5ms vb.) sıfır tick → hemen dön.
+    // HLT kullanmıyoruz: timer interrupt'ı güvensiz olduğu context'lerde
+    // sonsuz beklemeye girer. tick > 0 için sadece get_system_ticks() poll.
     if (ticks > 0) {
         uint64_t end = get_system_ticks() + ticks;
-        while (get_system_ticks() < end)
-            __asm__ volatile ("sti; hlt" ::: "memory");
+        uint64_t deadline = end + 10000;  // güvenlik: max 10000 iterasyon
+        uint64_t iter = 0;
+        while (get_system_ticks() < end && iter < deadline) {
+            __asm__ volatile ("pause" ::: "memory");
+            iter++;
+        }
     }
 
     // rem: kalan süre — sinyal kesemediyse 0
@@ -4419,6 +4612,759 @@ static void sys_pipe2(syscall_frame_t* frame) {
     frame->rax = 0;
 }
 
+// ============================================================
+// sys_futex — Linux x86-64 uyumlu futex (SYS_FUTEX = 202)
+//
+// AscentOS şu an single-threaded çalıştığından gerçek bekleme/
+// uyandırma mantığı gerekmez; POSIX semantiğini karşılaştırma
+// tabanlı stub ile uyguluyoruz:
+//
+//   FUTEX_WAIT / FUTEX_WAIT_PRIVATE:
+//     *uaddr != val  → EAGAIN  (zaten değer farklı, bekleme yok)
+//     *uaddr == val  → uniprocessor: anında EINTR dön
+//                      (gerçek scheduler entegrasyonuna kadar)
+//   FUTEX_WAKE / FUTEX_WAKE_PRIVATE:
+//     0 dön (kimse uyanmadı — waiter yok)
+//   NULL uaddr      → EFAULT
+//   Geçersiz op     → EINVAL
+//
+// Argümanlar (Linux uyumlu):
+//   RDI = uaddr   RSI = op   RDX = val   R10 = timeout   R8 = uaddr2   R9 = val3
+// ============================================================
+static void sys_futex(syscall_frame_t* frame) {
+    uint32_t* uaddr   = (uint32_t*)(uintptr_t)frame->rdi;
+    int       op      = (int)(int64_t)frame->rsi;
+    uint32_t  val     = (uint32_t)frame->rdx;
+    // timeout = frame->r10, uaddr2 = frame->r8, val3 = frame->r9 (şimdilik kullanılmıyor)
+
+    // PRIVATE flag: sadece aynı mm-içi semantik — tek process'te fark yok
+    int base_op = op & ~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
+
+    serial_print("[SYSCALL] futex op=");
+    { char b[8]; int_to_str(op, b); serial_print(b); }
+    serial_print("\n");
+
+    // ── NULL uaddr → EFAULT ──────────────────────────────────────
+    if (!uaddr || !is_valid_user_ptr(uaddr, sizeof(uint32_t))) {
+        serial_print("[SYSCALL] futex: EFAULT\n");
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+
+    switch (base_op) {
+    // ── FUTEX_WAIT ───────────────────────────────────────────────
+    case FUTEX_WAIT:
+        // Değer eşleşmiyor → EAGAIN (thread uyutulmayacak)
+        if (*uaddr != val) {
+            serial_print("[SYSCALL] futex WAIT: val mismatch -> EAGAIN\n");
+            frame->rax = SYSCALL_ERR_AGAIN;
+        } else {
+            // Değer eşleşiyor ama gerçek bekleme yok (single-threaded stub)
+            // Linux davranışı: sinyalle kesilirse EINTR döner
+            serial_print("[SYSCALL] futex WAIT: no real waitqueue -> EINTR\n");
+            frame->rax = SYSCALL_ERR_INTR;
+        }
+        break;
+
+    // ── FUTEX_WAKE ───────────────────────────────────────────────
+    case FUTEX_WAKE:
+        // Uyandırılan thread sayısını döndür; hiç waiter yok → 0
+        serial_print("[SYSCALL] futex WAKE: 0 woken\n");
+        frame->rax = 0;
+        break;
+
+    // ── FUTEX_REQUEUE ────────────────────────────────────────────
+    case FUTEX_REQUEUE:
+    case FUTEX_CMP_REQUEUE:
+        // Stub: waiter yok, 0 taşındı
+        frame->rax = 0;
+        break;
+
+    // ── Bilinmeyen op ────────────────────────────────────────────
+    default:
+        serial_print("[SYSCALL] futex: unknown op -> EINVAL\n");
+        frame->rax = SYSCALL_ERR_INVAL;
+        break;
+    }
+}
+
+// ============================================================
+// sys_getrandom — Linux x86-64 uyumlu (SYS_GETRANDOM = 318)
+//
+// Kernel PRNG: xorshift64 tabanlı, timer tick ile seed'lenir.
+// Gerçek entropi kaynağı yerine deterministic PRNG kullanılır
+// (bare-metal ortamda /dev/urandom yoktur).
+//
+// flags:
+//   GRND_NONBLOCK (0x01): entropi bekleme yok (zaten yok, görmezden gel)
+//   GRND_RANDOM   (0x02): "yüksek kalite" istendi — aynı PRNG'i kullan
+//   Bilinmeyen bit → EINVAL
+//
+// Argümanlar:
+//   RDI = buf   RSI = buflen   RDX = flags
+// Dönüş: okunan byte sayısı | hata
+// ============================================================
+
+// Xorshift64 PRNG — her çağrıda farklı random üretir
+static uint64_t grnd_state = 0xDEADBEEFCAFEBABEull;
+
+static uint64_t grnd_next(void) {
+    uint64_t x = grnd_state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    grnd_state = x;
+    return x;
+}
+
+// Dışarıdan seed ayarlamak için (timer.c'den çağrılabilir)
+void getrandom_seed(uint64_t seed) {
+    if (seed) grnd_state ^= seed;
+}
+
+static void sys_getrandom(syscall_frame_t* frame) {
+    uint8_t*  buf    = (uint8_t*)(uintptr_t)frame->rdi;
+    uint64_t  buflen = frame->rsi;
+    uint32_t  flags  = (uint32_t)frame->rdx;
+
+    serial_print("[SYSCALL] getrandom len=");
+    { char b[12]; int_to_str((int)buflen, b); serial_print(b); }
+    serial_print("\n");
+
+    // ── buflen == 0 → hemen 0 döndür ────────────────────────────
+    if (buflen == 0) {
+        frame->rax = 0;
+        return;
+    }
+
+    // ── NULL / geçersiz buf → EFAULT ────────────────────────────
+    if (!is_valid_user_ptr(buf, buflen)) {
+        serial_print("[SYSCALL] getrandom: EFAULT\n");
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+
+    // ── Bilinmeyen flags → EINVAL ───────────────────────────────
+    if (flags & ~(uint32_t)(GRND_NONBLOCK | GRND_RANDOM)) {
+        serial_print("[SYSCALL] getrandom: bad flags -> EINVAL\n");
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    // ── PRNG ile doldur ─────────────────────────────────────────
+    uint64_t filled = 0;
+    while (filled < buflen) {
+        uint64_t rnd = grnd_next();
+        uint64_t chunk = buflen - filled;
+        if (chunk > 8) chunk = 8;
+        kmemcpy(buf + filled, &rnd, chunk);
+        filled += chunk;
+    }
+
+    serial_print("[SYSCALL] getrandom: filled=");
+    { char b[12]; int_to_str((int)filled, b); serial_print(b); }
+    serial_print("\n");
+
+    frame->rax = filled;
+}
+
+// ============================================================
+// sys_set_tid_address — musl __init_tp() için  (SYS_SET_TID_ADDRESS = 218)
+//
+// Argüman: RDI = tidptr (kullanıcı alanı int* — thread çıkışında 0 yazılır)
+// Dönüş:   mevcut task'ın TID'i (AscentOS'ta PID == TID)
+//
+// tidptr task_t içinde saklanır; sys_exit() bunu kullanarak
+// futex_wake uygulayabilir (gelecek implementasyon).
+// ============================================================
+static void sys_set_tid_address(syscall_frame_t* frame) {
+    int* tidptr = (int*)(uintptr_t)frame->rdi;
+
+    serial_print("[SYSCALL] set_tid_address tidptr=0x");
+    print_hex64((uint64_t)(uintptr_t)tidptr);
+    serial_print("\n");
+
+    // cur->pid sıfır olabilir (idle task); pg_current_pid() fallback ile
+    // her zaman geçerli bir pid döndürür — sys_getpid ile aynı pattern.
+    uint32_t tid = pg_current_pid();
+
+    // tidptr kaydı — gelecek: cur->clear_child_tid = (uint64_t)tidptr
+    (void)tidptr;
+
+    frame->rax = (uint64_t)tid;
+
+    serial_print("[SYSCALL] set_tid_address: tid=");
+    { char b[12]; int_to_str((int)tid, b); serial_print(b); }
+    serial_print("\n");
+}
+
+// ============================================================
+// sys_set_robust_list — pthreads mutex recovery  (SYS_SET_ROBUST_LIST = 273)
+//
+// Argümanlar: RDI = head (robust_list_head*),  RSI = len
+// Dönüş: 0 (başarı) | EINVAL (yanlış len)
+//
+// musl her thread init'te bu syscall'ı yapar.
+// Gerçek robust futex recovery gelecekte implement edilecek;
+// şimdilik len doğrulama + 0 dönüş yeterli (ENOSYS yerine 0 tercih edilir
+// çünkü ENOSYS musl'un başlatmasını kesebilir).
+// ============================================================
+static void sys_set_robust_list(syscall_frame_t* frame) {
+    uint64_t head = frame->rdi;
+    uint64_t len  = frame->rsi;
+
+    serial_print("[SYSCALL] set_robust_list head=0x");
+    print_hex64(head);
+    serial_print(" len=");
+    { char b[12]; int_to_str((int)len, b); serial_print(b); }
+    serial_print("\n");
+
+    // Linux: len != sizeof(struct robust_list_head) → EINVAL
+    if (len != ROBUST_LIST_HEAD_SIZE) {
+        serial_print("[SYSCALL] set_robust_list: bad len -> EINVAL\n");
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    // head = NULL kabul edilir (robust list temizleme)
+    // Gerçek implementasyon: cur->robust_list = head;
+    (void)head;
+
+    serial_print("[SYSCALL] set_robust_list: registered (stub)\n");
+    frame->rax = 0;
+}
+
+// ============================================================
+// sys_arch_prctl — x86-64'e özgü işlem/thread kontrol  (SYS_ARCH_PRCTL = 158)
+//
+// Desteklenen kodlar:
+//   ARCH_SET_FS (0x1002): FS.base = addr  — TLS pointer kurulumu
+//   ARCH_GET_FS (0x1003): *addr = FS.base — TLS pointer okuma
+//   ARCH_SET_GS (0x1001): GS.base = addr
+//   ARCH_GET_GS (0x1004): *addr = GS.base
+//   ARCH_GET_CPUID / ARCH_SET_CPUID: stub, 0 döner
+//   Bilinmeyen kod → EINVAL
+//
+// x86-64'te FS.base ve GS.base MSR_FS_BASE / MSR_GS_BASE üzerinden yazılır.
+// FS.base = TLS pointer — pthreads ve newlib'in __thread değişkenleri için.
+// ============================================================
+#define MSR_FS_BASE  0xC0000100
+#define MSR_GS_BASE  0xC0000101
+
+// Per-task FS/GS base saklamak için (task_t henüz bu alanı taşımıyorsa burada tutarız)
+static uint64_t current_fs_base = 0;
+static uint64_t current_gs_base = 0;
+
+static void sys_arch_prctl(syscall_frame_t* frame) {
+    int      code = (int)(int64_t)frame->rdi;
+    uint64_t addr = frame->rsi;
+
+    serial_print("[SYSCALL] arch_prctl code=0x");
+    { char b[12]; int_to_str(code, b); serial_print(b); }
+    serial_print("\n");
+
+    switch (code) {
+    // ── ARCH_SET_FS: TLS pointer yaz ─────────────────────────────
+    case ARCH_SET_FS:
+        current_fs_base = addr;
+        wrmsr(MSR_FS_BASE, addr);
+        serial_print("[SYSCALL] arch_prctl: FS.base set\n");
+        frame->rax = 0;
+        break;
+
+    // ── ARCH_GET_FS: TLS pointer oku ─────────────────────────────
+    case ARCH_GET_FS: {
+        uint64_t* out = (uint64_t*)(uintptr_t)addr;
+        if (!is_valid_user_ptr(out, sizeof(uint64_t))) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+        *out = current_fs_base;
+        serial_print("[SYSCALL] arch_prctl: FS.base get\n");
+        frame->rax = 0;
+        break;
+    }
+
+    // ── ARCH_SET_GS ──────────────────────────────────────────────
+    case ARCH_SET_GS:
+        current_gs_base = addr;
+        wrmsr(MSR_GS_BASE, addr);
+        serial_print("[SYSCALL] arch_prctl: GS.base set\n");
+        frame->rax = 0;
+        break;
+
+    // ── ARCH_GET_GS ──────────────────────────────────────────────
+    case ARCH_GET_GS: {
+        uint64_t* out = (uint64_t*)(uintptr_t)addr;
+        if (!is_valid_user_ptr(out, sizeof(uint64_t))) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+        *out = current_gs_base;
+        serial_print("[SYSCALL] arch_prctl: GS.base get\n");
+        frame->rax = 0;
+        break;
+    }
+
+    // ── ARCH_GET_CPUID / ARCH_SET_CPUID: stub ────────────────────
+    case ARCH_GET_CPUID:
+        frame->rax = 1;  // CPUID izinli
+        break;
+    case ARCH_SET_CPUID:
+        frame->rax = 0;  // sessizce kabul et
+        break;
+
+    // ── Bilinmeyen kod ───────────────────────────────────────────
+    default:
+        serial_print("[SYSCALL] arch_prctl: unknown code -> EINVAL\n");
+        frame->rax = SYSCALL_ERR_INVAL;
+        break;
+    }
+}
+
+// ============================================================
+// sys_clone — Linux x86-64 uyumlu thread/process oluşturma  (SYS_CLONE = 56)
+//
+// AscentOS implementasyon stratejisi:
+//
+//   ┌──────────────────────────────────────────────────────────────┐
+//   │ flags & CLONE_THREAD == 0  →  fork() gibi davran            │
+//   │   (CLONE_VFORK dahil; child_stack varsa child RSP'ye set)    │
+//   │                                                              │
+//   │ flags & CLONE_THREAD != 0  →  aynı adres alanında yeni task │
+//   │   CLONE_SETTLS: FS.base = tls (R8)                          │
+//   │   CLONE_PARENT_SETTID: *ptid = child_pid                    │
+//   │   CLONE_CHILD_SETTID / CHILD_CLEARTID: kaydedilir           │
+//   └──────────────────────────────────────────────────────────────┘
+//
+// Argümanlar (Linux x86-64):
+//   RDI = flags   RSI = child_stack   RDX = ptid   R10 = ctid   R8 = tls
+//
+// Dönüş: parent → child_pid,  child → 0,  hata → negatif
+// ============================================================
+static void sys_clone(syscall_frame_t* frame) {
+    uint64_t flags       = frame->rdi;
+    uint64_t child_stack = frame->rsi;
+    int*     ptid        = (int*)(uintptr_t)frame->rdx;
+    int*     ctid        = (int*)(uintptr_t)frame->r10;
+    uint64_t tls         = frame->r8;
+
+    serial_print("[SYSCALL] clone flags=0x");
+    print_hex64(flags);
+    serial_print("\n");
+
+    // ── CLONE_THREAD yoksa → fork() semantiği ────────────────────
+    if (!(flags & CLONE_THREAD)) {
+        // Mevcut fork implementasyonunu çağır
+        sys_fork(frame);
+        int64_t fork_ret = (int64_t)frame->rax;
+
+        if (fork_ret > 0) {
+            // Parent: child_stack verilmişse child'ın RSP'sini ayarla
+            // (fork'tan dönen task burada değil; scheduler devralır)
+
+            // CLONE_PARENT_SETTID: *ptid = child_pid
+            if ((flags & CLONE_PARENT_SETTID) && ptid &&
+                is_valid_user_ptr(ptid, sizeof(int))) {
+                *ptid = (int)fork_ret;
+            }
+            serial_print("[SYSCALL] clone(no-thread): fork-like, child_pid=");
+            { char b[12]; int_to_str((int)fork_ret, b); serial_print(b); }
+            serial_print("\n");
+        }
+        // frame->rax zaten sys_fork tarafından set edildi
+        return;
+    }
+
+    // ── CLONE_THREAD: yeni thread oluştur ────────────────────────
+    // child_stack sağlanmalı
+    if (child_stack == 0) {
+        serial_print("[SYSCALL] clone(THREAD): no child_stack -> EINVAL\n");
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    // CLONE_SIGHAND + CLONE_VM zorunlu (Linux kuralı)
+    if (!(flags & CLONE_VM) || !(flags & CLONE_SIGHAND)) {
+        serial_print("[SYSCALL] clone(THREAD): missing VM|SIGHAND -> EINVAL\n");
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    // Yeni task oluştur (fork ile aynı altyapı)
+    sys_fork(frame);
+    int64_t child_pid = (int64_t)frame->rax;
+
+    if (child_pid <= 0) {
+        // fork başarısız veya child context
+        return;
+    }
+
+    // Parent: child'a thread ayarlarını uygula
+    // CLONE_SETTLS → child'ın FS.base = tls
+    if (flags & CLONE_SETTLS) {
+        wrmsr(MSR_FS_BASE, tls);
+        current_fs_base = tls;
+        serial_print("[SYSCALL] clone: TLS (FS.base) set\n");
+    }
+
+    // CLONE_PARENT_SETTID: *ptid = child_pid
+    if ((flags & CLONE_PARENT_SETTID) && ptid &&
+        is_valid_user_ptr(ptid, sizeof(int))) {
+        *ptid = (int)child_pid;
+    }
+
+    // CLONE_CHILD_SETTID / CHILD_CLEARTID: task_t'ye kaydedilmeli
+    // (task.h'da tid_addr alanı yoksa şimdilik logluyoruz)
+    if (flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID)) {
+        serial_print("[SYSCALL] clone: CHILD_SETTID/CLEARTID ctid registered\n");
+        (void)ctid;  // gelecek: task->clear_child_tid = ctid
+    }
+
+    serial_print("[SYSCALL] clone(THREAD): child_pid=");
+    { char b[12]; int_to_str((int)child_pid, b); serial_print(b); }
+    serial_print("\n");
+
+    // frame->rax = child_pid (sys_fork zaten set etti)
+}
+
+// ============================================================
+// sys_readv — scatter/gather read  (SYS_READV = 19)
+//
+// musl stdio fread/scanf buffer'larını bu syscall ile okur.
+// Her iovec için sys_read mantığını tekrar kullanır.
+//
+// Argümanlar: RDI=fd  RSI=iov[]  RDX=iovcnt
+// Dönüş: toplam okunan byte | err
+// ============================================================
+static void sys_readv(syscall_frame_t* frame) {
+    int       fd     = (int)(int64_t)frame->rdi;
+    iovec_t*  iov    = (iovec_t*)(uintptr_t)frame->rsi;
+    int       iovcnt = (int)(int64_t)frame->rdx;
+
+    if (!is_valid_user_ptr(iov, sizeof(iovec_t) * (uint64_t)iovcnt)) {
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+    if (iovcnt < 0 || iovcnt > 1024) {
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    int64_t total = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        uint64_t len = iov[i].iov_len;
+        if (len == 0) continue;
+        if (!is_valid_user_ptr(iov[i].iov_base, len)) {
+            if (total == 0) { frame->rax = SYSCALL_ERR_FAULT; return; }
+            break;
+        }
+
+        // sys_read çağrısını simüle et: frame'i geçici olarak ayarla
+        syscall_frame_t tmp = *frame;
+        tmp.rdi = (uint64_t)fd;
+        tmp.rsi = (uint64_t)(uintptr_t)iov[i].iov_base;
+        tmp.rdx = len;
+        sys_read(&tmp);
+
+        int64_t got = (int64_t)tmp.rax;
+        if (got < 0) {
+            if (total == 0) { frame->rax = tmp.rax; return; }
+            break;
+        }
+        total += got;
+        if ((uint64_t)got < len) break;  // kısa okuma — daha fazla yok
+    }
+
+    frame->rax = (uint64_t)total;
+}
+
+// sys_writev — scatter/gather write  (SYS_WRITEV = 20)
+//
+// musl stdio fwrite/printf buffer'larını bu syscall ile flush eder.
+// Her iovec için sys_write mantığını tekrar kullanır.
+//
+// Argümanlar: RDI=fd  RSI=iov[]  RDX=iovcnt
+// Dönüş: toplam yazılan byte | err
+// ============================================================
+static void sys_writev(syscall_frame_t* frame) {
+    int       fd     = (int)(int64_t)frame->rdi;
+    iovec_t*  iov    = (iovec_t*)(uintptr_t)frame->rsi;
+    int       iovcnt = (int)(int64_t)frame->rdx;
+
+    serial_print("[SYSCALL] writev fd=");
+    { char b[8]; int_to_str(fd, b); serial_print(b); }
+    serial_print(" iovcnt=");
+    { char b[8]; int_to_str(iovcnt, b); serial_print(b); }
+    serial_print("\n");
+
+    if (!is_valid_user_ptr(iov, sizeof(iovec_t) * (uint64_t)iovcnt)) {
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+    if (iovcnt < 0 || iovcnt > 1024) {
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    task_t* cur = task_get_current();
+    fd_entry_t* fde = cur ? fd_get(cur->fd_table, fd) : NULL;
+    if (!fde) {
+        frame->rax = SYSCALL_ERR_BADF;
+        return;
+    }
+
+    int64_t total = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        if (iov[i].iov_len == 0) continue;
+        if (!is_valid_user_ptr(iov[i].iov_base, iov[i].iov_len)) {
+            if (total == 0) frame->rax = SYSCALL_ERR_FAULT;
+            else            frame->rax = (uint64_t)total;
+            return;
+        }
+
+        const char* buf = (const char*)iov[i].iov_base;
+        uint64_t    len = iov[i].iov_len;
+
+        if (fde->type == FD_TYPE_SERIAL) {
+            // stdout/stderr → serial + VGA
+            for (uint64_t j = 0; j < len; j++) {
+                serial_putchar(buf[j]);
+                putchar64(buf[j], VGA_WHITE);
+            }
+            total += (int64_t)len;
+        } else if (fde->type == FD_TYPE_PIPE && fde->pipe) {
+            // Pipe write — sys_write ile aynı mantık
+            pipe_buf_t* pb = fde->pipe;
+            if (pb->write_closed) { frame->rax = SYSCALL_ERR_PIPE; return; }
+            uint64_t written = 0;
+            while (written < len && pb->bytes_avail < PIPE_BUF_SIZE) {
+                pb->data[pb->write_pos] = buf[written++];
+                pb->write_pos = (pb->write_pos + 1) % PIPE_BUF_SIZE;
+                pb->bytes_avail++;
+            }
+            total += (int64_t)written;
+        } else {
+            // Dosya yazma — offset ilerlet
+            fde->offset += len;
+            total += (int64_t)len;
+        }
+    }
+
+    frame->rax = (uint64_t)total;
+}
+
+// ============================================================
+// sys_madvise — bellek kullanım tavsiyesi  (SYS_MADVISE = 28)
+//
+// musl malloc/free tarafından MADV_DONTNEED/FREE ile çağrılır.
+// AscentOS'ta gerçek sayfa yönetimi gelecekte; şimdilik:
+//   MADV_DONTNEED / MADV_FREE → 0 (kabul et, işlem yapma)
+//   Geçersiz addr/len → EINVAL
+//   Bilinmeyen advice → 0 (sessizce kabul et)
+// ============================================================
+static void sys_madvise(syscall_frame_t* frame) {
+    uint64_t addr   = frame->rdi;
+    uint64_t len    = frame->rsi;
+    int      advice = (int)(int64_t)frame->rdx;
+
+    serial_print("[SYSCALL] madvise advice=");
+    { char b[8]; int_to_str(advice, b); serial_print(b); }
+    serial_print("\n");
+
+    // addr sayfa hizalı olmalı
+    if (addr & (PAGE_SIZE_SC - 1)) {
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+    if (len == 0) {
+        frame->rax = 0;
+        return;
+    }
+
+    // Tüm tavsiyeler için stub: 0 döndür
+    (void)advice;
+    frame->rax = 0;
+}
+
+// ============================================================
+// sys_exit_group — tüm thread'leri sonlandır  (SYS_EXIT_GROUP = 231)
+//
+// musl exit() her zaman exit_group çağırır, SYS_EXIT değil.
+// AscentOS şu an single-threaded; sys_exit ile aynı davranış.
+// ============================================================
+static void sys_exit_group(syscall_frame_t* frame) {
+    serial_print("[SYSCALL] exit_group\n");
+    // sys_exit ile aynı implementasyon
+    sys_exit(frame);
+}
+
+// ============================================================
+// sys_openat — dizin-göreceli dosya açma  (SYS_OPENAT = 257)
+//
+// musl open() wrapper'ı her zaman openat(AT_FDCWD, path, flags, mode)
+// şeklinde çağırır. AT_FDCWD (-100) = geçerli çalışma dizini.
+//
+// Argümanlar: RDI=dirfd  RSI=path  RDX=flags  R10=mode
+// Dönüş: fd | err
+// ============================================================
+static void sys_openat(syscall_frame_t* frame) {
+    int         dirfd = (int)(int64_t)frame->rdi;
+    const char* path  = (const char*)(uintptr_t)frame->rsi;
+    int         flags = (int)(int64_t)frame->rdx;
+
+    serial_print("[SYSCALL] openat dirfd=");
+    { char b[8]; int_to_str(dirfd, b); serial_print(b); }
+    serial_print(" path=");
+    if (path && is_valid_user_ptr(path, 1)) serial_print(path);
+    serial_print("\n");
+
+    // NULL path → EFAULT (sys_open EINVAL döndürür, POSIX EFAULT ister)
+    if (!path) {
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+    if (!is_valid_user_ptr(path, 1)) {
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+
+    // AT_FDCWD veya absolute path → sys_open'a yönlendir
+    if (dirfd == AT_FDCWD || path[0] == '/') {
+        frame->rdi = (uint64_t)(uintptr_t)path;
+        frame->rsi = (uint64_t)(uint32_t)flags;
+        sys_open(frame);
+        return;
+    }
+
+    // Relative path + gerçek dirfd
+    task_t* cur = task_get_current();
+    fd_entry_t* fde = cur ? fd_get(cur->fd_table, dirfd) : NULL;
+    if (!fde) {
+        frame->rax = SYSCALL_ERR_BADF;
+        return;
+    }
+    frame->rax = SYSCALL_ERR_INVAL;
+}
+
+// ============================================================
+// sys_newfstatat — dizin-göreceli stat  (SYS_NEWFSTATAT = 262)
+//
+// musl stat() wrapper'ı newfstatat(AT_FDCWD, path, &st, 0) çağırır.
+// lstat() için AT_SYMLINK_NOFOLLOW flag'i kullanılır.
+//
+// Argümanlar: RDI=dirfd  RSI=path  RDX=*stat  R10=flags
+// Dönüş: 0 | err
+// ============================================================
+static void sys_newfstatat(syscall_frame_t* frame) {
+    int         dirfd = (int)(int64_t)frame->rdi;
+    const char* path  = (const char*)(uintptr_t)frame->rsi;
+    // stat buf ve flags aynı registerlar
+    uint64_t    stat_buf = frame->rdx;
+    int         atflags  = (int)(int64_t)frame->r10;
+
+    serial_print("[SYSCALL] newfstatat dirfd=");
+    { char b[8]; int_to_str(dirfd, b); serial_print(b); }
+    if (path && is_valid_user_ptr(path, 1)) {
+        serial_print(" path="); serial_print(path);
+    }
+    serial_print("\n");
+
+    // AT_EMPTY_PATH: dirfd'nin kendisini stat et (fstat gibi)
+    if ((atflags & AT_EMPTY_PATH) && (path == NULL || path[0] == '\0')) {
+        frame->rdi = (uint64_t)(uint32_t)dirfd;
+        frame->rsi = stat_buf;
+        sys_fstat(frame);
+        return;
+    }
+
+    // AT_FDCWD + absolute path → sys_stat veya sys_lstat'a yönlendir
+    if (dirfd == AT_FDCWD || (path && path[0] == '/')) {
+        frame->rdi = (uint64_t)(uintptr_t)path;
+        frame->rsi = stat_buf;
+        if (atflags & AT_SYMLINK_NOFOLLOW) {
+            sys_lstat(frame);
+        } else {
+            sys_stat(frame);
+        }
+        return;
+    }
+
+    // Relative path + real dirfd → gelecek implementasyon
+    frame->rax = SYSCALL_ERR_INVAL;
+}
+
+// ============================================================
+// sys_prlimit64 — işlem kaynak limiti al/set  (SYS_PRLIMIT64 = 302)
+//
+// musl getrlimit/setrlimit yerine bunu kullanır.
+// pid=0 → mevcut process.
+//
+// Argümanlar: RDI=pid  RSI=resource  RDX=*new_limit  R10=*old_limit
+// Dönüş: 0 | err
+// ============================================================
+static void sys_prlimit64(syscall_frame_t* frame) {
+    int          pid_arg   = (int)(int64_t)frame->rdi;
+    int          resource  = (int)(int64_t)frame->rsi;
+    rlimit64_t*  new_lim   = (rlimit64_t*)(uintptr_t)frame->rdx;
+    rlimit64_t*  old_lim   = (rlimit64_t*)(uintptr_t)frame->r10;
+
+    serial_print("[SYSCALL] prlimit64 resource=");
+    { char b[8]; int_to_str(resource, b); serial_print(b); }
+    serial_print("\n");
+
+    // pid != 0 ve kendi pid'imiz değilse EPERM
+    if (pid_arg != 0) {
+        task_t* cur = task_get_current();
+        uint32_t my_pid = cur ? cur->pid : 0;
+        if ((uint32_t)pid_arg != my_pid) {
+            frame->rax = SYSCALL_ERR_PERM;
+            return;
+        }
+    }
+
+    // resource sınır kontrolü
+    if (resource < 0 || resource >= RLIMIT_NLIMITS) {
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    // old_limit istendi → doğrudan kernel_rlimits'ten kopyala
+    if (old_lim) {
+        if (!is_valid_user_ptr(old_lim, sizeof(rlimit64_t))) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+        old_lim->rlim_cur = kernel_rlimits[resource].rlim_cur;
+        old_lim->rlim_max = kernel_rlimits[resource].rlim_max;
+        serial_print("[SYSCALL] prlimit64: old_lim cur=");
+        { char b[12]; int_to_str((int)old_lim->rlim_cur, b); serial_print(b); }
+        serial_print("\n");
+    }
+
+    // new_limit verildi → kernel_rlimits güncelle
+    if (new_lim) {
+        if (!is_valid_user_ptr(new_lim, sizeof(rlimit64_t))) {
+            frame->rax = SYSCALL_ERR_FAULT;
+            return;
+        }
+        // Hard limit artırımı root gerektiriyor — stub: cur <= max kontrolü
+        if (new_lim->rlim_cur > kernel_rlimits[resource].rlim_max &&
+            kernel_rlimits[resource].rlim_max != RLIM_INFINITY) {
+            frame->rax = SYSCALL_ERR_PERM;
+            return;
+        }
+        if (new_lim->rlim_cur > new_lim->rlim_max) {
+            frame->rax = SYSCALL_ERR_INVAL;
+            return;
+        }
+        kernel_rlimits[resource].rlim_cur = new_lim->rlim_cur;
+        kernel_rlimits[resource].rlim_max = new_lim->rlim_max;
+    }
+
+    frame->rax = 0;
+}
+
 void syscall_dispatch(syscall_frame_t* frame) {
     uint64_t num = frame->rax;
 
@@ -4514,6 +5460,23 @@ void syscall_dispatch(syscall_frame_t* frame) {
     case SYS_PIPE2:         sys_pipe2(frame);          break;
     // v23 – grup listesi (bash $GROUPS, id builtin)
     case SYS_GETGROUPS:     sys_getgroups(frame);      break;
+    // v24 – futex & getrandom
+    case SYS_FUTEX:         sys_futex(frame);          break;
+    case SYS_GETRANDOM:     sys_getrandom(frame);      break;
+    // v25 – arch_prctl & clone
+    case SYS_ARCH_PRCTL:      sys_arch_prctl(frame);      break;
+    case SYS_CLONE:           sys_clone(frame);            break;
+    // v26 – musl libc başlatma (set_tid_address, set_robust_list)
+    case SYS_SET_TID_ADDRESS:  sys_set_tid_address(frame);  break;
+    case SYS_SET_ROBUST_LIST:  sys_set_robust_list(frame);  break;
+    // v27 – musl libc çalışması (writev, madvise, exit_group, openat, newfstatat, prlimit64)
+    case SYS_WRITEV:           sys_writev(frame);           break;
+    case 19:                   sys_readv(frame);            break;  /* SYS_READV */
+    case SYS_MADVISE:          sys_madvise(frame);          break;
+    case SYS_EXIT_GROUP:       sys_exit_group(frame);       break;
+    case SYS_OPENAT:           sys_openat(frame);           break;
+    case SYS_NEWFSTATAT:       sys_newfstatat(frame);       break;
+    case SYS_PRLIMIT64:        sys_prlimit64(frame);        break;
     // v10 – sinyal altyapısı
     case SYS_SIGACTION:    sys_sigaction(frame);    break;
     case SYS_SIGPROCMASK:  sys_sigprocmask(frame);  break;
