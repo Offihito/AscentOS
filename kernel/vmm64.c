@@ -1,6 +1,7 @@
 // vmm64.c - Virtual Memory Manager Implementation
 #include "vmm64.h"
-#include "memory_unified.h"
+#include "pmm.h"
+#include "heap.h"
 #include <stdint.h>
 #include <stddef.h>
 

@@ -4,7 +4,8 @@
 // v3: argc/argv SysV ABI stack kurulumu + foreground_pid yönetimi
 #include "task.h"
 #include "signal64.h"
-#include "memory_unified.h"
+#include "pmm.h"
+#include "heap.h"
 #include "elf64.h"
 #include <stddef.h>
 

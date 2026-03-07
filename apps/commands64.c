@@ -3,7 +3,8 @@
 #include "../fs/files64.h"
 #include "nano64.h"
 #include "../kernel/vmm64.h"
-#include "../kernel/memory_unified.h"
+#include "../kernel/heap.h"
+#include "../kernel/pmm.h"
 #include "../kernel/task.h"
 #include "../kernel/scheduler.h"
 #include "../kernel/disk64.h"    // fat32_file_size, fat32_read_file

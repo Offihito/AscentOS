@@ -2,7 +2,8 @@
 #include "scheduler.h"
 #include "task.h"
 #include "timer.h"
-#include "memory_unified.h"
+#include "pmm.h"
+#include "heap.h"
 #include "signal64.h"   // signal_dispatch_pending (v10)
 
 // External functions
