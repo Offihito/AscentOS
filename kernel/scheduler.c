@@ -2,8 +2,7 @@
 #include "scheduler.h"
 #include "task.h"
 #include "timer.h"
-#include "heap.h"
-#include "vmm.h"
+#include "memory_unified.h"
 #include "signal64.h"   // signal_dispatch_pending (v10)
 
 // External functions
@@ -32,27 +31,9 @@ static task_t* pending_next_task = NULL;
 // Current task tracking
 task_t* previous_task = NULL;
 
-// Yardımcı: stack belleğini serbest bırak.
-// Heap alanındaysa kfree, değilse VMM üzerinden sayfa sayfa serbest bırak.
-static void free_stack(void* base, uint64_t size_bytes) {
-    if (!base || size_bytes == 0) return;
-    uint64_t va = (uint64_t)base;
-    // Heap aralığı HEAP_VIRT_BASE'den başlar (heap.h sabiti)
-    if (va >= HEAP_VIRT_BASE) {
-        kfree(base);
-    } else {
-        uint64_t pages = (size_bytes + 4095) / 4096;
-        for (uint64_t i = 0; i < pages; i++) {
-            uint64_t page_va = va + i * 4096;
-            uint64_t phys = vmm_virt_to_phys(page_va);
-            vmm_unmap_page(page_va);
-            if (phys) {
-                extern void pmm_free_frame(uint64_t phys);
-                pmm_free_frame(phys);
-            }
-        }
-    }
-}
+// ===========================================
+// SCHEDULER INITIALIZATION
+// ===========================================
 
 void scheduler_init(void) {
     if (scheduler_initialized) {
@@ -190,19 +171,40 @@ void scheduler_tick(void) {
         serial_print(previous_task->name);
         serial_print("\n");
 
-        // Kernel stack
+        // Kernel stack: pmm_alloc_pages ile tahsis edildiyse pmm_free_pages ile serbest bırak.
+        // kfree() ile serbest bırakmak heap'i bozar çünkü adres heap aralığında değil.
         if (previous_task->kernel_stack_base) {
-            free_stack((void*)previous_task->kernel_stack_base,
-                       previous_task->kernel_stack_size);
+            extern void pmm_free_pages(void* base, uint64_t count);
+            extern uint8_t* heap_start;
+            extern uint8_t* heap_current;
+            uint8_t* ks = (uint8_t*)previous_task->kernel_stack_base;
+            // Heap aralığında değilse pmm ile serbest bırak
+            if (ks < heap_start || ks >= heap_current) {
+                uint64_t page_count = previous_task->kernel_stack_size / 4096;
+                pmm_free_pages((void*)previous_task->kernel_stack_base, page_count);
+            } else {
+                extern void kfree(void* ptr);
+                kfree((void*)previous_task->kernel_stack_base);
+            }
         }
 
-        // User stack
+        // User stack: pmm_alloc_pages_flags ile tahsis edildi
         if (previous_task->user_stack_base) {
-            free_stack((void*)previous_task->user_stack_base,
-                       previous_task->user_stack_size);
+            extern void pmm_free_pages(void* base, uint64_t count);
+            extern uint8_t* heap_start;
+            extern uint8_t* heap_current;
+            uint8_t* us = (uint8_t*)previous_task->user_stack_base;
+            if (us < heap_start || us >= heap_current) {
+                uint64_t page_count = previous_task->user_stack_size / 4096;
+                pmm_free_pages((void*)previous_task->user_stack_base, page_count);
+            } else {
+                extern void kfree(void* ptr);
+                kfree((void*)previous_task->user_stack_base);
+            }
         }
 
         // TCB kendisi heap'ten kmalloc ile alındı
+        extern void kfree(void* ptr);
         kfree(previous_task);
         previous_task = NULL;
     }

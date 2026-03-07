@@ -1,6 +1,6 @@
 // page_fault_handler.c - Page Fault Handler Wrapper
 #include <stdint.h>
-#include "vmm.h"
+#include "vmm64.h"
 
 // External serial print
 extern void serial_print(const char* str);
@@ -14,10 +14,11 @@ void page_fault_handler_wrapper(void) {
     __asm__ volatile ("mov %%cr2, %0" : "=r"(faulting_addr));
     
     // Error code is pushed by CPU, retrieve from stack
+    // This assumes standard interrupt frame
     __asm__ volatile ("mov 8(%%rsp), %0" : "=r"(error_code));
     
     // Call VMM page fault handler
-    vmm_handle_page_fault(error_code, faulting_addr);
+    vmm_page_fault_handler(error_code, faulting_addr);
 }
 
 // Helper to get CR2

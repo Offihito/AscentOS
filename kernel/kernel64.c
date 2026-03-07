@@ -7,11 +7,6 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-// Yeni modüler bellek yönetimi
-#include "pmm.h"
-#include "vmm.h"
-#include "heap.h"
-
 #define COM1 0x3F8
 
 static inline void outb(uint16_t port, uint8_t val) {
@@ -57,10 +52,10 @@ extern uint64_t multiboot_mmap_addr;
 extern uint32_t multiboot_mmap_entry_size;
 extern uint32_t multiboot_mmap_total_size;
 typedef struct { uint64_t base,len; uint32_t type,res; } __attribute__((packed)) mb2_mmap_t;
-
+struct mmap_entry { unsigned long base,len; unsigned int type,acpi; };
 #define MAX_MMAP 64
-static pmm_mmap_entry_t parsed_mmap[MAX_MMAP];
-
+static struct mmap_entry parsed_mmap[MAX_MMAP];
+void pmm_init(struct mmap_entry*, uint32_t);
 void vmm_init(void);
 void gdt_install_user_segments(void);
 void tss_init(void);
@@ -111,11 +106,6 @@ static bool needs_full_redraw = false;
 // ============================================================================
 // PMM bootstrap
 // ============================================================================
-
-// Çekirdeğin fiziksel sonu (linker script'ten veya sabit tahmin)
-// Gerçek projede linker64.ld'den _kernel_end sembolü alınmalı.
-#define KERNEL_END_PHYS 0x500000ULL   // 5MB: yeterince büyük sabit tahmin
-
 static uint32_t parse_mmap(void) {
     uint32_t es=multiboot_mmap_entry_size, ts=multiboot_mmap_total_size;
     uint64_t ma=multiboot_mmap_addr;
@@ -123,28 +113,17 @@ static uint32_t parse_mmap(void) {
     uint32_t n=0,off=0;
     while(off+es<=ts&&n<MAX_MMAP){
         mb2_mmap_t* e=(mb2_mmap_t*)(uint64_t)(ma+off);
-        parsed_mmap[n].base   = e->base;
-        parsed_mmap[n].length = e->len;
-        parsed_mmap[n].type   = e->type;
-        parsed_mmap[n].acpi_extended = 0;
+        parsed_mmap[n].base=(unsigned long)e->base; parsed_mmap[n].len=(unsigned long)e->len;
+        parsed_mmap[n].type=(unsigned int)e->type; parsed_mmap[n].acpi=0;
         n++; off+=es;
     }
     return n;
 }
-
 static void pmm_init_from_mb(void) {
     uint32_t n=parse_mmap();
-    if(n){ pmm_init(parsed_mmap, n, KERNEL_END_PHYS); return; }
-
-    // Fallback: QEMU varsayılan bellek haritası
-    pmm_mmap_entry_t fb[]={
-        {0,          0x9FC00,     MMAP_TYPE_USABLE,   0},
-        {0x9FC00,    0x400,       MMAP_TYPE_RESERVED, 0},
-        {0xF0000,    0x10000,     MMAP_TYPE_RESERVED, 0},
-        {0x100000,   0x1FF00000,  MMAP_TYPE_USABLE,   0}
-    };
-    pmm_init(fb, 4, KERNEL_END_PHYS);
-    serial_print("[MMAP] Fallback bellek haritasi kullanildi\n");
+    if(n){pmm_init(parsed_mmap,n);return;}
+    struct mmap_entry fb[]={{0,0x9FC00,1,0},{0x9FC00,0x400,2,0},{0xF0000,0x10000,2,0},{0x100000,0x1FF00000,1,0}};
+    pmm_init(fb,4); serial_print("[MMAP] Fallback\n");
 }
 
 // ============================================================================
@@ -357,9 +336,8 @@ void kernel_main(uint64_t multiboot_info) {
     serial_print("\n=== AscentOS Unified Kernel ===\n");
 
     init_vesa64();
-    pmm_init_from_mb();       // 1. PMM — fiziksel frame yönetimi
-    vmm_init();               // 2. VMM — sayfa tabloları
-    init_memory_unified();    // 3. Heap — kmalloc/kfree hazır
+    pmm_init_from_mb();
+    vmm_init();
     gdt_install_user_segments();
     tss_init();
     task_init();
