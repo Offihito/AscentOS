@@ -45,14 +45,17 @@ disk64.o: kernel/disk64.c
 elf64.o: kernel/elf64.c kernel/elf64.h
 	$(CC) $(CFLAGS) -c kernel/elf64.c -o elf64.o
 
-memory_unified.o: kernel/memory_unified.c kernel/memory_unified.h
-	$(CC) $(CFLAGS) -c kernel/memory_unified.c -o memory_unified.o
+pmm.o: kernel/pmm.c kernel/pmm.h
+	$(CC) $(CFLAGS) -c kernel/pmm.c -o pmm.o
+
+vmm.o: kernel/vmm.c kernel/vmm.h kernel/pmm.h
+	$(CC) $(CFLAGS) -c kernel/vmm.c -o vmm.o
+
+heap.o: kernel/heap.c kernel/heap.h kernel/vmm.h kernel/pmm.h
+	$(CC) $(CFLAGS) -c kernel/heap.c -o heap.o
 
 page_fault.o: kernel/page_fault_handler.c
 	$(CC) $(CFLAGS) -c kernel/page_fault_handler.c -o page_fault.o
-
-vmm64.o: kernel/vmm64.c kernel/vmm64.h kernel/memory_unified.h
-	$(CC) $(CFLAGS) -c kernel/vmm64.c -o vmm64.o
 
 timer.o: kernel/timer.c kernel/timer.h
 	$(CC) $(CFLAGS) -c kernel/timer.c -o timer.o
@@ -123,14 +126,15 @@ commands64.o: apps/commands64.c apps/commands64.h
 syscalltest64.o: apps/syscalltest64.c apps/commands64.h kernel/syscall.h kernel/signal64.h kernel/task.h
 	$(CC) $(CFLAGS) -c apps/syscalltest64.c -o syscalltest64.o
 
-kernel64.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h kernel/wm64.h
+kernel64.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h kernel/wm64.h \
+            kernel/pmm.h kernel/vmm.h kernel/heap.h
 	$(CC) $(CFLAGS) -c kernel/kernel64.c -o kernel64.o
 
 KERNEL_OBJS = boot64.o interrupts64.o \
               vesa64.o gui64.o compositor64.o wm64.o mouse64.o \
               keyboard.o kernel64.o taskbar.o \
               commands64.o syscalltest64.o files64.o disk64.o elf64.o nano64.o \
-              memory_unified.o vmm64.o timer.o task.o scheduler.o \
+              pmm.o vmm.o heap.o timer.o task.o scheduler.o \
               page_fault.o syscall.o signal64.o \
               panic64.o rtl8139.o arp.o
 

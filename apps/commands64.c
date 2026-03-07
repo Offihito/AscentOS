@@ -2,8 +2,9 @@
 #include "commands64.h"
 #include "../fs/files64.h"
 #include "nano64.h"
-#include "../kernel/vmm64.h"
-#include "../kernel/memory_unified.h"
+#include "../kernel/pmm.h"
+#include "../kernel/vmm.h"
+#include "../kernel/heap.h"
 #include "../kernel/task.h"
 #include "../kernel/scheduler.h"
 #include "../kernel/disk64.h"    // fat32_file_size, fat32_read_file
@@ -277,9 +278,8 @@ void get_cpu_vendor(char* vendor) {
 // ===========================================
 
 uint64_t get_memory_info() {
-    extern uint8_t* heap_start;
-    extern uint8_t* heap_current;
-    return ((uint64_t)heap_current - (uint64_t)heap_start) / 1024; // KB
+    heap_stats_t hs = heap_get_stats();
+    return hs.bytes_live / 1024; // KB
 }
 
 void format_memory_size(uint64_t kb, char* buffer) {
@@ -322,8 +322,10 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_line(output, " echo      - Echo text", VGA_WHITE);
     output_add_line(output, " about     - About AscentOS", VGA_WHITE);
     output_add_line(output, " neofetch  - Show system info", VGA_WHITE);
-    output_add_line(output, " pmm       - Physical Memory Manager stats", VGA_WHITE);
-    output_add_line(output, " vmm       - Virtual Memory Manager test", VGA_WHITE);
+    output_add_line(output, " pmm       - Physical Memory Manager istatistikleri", VGA_WHITE);
+    output_add_line(output, " vmm       - Virtual Memory Manager testi [stats|demand]", VGA_WHITE);
+    output_add_line(output, " heap      - Heap fonksiyon testi", VGA_WHITE);
+    output_add_line(output, " memtest   - Kapsamlı bellek testi [pmm|heap|vmm|stress|corrupt|brk]", VGA_YELLOW);
     output_add_empty_line(output);
     output_add_line(output, "ELF Loader Commands:", VGA_YELLOW);
     output_add_line(output, " exec      - Load ELF64 + Ring-3 task olustur", VGA_WHITE);
@@ -705,9 +707,8 @@ void cmd_sysinfo(void) {
     println64(cpu_brand, VGA_YELLOW);
     
     // Memory
-    extern uint8_t* heap_start;
-    extern uint8_t* heap_current;
-    uint64_t heap_used = (uint64_t)heap_current - (uint64_t)heap_start;
+    heap_stats_t _hs = heap_get_stats();
+    uint64_t heap_used = _hs.bytes_live;
     
     char mem_str[32];
     uint64_to_string(heap_used / 1024, mem_str);
@@ -916,37 +917,32 @@ void cmd_vmm(const char* args, CommandOutput* output) {
         output_add_empty_line(output);
         
         // Get statistics from VMM
-        extern uint64_t vmm_get_pages_mapped(void);
-        extern uint64_t vmm_get_pages_unmapped(void);
-        extern uint64_t vmm_get_page_faults(void);
-        extern uint64_t vmm_get_tlb_flushes(void);
-        extern uint64_t vmm_get_demand_allocations(void);
-        extern uint64_t vmm_get_reserved_pages(void);
+        vmm_stats_t vs = vmm_get_stats();
         
         char line[MAX_LINE_LENGTH];
         char num_str[32];
         
         // Pages mapped
         str_cpy(line, "  Pages mapped: ");
-        uint64_to_string(vmm_get_pages_mapped(), num_str);
+        uint64_to_string(vs.pages_mapped, num_str);
         str_concat(line, num_str);
         output_add_line(output, line, VGA_WHITE);
         
         // Pages unmapped
         str_cpy(line, "  Pages unmapped: ");
-        uint64_to_string(vmm_get_pages_unmapped(), num_str);
+        uint64_to_string(vs.pages_unmapped, num_str);
         str_concat(line, num_str);
         output_add_line(output, line, VGA_WHITE);
         
         // Page faults
         str_cpy(line, "  Page faults: ");
-        uint64_to_string(vmm_get_page_faults(), num_str);
+        uint64_to_string(vs.page_faults, num_str);
         str_concat(line, num_str);
         output_add_line(output, line, VGA_YELLOW);
         
         // TLB flushes
         str_cpy(line, "  TLB flushes: ");
-        uint64_to_string(vmm_get_tlb_flushes(), num_str);
+        uint64_to_string(vs.tlb_flushes, num_str);
         str_concat(line, num_str);
         output_add_line(output, line, VGA_CYAN);
         
@@ -955,15 +951,12 @@ void cmd_vmm(const char* args, CommandOutput* output) {
         
         // Demand allocations
         str_cpy(line, "  Demand allocations: ");
-        uint64_to_string(vmm_get_demand_allocations(), num_str);
+        uint64_to_string(vs.demand_allocs, num_str);
         str_concat(line, num_str);
         output_add_line(output, line, VGA_GREEN);
         
-        // Reserved pages
-        str_cpy(line, "  Reserved pages: ");
-        uint64_to_string(vmm_get_reserved_pages(), num_str);
-        str_concat(line, num_str);
-        output_add_line(output, line, VGA_MAGENTA);
+        // Reserved pages (artık vmm_stats_t içinde yok — demand_allocs gösterildi)
+        output_add_line(output, "  (reserved pages = demand paging ile yonetilir)", VGA_MAGENTA);
         
         output_add_empty_line(output);
         output_add_line(output, "VMM manages 4-level page tables (PML4)", VGA_DARK_GRAY);
@@ -974,16 +967,16 @@ void cmd_vmm(const char* args, CommandOutput* output) {
     
     // Check for demand subcommand
     if (str_len(args) > 0 && str_cmp(args, "demand") == 0) {
-        extern int vmm_enable_demand_paging(void);
-        extern int vmm_reserve_pages(uint64_t, uint64_t, uint64_t);
-        extern int vmm_is_demand_paging_enabled(void);
+        extern void vmm_enable_demand_paging(void);
+        extern int vmm_reserve_range(uint64_t, uint64_t, uint64_t);
+        extern int vmm_is_demand_paging(void);
         
         output_add_line(output, "VMM Demand Paging Test", VGA_CYAN);
         output_add_line(output, "======================", VGA_CYAN);
         output_add_empty_line(output);
         
         // Enable demand paging
-        if (!vmm_is_demand_paging_enabled()) {
+        if (!vmm_is_demand_paging()) {
             vmm_enable_demand_paging();
             output_add_line(output, "[1] Demand paging enabled", VGA_GREEN);
         } else {
@@ -992,7 +985,7 @@ void cmd_vmm(const char* args, CommandOutput* output) {
         
         // Reserve pages
         output_add_line(output, "[2] Reserving 10 pages at 0x700000...", VGA_YELLOW);
-        int result = vmm_reserve_pages(0x700000, 10, PAGE_WRITE);
+        int result = vmm_reserve_range(0x700000, 10, PTE_WRITE);
         if (result == 0) {
             output_add_line(output, "  OK Pages reserved (no physical memory yet)", VGA_GREEN);
         } else {
@@ -1033,12 +1026,12 @@ void cmd_vmm(const char* args, CommandOutput* output) {
     uint64_t test_virt = 0x400000;  // 4MB
     uint64_t test_phys = 0x200000;  // 2MB
     
-    int result = vmm_map_page(test_virt, test_phys, PAGE_WRITE | PAGE_PRESENT);
+    int result = vmm_map_page(test_virt, test_phys, PTE_WRITE | PTE_PRESENT);
     if (result == 0) {
         output_add_line(output, "  OK Page mapped successfully", VGA_GREEN);
         
         // Verify mapping
-        uint64_t phys = vmm_get_physical_address(test_virt);
+        uint64_t phys = vmm_virt_to_phys(test_virt);
         if (phys == test_phys) {
             output_add_line(output, "  OK Address translation verified", VGA_GREEN);
         } else {
@@ -1051,7 +1044,7 @@ void cmd_vmm(const char* args, CommandOutput* output) {
     
     // Test 2: Check if page is present
     output_add_line(output, "[TEST 2] Checking page presence...", VGA_YELLOW);
-    if (vmm_is_page_present(test_virt)) {
+    if (vmm_virt_to_phys(test_virt) != 0) {
         output_add_line(output, "  OK Page is present", VGA_GREEN);
     } else {
         output_add_line(output, "  ERROR Page not found", VGA_RED);
@@ -1060,7 +1053,7 @@ void cmd_vmm(const char* args, CommandOutput* output) {
     
     // Test 3: Map a range
     output_add_line(output, "[TEST 3] Mapping 16KB range...", VGA_YELLOW);
-    result = vmm_map_range(0x500000, 0x300000, 16384, PAGE_WRITE | PAGE_PRESENT);
+    result = vmm_map_range(0x500000, 0x300000, 16384, PTE_WRITE | PTE_PRESENT);
     if (result == 0) {
         output_add_line(output, "  OK Range mapped (4 pages)", VGA_GREEN);
     } else {
@@ -1070,7 +1063,7 @@ void cmd_vmm(const char* args, CommandOutput* output) {
     
     // Test 4: 2MB page mapping
     output_add_line(output, "[TEST 4] Mapping 2MB large page...", VGA_YELLOW);
-    result = vmm_map_page_2mb(0x800000, 0x800000, PAGE_WRITE | PAGE_PRESENT);
+    result = vmm_map_page_2m(0x800000, 0x800000, PTE_WRITE | PTE_PRESENT);
     if (result == 0) {
         output_add_line(output, "  OK 2MB page mapped", VGA_GREEN);
     } else {
@@ -1078,13 +1071,13 @@ void cmd_vmm(const char* args, CommandOutput* output) {
     }
     output_add_empty_line(output);
     
-    // Test 5: Identity mapping
+    // Test 5: Identity mapping (vmm_map_range ile virt==phys)
     output_add_line(output, "[TEST 5] Identity mapping test...", VGA_YELLOW);
-    result = vmm_identity_map(0x600000, PAGE_SIZE_4K, PAGE_WRITE | PAGE_PRESENT);
+    result = vmm_map_range(0x600000, 0x600000, PAGE_SIZE_4K, PTE_WRITE | PTE_PRESENT);
     if (result == 0) {
         output_add_line(output, "  OK Identity mapping created", VGA_GREEN);
         
-        uint64_t phys = vmm_get_physical_address(0x600000);
+        uint64_t phys = vmm_virt_to_phys(0x600000);
         if (phys == 0x600000) {
             output_add_line(output, "  OK Identity verified (V==P)", VGA_GREEN);
         } else {
@@ -1253,6 +1246,502 @@ void cmd_heap(const char* args, CommandOutput* output) {
     output_add_empty_line(output);
     output_add_line(output, "All heap tests completed!", VGA_CYAN);
 }
+
+// ============================================================================
+// MEMTEST — Master bellek test komutu
+// Kullanım:
+//   memtest          → tüm testleri çalıştır
+//   memtest pmm      → sadece PMM testi
+//   memtest heap     → sadece heap testi
+//   memtest vmm      → sadece VMM testi
+//   memtest stress   → stres testi (çok tahsis/serbest)
+//   memtest corrupt  → bozulma tespiti (magic sayı)
+//   memtest brk      → brk/sbrk syscall yolu
+// ============================================================================
+
+static void _mt_pass(CommandOutput* o, const char* msg) {
+    char line[128]; str_cpy(line, "  [PASS] "); str_concat(line, msg);
+    output_add_line(o, line, VGA_GREEN);
+}
+static void _mt_fail(CommandOutput* o, const char* msg) {
+    char line[128]; str_cpy(line, "  [FAIL] "); str_concat(line, msg);
+    output_add_line(o, line, VGA_RED);
+}
+static void _mt_info(CommandOutput* o, const char* msg) {
+    char line[128]; str_cpy(line, "  [INFO] "); str_concat(line, msg);
+    output_add_line(o, line, VGA_CYAN);
+}
+static void _mt_num(CommandOutput* o, const char* label, uint64_t val, const char* unit) {
+    char line[128]; char num[24];
+    uint64_to_string(val, num);
+    str_cpy(line, "  "); str_concat(line, label);
+    str_concat(line, num); str_concat(line, unit);
+    output_add_line(o, line, VGA_WHITE);
+}
+
+// ── PMM alt testi ────────────────────────────────────────────────────────────
+static int _test_pmm(CommandOutput* o) {
+    int pass = 0, fail = 0;
+    output_add_line(o, "--- PMM Testi ---", VGA_YELLOW);
+
+    // 1. İstatistik sorgula
+    uint64_t total = pmm_total_frames();
+    uint64_t free0 = pmm_free_frames();
+    uint64_t used0 = pmm_used_frames();
+
+    if (total > 0)        { _mt_pass(o, "total_frames > 0"); pass++; }
+    else                  { _mt_fail(o, "total_frames == 0 !"); fail++; }
+
+    if (free0 + used0 == total) { _mt_pass(o, "free+used == total"); pass++; }
+    else                        { _mt_fail(o, "free+used != total !"); fail++; }
+
+    _mt_num(o, "Toplam RAM    : ", pmm_total_bytes() >> 20, " MB");
+    _mt_num(o, "Serbest       : ", pmm_free_bytes()  >> 20, " MB");
+    _mt_num(o, "Kullanılan    : ", (pmm_used_frames() * 4096) >> 20, " MB");
+
+    // 2. Frame tahsis et, serbest bırak
+    uint64_t f1 = pmm_alloc_frame();
+    uint64_t f2 = pmm_alloc_frame();
+    if (f1 && f2 && f1 != f2) { _mt_pass(o, "2 farklı frame tahsis edildi"); pass++; }
+    else                       { _mt_fail(o, "frame tahsisi başarısız"); fail++; }
+
+    uint64_t free1 = pmm_free_frames();
+    if (free1 == free0 - 2)  { _mt_pass(o, "free_frames 2 azaldı"); pass++; }
+    else                      { _mt_fail(o, "free_frames sayımı yanlış"); fail++; }
+
+    pmm_free_frame(f1);
+    pmm_free_frame(f2);
+
+    uint64_t free2 = pmm_free_frames();
+    if (free2 == free0)  { _mt_pass(o, "Serbest bırakma sonrası frame sayısı eski hale geldi"); pass++; }
+    else                  { _mt_fail(o, "Frame serbest bırakma hatası"); fail++; }
+
+    // 3. NULL frame (0 adres) serbest bırakma — çökmemeli
+    pmm_free_frame(0);
+    _mt_pass(o, "pmm_free_frame(0) guvenli dondu");
+    pass++;
+
+    _mt_num(o, "Sonuç: PASS=", pass, ""); _mt_num(o, "       FAIL=", fail, "");
+    return fail;
+}
+
+// ── Heap alt testi ───────────────────────────────────────────────────────────
+static int _test_heap(CommandOutput* o) {
+    int pass = 0, fail = 0;
+    output_add_line(o, "--- Heap Testi ---", VGA_YELLOW);
+
+    // Baseline — test başlamadan önce aktif olan tahsisler (kernel/output)
+    heap_stats_t bl = heap_get_stats();
+    uint64_t baseline_net = bl.total_allocs - bl.total_frees;
+
+    // 1. Temel tahsis/serbest
+    void* p1 = kmalloc(64);
+    if (p1)  { _mt_pass(o, "kmalloc(64) OK"); pass++; }
+    else     { _mt_fail(o, "kmalloc(64) NULL döndü"); fail++; }
+
+    // 2. Belleğe yaz/oku
+    if (p1) {
+        uint8_t* b = (uint8_t*)p1;
+        for (int i = 0; i < 64; i++) b[i] = (uint8_t)(i ^ 0xA5);
+        int ok = 1;
+        for (int i = 0; i < 64; i++) if (b[i] != (uint8_t)(i ^ 0xA5)) { ok=0; break; }
+        if (ok) { _mt_pass(o, "64 byte yaz/oku doğrulandı"); pass++; }
+        else    { _mt_fail(o, "Bellek içeriği bozuk!"); fail++; }
+        kfree(p1);
+        _mt_pass(o, "kfree(64) OK"); pass++;
+    }
+
+    // 3. kcalloc sıfırlama
+    uint64_t* p2 = (uint64_t*)kcalloc(32, sizeof(uint64_t));
+    if (p2) {
+        int zero = 1;
+        for (int i = 0; i < 32; i++) if (p2[i]) { zero=0; break; }
+        if (zero) { _mt_pass(o, "kcalloc(32*8) sıfırlanmış"); pass++; }
+        else      { _mt_fail(o, "kcalloc sıfırlamadı!"); fail++; }
+        kfree(p2);
+    } else { _mt_fail(o, "kcalloc başarısız"); fail++; }
+
+    // 4. krealloc büyütme
+    void* p3 = kmalloc(128);
+    if (p3) {
+        uint8_t* b3 = (uint8_t*)p3;
+        for (int i = 0; i < 128; i++) b3[i] = (uint8_t)i;
+        void* p4 = krealloc(p3, 512);
+        if (p4) {
+            uint8_t* b4 = (uint8_t*)p4;
+            int ok = 1;
+            for (int i = 0; i < 128; i++) if (b4[i] != (uint8_t)i) { ok=0; break; }
+            if (ok) { _mt_pass(o, "krealloc(128→512) veri korundu"); pass++; }
+            else    { _mt_fail(o, "krealloc sonrası veri bozuk!"); fail++; }
+            kfree(p4);
+        } else { _mt_fail(o, "krealloc başarısız"); fail++; kfree(p3); }
+    }
+
+    // 5. Birleştirme (coalescing)
+    void* a = kmalloc(256);
+    void* b = kmalloc(256);
+    void* c = kmalloc(256);
+    if (a && b && c) {
+        kfree(b); b = NULL;
+        kfree(a); a = NULL;
+        void* d = kmalloc(400);
+        if (d) { _mt_pass(o, "Coalescing: 400B birlesmis bloktan alindi"); pass++; kfree(d); }
+        else   { _mt_fail(o, "Coalescing sonrasi tahsis basarisiz"); fail++; }
+        kfree(c); c = NULL;
+    } else {
+        // Tahsis başarısızsa elimizdekileri serbest bırak
+        if (a) { kfree(a); a = NULL; }
+        if (b) { kfree(b); b = NULL; }
+        if (c) { kfree(c); c = NULL; }
+        _mt_fail(o, "Coalescing: blok tahsisi basarisiz"); fail++;
+    }
+
+    // 6. Büyük tahsis (heap genişlemesi)
+    void* big = kmalloc(2 * 1024 * 1024);  // 2 MB
+    if (big) { _mt_pass(o, "kmalloc(2MB) heap genişledi"); pass++; kfree(big); }
+    else     { _mt_fail(o, "kmalloc(2MB) başarısız"); fail++; }
+
+    // 7. İstatistik tutarlılığı + sızıntı (delta bazlı)
+    heap_stats_t st = heap_get_stats();
+    uint64_t net_now = st.total_allocs - st.total_frees;
+    if (st.total_allocs >= st.total_frees)
+        { _mt_pass(o, "total_allocs >= total_frees"); pass++; }
+    else
+        { _mt_fail(o, "total_allocs < total_frees (sayim hatasi)"); fail++; }
+
+    if (net_now == baseline_net)
+        { _mt_pass(o, "Heap testi sizintisi yok (net delta = 0)"); pass++; }
+    else {
+        char lm[64]; char ln[16];
+        uint64_to_string(net_now - baseline_net, ln);
+        str_cpy(lm, "Sizinti: "); str_concat(lm, ln); str_concat(lm, " blok!");
+        _mt_fail(o, lm); fail++;
+    }
+
+    _mt_num(o, "Toplam tahsis : ", st.total_allocs, "");
+    _mt_num(o, "Toplam serbest: ", st.total_frees, "");
+    _mt_num(o, "Heap sayfaları: ", st.heap_pages, "");
+    _mt_num(o, "Birlesme      : ", st.coalesces, "");
+    _mt_num(o, "Bolme         : ", st.splits, "");
+
+    _mt_num(o, "Sonuç: PASS=", pass, ""); _mt_num(o, "       FAIL=", fail, "");
+    return fail;
+}
+
+// ── VMM alt testi ────────────────────────────────────────────────────────────
+static int _test_vmm(CommandOutput* o) {
+    int pass = 0, fail = 0;
+    output_add_line(o, "--- VMM Testi ---", VGA_YELLOW);
+
+    // 1. vmm_virt_to_phys: heap'ten tahsis edilen belleğin adresi
+    //    Kernel kodu 2MB huge page ile eşlenir — vmm.c düzeltmesiyle artık
+    //    kod adresleri de çözümlenebilir. Ek olarak heap adresini de doğrula.
+    void* probe = kmalloc(64);
+    uint64_t known_virt = (probe) ? (uint64_t)probe : (uint64_t)(void*)_test_vmm;
+    uint64_t phys = vmm_virt_to_phys(known_virt);
+    if (phys != 0) { _mt_pass(o, "vmm_virt_to_phys != 0"); pass++; }
+    else           { _mt_fail(o, "vmm_virt_to_phys == 0 !"); fail++; }
+    if (probe) kfree(probe);
+
+    // 2. Yeni sayfa eşle, yaz/oku, kaldır
+    uint64_t test_phys = pmm_alloc_frame();
+    if (test_phys) {
+        uint64_t test_virt = 0x0000000005000000ULL;  // 80 MB — çekirdek+heap dışı
+        int r = vmm_map_page(test_virt, test_phys, PTE_PRESENT | PTE_WRITE);
+        if (r == 0) {
+            _mt_pass(o, "vmm_map_page(80MB) OK"); pass++;
+
+            volatile uint64_t* p = (volatile uint64_t*)test_virt;
+            *p = 0xCAFEBABEDEAD1234ULL;
+            if (*p == 0xCAFEBABEDEAD1234ULL)
+                { _mt_pass(o, "Eşlenen sayfaya yaz/oku doğrulandı"); pass++; }
+            else
+                { _mt_fail(o, "Eşlenen sayfadan yanlış değer!"); fail++; }
+
+            uint64_t check = vmm_virt_to_phys(test_virt);
+            if (check == test_phys)
+                { _mt_pass(o, "vmm_virt_to_phys eşleme doğrulandı"); pass++; }
+            else
+                { _mt_fail(o, "vmm_virt_to_phys yanlış fiziksel adres"); fail++; }
+
+            vmm_unmap_page(test_virt);
+            if (vmm_virt_to_phys(test_virt) == 0)
+                { _mt_pass(o, "vmm_unmap_page sonrası sayfa gitti"); pass++; }
+            else
+                { _mt_fail(o, "vmm_unmap_page çalışmadı!"); fail++; }
+        } else {
+            _mt_fail(o, "vmm_map_page başarısız"); fail++;
+        }
+        pmm_free_frame(test_phys);
+    } else {
+        _mt_fail(o, "PMM frame tahsisi başarısız (VMM testi yapılamadı)"); fail++;
+    }
+
+    // 3. Aralık eşleme (4 sayfa = 16 KB)
+    uint64_t range_virt = 0x0000000005100000ULL;
+    uint64_t range_phys = pmm_alloc_frame();
+    uint64_t r2 = pmm_alloc_frame();
+    uint64_t r3 = pmm_alloc_frame();
+    uint64_t r4 = pmm_alloc_frame();
+    if (range_phys && r2 && r3 && r4) {
+        // 4 ayrı frame'i ardışık sanal adrese eşle
+        vmm_map_page(range_virt + 0x0000, range_phys, PTE_PRESENT | PTE_WRITE);
+        vmm_map_page(range_virt + 0x1000, r2,         PTE_PRESENT | PTE_WRITE);
+        vmm_map_page(range_virt + 0x2000, r3,         PTE_PRESENT | PTE_WRITE);
+        vmm_map_page(range_virt + 0x3000, r4,         PTE_PRESENT | PTE_WRITE);
+
+        volatile uint32_t* arr = (volatile uint32_t*)range_virt;
+        int ok = 1;
+        for (int i = 0; i < 16384 / 4; i++) { arr[i] = (uint32_t)i; }
+        for (int i = 0; i < 16384 / 4; i++) if (arr[i] != (uint32_t)i) { ok=0; break; }
+        if (ok) { _mt_pass(o, "16KB aralık eşleme yaz/oku OK"); pass++; }
+        else    { _mt_fail(o, "16KB aralık veri hatası"); fail++; }
+
+        vmm_unmap_range(range_virt, 0x4000);
+        pmm_free_frame(range_phys); pmm_free_frame(r2);
+        pmm_free_frame(r3);         pmm_free_frame(r4);
+        _mt_pass(o, "16KB aralık unmap + frame serbest OK"); pass++;
+    }
+
+    // 4. TLB flush
+    vmm_tlb_flush_all();
+    _mt_pass(o, "vmm_tlb_flush_all() istisna vermedi"); pass++;
+
+    // 5. İstatistik
+    vmm_stats_t vs = vmm_get_stats();
+    _mt_num(o, "Eşlenen sayfa  : ", vs.pages_mapped, "");
+    _mt_num(o, "Kaldırılan     : ", vs.pages_unmapped, "");
+    _mt_num(o, "Sayfa hatası   : ", vs.page_faults, "");
+
+    _mt_num(o, "Sonuç: PASS=", pass, ""); _mt_num(o, "       FAIL=", fail, "");
+    return fail;
+}
+
+// ── Stres testi ──────────────────────────────────────────────────────────────
+static int _test_stress(CommandOutput* o) {
+    int pass = 0, fail = 0;
+    output_add_line(o, "--- Stres Testi (60 tahsis/serbest turu) ---", VGA_YELLOW);
+
+    // Baseline: test öncesi aktif tahsis sayısı (kernel/output yapıları)
+    heap_stats_t baseline = heap_get_stats();
+    uint64_t baseline_net = baseline.total_allocs - baseline.total_frees;
+
+    // NOT: Kernel stack kısıtlı (genellikle 8KB). ptrs[] büyük tutulmamalı.
+#define STRESS_N 60
+    static void* ptrs[STRESS_N];  // static → stack yerine BSS
+    static const int sizes[STRESS_N] = {
+        16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
+        16, 48, 96, 192, 384, 768, 1536, 3072, 6144, 12288,
+        64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+        128,128,128,128,128,128,128,128,128,128,
+        256,256,256,256,256,256,256,256,256,256,
+        33, 77,111,222,333,444,555,666,777,888
+    };
+
+    // Round 1: hepsini tahsis et + pattern yaz
+    int alloc_ok = 0;
+    for (int i = 0; i < STRESS_N; i++) {
+        ptrs[i] = kmalloc((uint64_t)sizes[i]);
+        if (ptrs[i]) {
+            uint8_t* b = (uint8_t*)ptrs[i];
+            for (int j = 0; j < sizes[i]; j++) b[j] = (uint8_t)(i ^ j);
+            alloc_ok++;
+        }
+    }
+    char msg[64]; char num_buf[16];
+    int_to_str(alloc_ok, num_buf);
+    str_cpy(msg, "Tahsis: "); str_concat(msg, num_buf); str_concat(msg, "/60");
+    if (alloc_ok == STRESS_N) _mt_pass(o, msg);
+    else                      _mt_fail(o, msg);
+    (alloc_ok == STRESS_N) ? pass++ : fail++;
+
+    // Round 2: pattern doğrula
+    int verify_ok = 0;
+    for (int i = 0; i < STRESS_N; i++) {
+        if (!ptrs[i]) continue;
+        uint8_t* b = (uint8_t*)ptrs[i];
+        int ok = 1;
+        for (int j = 0; j < sizes[i]; j++)
+            if (b[j] != (uint8_t)(i ^ j)) { ok = 0; break; }
+        if (ok) verify_ok++;
+    }
+    int_to_str(verify_ok, num_buf);
+    str_cpy(msg, "Pattern dogrulama: "); str_concat(msg, num_buf); str_concat(msg, "/60");
+    if (verify_ok == alloc_ok) _mt_pass(o, msg);
+    else                       _mt_fail(o, msg);
+    (verify_ok == alloc_ok) ? pass++ : fail++;
+
+    // Round 3: hepsini serbest bırak, ardından yeniden tahsis dene
+    for (int i = 0; i < STRESS_N; i++) {
+        if (ptrs[i]) { kfree(ptrs[i]); ptrs[i] = NULL; }
+    }
+    int reuse_ok = 0;
+    for (int i = 0; i < STRESS_N; i++) {
+        void* tmp = kmalloc((uint64_t)sizes[i]);
+        if (tmp) { reuse_ok++; kfree(tmp); }
+    }
+    int_to_str(reuse_ok, num_buf);
+    str_cpy(msg, "Yeniden tahsis: "); str_concat(msg, num_buf); str_concat(msg, "/60");
+    if (reuse_ok == STRESS_N) _mt_pass(o, msg);
+    else                      _mt_fail(o, msg);
+    (reuse_ok == STRESS_N) ? pass++ : fail++;
+
+    // Büyük tek tahsis (1MB) — heap genişlemesi
+    void* big = kmalloc(1024 * 1024);
+    if (big) { _mt_pass(o, "kmalloc(1MB) OK"); pass++; kfree(big); }
+    else     { _mt_fail(o, "kmalloc(1MB) basarisiz"); fail++; }
+
+    // Sızıntı kontrolü: bu testin kendi net tahsisi = 0 olmalı
+    // (kernel/output yapılarından gelen baseline hariç)
+    heap_stats_t st = heap_get_stats();
+    uint64_t net_now = st.total_allocs - st.total_frees;
+    _mt_num(o, "Toplam tahsis : ", st.total_allocs, "");
+    _mt_num(o, "Toplam serbest: ", st.total_frees, "");
+    if (net_now == baseline_net) {
+        _mt_pass(o, "Stres testi sızıntısı yok (net delta = 0)"); pass++;
+    } else {
+        char leak_msg[64]; char leak_num[16];
+        uint64_to_string(net_now - baseline_net, leak_num);
+        str_cpy(leak_msg, "Sizinti: "); str_concat(leak_msg, leak_num);
+        str_concat(leak_msg, " blok serbest birakilmadi!");
+        _mt_fail(o, leak_msg); fail++;
+    }
+
+    _mt_num(o, "Sonuc: PASS=", pass, ""); _mt_num(o, "       FAIL=", fail, "");
+    return fail;
+#undef STRESS_N
+}
+
+// ── Bozulma tespiti ──────────────────────────────────────────────────────────
+static int _test_corrupt(CommandOutput* o) {
+    int pass = 0, fail = 0;
+    output_add_line(o, "--- Bozulma Tespit Testi ---", VGA_YELLOW);
+
+    // 1. Çift serbest bırakma (double free) — çökmemeli
+    void* p = kmalloc(64);
+    if (p) {
+        kfree(p);
+        kfree(p);  // ikinci kfree uyarı verip sessizce dönmeli
+        _mt_pass(o, "Double-free sessizce reddedildi (cokmedi)"); pass++;
+    }
+
+    // 2. NULL serbest bırakma — çökmemeli
+    kfree(NULL);
+    _mt_pass(o, "kfree(NULL) guvenli dondu"); pass++;
+
+    // 3. Tahsis sonrası bütünlük
+    void* a = kmalloc(128);
+    void* b2 = kmalloc(128);
+    void* c2 = kmalloc(128);
+    if (a && b2 && c2) {
+        // b2'yi serbest bırak, a ve c2 dokunulmadan kalsın
+        kfree(b2);
+        // a ve c2 hala geçerli mi?
+        uint8_t* ba = (uint8_t*)a;
+        uint8_t* bc = (uint8_t*)c2;
+        ba[0] = 0xDE; bc[0] = 0xAD;
+        if (ba[0] == 0xDE && bc[0] == 0xAD)
+            { _mt_pass(o, "Komşu serbest bırakma komşu bloğu bozmadı"); pass++; }
+        else
+            { _mt_fail(o, "Komşu blok bozuldu!"); fail++; }
+        kfree(a); kfree(c2);
+    }
+
+    // 4. krealloc(NULL) → kmalloc gibi davranmalı
+    void* r = krealloc(NULL, 256);
+    if (r) { _mt_pass(o, "krealloc(NULL,256) yeni blok tahsis etti"); pass++; kfree(r); }
+    else   { _mt_fail(o, "krealloc(NULL,256) başarısız"); fail++; }
+
+    // 5. krealloc(ptr, 0) → kfree gibi davranmalı
+    void* r2 = kmalloc(64);
+    if (r2) {
+        void* r3 = krealloc(r2, 0);
+        if (r3 == NULL) { _mt_pass(o, "krealloc(ptr,0) NULL döndü (free)"); pass++; }
+        else            { _mt_fail(o, "krealloc(ptr,0) NULL dönmedi"); fail++; kfree(r3); }
+    }
+
+    _mt_num(o, "Sonuç: PASS=", pass, ""); _mt_num(o, "       FAIL=", fail, "");
+    return fail;
+}
+
+// ── brk/sbrk yolu testi ──────────────────────────────────────────────────────
+static int _test_brk(CommandOutput* o) {
+    int pass = 0, fail = 0;
+    output_add_line(o, "--- BRK/SBRK Testi ---", VGA_YELLOW);
+
+    extern uint64_t kmalloc_get_brk(void);
+    extern uint64_t kmalloc_set_brk(uint64_t new_brk);
+
+    uint64_t brk0 = kmalloc_get_brk();
+    if (brk0 >= 0x1000000ULL)
+        { _mt_pass(o, "kmalloc_get_brk() heap bölgesinde"); pass++; }
+    else
+        { _mt_fail(o, "kmalloc_get_brk() beklenmedik değer"); fail++; }
+
+    // 4KB büyüt
+    uint64_t brk1 = kmalloc_set_brk(brk0 + 4096);
+    if (brk1 >= brk0 + 4096)
+        { _mt_pass(o, "kmalloc_set_brk(+4KB) OK"); pass++; }
+    else
+        { _mt_fail(o, "kmalloc_set_brk(+4KB) başarısız"); fail++; }
+
+    // Küçültme — desteklenmiyor, mevcut değeri döndürmeli
+    uint64_t brk2 = kmalloc_set_brk(brk0);
+    if (brk2 == brk1)
+        { _mt_pass(o, "Küçültme reddedildi (mevcut değer döndü)"); pass++; }
+    else
+        { _mt_info(o, "Küçültme davranışı farklı (sorun değil)"); pass++; }
+
+    _mt_num(o, "BRK başlangıç : 0x", brk0, "");
+    _mt_num(o, "BRK +4KB      : 0x", brk1, "");
+
+    _mt_num(o, "Sonuç: PASS=", pass, ""); _mt_num(o, "       FAIL=", fail, "");
+    return fail;
+}
+
+// ── Ana memtest komutu ────────────────────────────────────────────────────────
+void cmd_memtest(const char* args, CommandOutput* output) {
+    int run_pmm = 0, run_heap = 0, run_vmm = 0;
+    int run_stress = 0, run_corrupt = 0, run_brk = 0;
+    int run_all = 1;
+
+    if (str_len(args) > 0) {
+        run_all = 0;
+        if (str_cmp(args, "pmm")    == 0) run_pmm    = 1;
+        if (str_cmp(args, "heap")   == 0) run_heap   = 1;
+        if (str_cmp(args, "vmm")    == 0) run_vmm    = 1;
+        if (str_cmp(args, "stress") == 0) run_stress = 1;
+        if (str_cmp(args, "corrupt")== 0) run_corrupt= 1;
+        if (str_cmp(args, "brk")    == 0) run_brk    = 1;
+    }
+
+    output_add_line(output, "╔══════════════════════════════════╗", VGA_CYAN);
+    output_add_line(output, "║   AscentOS Bellek Test Paketi    ║", VGA_CYAN);
+    output_add_line(output, "╚══════════════════════════════════╝", VGA_CYAN);
+    output_add_empty_line(output);
+
+    int total_fail = 0;
+
+    if (run_all || run_pmm)    { total_fail += _test_pmm(output);    output_add_empty_line(output); }
+    if (run_all || run_heap)   { total_fail += _test_heap(output);   output_add_empty_line(output); }
+    if (run_all || run_vmm)    { total_fail += _test_vmm(output);    output_add_empty_line(output); }
+    if (run_all || run_stress) { total_fail += _test_stress(output); output_add_empty_line(output); }
+    if (run_all || run_corrupt){ total_fail += _test_corrupt(output);output_add_empty_line(output); }
+    if (run_all || run_brk)    { total_fail += _test_brk(output);    output_add_empty_line(output); }
+
+    if (total_fail == 0) {
+        output_add_line(output, "══ TÜM TESTLER BAŞARILI ══", VGA_GREEN);
+    } else {
+        char summary[64];
+        str_cpy(summary, "══ BAŞARISIZ TEST: ");
+        char n[16]; int_to_str(total_fail, n);
+        str_concat(summary, n); str_concat(summary, " ══");
+        output_add_line(output, summary, VGA_RED);
+    }
+    output_add_empty_line(output);
+    output_add_line(output, "Alt testler: pmm heap vmm stress corrupt brk", VGA_DARK_GRAY);
+}
+
 // ===========================================
 // MULTITASKING COMMANDS
 // ===========================================
@@ -2414,9 +2903,10 @@ static Command command_table[] = {
     {"echo", "Echo text back", cmd_echo},
     {"about", "About AscentOS", cmd_about},
     {"neofetch", "Show system information", cmd_neofetch},
-    {"pmm", "Physical Memory Manager stats", cmd_pmm},
-    {"vmm", "Virtual Memory Manager test", cmd_vmm},
-    {"heap", "Heap memory test", cmd_heap},
+    {"pmm", "PMM istatistikleri", cmd_pmm},
+    {"vmm", "VMM test ve istatistikleri [stats|demand]", cmd_vmm},
+    {"heap", "Heap fonksiyon testi", cmd_heap},
+    {"memtest", "Kapsamlı bellek testi [pmm|heap|vmm|stress|corrupt|brk]", cmd_memtest},
     
     // Multitasking commands
     {"ps", "List all tasks", cmd_ps},

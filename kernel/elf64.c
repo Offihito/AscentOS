@@ -177,13 +177,13 @@ int elf64_load(const uint8_t* buf, uint32_t buf_size,
     // load_min..load_max aralığındaki her 4KB sayfayı yeniden map ediyoruz.
     {
         extern int      vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
-        extern uint64_t vmm_get_physical_address(uint64_t virt);
-        // PAGE_PRESENT | PAGE_WRITE | PAGE_USER
+        extern uint64_t vmm_virt_to_phys(uint64_t virt);
+        // PTE_PRESENT | PTE_WRITE | PTE_USER
         const uint64_t USER_RW = 0x7ULL;
-        uint64_t page = min_vaddr & ~(uint64_t)0xFFF;  // 4KB hizala
+        uint64_t page = min_vaddr & ~(uint64_t)0xFFF;
         uint64_t end  = (max_vaddr + 0xFFF) & ~(uint64_t)0xFFF;
         while (page < end) {
-            uint64_t phys = vmm_get_physical_address(page);
+            uint64_t phys = vmm_virt_to_phys(page);
             if (phys) {
                 vmm_map_page(page, phys, USER_RW);
             }
