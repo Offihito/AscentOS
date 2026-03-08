@@ -94,8 +94,8 @@ panic64.o: kernel/panic64.c
 rtl8139.o: kernel/rtl8139.c kernel/rtl8139.h
 	$(CC) $(CFLAGS) -c kernel/rtl8139.c -o rtl8139.o
 
-arp.o: kernel/arp.c kernel/arp.h kernel/rtl8139.h
-	$(CC) $(CFLAGS) -c kernel/arp.c -o arp.o
+arp.o: network/arp.c network/arp.h kernel/rtl8139.h
+	$(CC) $(CFLAGS) -c network/arp.c -o arp.o
 
 # ============================================================================
 # UNIFIED KERNEL OBJECTS
@@ -130,23 +130,23 @@ wm64.o: kernel/wm64.c kernel/wm64.h kernel/compositor64.h kernel/taskbar64.h
 commands64.o: apps/commands64.c apps/commands64.h
 	$(CC) $(CFLAGS) -c apps/commands64.c -o commands64.o
 
-ipv4.o: kernel/ipv4.c kernel/ipv4.h kernel/arp.h kernel/rtl8139.h
-	$(CC) $(CFLAGS) -c kernel/ipv4.c -o ipv4.o
+ipv4.o: network/ipv4.c network/ipv4.h network/arp.h kernel/rtl8139.h
+	$(CC) $(CFLAGS) -c network/ipv4.c -o ipv4.o
 
-icmp.o: kernel/icmp.c kernel/icmp.h kernel/ipv4.h kernel/arp.h
-	$(CC) $(CFLAGS) -c kernel/icmp.c -o icmp.o
+icmp.o: network/icmp.c network/icmp.h network/ipv4.h network/arp.h
+	$(CC) $(CFLAGS) -c network/icmp.c -o icmp.o
 
-udp.o: kernel/udp.c kernel/udp.h kernel/ipv4.h kernel/arp.h
-	$(CC) $(CFLAGS) -c kernel/udp.c -o udp.o
+udp.o: network/udp.c network/udp.h network/ipv4.h network/arp.h
+	$(CC) $(CFLAGS) -c network/udp.c -o udp.o
 
-dhcp.o: kernel/dhcp.c kernel/dhcp.h kernel/udp.h kernel/ipv4.h kernel/arp.h
-	$(CC) $(CFLAGS) -c kernel/dhcp.c -o dhcp.o
+dhcp.o: network/dhcp.c network/dhcp.h network/udp.h network/ipv4.h network/arp.h
+	$(CC) $(CFLAGS) -c network/dhcp.c -o dhcp.o
 
-tcp.o: kernel/tcp.c kernel/tcp.h kernel/ipv4.h kernel/arp.h kernel/rtl8139.h
-	$(CC) $(CFLAGS) -c kernel/tcp.c -o tcp.o
+tcp.o: network/tcp.c network/tcp.h network/ipv4.h network/arp.h kernel/rtl8139.h
+	$(CC) $(CFLAGS) -c network/tcp.c -o tcp.o
 
-http.o: kernel/http.c kernel/http.h kernel/tcp.h kernel/arp.h kernel/ipv4.h
-	$(CC) $(CFLAGS) -c kernel/http.c -o http.o
+http.o: network/http.c network/http.h network/tcp.h network/arp.h network/ipv4.h
+	$(CC) $(CFLAGS) -c network/http.c -o http.o
 
 syscalltest64.o: apps/syscalltest64.c apps/commands64.h kernel/syscall.h kernel/signal64.h kernel/task.h
 	$(CC) $(CFLAGS) -c apps/syscalltest64.c -o syscalltest64.o

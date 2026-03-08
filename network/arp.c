@@ -7,7 +7,7 @@
 //   KERNEL_OBJS listesine arp.o ekle
 
 #include "arp.h"
-#include "rtl8139.h"
+#include "../kernel/rtl8139.h"
 
 // ============================================================================
 // Kernel yardımcıları

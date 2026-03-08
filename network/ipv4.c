@@ -9,7 +9,7 @@
 //   icmp_ping / üst katman → ipv4_send → ARP çözümle → Ethernet çerçevesi → rtl8139_send
 
 #include "ipv4.h"
-#include "rtl8139.h"
+#include "../kernel/rtl8139.h"
 
 // ============================================================================
 // Kernel yardımcıları
