@@ -1,42 +1,39 @@
 # 🚀 AscentOS
 
-> Modern, 64-bit bir hobi işletim sistemi — kendi dosya sistemi ve basit GUI desteğiyle
+> A modern 64-bit hobby operating system — with its own filesystem and basic GUI support
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 ![C](https://img.shields.io/badge/language-C-00599C.svg)
 ![x86_64](https://img.shields.io/badge/arch-x86__64-important)
 
-## ✨ Mevcut Özellikler (Mart 2026 itibarıyla)
+## ✨ Current Features (as of March 2026)
 
-- **64-bit x86_64 mimarisi** — modern donanımlar için tasarlandı
-- **FAT32 dosya sistemi** — okuma/yazma desteği çalışıyor
-- **Basit metin tabanlı kabuk** (shell)
-- **Temel grafik modu** (`gfx` komutu ile geçiş yapılıyor)
-- **Modüler bellek yönetimi** (son güncellemelerle stabilize edildi)
-- **Musl libc + Newlib** entegrasyonu
-- **İlk kullanıcı uygulaması:** [kilo](https://github.com/antirez/kilo) metin editörü port edildi
-- **GRUB2 ile önyükleme** (multiboot uyumlu)
-- **Temel ağ yığını** hazırlıkları devam ediyor
+- **64-bit x86_64 architecture** — designed for modern hardware
+- **FAT32 filesystem** — read/write support fully working
+- **Simple text-based shell**
+- **Basic graphics mode** (switch by typing `gfx` in the shell)
+- **Modular memory management** (stabilized in recent updates)
+- **Musl libc** integration
+- **First userland application:** [kilo](https://github.com/antirez/kilo) text editor successfully ported
+- **GRUB2 multiboot booting**
+- **Early network stack** preparations in progress
 
-Şu anda **kendi kendine boot edebiliyor**, FAT32 üzerinden dosya okuyup yazabiliyor ve basit bir GUI moduna geçebiliyor.
+The OS currently **successfully boots on its own**, can read/write files on FAT32, and switches to a basic graphical mode.
 
-## 🛠️ Kaynaktan Derleme & Çalıştırma
+## 🛠️ Building & Running from Source
 
-### Gereksinimler
+### Prerequisites
 
 - `make`, `gcc` / `clang`, `nasm`, `grub-mkrescue`, `qemu-system-x86_64`
-- xorriso (ISO oluşturmak için)
-- Musl-cross toolchain (otomatik derleniyor ama istersen manuel kurabilirsin)
+- `xorriso` (for creating the bootable ISO)
+- Musl cross-toolchain (builds automatically, or install manually if preferred)
 
-### Hızlı Başlangıç
+### Quick Start
 
 ```bash
-# Depoyu klonla
+# Clone the repository
 git clone https://github.com/Offihito/AscentOS.git
 cd AscentOS
 
-# Derle ve QEMU'da çalıştır (metin modu)
+# Build and run in QEMU (text mode)
 make run
-
-# Alternatif: sadece ISO oluştur
-make iso
