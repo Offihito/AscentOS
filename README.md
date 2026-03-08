@@ -1,60 +1,42 @@
 # 🚀 AscentOS
 
-> A modern 64-bit hobby operating system with integrated file system support
+> Modern, 64-bit bir hobi işletim sistemi — kendi dosya sistemi ve basit GUI desteğiyle
 
-## ✨ Features
+[![License: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+![C](https://img.shields.io/badge/language-C-00599C.svg)
+![x86_64](https://img.shields.io/badge/arch-x86__64-important)
 
-- **64-bit Architecture** - Built for modern hardware
-- **FAT32 File System** - Native file management capabilities
-- **Open Source** - Community-driven development
+## ✨ Mevcut Özellikler (Mart 2026 itibarıyla)
 
-## 🛠️ Building from Source
+- **64-bit x86_64 mimarisi** — modern donanımlar için tasarlandı
+- **FAT32 dosya sistemi** — okuma/yazma desteği çalışıyor
+- **Basit metin tabanlı kabuk** (shell)
+- **Temel grafik modu** (`gfx` komutu ile geçiş yapılıyor)
+- **Modüler bellek yönetimi** (son güncellemelerle stabilize edildi)
+- **Musl libc + Newlib** entegrasyonu
+- **İlk kullanıcı uygulaması:** [kilo](https://github.com/antirez/kilo) metin editörü port edildi
+- **GRUB2 ile önyükleme** (multiboot uyumlu)
+- **Temel ağ yığını** hazırlıkları devam ediyor
 
-### Prerequisites
+Şu anda **kendi kendine boot edebiliyor**, FAT32 üzerinden dosya okuyup yazabiliyor ve basit bir GUI moduna geçebiliyor.
 
-Ensure you have the necessary build tools installed on your system.
+## 🛠️ Kaynaktan Derleme & Çalıştırma
 
-### Quick Start
+### Gereksinimler
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/Offihito/AscentOS
-   ```
+- `make`, `gcc` / `clang`, `nasm`, `grub-mkrescue`, `qemu-system-x86_64`
+- xorriso (ISO oluşturmak için)
+- Musl-cross toolchain (otomatik derleniyor ama istersen manuel kurabilirsin)
 
-2. **Navigate to the project directory**
-   ```bash
-   cd AscentOS
-   ```
+### Hızlı Başlangıç
 
-3. **Build and run**
-   
-   For text mode:
-   ```bash
-   make run
-   ```
-   
+```bash
+# Depoyu klonla
+git clone https://github.com/Offihito/AscentOS.git
+cd AscentOS
 
-## 🎯 Usage Modes
+# Derle ve QEMU'da çalıştır (metin modu)
+make run
 
-| Mode | Command | Description |
-|------|---------|-------------|
-| Text | `make run` | Launches AscentOS in text-based interface you can type gfx into prompt to switch gui mode |
-
-
-## 📝 License
-
-This project is a hobby operating system development project.
-
-## 🤝 Contributing
-
-Contributions, issues, and feature requests are welcome!
-
-## 📧 Contact
-
-Project Link: [https://github.com/Offihito/AscentOS](https://github.com/Offihito/AscentOS)
-
----
-
-<div align="center">
-Made with ❤️ by Offihito
-</div>
+# Alternatif: sadece ISO oluştur
+make iso
