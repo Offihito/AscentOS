@@ -84,6 +84,17 @@ extern volatile int gui_request_new_window;
 // ============================================================================
 // Userland ring buffer
 // ============================================================================
+// Klavye durumu (kb_set_userland_mode'dan önce tanımlanmalı)
+// ============================================================================
+static int shift_pressed = 0;
+static int caps_lock     = 0;
+static int ctrl_pressed  = 0;
+static int extended_key  = 0;
+
+static char input_buffer[256];
+static int  buffer_pos = 0;
+
+// ============================================================================
 #define KB_RING_SIZE 512
 static volatile char kb_ring[KB_RING_SIZE];
 static volatile int  kb_ring_head = 0;
@@ -93,9 +104,14 @@ static volatile int  kb_userland_mode = 0;
 void kb_set_userland_mode(int on) {
     kb_userland_mode = on;
     if (on) {
-        // Userland task başlıyor: ekranı temizle, siyah-üstü-beyaz renk
-        // kilo kendi \x1b[2J\x1b[H göndermeden önce temiz başlasın
+        // Userland task başlıyor: ring buffer ve input_buffer'ı temizle
+        kb_ring_head = kb_ring_tail = 0;
+        buffer_pos = 0;
         clear_screen64();
+    } else {
+        // Kernel shell'e dönüş: buffer'ı temizle, stale veri kalmasın
+        kb_ring_head = kb_ring_tail = 0;
+        buffer_pos = 0;
     }
 }
 int  kb_userland_active(void)     { return kb_userland_mode; }
@@ -110,17 +126,6 @@ int kb_ring_pop(void) {
     kb_ring_tail = (kb_ring_tail + 1) % KB_RING_SIZE;
     return (unsigned char)c;
 }
-
-// ============================================================================
-// Klavye durumu
-// ============================================================================
-static int shift_pressed = 0;
-static int caps_lock     = 0;
-static int ctrl_pressed  = 0;
-static int extended_key  = 0;
-
-static char input_buffer[256];
-static int  buffer_pos = 0;
 
 // ============================================================================
 // Scancode → ASCII
@@ -324,9 +329,20 @@ void keyboard_handler64(void) {
     // GUI MODU
     // ----------------------------------------------------------------
     if (kernel_mode == 1) {
-        if (sc & 0x80) { outb(0x20, 0x20); return; } // release — ignore
-        // N tusu scancodu 0x31, shift/caps durumundan bagimsiz direkt kontrol
-        if (sc == 0x18) gui_request_new_window = 1; // O tusu
+        // E0 extended prefix — GUI modunda da takip et
+        if (sc == 0xE0) { extended_key = 1; outb(0x20, 0x20); return; }
+        // Shift
+        if (sc == 0x2A || sc == 0x36) { shift_pressed = 1; outb(0x20, 0x20); return; }
+        if (sc == 0xAA || sc == 0xB6) { shift_pressed = 0; outb(0x20, 0x20); return; }
+        // Ctrl
+        if (sc == 0x1D) { ctrl_pressed = 1; outb(0x20, 0x20); return; }
+        if (sc == 0x9D) { ctrl_pressed = 0; outb(0x20, 0x20); return; }
+        // Release — modifier'lar yukarıda zaten işlendi, geri kalanları yoksay
+        if (sc & 0x80) { extended_key = 0; outb(0x20, 0x20); return; }
+        // Extended key tüketildi
+        if (extended_key) { extended_key = 0; outb(0x20, 0x20); return; }
+        // O tusu (0x18) — yeni pencere isteği
+        if (sc == 0x18) gui_request_new_window = 1;
         outb(0x20, 0x20);
         return;
     }
@@ -455,22 +471,27 @@ void keyboard_handler64(void) {
     // Ctrl+L: temizle (sadece kernel shell)
     if (ctrl_pressed && sc == 0x26 && !kb_userland_mode) { clear_screen64(); show_prompt64(); outb(0x20, 0x20); return; }
 
-    // Ctrl kombinasyonları — userland'a ASCII kontrol kodu olarak gönder
-    // CTRL+key = key & 0x1F  (örn: Ctrl+S=0x13, Ctrl+Q=0x11, Ctrl+F=0x06)
+    // Ctrl kombinasyonları
     if (ctrl_pressed) {
         if (kb_userland_mode) {
+            // Ctrl+C → userland'a karakter 3 (ETX) gönder — shell bunu yakalar
+            if (sc == 0x2E) { kb_ring_push(3); outb(0x20, 0x20); return; }
+            // Ctrl+Z → karakter 26 (SUB)
+            if (sc == 0x2C) { kb_ring_push(26); outb(0x20, 0x20); return; }
+            // Ctrl+D → karakter 4 (EOT) — EOF sinyali
+            if (sc == 0x20) { kb_ring_push(4); outb(0x20, 0x20); return; }
+            // Diğer Ctrl+key → ASCII kontrol kodu (Ctrl+a=0x01 ... Ctrl+z=0x1A)
             char ascii = sc_to_char(sc);
             if (ascii >= 'a' && ascii <= 'z') {
-                kb_ring_push(ascii & 0x1F);  // Ctrl+a→0x01 ... Ctrl+z→0x1A
+                kb_ring_push(ascii & 0x1F);
             } else if (ascii >= 'A' && ascii <= 'Z') {
                 kb_ring_push(ascii & 0x1F);
-            } else {
-                // ESC tuşu (sc=0x01) veya bilinmeyen
-                if (sc == 0x01) kb_ring_push(0x1B);
+            } else if (sc == 0x01) {
+                kb_ring_push(0x1B); // ESC
             }
             outb(0x20, 0x20); return;
         }
-        // Kernel shell Ctrl+C / Ctrl+Z
+        // Kernel shell: Ctrl+C → SIGINT, Ctrl+Z → SIGTSTP foreground task'a
         if (sc == 0x2E) {
             extern task_t* task_get_current(void);
             task_t* fg = task_get_current();
@@ -488,23 +509,19 @@ void keyboard_handler64(void) {
 
     // Enter
     if (sc == 0x1C) {
-        input_buffer[buffer_pos] = '\0';
-        char cmd[256];
-        int ci = 0;
-        while (ci < buffer_pos) { cmd[ci] = input_buffer[ci]; ci++; }
-        cmd[ci] = '\0';
-        buffer_pos = 0;
         if (kb_userland_mode) {
-            // termios ICANON kontrolü: raw modda '\n', canonical modda '\r'
-            // Lua REPL ve kilo gibi uygulamalar raw modda '\n' bekler.
-            extern termios_t kernel_termios;
-            int is_canonical = (kernel_termios.c_lflag & ICANON) ? 1 : 0;
-            if (is_canonical) {
-                kb_ring_push('\r');
-            } else {
-                kb_ring_push('\n');
-            }
-        } else process_command64(cmd);
+            // Userland: ring buffer'a \n gönder, input_buffer'a dokunma
+            kb_ring_push('\n');
+        } else {
+            // Kernel shell: komutu çalıştır
+            input_buffer[buffer_pos] = '\0';
+            char cmd[256];
+            int ci = 0;
+            while (ci < buffer_pos) { cmd[ci] = input_buffer[ci]; ci++; }
+            cmd[ci] = '\0';
+            buffer_pos = 0;
+            process_command64(cmd);
+        }
         outb(0x20, 0x20); return;
     }
     // ESC tuşu → userland'a \x1b gönder (kilo search/quit için)

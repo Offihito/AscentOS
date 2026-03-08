@@ -27,8 +27,11 @@ all: AscentOS.iso userland install-userland
 	@echo "╔═══════════════════════════════════════════════════╗"
 	@echo "║  AscentOS Unified Kernel hazir                   ║"
 	@echo "║  Baslangic: TEXT terminali                       ║"
-	@echo "║  'gfx' komutu: GUI moduna gec                    ║"
-	@echo "║  make run   — calistir                           ║"
+	@echo "║  'dhcp'     → Otomatik IP al (10.0.2.15)         ║"
+	@echo "║  'tcptest 10.0.2.2 80' → TCP test               ║"
+	@echo "║  'tcplisten 8080'      → TCP sunucu              ║"
+	@echo "║  'gfx'      → GUI moduna gec                     ║"
+	@echo "║  make run   → calistir                           ║"
 	@echo "╚═══════════════════════════════════════════════════╝"
 
 
@@ -127,6 +130,24 @@ wm64.o: kernel/wm64.c kernel/wm64.h kernel/compositor64.h kernel/taskbar64.h
 commands64.o: apps/commands64.c apps/commands64.h
 	$(CC) $(CFLAGS) -c apps/commands64.c -o commands64.o
 
+ipv4.o: kernel/ipv4.c kernel/ipv4.h kernel/arp.h kernel/rtl8139.h
+	$(CC) $(CFLAGS) -c kernel/ipv4.c -o ipv4.o
+
+icmp.o: kernel/icmp.c kernel/icmp.h kernel/ipv4.h kernel/arp.h
+	$(CC) $(CFLAGS) -c kernel/icmp.c -o icmp.o
+
+udp.o: kernel/udp.c kernel/udp.h kernel/ipv4.h kernel/arp.h
+	$(CC) $(CFLAGS) -c kernel/udp.c -o udp.o
+
+dhcp.o: kernel/dhcp.c kernel/dhcp.h kernel/udp.h kernel/ipv4.h kernel/arp.h
+	$(CC) $(CFLAGS) -c kernel/dhcp.c -o dhcp.o
+
+tcp.o: kernel/tcp.c kernel/tcp.h kernel/ipv4.h kernel/arp.h kernel/rtl8139.h
+	$(CC) $(CFLAGS) -c kernel/tcp.c -o tcp.o
+
+http.o: kernel/http.c kernel/http.h kernel/tcp.h kernel/arp.h kernel/ipv4.h
+	$(CC) $(CFLAGS) -c kernel/http.c -o http.o
+
 syscalltest64.o: apps/syscalltest64.c apps/commands64.h kernel/syscall.h kernel/signal64.h kernel/task.h
 	$(CC) $(CFLAGS) -c apps/syscalltest64.c -o syscalltest64.o
 
@@ -139,7 +160,7 @@ KERNEL_OBJS = boot64.o interrupts64.o \
               commands64.o syscalltest64.o files64.o disk64.o elf64.o nano64.o \
               pmm.o heap.o vmm64.o timer.o task.o scheduler.o \
               page_fault.o syscall.o signal64.o \
-              panic64.o rtl8139.o arp.o
+              panic64.o rtl8139.o arp.o ipv4.o icmp.o udp.o dhcp.o tcp.o http.o
 
 kernel64.elf: $(KERNEL_OBJS)
 	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o kernel64.elf
@@ -222,7 +243,7 @@ USERLAND_LDFLAGS := \
 
 USERLAND_CRT0   := userland/libc/crt0.o
 SYSCALLS_OBJ    := userland/out/syscalls.o
-USERLAND_APPS   := hello calculator
+USERLAND_APPS   := hello calculator shell
 USERLAND_ELFS   := $(addprefix userland/out/, $(addsuffix .elf, $(USERLAND_APPS)))
 
 .PRECIOUS: userland/out/%.o userland/out/%.elf userland/libc/crt0.o $(SYSCALLS_OBJ)
@@ -278,12 +299,16 @@ hello: userland/out/hello.elf
 calculator: userland/out/calculator.elf
 	@echo "  ✓ calculator.elf hazir"
 
+shell: userland/out/shell.elf
+	@echo "  ✓ shell.elf hazir"
+
 # ── install-userland ──────────────────────────────────────────────────────────
 install-userland: userland
 	@echo "📦 ELF'ler disk.img'e yaziliyor (offset=2048 sektör)..."
 	@if [ ! -f disk.img ]; then echo "HATA: disk.img yok"; exit 1; fi
 	mcopy -i disk.img@@1048576 -o userland/out/hello.elf      ::HELLO.ELF
 	mcopy -i disk.img@@1048576 -o userland/out/calculator.elf ::CALC.ELF
+	mcopy -i disk.img@@1048576 -o userland/out/shell.elf      ::SHELL.ELF
 	@echo "✓ Yazildi:"
 	@mdir -i disk.img@@1048576 :: 2>/dev/null | grep -i elf || true
 
@@ -294,13 +319,21 @@ install-userland: userland
 run: AscentOS.iso disk.img install-userland
 	@echo "▶  AscentOS Unified başlatılıyor..."
 	@echo "   TEXT modu açılır. 'gfx' yazınca GUI moduna geçer."
+	@echo ""
+	@echo "   ── UDP Port Yönlendirme ──────────────────────────────"
+	@echo "   host→guest  : nc -u 127.0.0.1 5000   (udplisten 5000 sonrası)"
+	@echo "   guest→host  : nc -u -l -p 9999        (udpsend 10.0.2.2 9999 msg)"
+	@echo "   ── TCP Port Yönlendirme ──────────────────────────────"
+	@echo "   tcplisten   : hostfwd=tcp::8080-:8080  -> nc 127.0.0.1 8080"
+	@echo "   tcptest     : nc -l -p 8080 (host'ta) -> tcptest 10.0.2.15 8080"
+	@echo "   ─────────────────────────────────────────────────────"
 	qemu-system-x86_64 \
 	  -cdrom AscentOS.iso \
 	  -drive file=disk.img,format=raw,if=ide,cache=writeback \
 	  -m 1024M -cpu qemu64 -boot d \
 	  -serial stdio -vga std \
 	  -usb -device usb-tablet \
-	  -netdev user,id=net0,restrict=off \
+	  -netdev user,id=net0,restrict=off,hostfwd=udp::5000-:5000,hostfwd=udp::5001-:5001,hostfwd=udp::5002-:5002,hostfwd=tcp::8080-:8080,hostfwd=tcp::8081-:8081 \
 	  -device rtl8139,netdev=net0 \
 	  -display gtk,zoom-to-fit=off
 
@@ -315,7 +348,7 @@ net-test: AscentOS.iso disk.img install-userland
 	  -m 1024M -cpu qemu64 -boot d \
 	  -serial stdio -vga std \
 	  -usb -device usb-tablet \
-	  -netdev user,id=net0,restrict=off \
+	  -netdev user,id=net0,restrict=off,hostfwd=udp::5000-:5000,hostfwd=udp::5001-:5001,hostfwd=tcp::8080-:8080 \
 	  -device rtl8139,netdev=net0 \
 	  -object filter-dump,id=dump0,netdev=net0,file=/tmp/ascent_net.pcap \
 	  -display gtk,zoom-to-fit=off
@@ -378,7 +411,7 @@ info:
 	@echo "║    • strlen, memcpy, memset, strcmp, strcpy                ║"
 	@echo "║    • atoi, strtol, strtoul, exit                          ║"
 	@echo "║    • syscall stub'lar: userland/libc/syscalls.c           ║"
-	@echo "║                                                            ║"
+	@echo "║    • ELF'ler: HELLO.ELF, CALC.ELF, SHELL.ELF             ║"
 	@echo "║                                                            ║"
 	@echo "║  🚀 SYSCALL Support:                                       ║"
 	@echo "║    • fork, execve, waitpid, pipe, dup2                    ║"
@@ -412,6 +445,9 @@ help:
 	@echo "║                                                            ║"
 	@echo "║  Geliştirme:                                               ║"
 	@echo "║    make userland     Sadece userland ELF'leri derle       ║"
+	@echo "║    make hello        Sadece hello.elf derle               ║"
+	@echo "║    make calculator   Sadece calculator.elf derle          ║"
+	@echo "║    make shell        Sadece shell.elf (ash) derle         ║"
 	@echo "║    make run          QEMU'da çalıştır                     ║"               
 	@echo "║                                                            ║"
 	@echo "║  Temizlik:                                                 ║"
@@ -420,7 +456,7 @@ help:
 	@echo "║    make clean-all    Tam sıfırlama                        ║"
 	@echo "║                                                            ║"
 	@echo "║  Kernel shell komutları:                                   ║"
-	@echo "║    elfload HELLO.ELF / CALC.ELF                           ║"
+	@echo "║    elfload HELLO.ELF / CALC.ELF / SHELL.ELF              ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
 
 # ============================================================================
@@ -428,4 +464,5 @@ help:
 # ============================================================================
 
 .PHONY: all run debug net-test gdb musl userland install-userland \
+        hello calculator shell \
         clean musl-clean clean-all info help

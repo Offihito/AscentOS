@@ -1196,12 +1196,18 @@ static void sys_fork(syscall_frame_t* frame) {
     if (child->kernel_stack_size == 0)
         child->kernel_stack_size = KERNEL_STACK_SIZE;
 
-    child->kernel_stack_base = (uint64_t)kmalloc(child->kernel_stack_size);
-    if (!child->kernel_stack_base) {
+    // pmm_alloc_pages kullan (task_create_user ile tutarlı) →
+    // task_reap_zombie'de pmm_free_pages ile güvenle free edilebilir.
+    extern void* pmm_alloc_pages(uint64_t count);
+    uint64_t ks_pages = child->kernel_stack_size / 4096;
+    void* ks = pmm_alloc_pages(ks_pages);
+    if (!ks) ks = (void*)kmalloc(child->kernel_stack_size);  // fallback
+    if (!ks) {
         kfree(child);
         frame->rax = SYSCALL_ERR_NOMEM;
         return;
     }
+    child->kernel_stack_base = (uint64_t)ks;
     kmemcpy((void*)child->kernel_stack_base,
             (void*)parent->kernel_stack_base,
             child->kernel_stack_size);
@@ -1220,31 +1226,98 @@ static void sys_fork(syscall_frame_t* frame) {
     if (parent->privilege_level == TASK_PRIVILEGE_USER && parent->user_stack_size > 0) {
         // ── Ring-3 yolu ───────────────────────────────────────
         child->user_stack_size = parent->user_stack_size;
-        child->user_stack_base = (uint64_t)kmalloc(child->user_stack_size);
-        if (!child->user_stack_base) {
+
+        // KRITIK: user stack Ring-3'ten erişilebilir olmalı.
+        // kmalloc kernel-only sayfa verir (USER flag yok) → Ring-3 #PF.
+        // pmm_alloc_pages_flags(..., 0x7) = PRESENT|WRITE|USER flag'li sayfa kullan.
+        extern void* pmm_alloc_pages_flags(uint64_t count, uint64_t map_flags);
+        uint64_t page_count = child->user_stack_size / 4096;
+        void* us = pmm_alloc_pages_flags(page_count, 0x7);
+        if (!us) {
+            // fallback: kmalloc (flat-memory kernel'de erişilebilir olabilir)
+            us = (void*)kmalloc(child->user_stack_size);
+        }
+        if (!us) {
             kfree((void*)child->kernel_stack_base);
             kfree(child);
             frame->rax = SYSCALL_ERR_NOMEM;
             return;
         }
+        child->user_stack_base = (uint64_t)us;
         kmemcpy((void*)child->user_stack_base,
                 (void*)parent->user_stack_base,
                 child->user_stack_size);
 
-        // Ebeveynin register bağlamını kopyala
-        kmemcpy(&child->context, &parent->context, sizeof(cpu_context_t));
-
-        // RSP'yi çocuğun user stack'ine taşı (delta hesabı)
-        uint64_t stack_delta = child->user_stack_base - parent->user_stack_base;
-        child->context.rsp  += stack_delta;
+        // ── User stack: parent'ı kopyala + RSP delta ─────────────
         child->user_stack_top = child->user_stack_base + child->user_stack_size;
+        uint64_t stack_delta  = child->user_stack_base - parent->user_stack_base;
 
-        // Çocukta fork() == 0
-        child->context.rax = 0;
-        // SYSRET dönüş adresi: ebeveynin syscall sonrası RIP'i
-        child->context.rip = frame->rcx;
-        child->context.cs  = parent->context.cs;
-        child->context.ss  = parent->context.ss;
+        // Gerçek user RSP'yi bul.
+        //
+        // syscall_entry user-path stack düzeni (frame = rsp dispatch anında):
+        //   frame+0..+72  : syscall_frame_t (rax..user_rsp)
+        //   frame+80      : r14  (callee-saved)
+        //   frame+88      : r13
+        //   frame+96      : r12
+        //   frame+104     : rbp
+        //   frame+112     : rbx
+        //   frame+120     : r15  ← user RSP (mov r15,rsp ile kaydedildi)
+        //
+        // frame->user_rsp: eski assembly'de 0, yeni versiyonda gerçek user RSP.
+        // Geçersizse frame+120'den r15'i oku.
+        uint64_t parent_user_rsp = frame->user_rsp;
+
+        if (parent_user_rsp == 0 ||
+            parent_user_rsp >= 0x8000000000000000ULL ||
+            parent_user_rsp < parent->user_stack_base ||
+            parent_user_rsp > parent->user_stack_top) {
+
+            // frame+120 = index 15 = r15 = SYSCALL anındaki user RSP
+            uint64_t* frame_base = (uint64_t*)frame;
+            parent_user_rsp = frame_base[15];
+
+            if (parent_user_rsp < parent->user_stack_base ||
+                parent_user_rsp > parent->user_stack_top) {
+                parent_user_rsp = parent->user_stack_top - 128;
+            }
+        }
+
+        uint64_t child_user_rsp = parent_user_rsp + stack_delta;
+
+        // ── Çocuğun kernel stack'ine iretq frame kur ─────────────
+        // Scheduler task_switch_context sonrası iretq ile Ring-3'e döner.
+        // Frame düzeni (yüksekten alçağa):
+        //   SS, RSP(user), RFLAGS, CS, RIP
+        // Ardından 15 GPR (r15..rax) — task_switch_context bunları pop eder.
+        uint64_t* stk = (uint64_t*)child->kernel_stack_top;
+
+        // iretq frame
+        *(--stk) = GDT_USER_DATA_RPL3;               // SS  = 0x1B
+        *(--stk) = child_user_rsp;                   // RSP = user stack
+        *(--stk) = 0x202ULL;                         // RFLAGS = IF=1
+        *(--stk) = GDT_USER_CODE_RPL3;               // CS  = 0x23
+        *(--stk) = frame->rcx;                       // RIP = fork() sonrası user RIP
+
+        // 15 GPR: task_create_user ile ayni sekilde sifirla
+        // Sira: iretq'dan once pop edilecek r15..rax (interrupts64.asm sirasina gore)
+        // fork()==0 musl/libc tarafindan RAX'tan okunur — iretq sonrasi RAX=0 olmali.
+        // task_create_user da hepsini 0 yapiyor, ayni yaklasim guvenli.
+        for (int _gi = 0; _gi < 14; _gi++) *(--stk) = 0; // r15..rbx = 0
+        *(--stk) = 0;                                // RAX = 0 (fork() == 0 cocukta)
+
+        // context.rsp = kernel stack'teki GPR dizisinin basi
+        child->context.rsp    = (uint64_t)stk;
+        child->context.rip    = frame->rcx;          // user RIP
+        child->context.rflags = 0x202;
+        child->context.cs     = GDT_USER_CODE_RPL3;  // 0x23
+        child->context.ss     = GDT_USER_DATA_RPL3;  // 0x1B
+        child->context.rax    = 0;                   // fork() == 0
+
+        serial_print("[FORK] Ring-3 child iretq frame kuruldu, RIP=0x");
+        print_uint64(frame->rcx);
+        serial_print(" user_rsp=0x");
+        print_uint64(child_user_rsp);
+        serial_print("\n");
 
     } else {
         // ── Ring-0 / kernel context yolu ─────────────────────
@@ -1690,97 +1763,66 @@ static void sys_waitpid(syscall_frame_t* frame) {
     int*     status  = (int*)frame->rsi;
     uint64_t options = frame->rdx;
 
-    // status pointer doğrulama (NULL kabul edilir)
     if (status && !is_valid_user_ptr(status, sizeof(int))) {
-        frame->rax = SYSCALL_ERR_FAULT;
-        return;
+        frame->rax = SYSCALL_ERR_FAULT; return;
     }
-
     task_t* cur = task_get_current();
     if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
 
-    // ── Çocuk arama döngüsü ───────────────────────────────────
-    // Maksimum bekleme: WNOHANG yoksa ~5 saniye (5000 tick)
     uint64_t deadline = get_system_ticks() + ((options & WNOHANG) ? 0 : 5000);
 
     do {
-        uint32_t total = task_get_count();
-        task_t*  found      = 0;
-        int      found_type = 0;  // 1=zombie, 2=stopped, 3=continued
+        task_t* found = 0; int found_type = 0;
 
-        for (uint32_t scan = 0; scan < total; scan++) {
-            task_t* candidate = task_find_by_pid((uint32_t)scan);
-            if (!candidate) continue;
-
-            // Ebeveyn eşleşmesi
-            if (candidate->parent_pid != cur->pid) continue;
-
-            // PID filtresi
-            if (pid_arg > 0 && (int64_t)candidate->pid != pid_arg) continue;
-
-            // ZOMBIE / TERMINATED: her zaman raporla
-            if (candidate->state == TASK_STATE_ZOMBIE ||
-                candidate->state == TASK_STATE_TERMINATED) {
-                found = candidate; found_type = 1; break;
+        if (pid_arg > 0) {
+            task_t* c = task_find_by_pid((uint32_t)pid_arg);
+            if (c && c->parent_pid == cur->pid) {
+                if (c->state == TASK_STATE_ZOMBIE || c->state == TASK_STATE_TERMINATED)
+                    { found = c; found_type = 1; }
+                else if ((options & WUNTRACED) && c->state == TASK_STATE_STOPPED)
+                    { found = c; found_type = 2; }
             }
-
-            // WUNTRACED: durdurulan çocuk (TASK_STATE_STOPPED)
-            if ((options & WUNTRACED) &&
-                candidate->state == TASK_STATE_STOPPED) {
-                found = candidate; found_type = 2; break;
+        } else {
+            // Tüm child'ları tara — PID 1..4095 + zombie listesi
+            for (uint32_t sp = 1; sp < 4096 && !found; sp++) {
+                task_t* t = task_find_by_pid(sp);
+                if (!t || t->parent_pid != cur->pid) continue;
+                if (t->state == TASK_STATE_ZOMBIE || t->state == TASK_STATE_TERMINATED)
+                    { found = t; found_type = 1; }
+                else if ((options & WUNTRACED) && t->state == TASK_STATE_STOPPED)
+                    { found = t; found_type = 2; }
             }
         }
 
         if (found) {
-            uint32_t waited_pid = found->pid;
-
+            uint32_t wpid = found->pid;
             if (status) {
-                if (found_type == 1) {
-                    // Normal exit: WIFEXITED
-                    *status = (found->exit_code & 0xFF) << 8;
-                } else if (found_type == 2) {
-                    // Stopped: WIFSTOPPED — 0x7F | (SIGTSTP << 8)
-                    *status = 0x7F | (SIGTSTP << 8);
-                } else {
-                    // Continued: WIFCONTINUED — sabit 0xFFFF
-                    *status = 0xFFFF;
-                }
+                if      (found_type == 1) *status = (found->exit_code & 0xFF) << 8;
+                else if (found_type == 2) *status = 0x7F | (SIGTSTP << 8);
+                else                      *status = 0xFFFF;
             }
-
-            serial_print("[SYSCALL] waitpid: pid=");
-            print_uint64(waited_pid);
-            serial_print(" type=");
-            print_uint64(found_type);
+            serial_print("[SYSCALL] waitpid: pid="); print_uint64(wpid);
+            serial_print(" exitcode=");
+            { char b[8]; int_to_str(found->exit_code, b); serial_print(b); }
             serial_print("\n");
-
-            // Zombie ise TCB serbest bırak (tam GC ileride)
-            // if (found_type == 1) task_reap(found);
-
-            frame->rax = (uint64_t)waited_pid;
-            return;
-        }
-
-        // WNOHANG: değişiklik yoksa hemen 0 döndür
-        if (options & WNOHANG) {
-            frame->rax = 0;
-            return;
-        }
-
-        // Belirtilen PID hiç bu ebeveyne ait değilse ECHILD
-        if (pid_arg > 0) {
-            task_t* specific = task_find_by_pid((uint32_t)pid_arg);
-            if (!specific || specific->parent_pid != cur->pid) {
-                frame->rax = SYSCALL_ERR_CHILD;
-                return;
+            if (found_type == 1) {
+                extern void task_reap_zombie(task_t*);
+                task_reap_zombie(found);
             }
+            frame->rax = (uint64_t)wpid;
+            return;
         }
 
-        // Bekle ve tekrar dene
-        __asm__ volatile ("sti; hlt" ::: "memory");
+        if (options & WNOHANG) { frame->rax = 0; return; }
 
+        if (pid_arg > 0) {
+            task_t* s = task_find_by_pid((uint32_t)pid_arg);
+            if (!s || s->parent_pid != cur->pid) { frame->rax = SYSCALL_ERR_CHILD; return; }
+        }
+
+        __asm__ volatile ("sti; hlt" ::: "memory");
     } while (get_system_ticks() < deadline);
 
-    // Zaman aşımı
     frame->rax = SYSCALL_ERR_AGAIN;
 }
 
@@ -5127,11 +5169,11 @@ static void sys_writev(syscall_frame_t* frame) {
         uint64_t    len = iov[i].iov_len;
 
         if (fde->type == FD_TYPE_SERIAL) {
-            // stdout/stderr → serial + VGA
-            for (uint64_t j = 0; j < len; j++) {
+            // stdout/stderr → vesa_write_buf (batch) + serial
+            extern void vesa_write_buf(const char* buf, int len);
+            vesa_write_buf(buf, (int)len);
+            for (uint64_t j = 0; j < len; j++)
                 serial_putchar(buf[j]);
-                putchar64(buf[j], VGA_WHITE);
-            }
             total += (int64_t)len;
         } else if (fde->type == FD_TYPE_PIPE && fde->pipe) {
             // Pipe write — sys_write ile aynı mantık

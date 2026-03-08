@@ -428,6 +428,9 @@ bool rtl8139_link_is_up(void){
     return g_rtl.link_up;
 }
 
+uint32_t rtl8139_get_rx_count(void){ return g_rtl.rx_count; }
+uint32_t rtl8139_get_tx_count(void){ return g_rtl.tx_count; }
+
 void rtl8139_set_packet_handler(packet_handler_t handler){
     g_rtl.on_packet = handler;
 }

@@ -312,6 +312,10 @@ void task_exit(void);
 // Task durumunu degistir.
 void task_set_state(task_t* task, uint32_t new_state);
 
+// Zombie task'ı zombie listesinden çıkar ve belleğini serbest bırak.
+// sys_waitpid() child'ı topladıktan sonra bu fonksiyonu çağırır.
+void task_reap_zombie(task_t* task);
+
 // ============================================================
 // Sleep Yönetimi
 // Scheduler tick handler'i (scheduler_tick()) bu fonksiyonu cagirir.

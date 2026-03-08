@@ -325,8 +325,45 @@ extern void rtl8139_set_packet_handler(void* handler);
 // packet handler'ı kaydet ve g_net_initialized'ı güncelle.
 extern void net_register_packet_handler(void);
 
-// ARP katmanı (kernel/arp.c) — IP adresi kernel_main'de atanmaz,
-// kullanıcı 'ipconfig' komutuyla atar. Sadece extern bildirimi yeterli.
+// Ağ katmanları — tam yığın (Aşama 1-6)
+extern void     ipv4_init(void);
+extern void     udp_init(int csum_mode);
+extern void     icmp_init(void);
+extern void     dhcp_init(void);
+extern bool     dhcp_discover(void);
+extern void     tcp_init(void);
+extern void     tcp_tick(void);
+extern bool     tcp_is_initialized(void);
+extern uint64_t get_system_ticks(void);
+
+// ============================================================================
+// NET STACK INIT — tüm katmanları sırayla başlat
+// ============================================================================
+static void net_stack_init(void) {
+    if (!rtl8139_init()) {
+        serial_print("[NET] RTL8139 bulunamadi (QEMU -device rtl8139 eklenmeli).\n");
+        return;
+    }
+    net_register_packet_handler();   // g_net_initialized = 1
+    serial_print("[NET] RTL8139 hazir.\n");
+
+    ipv4_init();
+    serial_print("[NET] IPv4 hazir.\n");
+
+    udp_init(1);   // 1 = UDP_CSUM_ENABLE
+    serial_print("[NET] UDP hazir.\n");
+
+    icmp_init();
+    serial_print("[NET] ICMP hazir.\n");
+
+    tcp_init();    // IPv4'e proto=6 kaydeder
+    serial_print("[NET] TCP hazir.\n");
+
+    dhcp_init();   // UDP port 68 dinlemeye alir
+    serial_print("[NET] DHCP hazir. DHCPDISCOVER gonderiliyor...\n");
+
+    dhcp_discover();   // DHCPACK gelince arp_init() + ipv4_set_gateway() otomatik calisir
+}
 
 // ============================================================================
 // KERNEL MAIN
@@ -350,14 +387,9 @@ void kernel_main(uint64_t multiboot_info) {
     init_keyboard64();
     init_commands64();
 
-    // RTL8139 ağ kartını başlat (PCI taraması + IRQ kurulumu)
-    // Kart QEMU'da yoksa sessizce geçer, 'netinit' komutu tekrar denenebilir.
-    if (rtl8139_init()) {
-        net_register_packet_handler();   // packet handler'ı kaydet, g_net_initialized=1 yap
-        serial_print("[NET] RTL8139 baslatildi, 'netstat' ile durumu gor.\n");
-    } else {
-        serial_print("[NET] RTL8139 bulunamadi (QEMU -device rtl8139 eklenmeli).\n");
-    }
+    // Tüm ağ yığınını başlat: RTL8139 → IPv4 → UDP → ICMP → TCP → DHCP
+    // DHCP ACK gelince ARP otomatik init olur; 'ipconfig' artık sadece override için.
+    net_stack_init();
 
     // gui64 framebuffer ptr'yi kur (henüz ekrana çizme)
     gui_init();
@@ -367,12 +399,24 @@ void kernel_main(uint64_t multiboot_info) {
 
     // Ana döngü: TEXT modunda bekle
     // gfx komutu request_gui_start=1 yapınca GUI'ye geç
+    // tcp_tick() her ~100ms'de bir çağrılarak yeniden iletim / TIME_WAIT yönetir
+    static uint64_t last_tcp_tick = 0;
     while(1){
         if(request_gui_start){
             request_gui_start=0;
             gui_enter();
             gui_loop();   // buradan dönmez
         }
+
+        // TCP zamanlayıcısı — ~100ms aralıkla
+        if (tcp_is_initialized()) {
+            uint64_t now = get_system_ticks();
+            if (now - last_tcp_tick >= 100) {
+                last_tcp_tick = now;
+                tcp_tick();
+            }
+        }
+
         __asm__ volatile("sti; hlt");
     }
 }

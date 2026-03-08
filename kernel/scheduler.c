@@ -122,6 +122,12 @@ cpu_context_t* task_get_next_context(void) {
     pending_next_task = NULL;
     
     stats.total_context_switches++;
+
+    // TSS.RSP0 güncelle: yeni task'ın kernel_stack_top'u kullan.
+    // Bu kritik: Ring-3'ten syscall/interrupt geldiğinde CPU TSS.RSP0'dan
+    // kernel stack alır. context.rsp + 160 YANLIŞ — context.rsp her switch'te
+    // değişen bir kernel stack pointer'ı, kernel_stack_top sabit olmalı.
+    tss_set_kernel_stack(next->kernel_stack_top);
     
     // Return pointer to new task's context
     return &next->context;
@@ -143,10 +149,10 @@ cpu_context_t* task_get_next_context(void) {
 // Parametre: isr_timer'ın task_get_next_context'ten aldığı cpu_context_t*
 // ============================================================
 void tss_update_rsp0_from_context(cpu_context_t* ctx) {
-    if (!ctx) return;
-    // kernel_stack_top = context.rsp + 160 (15 register + 5 iretq qword)
-    uint64_t kernel_stack_top = ctx->rsp + 160;
-    tss_set_kernel_stack(kernel_stack_top);
+    // TSS.RSP0 artık task_get_next_context() içinde güncelleniyor
+    // (next->kernel_stack_top kullanılarak — context.rsp + 160 YANLIŞ).
+    // Bu fonksiyon isr_timer'dan çağrılmaya devam ediyor; no-op bırakıldı.
+    (void)ctx;
 }
 
 // ===========================================

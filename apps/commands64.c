@@ -22,6 +22,10 @@ extern bool     rtl8139_link_is_up(void);
 extern void     rtl8139_stats(void);
 extern void     rtl8139_dump_regs(void);
 extern void     rtl8139_set_packet_handler(void* handler);
+extern void     rtl8139_dump_regs(void);
+extern uint32_t rtl8139_get_rx_count(void);
+extern uint32_t rtl8139_get_tx_count(void);
+extern void     rtl8139_poll(void);
 
 // ============================================================================
 // ARP Katmanı — extern bildirimleri (arp.c)
@@ -43,9 +47,201 @@ extern bool     str_to_ip(const char* str, uint8_t out[4]);
 typedef void (*arp_line_cb)(const char* line, uint8_t color, void* ctx);
 extern void arp_cache_foreach(arp_line_cb cb, void* ctx);
 
+// ============================================================================
+// IPv4 Katmanı — extern bildirimleri (ipv4.c)
+// ============================================================================
+extern void     ipv4_init(void);
+extern void     ipv4_handle_packet(const uint8_t* frame, uint16_t len);
+extern bool     ipv4_send(const uint8_t dst_ip[4], uint8_t protocol,
+                          const uint8_t* payload, uint16_t plen);
+extern bool     ipv4_is_initialized(void);
+extern uint32_t ipv4_get_tx_count(void);
+extern uint32_t ipv4_get_rx_count(void);
+extern void     ipv4_set_gateway(const uint8_t gw[4]);
+extern void     ipv4_set_subnet(const uint8_t mask[4]);
+extern void     ipv4_get_gateway(uint8_t out[4]);
+
+// ============================================================================
+// ICMP Katmanı — extern bildirimleri (icmp.c)
+// ============================================================================
+extern void     icmp_init(void);
+extern bool     icmp_ping(const uint8_t dst_ip[4]);
+extern int      icmp_ping_state(void);   // PingState enum: 0=IDLE,1=PENDING,2=SUCCESS (hata:3/4)
+extern uint32_t icmp_last_rtt_ms(void);
+extern uint16_t icmp_last_seq(void);
+extern void     icmp_get_last_src(uint8_t out[4]);
+extern void     icmp_ping_reset(void);
+
+// PING_* enum değerleri (icmp.h'daki PingState ile eşleşmeli)
+#define PING_IDLE        0
+#define PING_PENDING     1
+#define PING_SUCCESS     2
+#define PING_TIMEOUT     3
+#define PING_UNREACHABLE 4
+
+// ============================================================================
+// UDP Katmanı — extern bildirimleri (udp.c)
+// ============================================================================
+typedef struct {
+    uint8_t  src_ip[4];
+    uint16_t src_port;
+    uint16_t dst_port;
+    const uint8_t* data;
+    uint16_t len;
+} UDPPacket;
+typedef void (*udp_handler_t)(const UDPPacket* pkt, void* ctx);
+
+extern void     udp_init_csum(int csum_enable);   // udp_init(mode) wrapper — aşağıda sarılır
+extern bool     udp_bind(uint16_t port, udp_handler_t handler, void* ctx);
+extern void     udp_unbind(uint16_t port);
+extern bool     udp_send(const uint8_t dst_ip[4], uint16_t dst_port, uint16_t src_port,
+                          const uint8_t* data, uint16_t len);
+extern bool     udp_broadcast(uint16_t dst_port, uint16_t src_port,
+                               const uint8_t* data, uint16_t len);
+extern bool     udp_is_initialized(void);
+extern uint32_t udp_get_rx_count(void);
+extern uint32_t udp_get_tx_count(void);
+
+// udp_sockets_foreach için callback tip tanımı
+typedef void (*udp_line_cb)(const char* line, uint8_t color, void* ctx);
+extern void udp_sockets_foreach(udp_line_cb cb, void* ctx);
+
+// UDP_CSUM_ENABLE = 1 (udp.h'dan)
+// udp.c içindeki udp_init(UDPCsumMode) fonksiyonunu doğrudan çağırıyoruz:
+extern void udp_init(int csum_mode);
+
+// ============================================================================
+// DHCP İstemcisi — extern bildirimleri (dhcp.c)
+// ============================================================================
+typedef enum {
+    DHCP_STATE_IDLE       = 0,
+    DHCP_STATE_SELECTING,
+    DHCP_STATE_REQUESTING,
+    DHCP_STATE_BOUND,
+    DHCP_STATE_RENEWING,
+    DHCP_STATE_REBINDING,
+    DHCP_STATE_RELEASED,
+    DHCP_STATE_FAILED,
+} DHCPState;
+
+typedef struct {
+    uint8_t  ip[4];
+    uint8_t  subnet[4];
+    uint8_t  gateway[4];
+    uint8_t  dns[4];
+    uint8_t  server_ip[4];
+    uint32_t lease_time;
+    uint32_t renewal_time;
+    uint32_t rebinding_time;
+    uint32_t lease_start_tick;
+    bool     valid;
+} DHCPConfig;
+
+extern void        dhcp_init(void);
+extern bool        dhcp_discover(void);
+extern void        dhcp_release(void);
+extern int         dhcp_get_state(void);      // DHCPState enum
+extern void        dhcp_get_config(DHCPConfig* out);
+extern const char* dhcp_state_str(void);
+extern bool        dhcp_is_initialized(void);
+extern uint32_t    dhcp_get_xid(void);
+
+// ============================================================================
+// TCP Katmanı — extern bildirimleri (tcp.c) — Aşama 6
+// ============================================================================
+typedef enum {
+    TCP_STATE_CLOSED      = 0,
+    TCP_STATE_LISTEN,
+    TCP_STATE_SYN_SENT,
+    TCP_STATE_SYN_RECEIVED,
+    TCP_STATE_ESTABLISHED,
+    TCP_STATE_FIN_WAIT_1,
+    TCP_STATE_FIN_WAIT_2,
+    TCP_STATE_CLOSE_WAIT,
+    TCP_STATE_CLOSING,
+    TCP_STATE_LAST_ACK,
+    TCP_STATE_TIME_WAIT,
+} TCPState_t;
+
+typedef enum {
+    TCP_EVENT_CONNECTED = 0,
+    TCP_EVENT_DATA,
+    TCP_EVENT_SENT,
+    TCP_EVENT_CLOSED,
+    TCP_EVENT_ERROR,
+    TCP_EVENT_ACCEPT,
+} TCPEvent_t;
+
+typedef void (*tcp_event_cb_t)(int conn_id, TCPEvent_t event,
+                               const uint8_t* data, uint16_t len, void* ctx);
+typedef void (*tcp_accept_cb_t)(int new_conn_id, const uint8_t remote_ip[4],
+                                uint16_t remote_port, void* ctx);
+
+extern void         tcp_init(void);
+extern int          tcp_connect(const uint8_t dst_ip[4], uint16_t dst_port,
+                                tcp_event_cb_t event_cb, void* ctx);
+extern int          tcp_listen(uint16_t port, tcp_accept_cb_t accept_cb, void* ctx);
+extern int          tcp_send(int conn_id, const uint8_t* data, uint16_t len);
+extern void         tcp_close(int conn_id);
+extern void         tcp_abort(int conn_id);
+extern int          tcp_get_state(int conn_id);   // TCPState_t
+extern bool         tcp_is_connected(int conn_id);
+extern uint16_t     tcp_read(int conn_id, uint8_t* out, uint16_t max_len);
+extern void         tcp_tick(void);
+extern bool         tcp_is_initialized(void);
+extern void         tcp_print_connections(void);
+extern uint32_t     tcp_get_tx_count(void);
+extern uint32_t     tcp_get_rx_count(void);
+extern int          tcp_get_conn_count(void);
+extern const char*  tcp_state_str(int state);
+
+// ── HTTP istemcisi (http.c) ──────────────────────────────────────────────────
+typedef struct {
+    int      status;
+    uint16_t header_len;
+    uint16_t body_len;
+    uint16_t total_len;
+    char     buf[4096];
+    char*    body;
+    bool     complete;
+    bool     timed_out;
+} HTTPResponse;
+
+typedef enum {
+    HTTP_OK           = 0,
+    HTTP_ERR_ARP      = 1,
+    HTTP_ERR_CONNECT  = 2,
+    HTTP_ERR_SEND     = 3,
+    HTTP_ERR_TIMEOUT  = 4,
+    HTTP_ERR_OVERFLOW = 5,
+    HTTP_ERR_INIT     = 6,
+} HTTPError;
+
+extern HTTPError    http_get(const uint8_t host_ip[4], uint16_t port,
+                              const char* path, HTTPResponse* out);
+extern HTTPError    http_post(const uint8_t host_ip[4], uint16_t port,
+                               const char* path,
+                               const uint8_t* body, uint16_t body_len,
+                               HTTPResponse* out);
+extern const char*  http_err_str(HTTPError err);
+extern const char*  http_status_str(int status);
+extern void         http_response_reset(HTTPResponse* resp);
+
+// TCP test için global durum (cmd_tcpconnect / cmd_tcptest ortak kullanır)
+static volatile int    g_tcp_conn_id      = -1;
+static volatile bool   g_tcp_connected    = false;
+static volatile bool   g_tcp_data_recvd   = false;
+static volatile bool   g_tcp_closed       = false;
+static volatile bool   g_tcp_error        = false;
+// Alınan verinin ilk 128 baytını VGA'ya yazmak için
+static char            g_tcp_recv_preview[128];
+static volatile uint16_t g_tcp_recv_len   = 0;
+
+// ============================================================================
 // Sürücünün başlatılıp başlatılmadığını sorgulayan dahili değişken
 // (rtl8139.c içinde static, doğrudan erişemeyiz — init sonucu burada saklarız)
 // NOT: kernel64.c'den net_register_packet_handler() üzerinden güncellenir.
+// ============================================================================
 int g_net_initialized = 0;
 
 // Son alınan paketin özet bilgisini TEXT modda göstermek için
@@ -56,18 +252,31 @@ static volatile uint8_t  g_net_last_src[6] = {0}; // son paketin kaynak MAC
 // Forward declaration — tanım dosyanın sonundadır
 void net_register_packet_handler(void);
 
-// Paket alma callback: RTL8139'dan gelen her çerçeveyi ARP katmanına + sayaca gönder
+// ============================================================================
+// Paket alma callback: RTL8139'dan gelen her çerçeveyi
+//   → ARP katmanına   (EtherType 0x0806)
+//   → IPv4 katmanına  (EtherType 0x0800)
+// ============================================================================
 static void net_packet_callback(const uint8_t* buf, uint16_t len) {
     g_net_rx_display++;
     // EtherType (byte 12-13)
-    if(len >= 14){
+    if (len >= 14) {
         g_net_last_etype = (uint16_t)((buf[12] << 8) | buf[13]);
         // Kaynak MAC (byte 6-11)
         for (int i = 0; i < 6; i++) g_net_last_src[i] = buf[6 + i];
     }
-    // ARP katmanına ilet
-    if(arp_is_initialized())
+    // ARP katmanına ilet (EtherType 0x0806)
+    if (arp_is_initialized())
         arp_handle_packet(buf, len);
+
+    // IPv4 katmanına ilet (EtherType 0x0800)
+    // icmp_handle_packet ve udp_handle_packet, ipv4_register_handler
+    // üzerinden otomatik çağrılır.
+    if (ipv4_is_initialized() && len >= 14) {
+        uint16_t etype = (uint16_t)((buf[12] << 8) | buf[13]);
+        if (etype == 0x0800)
+            ipv4_handle_packet(buf, len);
+    }
 }
 
 extern void println64(const char* str, uint8_t color);
@@ -368,6 +577,42 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_line(output, " syscalltest - Run full test suite (116 tests)", VGA_WHITE);
     output_add_line(output, "              v10: signal/sigaction/sigprocmask", VGA_WHITE);
     output_add_empty_line(output);
+    output_add_line(output, "Network Commands (RTL8139):", VGA_CYAN);
+    output_add_line(output, " netinit   - RTL8139 ag surucusunu baslat", VGA_WHITE);
+    output_add_line(output, " netstat   - Ag karti durumu + sayaclar", VGA_WHITE);
+    output_add_line(output, " netsend   - Test paketi gonder [adet]", VGA_WHITE);
+    output_add_line(output, " netmon    - Alinan paketleri izle", VGA_WHITE);
+    output_add_empty_line(output);
+    output_add_line(output, "Network Commands (ARP/IPv4/ICMP):", VGA_CYAN);
+    output_add_line(output, " ipconfig  - IP ata / goster   ornek: ipconfig 10.0.2.15", VGA_WHITE);
+    output_add_line(output, " arping    - ARP request gonder ornek: arping 10.0.2.2", VGA_WHITE);
+    output_add_line(output, " arpcache  - ARP cache tablosunu goster", VGA_WHITE);
+    output_add_line(output, " arpflush  - ARP cache temizle", VGA_WHITE);
+    output_add_line(output, " arpstatic - Statik ARP: arpstatic <IP> <MAC>", VGA_WHITE);
+    output_add_line(output, " ipv4info  - IPv4 katman durumu ve sayaclari", VGA_WHITE);
+    output_add_line(output, " ping      - ICMP ping   ornek: ping 10.0.2.2", VGA_WHITE);
+    output_add_line(output, " ping      - Birden fazla: ping 10.0.2.2 4", VGA_DARK_GRAY);
+    output_add_empty_line(output);
+    output_add_line(output, "Network Commands (UDP - Asama 4):", VGA_CYAN);
+    output_add_line(output, " udpinit              - UDP katmanini baslat (ipconfig sonrasi)", VGA_WHITE);
+    output_add_line(output, " udplisten <port>     - Porta UDP echo sunucusu bagla", VGA_WHITE);
+    output_add_line(output, " udpsend <ip> <p> <m> - UDP mesaji gonder", VGA_WHITE);
+    output_add_line(output, " udpclose <port>      - Port dinleyicisini kaldir", VGA_WHITE);
+    output_add_line(output, " udpstat              - UDP soket tablosu ve sayaclar", VGA_WHITE);
+    output_add_line(output, "", VGA_WHITE);
+    output_add_line(output, "Network Commands (DHCP - Asama 5):", VGA_CYAN);
+    output_add_line(output, " dhcp                 - DHCP ile otomatik IP al", VGA_WHITE);
+    output_add_line(output, " dhcpstat             - DHCP durum + atanan IP/GW/DNS", VGA_WHITE);
+    output_add_line(output, " dhcprel              - DHCP Release (IP iade et)", VGA_WHITE);
+    output_add_empty_line(output);
+    output_add_line(output, "Network Commands (TCP - Asama 6):", VGA_CYAN);
+    output_add_line(output, " tcpstat              - Tum TCP baglantilarini goster", VGA_WHITE);
+    output_add_line(output, " tcpconnect <ip> <p>  - TCP baglantisi kur", VGA_WHITE);
+    output_add_line(output, " tcpsend <id> <msg>   - Baglantiya veri gonder", VGA_WHITE);
+    output_add_line(output, " tcpclose <id>        - Baglantiyi kapat (FIN)", VGA_WHITE);
+    output_add_line(output, " tcplisten <port>     - TCP sunucu baslatir", VGA_WHITE);
+    output_add_line(output, " tcptest <ip> <port>  - HTTP GET testi (ornek: tcptest 10.0.2.2 80)", VGA_WHITE);
+    output_add_empty_line(output);
     output_add_line(output, "Debug Commands:", VGA_RED);
     output_add_line(output, " panic       - Panic ekranini test et", VGA_WHITE);
     output_add_line(output, "   panic df    #DF Double Fault", VGA_DARK_GRAY);
@@ -648,7 +893,7 @@ void cmd_neofetch(const char* args, CommandOutput* output) {
     str_concat(uptime_str, sec_str);
     str_concat(uptime_str, "s");
 
-    // Sistem bilgileri - art'ın boyutuna uygun şekilde yerleştirildi
+    // Sistem bilgileri
     str_cpy(info_lines[0],  "AscentOS v0.1 64-bit");
     str_cpy(info_lines[1],  "---------------------");
     str_cpy(info_lines[3],  "OS: AscentOS x86_64 - Why So Serious?");
@@ -681,7 +926,7 @@ void cmd_neofetch(const char* args, CommandOutput* output) {
     for (int i = 0; i < 18; i++) {
         full_line[0] = '\0';
         str_cpy(full_line, art_lines[i]);
-        str_concat(full_line, "   ");  // Joker ile bilgi arasında boşluk
+        str_concat(full_line, "   ");
         if (info_lines[i][0] != '\0') {
             str_concat(full_line, info_lines[i]);
         }
@@ -699,13 +944,11 @@ void cmd_sysinfo(void) {
     println64("System Information:", VGA_CYAN);
     println64("", VGA_WHITE);
     
-    // CPU Brand
     char cpu_brand[49];
     get_cpu_brand(cpu_brand);
     print_str64("CPU: ", VGA_WHITE);
     println64(cpu_brand, VGA_YELLOW);
     
-    // Memory
     extern uint8_t* heap_start;
     extern uint8_t* heap_current;
     uint64_t heap_used = (uint64_t)heap_current - (uint64_t)heap_start;
@@ -716,10 +959,8 @@ void cmd_sysinfo(void) {
     print_str64(mem_str, VGA_GREEN);
     println64(" KB", VGA_WHITE);
     
-    // Architecture
     println64("Architecture: x86_64 (64-bit)", VGA_GREEN);
     
-    // Paging
     uint64_t cr3;
     __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
     print_str64("Page Table (CR3): 0x", VGA_WHITE);
@@ -732,7 +973,6 @@ void cmd_sysinfo(void) {
     hex_str[16] = '\0';
     println64(hex_str, VGA_YELLOW);
     
-    // File system info
     int file_count = 0;
     get_all_files_list64(&file_count);
     print_str64("Files in system: ", VGA_WHITE);
@@ -747,13 +987,11 @@ void cmd_cpuinfo(void) {
     println64("CPU Information:", VGA_CYAN);
     println64("", VGA_WHITE);
     
-    // Vendor
     char vendor[13];
     get_cpu_vendor(vendor);
     print_str64("Vendor: ", VGA_WHITE);
     println64(vendor, VGA_GREEN);
     
-    // Features
     __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1));
     
     print_str64("Features: ", VGA_WHITE);
@@ -766,10 +1004,9 @@ void cmd_cpuinfo(void) {
     if (ecx & (1 << 0)) print_str64("SSE3 ", VGA_YELLOW);
     println64("", VGA_WHITE);
     
-    // Long mode check
     __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0x80000001));
     if (edx & (1 << 29)) {
-        println64("Long Mode: Supported ✓", VGA_GREEN);
+        println64("Long Mode: Supported", VGA_GREEN);
     }
 }
 
@@ -777,34 +1014,26 @@ void cmd_meminfo(void) {
     extern void show_memory_info(void);
     show_memory_info();
 }
+
 void cmd_reboot(const char* args, CommandOutput* output) {
     (void)args;
     
     output_add_line(output, "Saving files to disk...", VGA_YELLOW);
-    
-    // Dosyaları kaydet
     save_files_to_disk64();
-    
-    // Disk yazmanın tamamlanması için uzun bekleme
     for (volatile int i = 0; i < 5000000; i++);
-    
     output_add_line(output, "All files saved!", VGA_GREEN);
     output_add_line(output, "Rebooting now... Why so serious?", VGA_RED);
     
-    // Gerçek reboot: 8042 PS/2 controller ile CPU reset
-    __asm__ volatile ("cli");  // Interruptları kapat
+    __asm__ volatile ("cli");
     
     uint8_t good = 0x02;
     while (good & 0x02) {
         good = inb64(0x64);
     }
     
-    outb64(0x64, 0xFE);  // System reset komutu
-    
-    // Eğer başarısız olursa sonsuz döngü
+    outb64(0x64, 0xFE);
     __asm__ volatile ("hlt");
-    
-    for(;;);  // Buraya asla gelmemeli
+    for(;;);
 }
 
 void cmd_mkdir(const char* args, CommandOutput* output) {
@@ -814,7 +1043,6 @@ void cmd_mkdir(const char* args, CommandOutput* output) {
         return;
     }
 
-    // Check for spaces
     for (int i = 0; args[i]; i++) {
         if (args[i] == ' ') {
             output_add_line(output, "Error: Directory name cannot contain spaces", VGA_RED);
@@ -857,9 +1085,9 @@ void cmd_rmdir(const char* args, CommandOutput* output) {
         output_add_line(output, "Error: Cannot remove directory (not found, not empty, or read-only)", VGA_RED);
     }
 }
+
 void cmd_cd(const char* args, CommandOutput* output) {
     if (str_len(args) == 0) {
-        // cd with no args goes to root
         int success = fs_chdir64("/");
         if (success) {
             output_add_line(output, "Changed to root directory", VGA_GREEN);
@@ -884,8 +1112,9 @@ void cmd_pwd(const char* args, CommandOutput* output) {
     const char* cwd = fs_getcwd64();
     output_add_line(output, cwd, VGA_CYAN);
 }
+
 // ===========================================
-// PMM COMMAND - Physical Memory Manager Stats
+// PMM COMMAND
 // ===========================================
 
 void cmd_pmm(const char* args, CommandOutput* output) {
@@ -897,7 +1126,6 @@ void cmd_pmm(const char* args, CommandOutput* output) {
     output_add_line(output, "=========================================", VGA_CYAN);
     output_add_empty_line(output);
     
-    // Call PMM stats function which will print to console
     pmm_print_stats();
     
     output_add_empty_line(output);
@@ -910,13 +1138,11 @@ void cmd_pmm(const char* args, CommandOutput* output) {
 // ===========================================
 
 void cmd_vmm(const char* args, CommandOutput* output) {
-    // Check for stats subcommand
     if (str_len(args) > 0 && str_cmp(args, "stats") == 0) {
         output_add_line(output, "VMM Statistics:", VGA_CYAN);
         output_add_line(output, "===============", VGA_CYAN);
         output_add_empty_line(output);
         
-        // Get statistics from VMM
         extern uint64_t vmm_get_pages_mapped(void);
         extern uint64_t vmm_get_pages_unmapped(void);
         extern uint64_t vmm_get_page_faults(void);
@@ -927,25 +1153,21 @@ void cmd_vmm(const char* args, CommandOutput* output) {
         char line[MAX_LINE_LENGTH];
         char num_str[32];
         
-        // Pages mapped
         str_cpy(line, "  Pages mapped: ");
         uint64_to_string(vmm_get_pages_mapped(), num_str);
         str_concat(line, num_str);
         output_add_line(output, line, VGA_WHITE);
         
-        // Pages unmapped
         str_cpy(line, "  Pages unmapped: ");
         uint64_to_string(vmm_get_pages_unmapped(), num_str);
         str_concat(line, num_str);
         output_add_line(output, line, VGA_WHITE);
         
-        // Page faults
         str_cpy(line, "  Page faults: ");
         uint64_to_string(vmm_get_page_faults(), num_str);
         str_concat(line, num_str);
         output_add_line(output, line, VGA_YELLOW);
         
-        // TLB flushes
         str_cpy(line, "  TLB flushes: ");
         uint64_to_string(vmm_get_tlb_flushes(), num_str);
         str_concat(line, num_str);
@@ -954,13 +1176,11 @@ void cmd_vmm(const char* args, CommandOutput* output) {
         output_add_empty_line(output);
         output_add_line(output, "Demand Paging:", VGA_CYAN);
         
-        // Demand allocations
         str_cpy(line, "  Demand allocations: ");
         uint64_to_string(vmm_get_demand_allocations(), num_str);
         str_concat(line, num_str);
         output_add_line(output, line, VGA_GREEN);
         
-        // Reserved pages
         str_cpy(line, "  Reserved pages: ");
         uint64_to_string(vmm_get_reserved_pages(), num_str);
         str_concat(line, num_str);
@@ -969,11 +1189,9 @@ void cmd_vmm(const char* args, CommandOutput* output) {
         output_add_empty_line(output);
         output_add_line(output, "VMM manages 4-level page tables (PML4)", VGA_DARK_GRAY);
         output_add_line(output, "Supports 4KB and 2MB pages", VGA_DARK_GRAY);
-        
         return;
     }
     
-    // Check for demand subcommand
     if (str_len(args) > 0 && str_cmp(args, "demand") == 0) {
         extern int vmm_enable_demand_paging(void);
         extern int vmm_reserve_pages(uint64_t, uint64_t, uint64_t);
@@ -983,7 +1201,6 @@ void cmd_vmm(const char* args, CommandOutput* output) {
         output_add_line(output, "======================", VGA_CYAN);
         output_add_empty_line(output);
         
-        // Enable demand paging
         if (!vmm_is_demand_paging_enabled()) {
             vmm_enable_demand_paging();
             output_add_line(output, "[1] Demand paging enabled", VGA_GREEN);
@@ -991,7 +1208,6 @@ void cmd_vmm(const char* args, CommandOutput* output) {
             output_add_line(output, "[1] Demand paging already enabled", VGA_YELLOW);
         }
         
-        // Reserve pages
         output_add_line(output, "[2] Reserving 10 pages at 0x700000...", VGA_YELLOW);
         int result = vmm_reserve_pages(0x700000, 10, PAGE_WRITE);
         if (result == 0) {
@@ -1006,14 +1222,11 @@ void cmd_vmm(const char* args, CommandOutput* output) {
         output_add_line(output, "  Writing to 0x700000 will trigger page fault", VGA_CYAN);
         output_add_line(output, "  Physical page will be allocated on demand", VGA_CYAN);
         
-        // Try to write to reserved page
         volatile uint64_t* test_ptr = (volatile uint64_t*)0x700000;
         *test_ptr = 0xDEADBEEF;
         
-        // If we get here, demand paging worked!
         output_add_line(output, "  OK Page allocated on demand!", VGA_GREEN);
         
-        // Verify the value
         if (*test_ptr == 0xDEADBEEF) {
             output_add_line(output, "  OK Value verified: 0xDEADBEEF", VGA_GREEN);
         }
@@ -1021,7 +1234,6 @@ void cmd_vmm(const char* args, CommandOutput* output) {
         output_add_empty_line(output);
         output_add_line(output, "Demand Paging Test Complete!", VGA_GREEN);
         output_add_line(output, "Check 'vmm stats' to see demand allocations", VGA_CYAN);
-        
         return;
     }
     
@@ -1029,16 +1241,13 @@ void cmd_vmm(const char* args, CommandOutput* output) {
     output_add_line(output, "===================================", VGA_CYAN);
     output_add_empty_line(output);
     
-    // Test 1: Map a page
     output_add_line(output, "[TEST 1] Mapping 4KB page...", VGA_YELLOW);
-    uint64_t test_virt = 0x400000;  // 4MB
-    uint64_t test_phys = 0x200000;  // 2MB
+    uint64_t test_virt = 0x400000;
+    uint64_t test_phys = 0x200000;
     
     int result = vmm_map_page(test_virt, test_phys, PAGE_WRITE | PAGE_PRESENT);
     if (result == 0) {
         output_add_line(output, "  OK Page mapped successfully", VGA_GREEN);
-        
-        // Verify mapping
         uint64_t phys = vmm_get_physical_address(test_virt);
         if (phys == test_phys) {
             output_add_line(output, "  OK Address translation verified", VGA_GREEN);
@@ -1050,7 +1259,6 @@ void cmd_vmm(const char* args, CommandOutput* output) {
     }
     output_add_empty_line(output);
     
-    // Test 2: Check if page is present
     output_add_line(output, "[TEST 2] Checking page presence...", VGA_YELLOW);
     if (vmm_is_page_present(test_virt)) {
         output_add_line(output, "  OK Page is present", VGA_GREEN);
@@ -1059,7 +1267,6 @@ void cmd_vmm(const char* args, CommandOutput* output) {
     }
     output_add_empty_line(output);
     
-    // Test 3: Map a range
     output_add_line(output, "[TEST 3] Mapping 16KB range...", VGA_YELLOW);
     result = vmm_map_range(0x500000, 0x300000, 16384, PAGE_WRITE | PAGE_PRESENT);
     if (result == 0) {
@@ -1069,7 +1276,6 @@ void cmd_vmm(const char* args, CommandOutput* output) {
     }
     output_add_empty_line(output);
     
-    // Test 4: 2MB page mapping
     output_add_line(output, "[TEST 4] Mapping 2MB large page...", VGA_YELLOW);
     result = vmm_map_page_2mb(0x800000, 0x800000, PAGE_WRITE | PAGE_PRESENT);
     if (result == 0) {
@@ -1079,12 +1285,10 @@ void cmd_vmm(const char* args, CommandOutput* output) {
     }
     output_add_empty_line(output);
     
-    // Test 5: Identity mapping
     output_add_line(output, "[TEST 5] Identity mapping test...", VGA_YELLOW);
     result = vmm_identity_map(0x600000, PAGE_SIZE_4K, PAGE_WRITE | PAGE_PRESENT);
     if (result == 0) {
         output_add_line(output, "  OK Identity mapping created", VGA_GREEN);
-        
         uint64_t phys = vmm_get_physical_address(0x600000);
         if (phys == 0x600000) {
             output_add_line(output, "  OK Identity verified (V==P)", VGA_GREEN);
@@ -1096,7 +1300,6 @@ void cmd_vmm(const char* args, CommandOutput* output) {
     }
     output_add_empty_line(output);
     
-    // Summary
     output_add_line(output, "VMM Tests Complete!", VGA_GREEN);
     output_add_line(output, "", VGA_WHITE);
     output_add_line(output, "Available subcommands:", VGA_CYAN);
@@ -1104,77 +1307,50 @@ void cmd_vmm(const char* args, CommandOutput* output) {
     output_add_line(output, "  vmm stats  - Show statistics", VGA_WHITE);
     output_add_line(output, "  vmm demand - Test demand paging", VGA_WHITE);
 }
+
 void cmd_heap(const char* args, CommandOutput* output) {
     (void)args;
     
     output_add_line(output, "=== Heap Functionality Test ===", VGA_CYAN);
     output_add_empty_line(output);
     
-    // Test 1: Basic allocation
     output_add_line(output, "Test 1: Basic Allocation", VGA_YELLOW);
     void* ptr1 = kmalloc(1024);
     if (ptr1) {
         output_add_line(output, "  [OK] Allocated 1KB", VGA_GREEN);
-        
-        // Write to memory
         char* test_str = (char*)ptr1;
         const char* msg = "Hello from heap!";
         int i = 0;
-        while (msg[i]) {
-            test_str[i] = msg[i];
-            i++;
-        }
+        while (msg[i]) { test_str[i] = msg[i]; i++; }
         test_str[i] = '\0';
-        
-        char result[128];
-        str_cpy(result, "  [OK] Written: ");
-        str_concat(result, test_str);
-        output_add_line(output, result, VGA_GREEN);
-        
+        output_add_line(output, "  [OK] Wrote string to heap", VGA_GREEN);
         kfree(ptr1);
-        output_add_line(output, "  [OK] Freed 1KB", VGA_GREEN);
+        output_add_line(output, "  [OK] Freed memory", VGA_GREEN);
     } else {
-        output_add_line(output, "  [FAIL] Allocation failed!", VGA_RED);
+        output_add_line(output, "  [FAIL] Allocation failed", VGA_RED);
     }
-    
     output_add_empty_line(output);
     
-    // Test 2: Multiple allocations
     output_add_line(output, "Test 2: Multiple Allocations", VGA_YELLOW);
-    void* ptrs[10];
-    int alloc_count = 0;
-    
-    for (int i = 0; i < 10; i++) {
-        ptrs[i] = kmalloc(256 * (i + 1));
-        if (ptrs[i]) {
-            alloc_count++;
-        }
+    void* ptrs[5];
+    int alloc_ok = 1;
+    for (int i = 0; i < 5; i++) {
+        ptrs[i] = kmalloc(256);
+        if (!ptrs[i]) { alloc_ok = 0; break; }
     }
-    
-    char count_msg[64];
-    str_cpy(count_msg, "  [OK] Allocated ");
-    char num_str[16];
-    int_to_str(alloc_count, num_str);
-    str_concat(count_msg, num_str);
-    str_concat(count_msg, "/10 blocks");
-    output_add_line(output, count_msg, VGA_GREEN);
-    
-    // Free them all
-    for (int i = 0; i < 10; i++) {
-        if (ptrs[i]) {
-            kfree(ptrs[i]);
-        }
+    if (alloc_ok) {
+        output_add_line(output, "  [OK] Allocated 5 x 256B blocks", VGA_GREEN);
+        for (int i = 0; i < 5; i++) kfree(ptrs[i]);
+        output_add_line(output, "  [OK] Freed all blocks", VGA_GREEN);
+    } else {
+        output_add_line(output, "  [FAIL] Multiple allocation failed", VGA_RED);
     }
-    output_add_line(output, "  [OK] Freed all blocks", VGA_GREEN);
-    
     output_add_empty_line(output);
     
-    // Test 3: Realloc test
     output_add_line(output, "Test 3: Realloc Test", VGA_YELLOW);
     void* ptr2 = kmalloc(512);
     if (ptr2) {
-        output_add_line(output, "  [OK] Allocated 512 bytes", VGA_GREEN);
-        
+        output_add_line(output, "  [OK] Allocated 512B", VGA_GREEN);
         void* ptr3 = krealloc(ptr2, 2048);
         if (ptr3) {
             output_add_line(output, "  [OK] Reallocated to 2KB", VGA_GREEN);
@@ -1185,61 +1361,41 @@ void cmd_heap(const char* args, CommandOutput* output) {
             kfree(ptr2);
         }
     }
-    
     output_add_empty_line(output);
     
-    // Test 4: Calloc test
     output_add_line(output, "Test 4: Calloc (Zero-init) Test", VGA_YELLOW);
     uint32_t* ptr4 = (uint32_t*)kcalloc(256, sizeof(uint32_t));
     if (ptr4) {
         output_add_line(output, "  [OK] Allocated 256 uint32s", VGA_GREEN);
-        
-        // Verify zeroing
         int all_zero = 1;
         for (int i = 0; i < 256; i++) {
-            if (ptr4[i] != 0) {
-                all_zero = 0;
-                break;
-            }
+            if (ptr4[i] != 0) { all_zero = 0; break; }
         }
-        
         if (all_zero) {
             output_add_line(output, "  [OK] All values zeroed", VGA_GREEN);
         } else {
             output_add_line(output, "  [FAIL] Not all zeroed!", VGA_RED);
         }
-        
         kfree(ptr4);
         output_add_line(output, "  [OK] Freed calloc block", VGA_GREEN);
     }
-    
     output_add_empty_line(output);
     
-    // Test 5: Fragmentation test
     output_add_line(output, "Test 5: Fragmentation & Coalescing", VGA_YELLOW);
     void* frag1 = kmalloc(1024);
     void* frag2 = kmalloc(1024);
     void* frag3 = kmalloc(1024);
-    
     if (frag1 && frag2 && frag3) {
         output_add_line(output, "  [OK] Allocated 3 x 1KB blocks", VGA_GREEN);
-        
-        // Free middle block
         kfree(frag2);
         output_add_line(output, "  [OK] Freed middle block", VGA_GREEN);
-        
-        // Free first block (should coalesce)
         kfree(frag1);
         output_add_line(output, "  [OK] Freed first block (coalesce)", VGA_GREEN);
-        
-        // Free last block
         kfree(frag3);
         output_add_line(output, "  [OK] Freed last block", VGA_GREEN);
     }
-    
     output_add_empty_line(output);
     
-    // Test 6: Large allocation
     output_add_line(output, "Test 6: Large Allocation (1MB)", VGA_YELLOW);
     void* large = kmalloc(1024 * 1024);
     if (large) {
@@ -1254,6 +1410,7 @@ void cmd_heap(const char* args, CommandOutput* output) {
     output_add_empty_line(output);
     output_add_line(output, "All heap tests completed!", VGA_CYAN);
 }
+
 // ===========================================
 // MULTITASKING COMMANDS
 // ===========================================
@@ -1264,21 +1421,18 @@ void cmd_ps(const char* args, CommandOutput* output) {
     output_add_line(output, "=== Process List ===", VGA_CYAN);
     output_add_empty_line(output);
     
-    // Get current task
     task_t* current = task_get_current();
     uint32_t task_count = task_get_count();
     
     char info[128];
     
-    // Task count
     str_cpy(info, "Total tasks: ");
     char num[16];
-    int_to_str(task_count + 1, num);  // +1 for current
+    int_to_str(task_count + 1, num);
     str_concat(info, num);
     output_add_line(output, info, VGA_WHITE);
     output_add_empty_line(output);
     
-    // Current task
     if (current) {
         str_cpy(info, "[*] PID ");
         int_to_str(current->pid, num);
@@ -1299,7 +1453,6 @@ void cmd_taskinfo(const char* args, CommandOutput* output) {
         return;
     }
     
-    // Parse PID
     int pid = 0;
     int i = 0;
     while (args[i] >= '0' && args[i] <= '9') {
@@ -1319,35 +1472,30 @@ void cmd_taskinfo(const char* args, CommandOutput* output) {
     char info[128];
     char num[32];
     
-    // Name
     str_cpy(info, "Name: ");
     str_concat(info, task->name);
     output_add_line(output, info, VGA_WHITE);
     
-    // PID
     str_cpy(info, "PID: ");
     int_to_str(task->pid, num);
     str_concat(info, num);
     output_add_line(output, info, VGA_WHITE);
     
-    // State
     str_cpy(info, "State: ");
     switch (task->state) {
-        case TASK_STATE_READY: str_concat(info, "READY"); break;
-        case TASK_STATE_RUNNING: str_concat(info, "RUNNING"); break;
-        case TASK_STATE_BLOCKED: str_concat(info, "BLOCKED"); break;
+        case TASK_STATE_READY:      str_concat(info, "READY"); break;
+        case TASK_STATE_RUNNING:    str_concat(info, "RUNNING"); break;
+        case TASK_STATE_BLOCKED:    str_concat(info, "BLOCKED"); break;
         case TASK_STATE_TERMINATED: str_concat(info, "TERMINATED"); break;
-        default: str_concat(info, "UNKNOWN"); break;
+        default:                    str_concat(info, "UNKNOWN"); break;
     }
     output_add_line(output, info, VGA_WHITE);
     
-    // Priority
     str_cpy(info, "Priority: ");
     int_to_str(task->priority, num);
     str_concat(info, num);
     output_add_line(output, info, VGA_WHITE);
     
-    // Context switches
     str_cpy(info, "Context switches: ");
     uint64_to_string(task->context_switches, num);
     str_concat(info, num);
@@ -1359,7 +1507,6 @@ void cmd_createtask(const char* args, CommandOutput* output) {
     
     output_add_line(output, "Creating test tasks...", VGA_CYAN);
     
-    // Create test tasks
     task_t* task_a = task_create("TestA", test_task_a, 10);
     if (!task_a) {
         output_add_line(output, "Failed to create task A - task system may not be initialized", VGA_RED);
@@ -1369,14 +1516,10 @@ void cmd_createtask(const char* args, CommandOutput* output) {
     task_t* task_b = task_create("TestB", test_task_b, 10);
     if (!task_b) {
         output_add_line(output, "Failed to create task B - task system may not be initialized", VGA_RED);
-        // Clean up task_a if it was created
-        if (task_a) {
-            task_terminate(task_a);
-        }
+        if (task_a) task_terminate(task_a);
         return;
     }
     
-    // Both tasks created successfully, now start them
     if (task_start(task_a) != 0) {
         output_add_line(output, "Failed to start task A", VGA_RED);
         task_terminate(task_a);
@@ -1397,13 +1540,6 @@ void cmd_createtask(const char* args, CommandOutput* output) {
     output_add_line(output, "Check serial output for task messages", VGA_YELLOW);
 }
 
-// ============================================================
-// cmd_usertask  [test|ring3|<isim>]
-//
-// Ring-3 user-mode task olusturur ve baslatir.
-// Parametresiz veya "test"/"ring3" verilirse yerlesik
-// user_mode_test_task() entry fonksiyonu kullanilir.
-// ============================================================
 void cmd_usertask(const char* args, CommandOutput* output) {
     output_add_line(output, "=== Ring-3 User Task Olusturuluyor ===", VGA_CYAN);
     output_add_empty_line(output);
@@ -1411,7 +1547,6 @@ void cmd_usertask(const char* args, CommandOutput* output) {
     const char* task_name = "UserTest";
     void (*entry)(void)   = user_mode_test_task;
 
-    // args varsa ve bilinen keyword degilse task ismi olarak kullan
     if (args && str_len(args) > 0
         && str_cmp(args, "test")  != 0
         && str_cmp(args, "ring3") != 0) {
@@ -1428,7 +1563,6 @@ void cmd_usertask(const char* args, CommandOutput* output) {
     output_add_line(output, "CS=0x23  SS=0x1B  Entry=user_mode_test_task", VGA_WHITE);
     output_add_empty_line(output);
 
-    // ── Olustur ───────────────────────────────────────────────────
     task_t* utask = task_create_user(task_name, entry, TASK_PRIORITY_NORMAL);
     if (!utask) {
         output_add_line(output, "[HATA] task_create_user() basarisiz!", VGA_RED);
@@ -1451,7 +1585,6 @@ void cmd_usertask(const char* args, CommandOutput* output) {
     str_concat(info, num);
     output_add_line(output, info, VGA_WHITE);
 
-    // ── Zamanlayiciya ekle ────────────────────────────────────────
     if (task_start(utask) != 0) {
         output_add_line(output, "[HATA] task_start() basarisiz!", VGA_RED);
         task_terminate(utask);
@@ -1474,19 +1607,16 @@ void cmd_schedinfo(const char* args, CommandOutput* output) {
     char info[128];
     char num[32];
     
-    // Total context switches
     str_cpy(info, "Total context switches: ");
     uint64_to_string(scheduler_get_context_switches(), num);
     str_concat(info, num);
     output_add_line(output, info, VGA_WHITE);
     
-    // Total ticks
     str_cpy(info, "Total ticks: ");
     uint64_to_string(get_system_ticks(), num);
     str_concat(info, num);
     output_add_line(output, info, VGA_WHITE);
     
-    // Ready queue size
     str_cpy(info, "Ready queue size: ");
     int_to_str(task_get_count(), num);
     str_concat(info, num);
@@ -1501,7 +1631,6 @@ void cmd_offihito(const char* args, CommandOutput* output) {
     
     output_add_line(output, "Creating Offihito task...", VGA_CYAN);
     
-    // Create Offihito task
     task_t* offihito = task_create("Offihito", offihito_task, 10);
     
     if (!offihito) {
@@ -1525,9 +1654,6 @@ void cmd_offihito(const char* args, CommandOutput* output) {
 // ELF LOADER COMMANDS
 // ===========================================
 
-// cmd_elfinfo <DOSYA.ELF>
-// FAT32'deki bir ELF dosyasının başlık bilgilerini gösterir,
-// yüklemez. Test/tanı amaçlı.
 void cmd_elfinfo(const char* args, CommandOutput* output) {
     if (!args || str_len(args) == 0) {
         output_add_line(output, "Usage: elfinfo <FILE.ELF>", VGA_YELLOW);
@@ -1537,7 +1663,6 @@ void cmd_elfinfo(const char* args, CommandOutput* output) {
         return;
     }
 
-    // Dosya boyutunu kontrol et
     uint32_t fsize = fat32_file_size(args);
     if (fsize == 0) {
         char line[96];
@@ -1547,7 +1672,6 @@ void cmd_elfinfo(const char* args, CommandOutput* output) {
         return;
     }
 
-    // Sadece ilk 512 byte'ı oku (başlık için yeterli)
     static uint8_t hdr_buf[512];
     int n = fat32_read_file(args, hdr_buf, 512);
     if (n < 64) {
@@ -1555,7 +1679,6 @@ void cmd_elfinfo(const char* args, CommandOutput* output) {
         return;
     }
 
-    // Dosya boyutunu göster
     char line[96];
     char tmp[24];
     uint64_to_string(fsize, tmp);
@@ -1563,26 +1686,14 @@ void cmd_elfinfo(const char* args, CommandOutput* output) {
     str_concat(line, "  Size: "); str_concat(line, tmp); str_concat(line, " bytes");
     output_add_line(output, line, VGA_CYAN);
 
-    // Başlık dökümü
     elf64_dump_header(hdr_buf, output);
 
-    // Hızlı doğrulama
     int rc = elf64_validate(hdr_buf, (uint32_t)n);
     str_cpy(line, "Validation: ");
     str_concat(line, elf64_strerror(rc));
     output_add_line(output, line, rc == ELF_OK ? VGA_GREEN : VGA_RED);
 }
 
-// ============================================================
-// cmd_exec <DOSYA.ELF> [base_hex]
-//
-// FAT32'deki ELF64 binary'yi yükler ve Ring-3 task olarak başlatır.
-// Tam Ring-3 → Ring-0 → Ring-3 syscall döngüsünü test eder.
-//
-// Kullanım:
-//   exec HELLO.ELF             → 0x400000 tabanından ET_EXEC
-//   exec MYAPP.ELF 0x500000    → özel PIE taban adresi
-// ============================================================
 void cmd_exec(const char* args, CommandOutput* output) {
     if (!args || str_len(args) == 0) {
         output_add_line(output, "Usage: exec <FILE.ELF> [base_hex]", VGA_YELLOW);
@@ -1593,9 +1704,8 @@ void cmd_exec(const char* args, CommandOutput* output) {
         return;
     }
 
-    // ── 1. Argümanları ayrıştır ───────────────────────────────
     char filename[64];
-    uint64_t load_base = 0x400000ULL;   // varsayılan ET_EXEC taban adresi
+    uint64_t load_base = 0x400000ULL;
 
     int i = 0;
     while (args[i] && args[i] != ' ' && i < 63) {
@@ -1604,7 +1714,6 @@ void cmd_exec(const char* args, CommandOutput* output) {
     }
     filename[i] = '\0';
 
-    // Opsiyonel hex base (0x...)
     if (args[i] == ' ') {
         i++;
         const char* base_str = &args[i];
@@ -1624,7 +1733,6 @@ void cmd_exec(const char* args, CommandOutput* output) {
         }
     }
 
-    // ── 2. Başlık bilgilerini göster ──────────────────────────
     char line[96];
     char tmp[24];
     const char* hexc = "0123456789ABCDEF";
@@ -1643,14 +1751,12 @@ void cmd_exec(const char* args, CommandOutput* output) {
     output_add_line(output, line, VGA_WHITE);
     output_add_empty_line(output);
 
-    // ── 3. SYSCALL başlatılmış mı? ────────────────────────────
     if (!syscall_is_enabled()) {
         output_add_line(output, "[HATA] SYSCALL altyapisi baslatilmamis!", VGA_RED);
         output_add_line(output, "  kernel'de syscall_init() cagirildi mi?", VGA_YELLOW);
         return;
     }
 
-    // ── 4. ELF'i FAT32'den yükle ─────────────────────────────
     output_add_line(output, "[1/3] ELF FAT32'den yukleniyor...", VGA_WHITE);
     ElfImage image;
     int rc = elf64_exec_from_fat32(filename, load_base, &image, output);
@@ -1661,16 +1767,12 @@ void cmd_exec(const char* args, CommandOutput* output) {
         return;
     }
 
-    // ── 5. Ring-3 task oluştur ────────────────────────────────
     output_add_line(output, "[2/3] Ring-3 task olusturuluyor...", VGA_WHITE);
 
-    // argv dizisini oluştur: argv[0]=filename, argv[1..]=kullanıcı argümanları
-    // exec KILO.ELF dosya.txt  →  argc=2, argv={"KILO.ELF","dosya.txt"}
     static char argv_storage[8][128];
     const char* argv_ptrs[8];
     int exec_argc = 0;
 
-    // argv[0] = program adı (dosya adı)
     {
         int fn = 0;
         while (filename[fn] && fn < 127) { argv_storage[0][fn] = filename[fn]; fn++; }
@@ -1678,23 +1780,16 @@ void cmd_exec(const char* args, CommandOutput* output) {
         argv_ptrs[exec_argc++] = argv_storage[0];
     }
 
-    // Kalan argümanları boşlukla ayır (args içinden load_base'den SONRA gelenler)
-    // Şu anki args = "KILO.ELF [base_hex] [arg1] [arg2] ..." şeklinde parse edildi.
-    // load_base argümanı zaten tüketildi; ek argümanlar filename'den sonra gelen
-    // boşluktan itibaren başlar. Onları tekrar parse edelim:
     {
-        // args içinde filename'den ve opsiyonel hex base'den sonrasını bul
         int skip = 0;
-        while (args[skip] && args[skip] != ' ') skip++;  // filename
+        while (args[skip] && args[skip] != ' ') skip++;
         if (args[skip] == ' ') {
             skip++;
-            // hex base var mı kontrol et
             if (args[skip] == '0' && (args[skip+1] == 'x' || args[skip+1] == 'X')) {
-                while (args[skip] && args[skip] != ' ') skip++;  // base_hex geç
+                while (args[skip] && args[skip] != ' ') skip++;
                 if (args[skip] == ' ') skip++;
             }
         }
-        // Kalan kısım gerçek argümanlar
         const char* rest = &args[skip];
         while (*rest && exec_argc < 7) {
             int ai = 0;
@@ -1705,7 +1800,6 @@ void cmd_exec(const char* args, CommandOutput* output) {
             if (ai > 0) { argv_ptrs[exec_argc] = argv_storage[exec_argc]; exec_argc++; }
             while (*rest == ' ') rest++;
         }
-        // argv_ptrs'yi doğru pointer'larla yeniden doldur
         for (int ai = 1; ai < exec_argc; ai++)
             argv_ptrs[ai] = argv_storage[ai];
     }
@@ -1725,8 +1819,6 @@ void cmd_exec(const char* args, CommandOutput* output) {
         }
     }
 
-    // task_create_from_elf: TCB + stack + iretq frame'i ELF entry'sine
-    // doğru şekilde kurar. SysV ABI uyumlu argv/argc stack kurulumu dahil.
     task_t* utask = task_create_from_elf(filename, &image, TASK_PRIORITY_NORMAL,
                                           exec_argc, argv_ptrs);
     if (!utask) {
@@ -1735,7 +1827,6 @@ void cmd_exec(const char* args, CommandOutput* output) {
         return;
     }
 
-    // Bilgi satırları
     FMT_HEX64(image.entry);
     str_cpy(line, "  Entry point     : "); str_concat(line, tmp);
     output_add_line(output, line, VGA_YELLOW);
@@ -1761,7 +1852,6 @@ void cmd_exec(const char* args, CommandOutput* output) {
     str_cpy(line, "  User stack top  : "); str_concat(line, tmp);
     output_add_line(output, line, VGA_WHITE);
 
-    // ── 6. Zamanlayıcı kuyruğuna ekle ────────────────────────
     output_add_line(output, "[3/3] Zamanlayici kuyruguna ekleniyor...", VGA_WHITE);
     if (task_start(utask) != 0) {
         output_add_line(output, "[HATA] task_start() basarisiz!", VGA_RED);
@@ -1769,15 +1859,12 @@ void cmd_exec(const char* args, CommandOutput* output) {
         return;
     }
 
-    // Klavyeyi userland task'a devret ve foreground PID'i kaydet
     extern void kb_set_userland_mode(int on);
     kb_set_userland_mode(1);
 
-    // Shell bu task bitene kadar input almaz
     extern volatile uint32_t foreground_pid;
     foreground_pid = utask->pid;
 
-    // ── 7. Özet ──────────────────────────────────────────────
     output_add_empty_line(output);
     output_add_line(output, "================================================", VGA_GREEN);
     str_cpy(line, "  Task '"); str_concat(line, filename);
@@ -1812,12 +1899,10 @@ void cmd_find(const char* args, CommandOutput* output) {
         output_add_line(output, "Example: find txt", VGA_DARK_GRAY);
         return;
     }
-    
     fs_find64(args, output);
 }
 
 void cmd_du(const char* args, CommandOutput* output) {
-    // If no args, use current directory
     const char* path = (args && str_len(args) > 0) ? args : NULL;
     fs_du64(path, output);
 }
@@ -1828,14 +1913,12 @@ void cmd_rmr(const char* args, CommandOutput* output) {
         output_add_line(output, "WARNING: Recursively removes directory and all contents!", VGA_RED);
         return;
     }
-    
     if (fs_rmdir_recursive64(args)) {
         output_add_line(output, "Directory removed recursively", VGA_GREEN);
     } else {
         output_add_line(output, "Failed to remove directory (may be system directory)", VGA_RED);
     }
 }
-
 
 // ===========================================
 // SYSCALL COMMANDS — syscalltest64.c icinde tanimli
@@ -1844,16 +1927,8 @@ void cmd_syscalltest(const char* args, CommandOutput* output);
 
 // ===========================================
 // PANIC TEST KOMUTU
-// Kullanım: panic <tip>
-//   panic df     → #DF Double Fault   (int $0x08)
-//   panic gp     → #GP Gen Protection (int $0x0D)
-//   panic pf     → #PF Page Fault     (null pointer deref)
-//   panic ud     → #UD Invalid Opcode (ud2)
-//   panic de     → #DE Divide Error   (div by zero)
-//   panic stack  → Stack overflow (sonsuz rekürsif çağrı)
 // ===========================================
 static void panic_do_div0(void) {
-    // #DE — Divide by Zero
     volatile int a = 42;
     volatile int b = 0;
     volatile int c = a / b;
@@ -1861,7 +1936,6 @@ static void panic_do_div0(void) {
 }
 
 static void panic_do_stack_overflow(int depth) {
-    // Stack overflow → #SS veya #DF
     volatile char buf[512];
     buf[0] = (char)depth;
     (void)buf;
@@ -1869,7 +1943,6 @@ static void panic_do_stack_overflow(int depth) {
 }
 
 static void cmd_panic(const char* args, CommandOutput* output) {
-    // Argüman yoksa kullanım bilgisi göster
     if (!args || str_len(args) == 0) {
         output_add_line(output, "Kernel Panic Test - Mevcut exception tipleri:", VGA_CYAN);
         output_add_empty_line(output);
@@ -1884,11 +1957,9 @@ static void cmd_panic(const char* args, CommandOutput* output) {
         return;
     }
 
-    // Seçilen test türünü ekrana yaz — panic gerçekleşmeden önce görünür
     if (str_cmp(args, "df") == 0) {
         output_add_line(output, "[PANIC TEST] #DF Double Fault tetikleniyor...", VGA_RED);
         output_add_line(output, "  int 0x08 -> exception_frame -> kernel_panic_handler", VGA_DARK_GRAY);
-        // Küçük bir gecikme: output ekrana yansısın
         for (volatile int i = 0; i < 5000000; i++);
         __asm__ volatile("int $0x08");
 
@@ -1902,7 +1973,6 @@ static void cmd_panic(const char* args, CommandOutput* output) {
         output_add_line(output, "[PANIC TEST] #PF Page Fault tetikleniyor...", VGA_RED);
         output_add_line(output, "  NULL pointer deref -> CR2=0x0 -> kernel_panic_handler", VGA_DARK_GRAY);
         for (volatile int i = 0; i < 5000000; i++);
-        // NULL pointer dereference — #PF, err_code[1]=0 (READ), CR2=0x0
         volatile uint64_t* null_ptr = (volatile uint64_t*)0x0;
         volatile uint64_t val = *null_ptr;
         (void)val;
@@ -1930,15 +2000,8 @@ static void cmd_panic(const char* args, CommandOutput* output) {
     }
 }
 
-// ===========================================
-// COMMAND TABLE
-// ===========================================
-
 // ============================================================================
-// GFX KOMUTU — GUI moduna geç
-// ============================================================================
-// ============================================================================
-// AĞ KOMUTLARI — RTL8139
+// AĞ KOMUTLARI — Yardımcı fonksiyonlar
 // ============================================================================
 
 // Hex bayt yardımcısı (serial değil, ekrana)
@@ -1959,21 +2022,47 @@ static void uint16_to_hex_str(uint16_t v, char* out) {
     out[6] = '\0';
 }
 
+// ============================================================================
+// AĞ KOMUTLARI — RTL8139
+// ============================================================================
+
 // ── netinit ──────────────────────────────────────────────────────────────────
-// RTL8139 sürücüsünü başlatır. kernel_main'den otomatik başlatılıyorsa
-// bu komut "zaten başlatıldı" mesajı verir.
 static void cmd_netinit(const char* args, CommandOutput* output) {
     (void)args;
     if (g_net_initialized) {
         output_add_line(output, "Ag surucusu zaten baslatildi.", 0x0E);
+        if (!ipv4_is_initialized()) {
+            ipv4_init();
+            icmp_init();
+            output_add_line(output, "  [OK] IPv4 + ICMP katmanlari baslatildi.", 0x0A);
+        }
+        if (!udp_is_initialized()) {
+            udp_init(1);
+            output_add_line(output, "  [OK] UDP katmani baslatildi.", 0x0A);
+        }
+        if (!dhcp_is_initialized()) {
+            dhcp_init();
+            output_add_line(output, "  [OK] DHCP katmani baslatildi.", 0x0A);
+        }
+        if (!tcp_is_initialized()) {
+            tcp_init();
+            output_add_line(output, "  [OK] TCP katmani baslatildi.", 0x0A);
+        }
         return;
     }
     output_add_line(output, "RTL8139 baslatiliyor...", 0x07);
     bool ok = rtl8139_init();
     if (ok) {
         net_register_packet_handler();
+        ipv4_init();
+        icmp_init();
+        udp_init(1);   // 1 = UDP_CSUM_ENABLE
+        dhcp_init();   // UDP port 68 dinlemeye alir
+        tcp_init();    // IPv4'e proto=6 kaydet
         output_add_line(output, "  [OK] RTL8139 hazir!", 0x0A);
-        output_add_line(output, "  Paket alma aktif. 'netstat' ile durumu gor.", 0x07);
+        output_add_line(output, "  [OK] IPv4 + ICMP + UDP + DHCP + TCP hazir.", 0x0A);
+        output_add_line(output, "  'dhcp' komutu ile otomatik IP alabilirsin.", 0x07);
+        output_add_line(output, "  Ya da 'ipconfig 10.0.2.15' ile elle ata.", 0x07);
     } else {
         output_add_line(output, "  [HATA] RTL8139 bulunamadi veya baslatilamadi.", 0x0C);
         output_add_line(output, "  QEMU'ya '-device rtl8139,netdev=net0' ekli mi?", 0x0E);
@@ -1981,7 +2070,6 @@ static void cmd_netinit(const char* args, CommandOutput* output) {
 }
 
 // ── netstat ───────────────────────────────────────────────────────────────────
-// Kart MAC, link durumu ve paket sayaçlarını gösterir.
 static void cmd_netstat(const char* args, CommandOutput* output) {
     (void)args;
     if (!g_net_initialized) {
@@ -1991,7 +2079,6 @@ static void cmd_netstat(const char* args, CommandOutput* output) {
 
     output_add_line(output, "=== RTL8139 Ag Durumu ===", 0x0B);
 
-    // MAC adresi
     uint8_t mac[6];
     rtl8139_get_mac(mac);
     char mac_str[32];
@@ -2003,13 +2090,11 @@ static void cmd_netstat(const char* args, CommandOutput* output) {
     }
     output_add_line(output, mac_str, 0x0F);
 
-    // Link
     bool up = rtl8139_link_is_up();
     char lnk[32]; str_cpy(lnk, "  Link: ");
     str_concat(lnk, up ? "UP  (bagli)" : "DOWN (kablo yok?)");
     output_add_line(output, lnk, up ? 0x0A : 0x0C);
 
-    // Son alınan paket bilgisi
     if (g_net_rx_display > 0) {
         char rxinfo[48];
         str_cpy(rxinfo, "  Son paket EtherType: ");
@@ -2026,13 +2111,22 @@ static void cmd_netstat(const char* args, CommandOutput* output) {
         output_add_line(output, srcmac, 0x07);
     }
 
-    // Serial'e tam istatistik
+    // IPv4 sayaçları
+    if (ipv4_is_initialized()) {
+        char ipv4line[48];
+        str_cpy(ipv4line, "  IPv4 TX: ");
+        char cnt[12]; uint64_to_string(ipv4_get_tx_count(), cnt);
+        str_concat(ipv4line, cnt); str_concat(ipv4line, "  RX: ");
+        uint64_to_string(ipv4_get_rx_count(), cnt);
+        str_concat(ipv4line, cnt); str_concat(ipv4line, " paket");
+        output_add_line(output, ipv4line, 0x0B);
+    }
+
     rtl8139_stats();
     output_add_line(output, "  (Detayli istatistik serial porta yazildi)", 0x08);
 }
 
 // ── netregs ───────────────────────────────────────────────────────────────────
-// Kart donanım yazmaçlarını serial porta döker (düşük seviye debug).
 static void cmd_netregs(const char* args, CommandOutput* output) {
     (void)args;
     if (!g_net_initialized) {
@@ -2045,43 +2139,30 @@ static void cmd_netregs(const char* args, CommandOutput* output) {
 }
 
 // ── netsend ───────────────────────────────────────────────────────────────────
-// Broadcast test paketi gönderir. Wireshark/QEMU ile yakalanabilir.
-// Kullanım: netsend          → tek paket
-//           netsend 5        → 5 paket
 static void cmd_netsend(const char* args, CommandOutput* output) {
     if (!g_net_initialized) {
         output_add_line(output, "Ag surucusu baslatilmadi. Once 'netinit' calistir.", 0x0C);
         return;
     }
 
-    // Kaç paket gönderilecek?
     int count = 1;
     if (args && args[0] >= '1' && args[0] <= '9') {
         count = 0;
         for (int i = 0; args[i] >= '0' && args[i] <= '9' && i < 3; i++)
             count = count * 10 + (args[i] - '0');
         if (count < 1) count = 1;
-        if (count > 99) count = 99;  // makul sınır
+        if (count > 99) count = 99;
     }
 
     uint8_t mac[6];
     rtl8139_get_mac(mac);
 
-    // 60-byte minimum Ethernet çerçevesi oluştur
-    // [ Hedef MAC 6B ][ Kaynak MAC 6B ][ EtherType 2B ][ Payload 46B ]
     uint8_t frame[60];
-
-    // Hedef: broadcast
     for (int i = 0; i < 6; i++) frame[i] = 0xFF;
-
-    // Kaynak: kart MAC
     for (int i = 0; i < 6; i++) frame[6 + i] = mac[i];
-
-    // EtherType: 0x88B5 = IEEE 802 deneme tipi (gerçek protokol yok)
     frame[12] = 0x88;
     frame[13] = 0xB5;
 
-    // Payload: "AscentOS NET TEST" + sıfır doldur
     const char* msg = "AscentOS NET TEST Asama-1";
     int mi = 0;
     for (int i = 14; i < 60; i++) {
@@ -2090,12 +2171,10 @@ static void cmd_netsend(const char* args, CommandOutput* output) {
 
     int ok_count = 0;
     for (int n = 0; n < count; n++) {
-        // Sıra numarasını payload'a göm (byte 38)
         frame[38] = (uint8_t)(n + 1);
         if (rtl8139_send(frame, 60)) ok_count++;
     }
 
-    // Sonuç
     char res[64];
     str_cpy(res, "  Gonderilen: ");
     char tmp[8]; int_to_str(ok_count, tmp); str_concat(res, tmp);
@@ -2112,7 +2191,6 @@ static void cmd_netsend(const char* args, CommandOutput* output) {
 }
 
 // ── netmon ────────────────────────────────────────────────────────────────────
-// Alınan son paket sayısını gösterir (polling olmadan sadece sayaç okur).
 static void cmd_netmon(const char* args, CommandOutput* output) {
     (void)args;
     if (!g_net_initialized) {
@@ -2161,7 +2239,6 @@ static void cmd_netmon(const char* args, CommandOutput* output) {
 // ARP KOMUTLARI — Aşama 2
 // ============================================================================
 
-// arp_cache_foreach için output_add_line wrapper
 typedef struct { CommandOutput* out; } ARPCacheCtx;
 static void arp_cache_line_cb(const char* line, uint8_t color, void* ctx){
     ARPCacheCtx* c = (ARPCacheCtx*)ctx;
@@ -2169,9 +2246,6 @@ static void arp_cache_line_cb(const char* line, uint8_t color, void* ctx){
 }
 
 // ── ipconfig ─────────────────────────────────────────────────────────────────
-// IP adresi ata ve ARP katmanını başlat.
-// Kullanım: ipconfig 10.0.2.15
-//           ipconfig          → mevcut IP'yi göster
 static void cmd_ipconfig(const char* args, CommandOutput* output) {
     if (!g_net_initialized) {
         output_add_line(output, "Ag surucusu hazir degil. 'netinit' calistir.", 0x0C);
@@ -2188,9 +2262,9 @@ static void cmd_ipconfig(const char* args, CommandOutput* output) {
         output_add_line(output, "=== IP Yapilandirmasi ===", 0x0B);
         uint8_t ip[4], mac[6];
         arp_get_my_ip(ip); arp_get_my_mac(mac);
-        char buf[48];
+        char buf[64]; char ipstr[16];
 
-        str_cpy(buf, "  IP   : "); char ipstr[16]; ip_to_str(ip, ipstr);
+        str_cpy(buf, "  IP   : "); ip_to_str(ip, ipstr);
         str_concat(buf, ipstr);
         output_add_line(output, buf, 0x0F);
 
@@ -2201,11 +2275,18 @@ static void cmd_ipconfig(const char* args, CommandOutput* output) {
         }
         output_add_line(output, buf, 0x07);
 
-        // Gateway varsayımı: .1 (QEMU SLiRP = 10.0.2.2)
         uint8_t gw[4] = {ip[0], ip[1], ip[2], 2};
         str_cpy(buf, "  GW   : "); ip_to_str(gw, ipstr); str_concat(buf, ipstr);
         str_concat(buf, "  (QEMU SLiRP default)");
         output_add_line(output, buf, 0x08);
+
+        // IPv4 / ICMP durumu
+        if (ipv4_is_initialized()) {
+            output_add_line(output, "  IPv4 : Aktif", 0x0A);
+            output_add_line(output, "  ICMP : Aktif  ('ping <IP>' ile test et)", 0x0A);
+        } else {
+            output_add_line(output, "  IPv4 : Baslatilmamis", 0x0E);
+        }
         return;
     }
 
@@ -2221,17 +2302,30 @@ static void cmd_ipconfig(const char* args, CommandOutput* output) {
     rtl8139_get_mac(mac);
     arp_init(new_ip, mac);
 
-    char buf[48]; char ipstr[16]; ip_to_str(new_ip, ipstr);
+    if (!ipv4_is_initialized()) {
+        ipv4_init();
+        icmp_init();
+    }
+
+    // Gateway: aynı /24'te .2 (QEMU SLiRP default: 10.x.x.2)
+    uint8_t gw[4]   = {new_ip[0], new_ip[1], new_ip[2], 2};
+    uint8_t mask[4] = {255, 255, 255, 0};
+    ipv4_set_gateway(gw);
+    ipv4_set_subnet(mask);
+
+    char buf[64]; char ipstr[16]; ip_to_str(new_ip, ipstr);
     str_cpy(buf, "  IP atandi: "); str_concat(buf, ipstr);
     output_add_line(output, buf, 0x0A);
+    char gwstr[16]; ip_to_str(gw, gwstr);
+    str_cpy(buf, "  Gateway  : "); str_concat(buf, gwstr);
+    output_add_line(output, buf, 0x07);
+    output_add_line(output, "  IPv4 + ICMP katmanlari aktif.", 0x0A);
     output_add_line(output, "  Gratuitous ARP gonderiliyor...", 0x07);
     arp_announce();
-    output_add_line(output, "  Hazir! 'arping <IP>' ile test edebilirsin.", 0x07);
+    output_add_line(output, "  Hazir! 'ping 10.0.2.2' veya 'ping 1.1.1.1' dene.", 0x07);
 }
 
 // ── arping ───────────────────────────────────────────────────────────────────
-// Belirtilen IP'ye ARP request gönder, cevabı cache'ten göster.
-// Kullanım: arping 10.0.2.2
 static void cmd_arping(const char* args, CommandOutput* output) {
     if (!arp_is_initialized()) {
         output_add_line(output, "Once 'ipconfig <IP>' ile IP ata.", 0x0C);
@@ -2246,7 +2340,6 @@ static void cmd_arping(const char* args, CommandOutput* output) {
         output_add_line(output, "Gecersiz IP.", 0x0C); return;
     }
 
-    // ARP sadece aynı alt agda calisir — farklı subnet uyarısı
     if (arp_is_initialized()) {
         uint8_t my_ip[4]; arp_get_my_ip(my_ip);
         if (target[0] != my_ip[0] || target[1] != my_ip[1] || target[2] != my_ip[2]) {
@@ -2254,9 +2347,7 @@ static void cmd_arping(const char* args, CommandOutput* output) {
             str_cpy(warn, "  [UYARI] ARP yalnizca ayni /24 agda calisir.");
             output_add_line(output, warn, 0x0E);
             char gwbuf[32]; char gwip[16];
-            uint8_t gw[4] = {my_ip[0], my_ip[1], my_ip[2], 1};
-            // QEMU NAT'ta gateway genellikle x.x.x.2
-            gw[3] = 2;
+            uint8_t gw[4] = {my_ip[0], my_ip[1], my_ip[2], 2};
             ip_to_str(gw, gwip);
             str_cpy(gwbuf, "  Gateway deneyin: arping "); str_concat(gwbuf, gwip);
             output_add_line(output, gwbuf, 0x0B);
@@ -2267,7 +2358,6 @@ static void cmd_arping(const char* args, CommandOutput* output) {
     str_cpy(buf, "ARP request -> "); str_concat(buf, ipstr);
     output_add_line(output, buf, 0x07);
 
-    // Cache'te var mı kontrol et önce
     uint8_t found_mac[6];
     if (arp_resolve(target, found_mac)) {
         str_cpy(buf, "  Cache'ten: ");
@@ -2283,7 +2373,6 @@ static void cmd_arping(const char* args, CommandOutput* output) {
 }
 
 // ── arpcache ─────────────────────────────────────────────────────────────────
-// ARP cache tablosunu göster.
 static void cmd_arpcache(const char* args, CommandOutput* output) {
     (void)args;
     output_add_line(output, "=== ARP Cache ===", 0x0B);
@@ -2304,8 +2393,6 @@ static void cmd_arpflush(const char* args, CommandOutput* output) {
 }
 
 // ── arptest ──────────────────────────────────────────────────────────────────
-// QEMU user-net (NAT) kısıtlamasını açıklar ve TX paketini doğrular.
-// ARP reply alamama normal — QEMU NAT L2 değil L3 proxy'dir.
 static void cmd_arptest(const char* args, CommandOutput* output) {
     (void)args;
     output_add_line(output, "=== ARP / QEMU Ag Testi ===", 0x0B);
@@ -2325,13 +2412,10 @@ static void cmd_arptest(const char* args, CommandOutput* output) {
     output_add_line(output, "  - Paket TX calisiyorsa surucunuz dogru demektir.", 0x07);
     output_add_line(output, "", 0x07);
 
-    // TX testi: bir ARP request gonder
     uint8_t my_ip[4]; arp_get_my_ip(my_ip);
     uint8_t test_ip[4] = {my_ip[0], my_ip[1], my_ip[2], 1};
     uint32_t rx_before = g_net_rx_display;
     arp_request(test_ip);
-    // TX başarısı: rtl8139_send false dönmüyorsa paket kuyruklandı demektir.
-    // RX artmazsa bu normaldir (QEMU NAT ARP reply vermez).
     output_add_line(output, "[OK] TX calisiyor — ARP request gonderildi.", 0x0A);
     if (g_net_rx_display == rx_before) {
         output_add_line(output, "[OK] RX: 0 reply — QEMU NAT'ta beklenen davranis.", 0x0A);
@@ -2348,8 +2432,6 @@ static void cmd_arptest(const char* args, CommandOutput* output) {
 }
 
 // ── arpstatic ────────────────────────────────────────────────────────────────
-// Statik ARP girişi ekle.
-// Kullanım: arpstatic 10.0.2.2 52:54:00:12:34:56
 static void cmd_arpstatic(const char* args, CommandOutput* output) {
     if (!arp_is_initialized()) {
         output_add_line(output, "Once 'ipconfig <IP>' ile IP ata.", 0x0C); return;
@@ -2360,7 +2442,6 @@ static void cmd_arpstatic(const char* args, CommandOutput* output) {
         return;
     }
 
-    // IP parse
     uint8_t ip[4];
     int ip_end = 0;
     while (args[ip_end] && args[ip_end] != ' ') ip_end++;
@@ -2370,7 +2451,6 @@ static void cmd_arpstatic(const char* args, CommandOutput* output) {
         output_add_line(output, "Gecersiz IP.", 0x0C); return;
     }
 
-    // MAC parse "XX:XX:XX:XX:XX:XX"
     const char* mac_str = args + ip_end;
     while(*mac_str == ' ') mac_str++;
     uint8_t mac[6]; int mi = 0; int val = 0; int nibbles = 0;
@@ -2397,6 +2477,1491 @@ static void cmd_arpstatic(const char* args, CommandOutput* output) {
     output_add_line(output, buf, 0x0A);
 }
 
+// ============================================================================
+// IPv4 + ICMP KOMUTLARI — Aşama 3
+// ============================================================================
+
+// ── ipv4info ─────────────────────────────────────────────────────────────────
+// IPv4 ve ICMP katman durumu, sayaçlar
+static void cmd_ipv4info(const char* args, CommandOutput* output) {
+    (void)args;
+    if (!ipv4_is_initialized()) {
+        output_add_line(output, "IPv4 katmani baslatilmadi.", 0x0C);
+        output_add_line(output, "  'ipconfig 10.0.2.15' komutu hem ARP hem IPv4+ICMP'yi baslatir.", 0x0E);
+        return;
+    }
+
+    output_add_line(output, "=== IPv4 / ICMP Katman Durumu ===", 0x0B);
+
+    uint8_t my_ip[4], my_mac[6];
+    arp_get_my_ip(my_ip);
+    arp_get_my_mac(my_mac);
+
+    char line[64];
+
+    str_cpy(line, "  IP     : "); char ipbuf[16]; ip_to_str(my_ip, ipbuf);
+    str_concat(line, ipbuf);
+    output_add_line(output, line, 0x0F);
+
+    str_cpy(line, "  MAC    : ");
+    for (int i = 0; i < 6; i++) {
+        char hx[3]; byte_to_hex_str(my_mac[i], hx);
+        str_concat(line, hx);
+        if (i < 5) str_concat(line, ":");
+    }
+    output_add_line(output, line, 0x0F);
+
+    char cnt[16];
+    str_cpy(line, "  IPv4 TX: ");
+    uint64_to_string(ipv4_get_tx_count(), cnt);
+    str_concat(line, cnt); str_concat(line, " paket");
+    output_add_line(output, line, 0x07);
+
+    str_cpy(line, "  IPv4 RX: ");
+    uint64_to_string(ipv4_get_rx_count(), cnt);
+    str_concat(line, cnt); str_concat(line, " paket");
+    output_add_line(output, line, 0x07);
+
+    output_add_empty_line(output);
+    output_add_line(output, "  ICMP (ping) hazir.", 0x0A);
+    output_add_line(output, "  Ornek: ping 10.0.2.2", 0x07);
+    output_add_line(output, "  Ornek: ping 10.0.2.2 4   (4 kez)", 0x07);
+}
+
+// ── ping ─────────────────────────────────────────────────────────────────────
+// ICMP Echo Request gönder, yanıtı bekle, RTT göster.
+// Kullanım: ping 10.0.2.2
+//           ping 10.0.2.2 4      (4 kez)
+static void cmd_ping(const char* args, CommandOutput* output) {
+
+    // Ön koşul: ARP başlatılmış olmalı
+    if (!arp_is_initialized()) {
+        output_add_line(output, "ARP/IP katmani baslatilmadi.", 0x0C);
+        output_add_line(output, "  Once: ipconfig 10.0.2.15", 0x0E);
+        return;
+    }
+    if (!ipv4_is_initialized()) {
+        output_add_line(output, "IPv4 katmani baslatilmadi.", 0x0C);
+        output_add_line(output, "  'ipconfig <IP>' otomatik olarak baslatir.", 0x0E);
+        return;
+    }
+
+    // Argüman yoksa yardım
+    if (!args || args[0] == '\0') {
+        output_add_line(output, "Kullanim: ping <IP> [adet]", 0x0E);
+        output_add_line(output, "  Ornek : ping 10.0.2.2", 0x07);
+        output_add_line(output, "  Ornek : ping 10.0.2.2 4", 0x07);
+        return;
+    }
+
+    // IP'yi ayrıştır (boşluğa kadar)
+    char ip_str[16];
+    int si = 0;
+    while (args[si] && args[si] != ' ' && si < 15) {
+        ip_str[si] = args[si]; si++;
+    }
+    ip_str[si] = '\0';
+
+    uint8_t dst_ip[4];
+    if (!str_to_ip(ip_str, dst_ip)) {
+        output_add_line(output, "Gecersiz IP adresi.", 0x0C);
+        return;
+    }
+
+    // Tekrar sayısını ayrıştır (varsayılan 1, max 10)
+    int count = 1;
+    if (args[si] == ' ' && args[si+1] >= '1' && args[si+1] <= '9') {
+        count = 0;
+        int ci = si + 1;
+        while (args[ci] >= '0' && args[ci] <= '9') {
+            count = count * 10 + (args[ci] - '0');
+            ci++;
+        }
+        if (count < 1)  count = 1;
+        if (count > 10) count = 10;
+    }
+
+    // Başlık
+    char hdr[56];
+    str_cpy(hdr, "PING "); str_concat(hdr, ip_str);
+    str_concat(hdr, " — ICMP Echo Request");
+    output_add_line(output, hdr, 0x0B);
+
+    // Subnet kontrolü: farklı ağ → gateway MAC'ine ARP yap (1.1.1.1 için "who has 1.1.1.1" olmaz)
+    uint8_t my_ip[4]; arp_get_my_ip(my_ip);
+    uint8_t gw[4];    ipv4_get_gateway(gw);
+    bool same_subnet = (dst_ip[0] == my_ip[0] &&
+                        dst_ip[1] == my_ip[1] &&
+                        dst_ip[2] == my_ip[2]);
+    uint8_t arp_target[4];
+    for(int k=0;k<4;k++) arp_target[k] = same_subnet ? dst_ip[k] : gw[k];
+
+    // ARP — poll tabanlı bekleme (flood yok, IRQ nesting yok)
+    {
+        uint8_t dummy_mac[6];
+        if (!arp_resolve(arp_target, dummy_mac)) {
+            output_add_line(output, "  ARP isteği gönderiliyor...", 0x0E);
+            arp_request(arp_target);     // explicit istek — cache boşsa tetikle
+            __asm__ volatile("sti");
+            uint64_t t_arp = get_system_ticks();
+            bool resolved = false;
+            while ((get_system_ticks() - t_arp) < 5000) {
+                rtl8139_poll();
+                if (arp_resolve(arp_target, dummy_mac)) { resolved = true; break; }
+                __asm__ volatile("hlt");  // QEMU'ya CPU ver → IRQ11 ARP reply gelir
+            }
+            __asm__ volatile("cli");
+            if (!resolved) {
+                output_add_line(output, "  ARP zaman asimi.", 0x0C);
+                return;
+            }
+            output_add_line(output, "  ARP cozumlendi.", 0x0A);
+        }
+    }
+
+    int ok_count   = 0;
+    int fail_count = 0;
+
+    for (int i = 0; i < count; i++) {
+        icmp_ping_reset();
+
+        bool sent = icmp_ping(dst_ip);
+        if (!sent) {
+            char eline[48];
+            str_cpy(eline, "  [");
+            char ns[8]; int_to_str(i + 1, ns);
+            str_concat(eline, ns); str_concat(eline, "] gonderilemedi");
+            output_add_line(output, eline, 0x0C);
+            fail_count++;
+            continue;
+        }
+
+        // Poll tabanlı bekleme — STI ile timer IRQ'nun ilerlemesine izin ver
+        {
+            __asm__ volatile("sti");
+            uint64_t t0 = get_system_ticks();
+            while (icmp_ping_state() == PING_PENDING) {
+                rtl8139_poll();
+                if ((get_system_ticks() - t0) >= 5000) break;
+                __asm__ volatile("hlt");
+            }
+            __asm__ volatile("cli");
+        }
+
+        int state = icmp_ping_state();
+        char res_line[64];
+        str_cpy(res_line, "  [");
+        char ns[8]; int_to_str(i + 1, ns);
+        str_concat(res_line, ns); str_concat(res_line, "] ");
+
+        if (state == PING_SUCCESS) {
+            uint32_t rtt = icmp_last_rtt_ms();
+            uint8_t src[4]; icmp_get_last_src(src);
+            char src_s[16]; ip_to_str(src, src_s);
+            str_concat(res_line, src_s);
+            str_concat(res_line, "  yanit verdi  RTT~");
+            if (rtt == 0) {
+                str_concat(res_line, "<1ms");
+            } else {
+                char rtt_s[12]; uint64_to_string((uint64_t)rtt, rtt_s);
+                str_concat(res_line, rtt_s); str_concat(res_line, "ms");
+            }
+            output_add_line(output, res_line, 0x0A);
+            ok_count++;
+        } else if (state == PING_UNREACHABLE) {
+            str_concat(res_line, "Destination Unreachable");
+            output_add_line(output, res_line, 0x0C);
+            fail_count++;
+        } else {
+            str_concat(res_line, "Zaman asimi (yanit yok)");
+            output_add_line(output, res_line, 0x0C);
+            fail_count++;
+        }
+
+        icmp_ping_reset();
+
+        if (i < count - 1) {
+            uint64_t tw = get_system_ticks();
+            while ((get_system_ticks() - tw) < 500) rtl8139_poll();
+        }
+    }
+
+    // Özet
+    output_add_empty_line(output);
+    char sum[64];
+    str_cpy(sum, "  Sonuc: ");
+    char ok_s[8]; int_to_str(ok_count, ok_s);
+    str_concat(sum, ok_s); str_concat(sum, "/");
+    char cnt_s[8]; int_to_str(count, cnt_s);
+    str_concat(sum, cnt_s); str_concat(sum, " basarili");
+    output_add_line(output, sum, ok_count == count ? 0x0A : (ok_count > 0 ? 0x0E : 0x0C));
+
+    if (ok_count > 0) {
+        output_add_line(output, "  NOT: RTT icmp.c icindeki get_system_ticks() delta'sidir.", 0x08);
+        output_add_line(output, "       PIT 1kHz ise 1 tick = 1ms, aksi halde icmp_ticks_to_ms() ayarla.", 0x08);
+    }
+    if (fail_count > 0 && ok_count == 0) {
+        output_add_line(output, "  Ipucu: 'arping 10.0.2.2' ile once ARP coz.", 0x0E);
+        output_add_line(output, "  Sonra 'arpstatic 10.0.2.2 52:54:00:12:34:56' dene.", 0x0E);
+    }
+}
+
+// ============================================================================
+// UDP KOMUTLARI — Aşama 4
+// ============================================================================
+
+// UDP paket alındığında VGA'ya yazan ve aynı içeriği geri gönderen echo handler
+static void _udp_echo_handler(const UDPPacket* pkt, void* ctx) {
+    (void)ctx;
+
+    // Kaynak IP:port + içerik → ekrana
+    char line[80]; int pos = 0;
+    const char* lbl = "UDP< ";
+    for (int k = 0; lbl[k]; k++) line[pos++] = lbl[k];
+
+    char ipbuf[16]; ip_to_str(pkt->src_ip, ipbuf);
+    for (int k = 0; ipbuf[k]; k++) line[pos++] = ipbuf[k];
+    line[pos++] = ':';
+
+    // kaynak port → string
+    {
+        uint16_t pv = pkt->src_port;
+        char rev[6]; int ri = 0;
+        if (!pv) { rev[ri++] = '0'; }
+        else { while (pv) { rev[ri++] = '0' + (pv % 10); pv /= 10; } }
+        for (int x = ri - 1; x >= 0; x--) line[pos++] = rev[x];
+    }
+
+    line[pos++] = ' '; line[pos++] = '"';
+
+    // Verinin yazdırılabilir kısmı (max 48 karakter)
+    uint16_t show = pkt->len < 48 ? pkt->len : 48;
+    for (uint16_t k = 0; k < show; k++) {
+        char c = (char)pkt->data[k];
+        line[pos++] = (c >= ' ' && c < 127) ? c : '.';
+    }
+    if (pkt->len > 48) { line[pos++] = '.'; line[pos++] = '.'; line[pos++] = '.'; }
+    line[pos++] = '"'; line[pos] = '\0';
+
+    println64(line, 0x0B);
+
+    // Echo: gelen paketi aynen geri gönder
+    udp_send(pkt->src_ip, pkt->src_port, pkt->dst_port, pkt->data, pkt->len);
+}
+
+// ── udpinit ──────────────────────────────────────────────────────────────────
+static void cmd_udpinit(const char* args, CommandOutput* output) {
+    (void)args;
+    if (udp_is_initialized()) {
+        output_add_line(output, "UDP katmani zaten baslatildi.", 0x0E);
+        return;
+    }
+    if (!ipv4_is_initialized()) {
+        output_add_line(output, "Hata: Once 'ipconfig <IP>' ile IPv4 katmanini baslat.", 0x0C);
+        return;
+    }
+    udp_init(1);   // 1 = UDP_CSUM_ENABLE
+    output_add_line(output, "UDP katmani baslatildi (checksum: etkin).", 0x0A);
+    output_add_line(output, "  udplisten <port>     — echo sunucusu baslat", 0x07);
+    output_add_line(output, "  udpsend <ip> <p> <m> — mesaj gonder", 0x07);
+}
+
+// ── udplisten ─────────────────────────────────────────────────────────────────
+static void cmd_udplisten(const char* args, CommandOutput* output) {
+    if (!udp_is_initialized()) {
+        output_add_line(output, "Hata: Once 'udpinit' calistir.", 0x0C); return;
+    }
+    if (!args || args[0] == '\0') {
+        output_add_line(output, "Kullanim: udplisten <port>   ornek: udplisten 5000", 0x0E); return;
+    }
+    uint16_t port = 0;
+    for (int i = 0; args[i] >= '0' && args[i] <= '9'; i++)
+        port = (uint16_t)(port * 10 + (args[i] - '0'));
+    if (port == 0) {
+        output_add_line(output, "Gecersiz port numarasi.", 0x0C); return;
+    }
+    if (udp_bind(port, _udp_echo_handler, (void*)(uint64_t)port)) {
+        char buf[48]; str_cpy(buf, "Echo dinleyici baslatildi — port=");
+        char ps[8]; int_to_str((int)port, ps); str_concat(buf, ps);
+        output_add_line(output, buf, 0x0A);
+        output_add_line(output, "  Host: nc -u <guest-ip> <port> ile test edebilirsin.", 0x08);
+    } else {
+        output_add_line(output, "Hata: Bind basarisiz (soket tablosu dolu?).", 0x0C);
+    }
+}
+
+// ── udpsend ──────────────────────────────────────────────────────────────────
+// Kullanim: udpsend 10.0.2.2 5000 merhaba dunya
+static void cmd_udpsend(const char* args, CommandOutput* output) {
+    if (!udp_is_initialized()) {
+        output_add_line(output, "Hata: Once 'udpinit' calistir.", 0x0C); return;
+    }
+    if (!args || args[0] == '\0') {
+        output_add_line(output, "Kullanim: udpsend <ip> <port> <mesaj>", 0x0E);
+        output_add_line(output, "  Ornek : udpsend 10.0.2.2 5000 merhaba", 0x08);
+        return;
+    }
+
+    int pos = 0;
+
+    // IP
+    char ip_str[20]; int ilen = 0;
+    while (args[pos] && args[pos] != ' ' && ilen < 19) ip_str[ilen++] = args[pos++];
+    ip_str[ilen] = '\0';
+    if (ilen == 0) { output_add_line(output, "Gecersiz IP.", 0x0C); return; }
+
+    while (args[pos] == ' ') pos++;
+
+    // Port
+    uint16_t dst_port = 0;
+    while (args[pos] >= '0' && args[pos] <= '9')
+        dst_port = (uint16_t)(dst_port * 10 + (args[pos++] - '0'));
+    if (dst_port == 0) { output_add_line(output, "Gecersiz port.", 0x0C); return; }
+
+    while (args[pos] == ' ') pos++;
+
+    // Mesaj
+    const char* msg = args + pos;
+    uint16_t mlen = 0;
+    while (msg[mlen]) mlen++;
+    if (mlen == 0) { output_add_line(output, "Mesaj bos olamaz.", 0x0C); return; }
+
+    // IP ayrıştır
+    uint8_t dst_ip[4];
+    if (!str_to_ip(ip_str, dst_ip)) {
+        output_add_line(output, "Gecersiz IP adresi.", 0x0C); return;
+    }
+
+    // ARP çözümle (önce dene)
+    {
+        uint8_t dummy[6];
+        if (!arp_resolve(dst_ip, dummy)) {
+            output_add_line(output, "ARP isteği gönderiliyor...", 0x0E);
+            arp_request(dst_ip);
+            __asm__ volatile("sti");
+            uint64_t t = get_system_ticks();
+            bool ok = false;
+            while ((get_system_ticks() - t) < 3000) {
+                rtl8139_poll();
+                if (arp_resolve(dst_ip, dummy)) { ok = true; break; }
+                __asm__ volatile("hlt");
+            }
+            __asm__ volatile("cli");
+            if (!ok) {
+                output_add_line(output, "ARP zaman asimi — 'arping <ip>' ile once coz.", 0x0C);
+                return;
+            }
+        }
+    }
+
+    bool sent = udp_send(dst_ip, dst_port, 0, (const uint8_t*)msg, mlen);
+
+    if (sent) {
+        char buf[64]; str_cpy(buf, "Gonderildi -> ");
+        str_concat(buf, ip_str); str_concat(buf, ":");
+        char ps[8]; int_to_str((int)dst_port, ps); str_concat(buf, ps);
+        output_add_line(output, buf, 0x0A);
+    } else {
+        output_add_line(output, "Gonderim basarisiz.", 0x0C);
+    }
+}
+
+// ── udpclose ─────────────────────────────────────────────────────────────────
+static void cmd_udpclose(const char* args, CommandOutput* output) {
+    if (!args || args[0] == '\0') {
+        output_add_line(output, "Kullanim: udpclose <port>", 0x0E); return;
+    }
+    uint16_t port = 0;
+    for (int i = 0; args[i] >= '0' && args[i] <= '9'; i++)
+        port = (uint16_t)(port * 10 + (args[i] - '0'));
+    if (port == 0) { output_add_line(output, "Gecersiz port.", 0x0C); return; }
+    udp_unbind(port);
+    char buf[40]; str_cpy(buf, "Port kapatildi: ");
+    char ps[8]; int_to_str((int)port, ps); str_concat(buf, ps);
+    output_add_line(output, buf, 0x07);
+}
+
+// ── udpstat ──────────────────────────────────────────────────────────────────
+typedef struct { CommandOutput* out; } UDPLineCtx;
+static void udp_line_vga_cb(const char* line, uint8_t color, void* ctx) {
+    UDPLineCtx* c = (UDPLineCtx*)ctx;
+    output_add_line(c->out, line, color);
+}
+
+static void cmd_udpstat(const char* args, CommandOutput* output) {
+    (void)args;
+    if (!udp_is_initialized()) {
+        output_add_line(output, "UDP katmani baslatilmadi.", 0x08); return;
+    }
+
+    output_add_line(output, "=== UDP Soket Tablosu ===", 0x0B);
+    output_add_line(output, "  PORT     RX              TX", 0x08);
+    output_add_line(output, "  -------- --------------- ---------------", 0x08);
+
+    UDPLineCtx ctx = { output };
+    udp_sockets_foreach(udp_line_vga_cb, &ctx);
+
+    // Toplam sayaçlar
+    char buf[64];
+    str_cpy(buf, "  Toplam RX: "); char tmp[12];
+    uint64_to_string(udp_get_rx_count(), tmp); str_concat(buf, tmp);
+    str_concat(buf, "  TX: ");
+    uint64_to_string(udp_get_tx_count(), tmp); str_concat(buf, tmp);
+    output_add_line(output, buf, 0x07);
+}
+
+
+// ============================================================================
+// DHCP KOMUTLARI — Aşama 5
+// ============================================================================
+
+// ── dhcp ─────────────────────────────────────────────────────────────────────
+// DHCPDISCOVER gönder → otomatik IP, GW, DNS al
+static void cmd_dhcp(const char* args, CommandOutput* output) {
+    (void)args;
+
+    // Katman kontrolleri
+    if (!g_net_initialized) {
+        output_add_line(output, "Ag surucusu hazir degil. Once 'netinit' calistir.", 0x0C);
+        return;
+    }
+    if (!ipv4_is_initialized()) {
+        ipv4_init();
+        icmp_init();
+    }
+    if (!udp_is_initialized()) {
+        udp_init(1);
+    }
+    if (!dhcp_is_initialized()) {
+        dhcp_init();
+    }
+
+    // Zaten BOUND ise mevcut yapılandırmayı göster
+    if (dhcp_get_state() == (int)DHCP_STATE_BOUND) {
+        output_add_line(output, "DHCP zaten BOUND. Mevcut yapilandirma:", 0x0E);
+        DHCPConfig cfg;
+        dhcp_get_config(&cfg);
+        if (cfg.valid) {
+            char buf[64]; char ipstr[16];
+            str_cpy(buf, "  IP      : "); ip_to_str(cfg.ip,      ipstr); str_concat(buf, ipstr);
+            output_add_line(output, buf, 0x0F);
+            str_cpy(buf, "  Gateway : "); ip_to_str(cfg.gateway, ipstr); str_concat(buf, ipstr);
+            output_add_line(output, buf, 0x07);
+        }
+        output_add_line(output, "  Yenilemek icin once 'dhcprel' calistir.", 0x08);
+        return;
+    }
+
+    output_add_line(output, "DHCP DISCOVER gonderiliyor...", 0x0E);
+
+    bool sent = dhcp_discover();
+    if (!sent) {
+        output_add_line(output, "  [HATA] DISCOVER gonderilemedi.", 0x0C);
+        output_add_line(output, "  'netinit' calistirildi mi?", 0x0E);
+        return;
+    }
+
+    // ── OFFER/ACK bekleme döngüsü ─────────────────────────────────────────
+    // Klavye IRQ context'inde çalıştığımızdan IF=0. STI ile interrupt'ları
+    // açıyoruz; ardından HLT döngüsü çalıştırıyoruz.
+    //
+    // STI + HLT neden gerekli:
+    //   • HLT: CPU'yu beklet → QEMU ana döngüsü çalışır
+    //   • QEMU SLiRP cevabı RTL8139 ring buffer'a yazar + IRQ11 çeker
+    //   • IRQ11 → isr_net → rtl8139_irq_handler → rtl_process_rx
+    //          → net_packet_callback → udp_handle_packet → dhcp_handle_packet
+    //   • dhcp_handle_packet g_state'i REQUESTING/BOUND/FAILED'a günceller
+    //   • Uyandıktan sonra rtl8139_poll() ek güvence sağlar (IRQ kaçırmaya karşı)
+    //
+    // pause ÇALIŞMAZ: sadece decoder ipucu, QEMU'ya kontrol vermiyor.
+    output_add_line(output, "  OFFER bekleniyor (max 4 sn)...", 0x07);
+
+    __asm__ volatile("sti");    // IRQ'ları aç (timer + RTL8139 IRQ11)
+
+    uint64_t t0 = get_system_ticks();
+    int reported_requesting = 0;
+
+    while ((get_system_ticks() - t0) < 4000) {
+
+        // Ring buffer'ı doğrudan kontrol et (IRQ'suz güvence)
+        rtl8139_poll();
+
+        int st = dhcp_get_state();
+        if (st == (int)DHCP_STATE_REQUESTING && !reported_requesting) {
+            reported_requesting = 1;
+            output_add_line(output, "  OFFER alindi! REQUEST gonderildi...", 0x0E);
+        }
+        if (st == (int)DHCP_STATE_BOUND || st == (int)DHCP_STATE_FAILED) break;
+
+        // HLT: CPU'yu bir sonraki IRQ'ya kadar beklet.
+        // Bu sürede QEMU kendi event loop'unu çalıştırır ve
+        // SLiRP cevabını RTL8139 DMA ring buffer'a yazabilir.
+        __asm__ volatile("hlt");
+    }
+
+    __asm__ volatile("cli");    // IRQ'ları kapat (klavye ISR bağlamına geri dön)
+
+    int final_state = dhcp_get_state();
+
+    if (final_state == (int)DHCP_STATE_BOUND) {
+        DHCPConfig cfg;
+        dhcp_get_config(&cfg);
+        output_add_line(output, "=== DHCP BOUND — Yapilandirma Tamam ===", 0x0A);
+        if (cfg.valid) {
+            char buf[64]; char ipstr[16];
+            str_cpy(buf, "  IP      : "); ip_to_str(cfg.ip,      ipstr); str_concat(buf, ipstr);
+            output_add_line(output, buf, 0x0F);
+            str_cpy(buf, "  Subnet  : "); ip_to_str(cfg.subnet,  ipstr); str_concat(buf, ipstr);
+            output_add_line(output, buf, 0x07);
+            str_cpy(buf, "  Gateway : "); ip_to_str(cfg.gateway, ipstr); str_concat(buf, ipstr);
+            output_add_line(output, buf, 0x07);
+            str_cpy(buf, "  DNS     : "); ip_to_str(cfg.dns,     ipstr); str_concat(buf, ipstr);
+            output_add_line(output, buf, 0x07);
+            str_cpy(buf, "  Kira    : ");
+            char ls[12]; uint64_to_string((uint64_t)cfg.lease_time, ls);
+            str_concat(buf, ls); str_concat(buf, " sn");
+            output_add_line(output, buf, 0x07);
+        }
+        output_add_empty_line(output);
+        output_add_line(output, "  'ping 10.0.2.2' ile baglantıyı test et.", 0x0B);
+
+    } else if (final_state == (int)DHCP_STATE_FAILED) {
+        output_add_line(output, "  [HATA] DHCP basarisiz (DHCPNAK alindi).", 0x0C);
+        output_add_line(output, "  Elle atamak icin: ipconfig 10.0.2.15", 0x07);
+
+    } else {
+        // Hala SELECTING veya REQUESTING — OFFER gelmiyor
+        output_add_line(output, "  [ZAMAN ASIMI] DHCP: OFFER gelmedi.", 0x0C);
+        // RTL8139 register dump — seri porta yazar; ISR_ROK=1 ise paket
+        // geldi ama rtl_process_rx() onu işleyemedi demektir.
+        rtl8139_dump_regs();
+        output_add_line(output, "  Seri portu incele: ISR/CAPR/CBR degerleri yazildi.", 0x0E);
+        output_add_line(output, "  QEMU SLiRP aktif mi? (-netdev user,id=net0)", 0x0E);
+        output_add_line(output, "  Elle atamak icin: ipconfig 10.0.2.15", 0x07);
+    }
+}
+
+// ── dhcpstat ─────────────────────────────────────────────────────────────────
+static void cmd_dhcpstat(const char* args, CommandOutput* output) {
+    (void)args;
+
+    output_add_line(output, "=== DHCP Istemci Durumu ===", 0x0B);
+
+    if (!dhcp_is_initialized()) {
+        output_add_line(output, "  DHCP katmani baslatilmadi.", 0x0C);
+        output_add_line(output, "  Once 'dhcp' komutunu calistir.", 0x07);
+        return;
+    }
+
+    // BOUND ise tam yapılandırmayı doğrudan göster
+    if (dhcp_get_state() == (int)DHCP_STATE_BOUND) {
+        DHCPConfig cfg;
+        dhcp_get_config(&cfg);
+        output_add_line(output, "  Durum  : BOUND (IP atandi)", 0x0A);
+        if (cfg.valid) {
+            char buf[64]; char ipstr[16];
+            str_cpy(buf, "  IP      : "); ip_to_str(cfg.ip,        ipstr); str_concat(buf, ipstr);
+            output_add_line(output, buf, 0x0F);
+            str_cpy(buf, "  Subnet  : "); ip_to_str(cfg.subnet,    ipstr); str_concat(buf, ipstr);
+            output_add_line(output, buf, 0x07);
+            str_cpy(buf, "  Gateway : "); ip_to_str(cfg.gateway,   ipstr); str_concat(buf, ipstr);
+            output_add_line(output, buf, 0x07);
+            str_cpy(buf, "  DNS     : "); ip_to_str(cfg.dns,       ipstr); str_concat(buf, ipstr);
+            output_add_line(output, buf, 0x07);
+            str_cpy(buf, "  DHCP Sv : "); ip_to_str(cfg.server_ip, ipstr); str_concat(buf, ipstr);
+            output_add_line(output, buf, 0x08);
+            char ls[12];
+            str_cpy(buf, "  Kira    : ");
+            uint64_to_string((uint64_t)cfg.lease_time, ls);
+            str_concat(buf, ls); str_concat(buf, " sn");
+            output_add_line(output, buf, 0x07);
+        }
+        output_add_empty_line(output);
+        output_add_line(output, "  ping 10.0.2.2  komutu ile baglantıyı test edebilirsin.", 0x0B);
+        return;
+    }
+
+    char buf[64];
+    str_cpy(buf, "  Durum : "); str_concat(buf, dhcp_state_str());
+    int st = dhcp_get_state();
+    uint8_t color = 0x07;
+    if      (st == (int)DHCP_STATE_BOUND)      color = 0x0A;
+    else if (st == (int)DHCP_STATE_SELECTING ||
+             st == (int)DHCP_STATE_REQUESTING) color = 0x0E;
+    else if (st == (int)DHCP_STATE_FAILED)     color = 0x0C;
+    output_add_line(output, buf, color);
+
+    // XID
+    {
+        uint32_t xid = dhcp_get_xid();
+        if (xid) {
+            char xbuf[32]; str_cpy(xbuf, "  XID  : 0x");
+            const char* hx = "0123456789ABCDEF";
+            char xs[9]; int xi = 0;
+            for (int s = 28; s >= 0; s -= 4) xs[xi++] = hx[(xid >> s) & 0xF];
+            xs[8] = '\0';
+            str_concat(xbuf, xs);
+            output_add_line(output, xbuf, 0x08);
+        }
+    }
+
+    DHCPConfig cfg;
+    dhcp_get_config(&cfg);
+
+    if (!cfg.valid) {
+        output_add_line(output, "  Gecerli konfigürasyon yok.", 0x08);
+        return;
+    }
+
+    output_add_empty_line(output);
+    output_add_line(output, "  Atanan Yapilandirma:", 0x0B);
+
+    char ipstr[16];
+    str_cpy(buf, "    IP       : "); ip_to_str(cfg.ip,        ipstr); str_concat(buf, ipstr);
+    output_add_line(output, buf, 0x0F);
+    str_cpy(buf, "    Subnet   : "); ip_to_str(cfg.subnet,    ipstr); str_concat(buf, ipstr);
+    output_add_line(output, buf, 0x07);
+    str_cpy(buf, "    Gateway  : "); ip_to_str(cfg.gateway,   ipstr); str_concat(buf, ipstr);
+    output_add_line(output, buf, 0x07);
+    str_cpy(buf, "    DNS      : "); ip_to_str(cfg.dns,       ipstr); str_concat(buf, ipstr);
+    output_add_line(output, buf, 0x07);
+    str_cpy(buf, "    DHCP Srv : "); ip_to_str(cfg.server_ip, ipstr); str_concat(buf, ipstr);
+    output_add_line(output, buf, 0x08);
+
+    char ls[12];
+    str_cpy(buf, "    Kira     : ");
+    uint64_to_string((uint64_t)cfg.lease_time, ls); str_concat(buf, ls);
+    str_concat(buf, " sn");
+    output_add_line(output, buf, 0x07);
+
+    str_cpy(buf, "    T1 (yen.): ");
+    uint64_to_string((uint64_t)cfg.renewal_time, ls); str_concat(buf, ls);
+    str_concat(buf, " sn");
+    output_add_line(output, buf, 0x08);
+
+    str_cpy(buf, "    T2 (yen.): ");
+    uint64_to_string((uint64_t)cfg.rebinding_time, ls); str_concat(buf, ls);
+    str_concat(buf, " sn");
+    output_add_line(output, buf, 0x08);
+}
+
+// ── netrxtest ────────────────────────────────────────────────────────────────
+// ARP request → 10.0.2.2 gönder, 3 saniye RX bekle.
+// Herhangi bir paket gelirse RX path çalışıyor demektir.
+// ─────────────────────────────────────────────────────────────────────────────
+static void cmd_netrxtest(const char* args, CommandOutput* output) {
+    (void)args;
+
+    if (!g_net_initialized) {
+        output_add_line(output, "netinit calistirilmadi.", 0x0C);
+        return;
+    }
+
+    // ARP + IPv4 init gerekli
+    if (!ipv4_is_initialized()) { ipv4_init(); icmp_init(); }
+    if (!arp_is_initialized()) {
+        // Geçici IP ile başlat — sadece ARP probe için
+        uint8_t tmp_mac[6]; rtl8139_get_mac(tmp_mac);
+        uint8_t tmp_ip[4] = {10,0,2,15};
+        arp_init(tmp_ip, tmp_mac);
+        ipv4_set_gateway((uint8_t[]){10,0,2,2});
+    }
+
+    output_add_line(output, "RX yolu testi: ARP probe 10.0.2.2 gonderiliyor...", 0x0E);
+    // ARP resolve tetikler — probe gönderilir
+    uint8_t dummy[6];
+    arp_resolve((uint8_t[]){10,0,2,2}, dummy);
+
+    output_add_line(output, "3 saniye RX bekleniyor...", 0x07);
+    __asm__ volatile("sti");
+
+    uint64_t t0 = get_system_ticks();
+    uint32_t pkts_before = g_net_rx_display;
+    while ((get_system_ticks() - t0) < 3000) {
+        rtl8139_poll();
+        if (g_net_rx_display > pkts_before) break;
+        __asm__ volatile("hlt");
+    }
+    __asm__ volatile("cli");
+
+    rtl8139_dump_regs();  // seri porta register durumu
+
+    uint32_t received = g_net_rx_display - pkts_before;
+    if (received > 0) {
+        output_add_line(output, "  [OK] RX paket alindi! RX path calisıyor.", 0x0A);
+        char buf[48]; str_cpy(buf, "  Alinan paket sayisi: ");
+        char ns[12]; uint64_to_string((uint64_t)received, ns);
+        str_concat(buf, ns);
+        output_add_line(output, buf, 0x0F);
+    } else {
+        output_add_line(output, "  [HATA] Hic paket alinamadi.", 0x0C);
+        output_add_line(output, "  Seri portta register degerlerini kontrol et.", 0x0E);
+        output_add_line(output, "  ISR_ROK=1 ise rtl_process_rx bug'i var.", 0x0E);
+        output_add_line(output, "  ISR=0 ise QEMU hic cevap vermedi.", 0x0E);
+    }
+}
+
+// ── dhcprel ──────────────────────────────────────────────────────────────────
+static void cmd_dhcprel(const char* args, CommandOutput* output) {
+    (void)args;
+    if (!dhcp_is_initialized()) {
+        output_add_line(output, "DHCP katmani baslatilmadi.", 0x0C); return;
+    }
+    if (dhcp_get_state() != (int)DHCP_STATE_BOUND) {
+        output_add_line(output, "DHCP BOUND durumunda degil, release gereksiz.", 0x0E);
+        str_cpy((char[64]){0}, "  Mevcut durum: ");
+        char buf[48]; str_cpy(buf, "  Mevcut durum: "); str_concat(buf, dhcp_state_str());
+        output_add_line(output, buf, 0x07);
+        return;
+    }
+    dhcp_release();
+    output_add_line(output, "DHCP Release gonderildi.", 0x0A);
+    output_add_line(output, "  IP birakildi. Yeniden almak icin 'dhcp' calistir.", 0x07);
+}
+
+// ============================================================================
+// TCP KOMUTLARI — Aşama 6
+// ============================================================================
+
+// Bağlantı olayı callback'i (tcpconnect / tcptest komutları paylaşır)
+static void _tcp_cmd_event_cb(int conn_id, TCPEvent_t event,
+                               const uint8_t* data, uint16_t len, void* ctx)
+{
+    (void)ctx;
+    g_tcp_conn_id = conn_id;
+
+    switch(event) {
+    case TCP_EVENT_CONNECTED:
+        g_tcp_connected = true;
+        println64("[TCP] Baglanti kuruldu!", 0x0A);
+        break;
+
+    case TCP_EVENT_DATA: {
+        g_tcp_data_recvd = true;
+        // İlk 127 baytı önizleme tampona kopyala
+        uint16_t copy_len = (len < 127) ? len : 127;
+        for(uint16_t i = 0; i < copy_len; i++) {
+            char c = (char)data[i];
+            g_tcp_recv_preview[i] = (c >= ' ' && c < 127) ? c : '.';
+        }
+        g_tcp_recv_preview[copy_len] = '\0';
+        g_tcp_recv_len = len;
+
+        // İlk satırı VGA'ya yaz
+        char info[80];
+        str_cpy(info, "[TCP] Veri alindi: ");
+        char ns[12]; int_to_str((int)len, ns); str_concat(info, ns);
+        str_concat(info, " byte");
+        println64(info, 0x0B);
+
+        // Önizleme (ilk 64 karakter)
+        char preview[68]; int pi = 0;
+        preview[pi++] = '['; preview[pi++] = 'T'; preview[pi++] = 'C';
+        preview[pi++] = 'P'; preview[pi++] = ']'; preview[pi++] = ' ';
+        for(int k = 0; k < 60 && g_tcp_recv_preview[k]; k++)
+            preview[pi++] = g_tcp_recv_preview[k];
+        if(len > 60) { preview[pi++]='.'; preview[pi++]='.'; preview[pi++]='.'; }
+        preview[pi] = '\0';
+        println64(preview, 0x0F);
+        break;
+    }
+
+    case TCP_EVENT_CLOSED:
+        g_tcp_closed = true;
+        println64("[TCP] Baglanti kapandi.", 0x07);
+        break;
+
+    case TCP_EVENT_ERROR:
+        g_tcp_error = true;
+        println64("[TCP] Baglanti hatasi / zaman asimi.", 0x0C);
+        break;
+
+    default:
+        break;
+    }
+}
+
+// Sunucu accept callback'i (tcplisten komutu için)
+static void _tcp_cmd_accept_cb(int new_conn_id, const uint8_t remote_ip[4],
+                                uint16_t remote_port, void* ctx)
+{
+    (void)ctx;
+    char line[72];
+    str_cpy(line, "[TCP] Yeni baglanti kabul edildi! conn_id=");
+    char ns[8]; int_to_str(new_conn_id, ns); str_concat(line, ns);
+    str_concat(line, "  remote=");
+    char ipbuf[16]; ip_to_str(remote_ip, ipbuf); str_concat(line, ipbuf);
+    str_concat(line, ":"); int_to_str((int)remote_port, ns); str_concat(line, ns);
+    println64(line, 0x0A);
+
+    // Gelen bağlantıyı aktif conn_id olarak kaydet
+    g_tcp_conn_id  = new_conn_id;
+    g_tcp_connected = true;
+}
+
+// ── tcpstat ──────────────────────────────────────────────────────────────────
+static void cmd_tcpstat(const char* args, CommandOutput* output) {
+    (void)args;
+    if (!tcp_is_initialized()) {
+        output_add_line(output, "TCP katmani baslatilmadi.", 0x0C);
+        output_add_line(output, "  Kernel otomatik baslatir. 'netinit' ile kontrol et.", 0x0E);
+        return;
+    }
+    output_add_line(output, "=== TCP Baglanti Tablosu ===", 0x0B);
+    tcp_print_connections();   // serial'a yazar
+
+    char buf[64];
+    str_cpy(buf, "  Aktif baglanti: ");
+    char ns[8]; int_to_str(tcp_get_conn_count(), ns); str_concat(buf, ns);
+    output_add_line(output, buf, 0x07);
+
+    str_cpy(buf, "  TX: "); uint64_to_string(tcp_get_tx_count(), ns);
+    str_concat(buf, ns); str_concat(buf, "  RX: ");
+    uint64_to_string(tcp_get_rx_count(), ns); str_concat(buf, ns);
+    str_concat(buf, " segment");
+    output_add_line(output, buf, 0x07);
+
+    // Mevcut aktif conn_id göster
+    if (g_tcp_conn_id >= 0) {
+        str_cpy(buf, "  Son baglanti ID: "); int_to_str(g_tcp_conn_id, ns);
+        str_concat(buf, ns);
+        str_concat(buf, "  Durum: ");
+        str_concat(buf, tcp_state_str(tcp_get_state(g_tcp_conn_id)));
+        output_add_line(output, buf, 0x0F);
+    }
+    output_add_line(output, "  (Detayli log serial porta yazildi)", 0x08);
+}
+
+// ── tcpconnect ───────────────────────────────────────────────────────────────
+// Kullanim: tcpconnect 10.0.2.2 80
+static void cmd_tcpconnect(const char* args, CommandOutput* output) {
+    if (!tcp_is_initialized()) {
+        output_add_line(output, "TCP katmani baslatilmadi.", 0x0C); return;
+    }
+    if (!arp_is_initialized()) {
+        output_add_line(output, "Once 'dhcp' veya 'ipconfig' ile IP ata.", 0x0C); return;
+    }
+    if (!args || args[0] == '\0') {
+        output_add_line(output, "Kullanim: tcpconnect <ip> <port>", 0x0E);
+        output_add_line(output, "  Ornek : tcpconnect 10.0.2.2 80", 0x08);
+        return;
+    }
+
+    // IP ayrıştır
+    char ip_str[20]; int pos = 0, ilen = 0;
+    while (args[pos] && args[pos] != ' ' && ilen < 19) ip_str[ilen++] = args[pos++];
+    ip_str[ilen] = '\0';
+    while (args[pos] == ' ') pos++;
+
+    uint8_t dst_ip[4];
+    if (!str_to_ip(ip_str, dst_ip)) {
+        output_add_line(output, "Gecersiz IP adresi.", 0x0C); return;
+    }
+
+    // Port ayrıştır
+    uint16_t port = 0;
+    while (args[pos] >= '0' && args[pos] <= '9')
+        port = (uint16_t)(port * 10 + (args[pos++] - '0'));
+    if (port == 0) {
+        output_add_line(output, "Gecersiz port numarasi.", 0x0C); return;
+    }
+
+    // ARP çözümle — önce mevcut cache kontrol et, yoksa istek gönder ve HLT ile QEMU'ya yield et
+    {
+        uint8_t dummy[6];
+        if (!arp_resolve(dst_ip, dummy)) {
+            output_add_line(output, "ARP isteği gönderiliyor...", 0x0E);
+            arp_request(dst_ip);          // explicit ARP request gönder
+            __asm__ volatile("sti");
+            uint64_t t = get_system_ticks();
+            bool ok = false;
+            while ((get_system_ticks() - t) < 3000) {
+                rtl8139_poll();
+                if (arp_resolve(dst_ip, dummy)) { ok = true; break; }
+                __asm__ volatile("hlt");  // QEMU'ya CPU ver → IRQ11 ile ARP reply gelir
+            }
+            __asm__ volatile("cli");
+            if (!ok) {
+                output_add_line(output, "ARP zaman asimi.", 0x0C); return;
+            }
+            output_add_line(output, "ARP cozumlendi.", 0x0A);
+        }
+    }
+
+    // Durum sıfırla
+    g_tcp_connected = false;
+    g_tcp_data_recvd = false;
+    g_tcp_closed = false;
+    g_tcp_error = false;
+    g_tcp_recv_len = 0;
+
+    int cid = tcp_connect(dst_ip, port, _tcp_cmd_event_cb, (void*)0);
+    if (cid < 0) {
+        output_add_line(output, "tcp_connect() basarisiz (tablo dolu?).", 0x0C); return;
+    }
+
+    char buf[56]; str_cpy(buf, "SYN gonderildi: "); str_concat(buf, ip_str);
+    str_concat(buf, ":"); char ps[8]; int_to_str((int)port, ps); str_concat(buf, ps);
+    str_concat(buf, "  conn_id="); int_to_str(cid, ps); str_concat(buf, ps);
+    output_add_line(output, buf, 0x0E);
+
+    // SYN+ACK bekle (3 saniye)
+    __asm__ volatile("sti");
+    uint64_t t0 = get_system_ticks();
+    while ((get_system_ticks() - t0) < 3000) {
+        rtl8139_poll();
+        tcp_tick();
+        if (g_tcp_connected || g_tcp_error) break;
+        __asm__ volatile("hlt");
+    }
+    __asm__ volatile("cli");
+
+    if (g_tcp_connected) {
+        str_cpy(buf, "  ESTABLISHED! conn_id="); int_to_str(cid, ps); str_concat(buf, ps);
+        output_add_line(output, buf, 0x0A);
+        output_add_line(output, "  'tcpsend <id> <mesaj>' ile veri gonder.", 0x07);
+        output_add_line(output, "  'tcpclose <id>' ile baglantiyi kapat.", 0x07);
+    } else if (g_tcp_error) {
+        output_add_line(output, "  Baglanti basarisiz (RST veya zaman asimi).", 0x0C);
+    } else {
+        output_add_line(output, "  SYN_SENT: Yanit bekleniyor (server acik mi?).", 0x0E);
+        output_add_line(output, "  'tcpstat' ile durumu izleyebilirsin.", 0x07);
+    }
+}
+
+// ── tcpsend ──────────────────────────────────────────────────────────────────
+// Kullanim: tcpsend 0 Merhaba dunya
+static void cmd_tcpsend(const char* args, CommandOutput* output) {
+    if (!tcp_is_initialized()) {
+        output_add_line(output, "TCP katmani baslatilmadi.", 0x0C); return;
+    }
+    if (!args || args[0] == '\0') {
+        output_add_line(output, "Kullanim: tcpsend <conn_id> <mesaj>", 0x0E);
+        output_add_line(output, "  Ornek : tcpsend 0 GET / HTTP/1.0", 0x08);
+        return;
+    }
+
+    // conn_id
+    int cid = 0; int pos = 0;
+    while (args[pos] >= '0' && args[pos] <= '9')
+        cid = cid * 10 + (args[pos++] - '0');
+    while (args[pos] == ' ') pos++;
+
+    const char* msg = args + pos;
+    uint16_t mlen = 0; while (msg[mlen]) mlen++;
+    if (mlen == 0) {
+        output_add_line(output, "Mesaj bos olamaz.", 0x0C); return;
+    }
+
+    if (!tcp_is_connected(cid)) {
+        char buf[48]; str_cpy(buf, "conn_id="); char ns[8]; int_to_str(cid, ns);
+        str_concat(buf, ns); str_concat(buf, " ESTABLISHED degil.");
+        output_add_line(output, buf, 0x0C);
+        output_add_line(output, "  'tcpstat' ile durumu kontrol et.", 0x07);
+        return;
+    }
+
+    int sent = tcp_send(cid, (const uint8_t*)msg, mlen);
+    if (sent > 0) {
+        char buf[56]; str_cpy(buf, "Gonderildi: ");
+        char ns[8]; int_to_str(sent, ns); str_concat(buf, ns);
+        str_concat(buf, " byte  conn_id="); int_to_str(cid, ns); str_concat(buf, ns);
+        output_add_line(output, buf, 0x0A);
+    } else {
+        output_add_line(output, "Gonderim basarisiz.", 0x0C);
+    }
+}
+
+// ── tcpclose ─────────────────────────────────────────────────────────────────
+static void cmd_tcpclose(const char* args, CommandOutput* output) {
+    if (!tcp_is_initialized()) {
+        output_add_line(output, "TCP katmani baslatilmadi.", 0x0C); return;
+    }
+    if (!args || args[0] == '\0') {
+        output_add_line(output, "Kullanim: tcpclose <conn_id>", 0x0E); return;
+    }
+    int cid = 0;
+    for (int i = 0; args[i] >= '0' && args[i] <= '9'; i++)
+        cid = cid * 10 + (args[i] - '0');
+
+    int st = tcp_get_state(cid);
+    if (st == TCP_STATE_CLOSED) {
+        char buf[48]; str_cpy(buf, "conn_id="); char ns[8]; int_to_str(cid, ns);
+        str_concat(buf, ns); str_concat(buf, " zaten kapali.");
+        output_add_line(output, buf, 0x0E); return;
+    }
+
+    tcp_close(cid);
+    char buf[48]; str_cpy(buf, "FIN gonderildi: conn_id=");
+    char ns[8]; int_to_str(cid, ns); str_concat(buf, ns);
+    output_add_line(output, buf, 0x07);
+    output_add_line(output, "  'tcpstat' ile kapanma durumunu izle.", 0x08);
+}
+
+// ── tcplisten ─────────────────────────────────────────────────────────────────
+static void cmd_tcplisten(const char* args, CommandOutput* output) {
+    if (!tcp_is_initialized()) {
+        output_add_line(output, "TCP katmani baslatilmadi.", 0x0C); return;
+    }
+    if (!args || args[0] == '\0') {
+        output_add_line(output, "Kullanim: tcplisten <port>", 0x0E);
+        output_add_line(output, "  Ornek : tcplisten 8080", 0x08);
+        output_add_line(output, "  Host  : nc 10.0.2.15 8080  (QEMU portfwd gerekli)", 0x08);
+        return;
+    }
+    uint16_t port = 0;
+    for (int i = 0; args[i] >= '0' && args[i] <= '9'; i++)
+        port = (uint16_t)(port * 10 + (args[i] - '0'));
+    if (port == 0) {
+        output_add_line(output, "Gecersiz port.", 0x0C); return;
+    }
+
+    g_tcp_connected = false;
+    g_tcp_data_recvd = false;
+    g_tcp_closed = false;
+
+    int lid = tcp_listen(port, _tcp_cmd_accept_cb, (void*)0);
+    if (lid < 0) {
+        output_add_line(output, "tcp_listen() basarisiz (tablo dolu?).", 0x0C); return;
+    }
+
+    char buf[64]; str_cpy(buf, "LISTEN baslatildi: port=");
+    char ps[8]; int_to_str((int)port, ps); str_concat(buf, ps);
+    str_concat(buf, "  conn_id="); int_to_str(lid, ps); str_concat(buf, ps);
+    output_add_line(output, buf, 0x0A);
+    output_add_line(output, "  Baglanti gelince VGA'ya yazilir.", 0x07);
+    output_add_line(output, "  QEMU Makefile'da: hostfwd=tcp::<host_port>-:<guest_port>", 0x08);
+    output_add_line(output, "  'tcpstat' ile durumu izle.", 0x08);
+}
+
+// ── wget ──────────────────────────────────────────────────────────────────────
+// Kullanim: wget 10.0.2.2:8080/index.html
+//           wget 10.0.2.2:8080/dosya.txt [hedef_adi]   (opsiyonel kayıt adı)
+static void cmd_wget(const char* args, CommandOutput* output) {
+    if (!tcp_is_initialized() || !arp_is_initialized()) {
+        output_add_line(output, "Once 'dhcp' ile IP al.", 0x0C); return;
+    }
+    if (!args || args[0] == '\0') {
+        output_add_line(output, "Kullanim: wget <ip[:port][/yol]> [dosyaadi]", 0x0E);
+        output_add_line(output, "  Ornek : wget 10.0.2.2:9999/index.html", 0x08);
+        output_add_line(output, "  Ornek : wget 10.0.2.2:9999/veri.txt benim.txt", 0x08);
+        output_add_line(output, "  Host  : python3 -m http.server 9999", 0x08);
+        return;
+    }
+
+    // ── URL ayrıştır: ip[:port][/path] [kayit_adi] ───────────────────────
+    char ip_str[20] = {0};
+    uint16_t port = 80;
+    char path[128] = "/";
+    char save_name[64] = {0};
+    int pos = 0;
+
+    int ilen = 0;
+    while (args[pos] && args[pos] != ':' && args[pos] != '/' && args[pos] != ' ' && ilen < 19)
+        ip_str[ilen++] = args[pos++];
+    ip_str[ilen] = '\0';
+
+    if (args[pos] == ':') {
+        pos++; port = 0;
+        while (args[pos] >= '0' && args[pos] <= '9')
+            port = (uint16_t)(port * 10 + (args[pos++] - '0'));
+        if (port == 0) port = 80;
+    }
+    if (args[pos] == '/') {
+        int pi = 0;
+        while (args[pos] && args[pos] != ' ' && pi < 127) path[pi++] = args[pos++];
+        path[pi] = '\0';
+    }
+    while (args[pos] == ' ') pos++;
+
+    // Opsiyonel kayıt adı
+    if (args[pos]) {
+        int si = 0;
+        while (args[pos] && args[pos] != ' ' && si < 63) save_name[si++] = args[pos++];
+        save_name[si] = '\0';
+    }
+
+    // Kayıt adı belirtilmemişse path'ten türet
+    if (save_name[0] == '\0') {
+        // /index.html → index.html, / → index.html
+        const char* slash = path;
+        const char* last = slash;
+        for (int i = 0; path[i]; i++) if (path[i] == '/') last = path + i + 1;
+        if (*last == '\0') {
+            str_cpy(save_name, "index.html");
+        } else {
+            int si = 0;
+            while (*last && si < 63) save_name[si++] = *last++;
+            save_name[si] = '\0';
+        }
+    }
+
+    uint8_t dst_ip[4];
+    if (!str_to_ip(ip_str, dst_ip)) {
+        output_add_line(output, "Gecersiz IP adresi.", 0x0C); return;
+    }
+
+    // Başlık
+    char hdr[80];
+    str_cpy(hdr, "wget  http://"); str_concat(hdr, ip_str);
+    str_concat(hdr, ":"); char ps[8]; int_to_str((int)port, ps); str_concat(hdr, ps);
+    str_concat(hdr, path);
+    output_add_line(output, hdr, 0x0B);
+
+    // ── HTTP GET ─────────────────────────────────────────────────────────
+    static HTTPResponse resp;
+    HTTPError err = http_get(dst_ip, port, path, &resp);
+
+    if (err != HTTP_OK) {
+        char emsg[64]; str_cpy(emsg, "  HATA: "); str_concat(emsg, http_err_str(err));
+        output_add_line(output, emsg, 0x0C);
+        return;
+    }
+
+    // ── Durum ─────────────────────────────────────────────────────────────
+    {
+        char sl[48]; str_cpy(sl, "  HTTP ");
+        char sc[8]; int_to_str(resp.status, sc); str_concat(sl, sc);
+        str_concat(sl, " "); str_concat(sl, http_status_str(resp.status));
+        output_add_line(output, sl, resp.status == 200 ? 0x0A : 0x0E);
+    }
+
+    if (resp.status != 200 || !resp.body || resp.body_len == 0) {
+        output_add_line(output, "  Govde bos veya hata kodu, kaydedilmedi.", 0x0E);
+        return;
+    }
+
+    // ── Boyut ─────────────────────────────────────────────────────────────
+    {
+        char sz[64]; str_cpy(sz, "  Baslik: ");
+        char tmp[8]; int_to_str((int)resp.header_len, tmp); str_concat(sz, tmp);
+        str_concat(sz, " byte  Govde: ");
+        int_to_str((int)resp.body_len, tmp); str_concat(sz, tmp);
+        str_concat(sz, " byte");
+        output_add_line(output, sz, 0x07);
+    }
+
+    // ── Önizleme (ilk 3 satır) ────────────────────────────────────────────
+    output_add_line(output, "  ── Onizleme ──────────────────────────────", 0x08);
+    int lines = 0, bi = 0;
+    while (bi < (int)resp.body_len && lines < 3) {
+        char line[76]; int li = 0;
+        line[li++] = ' '; line[li++] = ' ';
+        while (bi < (int)resp.body_len && resp.body[bi] != '\n' && li < 74) {
+            char c = resp.body[bi++];
+            if (c == '\r') continue;
+            if (c < 32 && c != '\t') c = '.';
+            line[li++] = c;
+        }
+        if (bi < (int)resp.body_len && resp.body[bi] == '\n') bi++;
+        line[li] = '\0';
+        output_add_line(output, line, 0x0F);
+        lines++;
+    }
+    if (bi < (int)resp.body_len) {
+        char more[32]; str_cpy(more, "  ... (");
+        char tmp[8]; int_to_str((int)(resp.body_len - bi), tmp);
+        str_concat(more, tmp); str_concat(more, " byte daha)");
+        output_add_line(output, more, 0x08);
+    }
+
+    // ── Diske kaydet ──────────────────────────────────────────────────────
+    // resp.body null-terminate edildi (http.c garantisi), doğrudan yazılabilir
+    output_add_line(output, "  Diske kaydediliyor...", 0x0E);
+
+    // Önce dosyayı oluştur (yoksa touch)
+    extern int  fs_touch_file64(const char* filename);
+    extern int  fs_write_file64(const char* filename, const char* content);
+    extern void save_files_to_disk64(void);
+
+    fs_touch_file64(save_name);
+    int written = fs_write_file64(save_name, resp.body);
+
+    if (written) {
+        char smsg[64]; str_cpy(smsg, "  Kaydedildi: ");
+        str_concat(smsg, save_name);
+        str_concat(smsg, "  (");
+        char tmp[8]; int_to_str((int)resp.body_len, tmp);
+        str_concat(smsg, tmp); str_concat(smsg, " byte)");
+        output_add_line(output, smsg, 0x0A);
+        save_files_to_disk64();  // FAT32'ye flush
+        output_add_line(output, "  FAT32'ye yazildi.", 0x0A);
+    } else {
+        output_add_line(output, "  HATA: Diske yazma basarisiz!", 0x0C);
+        output_add_line(output, "  (Dosya boyutu VFS limitini asiyor olabilir)", 0x08);
+    }
+
+    // ── Özet ──────────────────────────────────────────────────────────────
+    {
+        char sum[64]; str_cpy(sum, "  Toplam: ");
+        char tmp[8]; int_to_str((int)resp.total_len, tmp); str_concat(sum, tmp);
+        str_concat(sum, " byte alindi.");
+        output_add_line(output, sum, written ? 0x0A : 0x0C);
+    }
+}
+
+// ── httppost ───────────────────────────────────────────────────────────────
+// Kullanim: httppost 10.0.2.2:8080/api key=value
+static void cmd_httppost(const char* args, CommandOutput* output) {
+    if (!tcp_is_initialized() || !arp_is_initialized()) {
+        output_add_line(output, "Once 'dhcp' ile IP al.", 0x0C); return;
+    }
+    if (!args || args[0] == '\0') {
+        output_add_line(output, "Kullanim: httppost <ip[:port][/yol]> <veri>", 0x0E);
+        output_add_line(output, "  Ornek : httppost 10.0.2.2:9999/api key=merhaba", 0x08);
+        return;
+    }
+
+    char ip_str[20] = {0};
+    uint16_t port = 80;
+    char path[128] = "/";
+    int pos = 0;
+
+    int ilen = 0;
+    while (args[pos] && args[pos] != ':' && args[pos] != '/' && args[pos] != ' ' && ilen < 19)
+        ip_str[ilen++] = args[pos++];
+    ip_str[ilen] = '\0';
+
+    if (args[pos] == ':') {
+        pos++; port = 0;
+        while (args[pos] >= '0' && args[pos] <= '9')
+            port = (uint16_t)(port * 10 + (args[pos++] - '0'));
+        if (port == 0) port = 80;
+    }
+    if (args[pos] == '/') {
+        int pi = 0;
+        while (args[pos] && args[pos] != ' ' && pi < 127) path[pi++] = args[pos++];
+        path[pi] = '\0';
+    }
+    while (args[pos] == ' ') pos++;
+
+    const char* body_str = args + pos;
+    uint16_t body_len = 0;
+    while (body_str[body_len]) body_len++;
+
+    uint8_t dst_ip[4];
+    if (!str_to_ip(ip_str, dst_ip)) {
+        output_add_line(output, "Gecersiz IP.", 0x0C); return;
+    }
+
+    char hdr[80]; str_cpy(hdr, "POST  http://"); str_concat(hdr, ip_str);
+    str_concat(hdr, ":"); char ps[8]; int_to_str((int)port, ps); str_concat(hdr, ps);
+    str_concat(hdr, path);
+    output_add_line(output, hdr, 0x0B);
+
+    static HTTPResponse resp;
+    HTTPError err = http_post(dst_ip, port, path,
+                               (const uint8_t*)body_str, body_len, &resp);
+
+    if (err != HTTP_OK) {
+        char emsg[64]; str_cpy(emsg, "  HATA: "); str_concat(emsg, http_err_str(err));
+        output_add_line(output, emsg, 0x0C);
+        return;
+    }
+
+    {
+        char sl[48]; str_cpy(sl, "  HTTP ");
+        char sc[8]; int_to_str(resp.status, sc); str_concat(sl, sc);
+        str_concat(sl, " "); str_concat(sl, http_status_str(resp.status));
+        output_add_line(output, sl, resp.status < 400 ? 0x0A : 0x0C);
+    }
+    if (resp.body && resp.body_len > 0) {
+        char preview[76]; int pi = 0;
+        preview[pi++] = ' '; preview[pi++] = ' ';
+        int bi = 0;
+        while (bi < (int)resp.body_len && pi < 74) {
+            char c = resp.body[bi++];
+            if (c == '\r' || c == '\n') continue;
+            if (c < 32) c = '.';
+            preview[pi++] = c;
+        }
+        preview[pi] = '\0';
+        output_add_line(output, preview, 0x0F);
+    }
+    {
+        char sz[48]; str_cpy(sz, "  Toplam: ");
+        char tmp[8]; int_to_str((int)resp.total_len, tmp);
+        str_concat(sz, tmp); str_concat(sz, " byte");
+        output_add_line(output, sz, 0x07);
+    }
+}
+
+// ── tcptest ───────────────────────────────────────────────────────────────────
+// Tam döngü TCP testi: SYN → ESTABLISHED → HTTP GET → yanıt bekle → FIN
+// Kullanim: tcptest 10.0.2.2 80
+//           tcptest 10.0.2.15 8080  (nc -l -p 8080 açık olmalı)
+static void cmd_tcptest(const char* args, CommandOutput* output) {
+    if (!tcp_is_initialized()) {
+        output_add_line(output, "TCP katmani baslatilmadi.", 0x0C); return;
+    }
+    if (!arp_is_initialized()) {
+        output_add_line(output, "Once 'dhcp' veya 'ipconfig' ile IP ata.", 0x0C); return;
+    }
+    if (!args || args[0] == '\0') {
+        output_add_line(output, "Kullanim: tcptest <ip> <port>", 0x0E);
+        output_add_line(output, "  Ornek : tcptest 10.0.2.2 80", 0x08);
+        output_add_line(output, "  Host  : nc -l -p 8080   sonra: tcptest 10.0.2.15 8080", 0x08);
+        return;
+    }
+
+    // IP ve port ayrıştır
+    char ip_str[20]; int pos = 0, ilen = 0;
+    while (args[pos] && args[pos] != ' ' && ilen < 19) ip_str[ilen++] = args[pos++];
+    ip_str[ilen] = '\0';
+    while (args[pos] == ' ') pos++;
+    uint16_t port = 0;
+    while (args[pos] >= '0' && args[pos] <= '9')
+        port = (uint16_t)(port * 10 + (args[pos++] - '0'));
+    if (port == 0) port = 80;
+
+    uint8_t dst_ip[4];
+    if (!str_to_ip(ip_str, dst_ip)) {
+        output_add_line(output, "Gecersiz IP.", 0x0C); return;
+    }
+
+    char hdr[64]; str_cpy(hdr, "TCP Test: "); str_concat(hdr, ip_str);
+    str_concat(hdr, ":"); char ps[8]; int_to_str((int)port, ps); str_concat(hdr, ps);
+    output_add_line(output, hdr, 0x0B);
+
+    // ARP çözümle
+    {
+        uint8_t dummy[6];
+        uint8_t my_ip[4]; arp_get_my_ip(my_ip);
+        uint8_t gw[4];    ipv4_get_gateway(gw);
+
+        // Kendi IP'mize bağlanmaya çalışıyoruz → ARP çalışmaz
+        bool dst_is_me = (dst_ip[0]==my_ip[0] && dst_ip[1]==my_ip[1] &&
+                          dst_ip[2]==my_ip[2] && dst_ip[3]==my_ip[3]);
+        if (dst_is_me) {
+            output_add_line(output, "  [BILGI] Kendi IP'nize baglaniyor.", 0x0E);
+            output_add_line(output, "  Loopback desteklenmez. Host'ta tcplisten'i test edin:", 0x07);
+            output_add_line(output, "    QEMU'da: tcplisten 8080", 0x08);
+            output_add_line(output, "    Host'ta: nc 127.0.0.1 8080  (Makefile: hostfwd=tcp::8080-:8080)", 0x08);
+            return;
+        }
+
+        // Aynı /24 ise direkt hedef, değilse gateway üzerinden git
+        bool same = (dst_ip[0]==my_ip[0] && dst_ip[1]==my_ip[1] && dst_ip[2]==my_ip[2]);
+        uint8_t* arp_t = same ? dst_ip : gw;
+
+        if (!arp_resolve(arp_t, dummy)) {
+            char arp_msg[48]; str_cpy(arp_msg, "  ARP isteği gönderiliyor: ");
+            char ipbuf2[16]; ip_to_str(arp_t, ipbuf2); str_concat(arp_msg, ipbuf2);
+            output_add_line(output, arp_msg, 0x0E);
+            arp_request(arp_t);          // explicit ARP request — cache boşsa tetikle
+            __asm__ volatile("sti");
+            uint64_t t = get_system_ticks(); bool ok = false;
+            while ((get_system_ticks() - t) < 4000) {
+                rtl8139_poll();
+                if (arp_resolve(arp_t, dummy)) { ok = true; break; }
+                __asm__ volatile("hlt");  // pause DEĞİL: QEMU'ya CPU ver → IRQ11 ARP reply
+            }
+            __asm__ volatile("cli");
+            if (!ok) {
+                output_add_line(output, "  ARP zaman asimi.", 0x0C);
+                output_add_line(output, "  'arping' ile cache'i kontrol et.", 0x07);
+                return;
+            }
+            output_add_line(output, "  ARP cozumlendi.", 0x0A);
+        }
+    }
+
+    // Durum sıfırla
+    g_tcp_connected = false; g_tcp_data_recvd = false;
+    g_tcp_closed = false;    g_tcp_error = false;
+    g_tcp_recv_len = 0;      g_tcp_recv_preview[0] = '\0';
+
+    // [1] SYN gönder
+    output_add_line(output, "[1/4] SYN gonderiliyor...", 0x07);
+    int cid = tcp_connect(dst_ip, port, _tcp_cmd_event_cb, (void*)0);
+    if (cid < 0) {
+        output_add_line(output, "  HATA: tcp_connect() basarisiz.", 0x0C); return;
+    }
+
+    // [2] ESTABLISHED bekle
+    output_add_line(output, "[2/4] SYN+ACK bekleniyor (3sn)...", 0x07);
+    __asm__ volatile("sti");
+    uint64_t t0 = get_system_ticks();
+    while ((get_system_ticks() - t0) < 3000) {
+        rtl8139_poll(); tcp_tick();
+        if (g_tcp_connected || g_tcp_error) break;
+        __asm__ volatile("hlt");
+    }
+    __asm__ volatile("cli");
+
+    if (!g_tcp_connected) {
+        output_add_line(output, "  HATA: ESTABLISHED kurulamadi.", 0x0C);
+        output_add_line(output, "  Sunucu acik mi? QEMU hostfwd ayarli mi?", 0x0E);
+        output_add_line(output, "  Ipucu: 'nc -l -p <port>' host'ta ac.", 0x08);
+        tcp_abort(cid);
+        return;
+    }
+    output_add_line(output, "  ESTABLISHED!", 0x0A);
+
+    // [3] HTTP GET gönder
+    output_add_line(output, "[3/4] HTTP GET gonderiliyor...", 0x07);
+    const char* http_req =
+        "GET / HTTP/1.0\r\n"
+        "Host: ascentos\r\n"
+        "User-Agent: AscentOS/1.0 (hobi OS; x86_64)\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    uint16_t req_len = 0; while (http_req[req_len]) req_len++;
+    int sent = tcp_send(cid, (const uint8_t*)http_req, req_len);
+    if (sent > 0) {
+        char buf[48]; str_cpy(buf, "  Gonderildi: ");
+        char ns[8]; int_to_str(sent, ns); str_concat(buf, ns);
+        str_concat(buf, " byte");
+        output_add_line(output, buf, 0x07);
+    } else {
+        output_add_line(output, "  Gonderim basarisiz!", 0x0C);
+    }
+
+    // [4] Yanıt bekle
+    output_add_line(output, "[4/4] Yanit bekleniyor (4sn)...", 0x07);
+    __asm__ volatile("sti");
+    t0 = get_system_ticks();
+    while ((get_system_ticks() - t0) < 4000) {
+        rtl8139_poll(); tcp_tick();
+        if (g_tcp_data_recvd || g_tcp_closed || g_tcp_error) break;
+        __asm__ volatile("hlt");
+    }
+    __asm__ volatile("cli");
+
+    if (g_tcp_data_recvd) {
+        char buf[64]; str_cpy(buf, "  Yanit alindi: ");
+        char ns[8]; int_to_str((int)g_tcp_recv_len, ns); str_concat(buf, ns);
+        str_concat(buf, " byte");
+        output_add_line(output, buf, 0x0A);
+        // İlk 60 karakter önizleme
+        char preview[72]; str_cpy(preview, "  > ");
+        for(int k = 0; k < 60 && g_tcp_recv_preview[k]; k++) {
+            int pl = str_len(preview);
+            if (pl < 70) { preview[pl] = g_tcp_recv_preview[k]; preview[pl+1] = '\0'; }
+        }
+        output_add_line(output, preview, 0x0F);
+        output_add_empty_line(output);
+        output_add_line(output, "  TCP katmani tam calisıyor!", 0x0A);
+    } else if (g_tcp_error) {
+        output_add_line(output, "  Baglanti hatasi / RST alindi.", 0x0C);
+    } else {
+        output_add_line(output, "  Yanit zaman asimi (4sn).", 0x0E);
+        output_add_line(output, "  SYN+ACK gelmesi katmanin calistigini kanıtlar.", 0x07);
+    }
+
+    // Temiz kapat
+    if (!g_tcp_closed) tcp_close(cid);
+
+    char sum[64]; str_cpy(sum, "  Sonuc: ");
+    if (g_tcp_connected) str_concat(sum, "3-way-handshake OK  ");
+    if (g_tcp_data_recvd) str_concat(sum, "DATA OK  ");
+    str_concat(sum, "conn_id="); char ns[8]; int_to_str(cid, ns); str_concat(sum, ns);
+    output_add_line(output, sum, g_tcp_data_recvd ? 0x0A : (g_tcp_connected ? 0x0E : 0x0C));
+}
+
+// ============================================================================
+// GFX KOMUTU — GUI moduna geç
+// ============================================================================
 extern volatile int request_gui_start;
 
 static void cmd_gfx(const char* args, CommandOutput* output) {
@@ -2407,6 +3972,8 @@ static void cmd_gfx(const char* args, CommandOutput* output) {
     request_gui_start = 1;
 }
 
+// ============================================================================
+// COMMAND TABLE
 // ============================================================================
 static Command command_table[] = {
     {"hello", "Say hello", cmd_hello},
@@ -2447,9 +4014,6 @@ static Command command_table[] = {
     // ELF loader commands
     {"exec",    "Load and execute ELF64 binary from FAT32", cmd_exec},
     {"elfinfo", "Show ELF64 header info (no load)",         cmd_elfinfo},
-    // ELF kısayolları — execute_command64 içinde işlenir, dummy handler yok
-    // "kilo" ve "lua" isimleri command_table'da olmadığı için
-    // execute_command64'ün uzantı/kısayol bloğu devreye girer.
 
     // SYSCALL/SYSRET commands
     {"syscalltest", "Run SYSCALL test suite (116 tests)", cmd_syscalltest},
@@ -2472,18 +4036,42 @@ static Command command_table[] = {
     {"arptest",   "QEMU NAT ARP sinirlamasini acikla + TX test",  cmd_arptest},
     {"arpstatic", "Statik ARP ekle  ornek: arpstatic <IP> <MAC>", cmd_arpstatic},
 
+    // IPv4 + ICMP komutları — Aşama 3
+    {"ipv4info", "IPv4 katman durumu ve sayaclari",               cmd_ipv4info},
+    {"ping",     "ICMP Echo (ping) gonder  ornek: ping 10.0.2.2", cmd_ping},
+
+    // UDP komutları — Aşama 4
+    {"udpinit",   "UDP katmanini baslat (ipconfig sonrasi)",          cmd_udpinit},
+    {"udplisten", "Porta UDP echo sunucusu bagla  ornek: udplisten 5000", cmd_udplisten},
+    {"udpsend",   "UDP mesaji gonder  ornek: udpsend 10.0.2.2 5000 merhaba", cmd_udpsend},
+    {"udpclose",  "Port dinleyicisini kaldir  ornek: udpclose 5000",  cmd_udpclose},
+    {"udpstat",   "UDP soket tablosu ve sayaclar",                    cmd_udpstat},
+
+    // DHCP komutları — Aşama 5
+    {"dhcp",     "DHCP ile otomatik IP al",                          cmd_dhcp},
+    {"dhcpstat", "DHCP durum + atanan IP/GW/DNS goster",             cmd_dhcpstat},
+    {"dhcprel",  "DHCP Release — IP iade et",                        cmd_dhcprel},
+    {"netrxtest","RX yolu testi (ARP probe 10.0.2.2)",                cmd_netrxtest},
+
+    // TCP komutları — Aşama 6
+    {"tcpstat",    "TCP baglanti tablosu ve sayaclar",                    cmd_tcpstat},
+    {"tcpconnect", "TCP baglantisi kur  ornek: tcpconnect 10.0.2.2 80",  cmd_tcpconnect},
+    {"tcpsend",    "TCP veri gonder     ornek: tcpsend 0 merhaba",        cmd_tcpsend},
+    {"tcpclose",   "TCP baglantiyi kapat ornek: tcpclose 0",              cmd_tcpclose},
+    {"tcplisten",  "TCP sunucu baslat   ornek: tcplisten 8080",           cmd_tcplisten},
+    {"tcptest",    "TCP tam dongü testi  ornek: tcptest 10.0.2.2 80",     cmd_tcptest},
+    {"wget",       "HTTP GET + diske kaydet: wget 10.0.2.2:9999/index.html", cmd_wget},
+    {"httppost",   "HTTP POST gonder: httppost 10.0.2.2:9999/api key=val",   cmd_httppost},
+
     // Panic test
     {"panic", "Kernel panic ekranini test et [df|gp|pf|ud|de|stack]", cmd_panic},
 };
 static int command_count = sizeof(command_table) / sizeof(Command);
 
-// ===========================================
-// COMMAND SYSTEM
-// ===========================================
-
-// ── net_register_packet_handler ──────────────────────────────────────────────
+// ============================================================================
+// net_register_packet_handler
 // kernel64.c'den rtl8139_init() başarılı olduğunda çağrılır.
-// Paket callback'ini kaydeder ve g_net_initialized'ı 1 yapar.
+// ============================================================================
 void net_register_packet_handler(void) {
     rtl8139_set_packet_handler(net_packet_callback);
     g_net_initialized = 1;
@@ -2540,12 +4128,7 @@ int execute_command64(const char* input, CommandOutput* output) {
     }
     
     // ── Evrensel ELF fallback ────────────────────────────────────────────────
-    // Hiçbir yerleşik komut bulunamazsa:
-    //   "kilo test.txt"  →  KILO.ELF FAT32'de aranır, varsa çalıştırılır
-    //   "mygame"         →  MYGAME.ELF aranır
-    //   "PROG.ELF args"  →  doğrudan exec'e gönderilir
     {
-        // Komut adında zaten .ELF uzantısı varsa direkt exec'e ver
         int dot_pos = -1;
         for (int _k = 0; command[_k]; _k++) {
             if (command[_k] == '.') { dot_pos = _k; break; }
@@ -2557,11 +4140,9 @@ int execute_command64(const char* input, CommandOutput* output) {
                          (ext[2]=='F'||ext[2]=='f') &&
                           ext[3]=='\0';
             if (is_elf) {
-                // Önce verilen adı dene, bulamazsa küçük harfli versiyonu dene
                 char try_name[32];
                 str_cpy(try_name, command);
                 if (fat32_file_size(try_name) == 0) {
-                    // Küçük harfe çevir: "PROG.ELF" → "prog.elf"
                     for (int _k = 0; try_name[_k]; _k++) {
                         char c = try_name[_k];
                         if (c >= 'A' && c <= 'Z') try_name[_k] = c - 'A' + 'a';
@@ -2578,34 +4159,27 @@ int execute_command64(const char* input, CommandOutput* output) {
             }
         }
 
-        // Uzantısız komut adını büyük harfe çevir ve .ELF ekle
-        // "kilo" → "KILO.ELF"
         char elf_filename[32];
         int cmd_len = str_len(command);
         if (cmd_len == 0 || cmd_len > 8) {
-            // FAT32 8.3 formatı: max 8 karakter taban adı
             output_add_line(output, "Komut bulunamadi.", VGA_RED);
             return 0;
         }
 
         for (int _k = 0; _k < cmd_len; _k++) {
             char c = command[_k];
-            if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';  // küçük → büyük
+            if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
             elf_filename[_k] = c;
         }
         elf_filename[cmd_len] = '\0';
         str_concat(elf_filename, ".ELF");
 
-        // FAT32'de bu dosya var mı?
-        // Önce büyük harf dene: KILO.ELF
-        // Bulamazsa küçük harf dene: kilo.elf
         uint32_t fsize = fat32_file_size(elf_filename);
         if (fsize == 0) {
-            // Küçük harfli versiyonu dene: "kilo.elf"
             char elf_lower[32];
             for (int _k = 0; _k < cmd_len; _k++) {
                 char c = command[_k];
-                if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';  // büyük → küçük
+                if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
                 elf_lower[_k] = c;
             }
             elf_lower[cmd_len] = '\0';
@@ -2613,10 +4187,8 @@ int execute_command64(const char* input, CommandOutput* output) {
 
             fsize = fat32_file_size(elf_lower);
             if (fsize > 0) {
-                // Küçük harfli versiyonu bulundu
                 str_cpy(elf_filename, elf_lower);
             } else {
-                // Her iki versiyonda da bulunamadı
                 char msg[MAX_LINE_LENGTH];
                 str_cpy(msg, "Bilinmeyen komut: ");
                 str_concat(msg, command);
@@ -2625,7 +4197,6 @@ int execute_command64(const char* input, CommandOutput* output) {
             }
         }
 
-        // Dosya bulundu — exec'e yönlendir
         char exec_args[MAX_COMMAND_LENGTH];
         str_cpy(exec_args, elf_filename);
         if (args && str_len(args) > 0) {
@@ -2635,7 +4206,6 @@ int execute_command64(const char* input, CommandOutput* output) {
         cmd_exec(exec_args, output);
         return 1;
     }
-    // ── ELF fallback sonu ───────────────────────────────────────────────────
 }
 
 const Command* get_all_commands64(int* count) {

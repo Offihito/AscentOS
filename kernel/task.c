@@ -51,6 +51,31 @@ static int          task_system_initialized = 0;
 static task_t* task_exit_previous = NULL;
 
 // ============================================================
+// ZOMBIE LİSTESİ
+//
+// task_exit() çağrıldığında task ready_queue'dan çıkar.
+// Ama parent waitpid() ile toplayana kadar TCB kaybolmamalı.
+// Bu yüzden TERMINATED yerine ZOMBIE yapıp burada tutuyoruz.
+// task_find_by_pid() bu listeye de bakıyor; waitpid bulabilsin.
+// ============================================================
+static task_t* zombie_list_head = NULL;
+
+static void zombie_list_add(task_t* t) {
+    t->next = zombie_list_head;
+    t->prev = NULL;
+    if (zombie_list_head) zombie_list_head->prev = t;
+    zombie_list_head = t;
+}
+
+static void zombie_list_remove(task_t* t) {
+    if (t->prev) t->prev->next = t->next;
+    else         zombie_list_head = t->next;
+    if (t->next) t->next->prev = t->prev;
+    t->next = NULL;
+    t->prev = NULL;
+}
+
+// ============================================================
 // FOREGROUND TASK YÖNETİMİ
 //
 // foreground_pid != 0 → bir ELF task ön planda çalışıyor.
@@ -801,7 +826,12 @@ void task_exit(void) {
         shell_restore_prompt();
     }
 
-    current_task->state = TASK_STATE_TERMINATED;
+    // ── ZOMBIE yap: parent waitpid() toplayana kadar TCB'yi koru ─
+    // TERMINATED yerine ZOMBIE kullanıyoruz. task_find_by_pid()
+    // zombie listesine de baktığından sys_waitpid() görebilir.
+    current_task->state = TASK_STATE_ZOMBIE;
+    zombie_list_add(current_task);
+
     task_t* next = task_get_next();
     if (!next) next = idle_task;
     task_exit_previous = current_task;
@@ -817,6 +847,25 @@ void task_exit(void) {
 
 void task_set_state(task_t* task, uint32_t new_state) {
     if (task) task->state = new_state;
+}
+
+// Zombie task'ı listeden çıkar ve kaynaklarını serbest bırak.
+// sys_waitpid() child'ı topladıktan sonra çağırır.
+void task_reap_zombie(task_t* task) {
+    if (!task) return;
+    zombie_list_remove(task);
+
+    // Kernel stack: pmm_alloc_pages() ile ayrıldı (sys_fork + task_create_user).
+    if (task->kernel_stack_base)
+        pmm_free_pages((void*)task->kernel_stack_base,
+                       task->kernel_stack_size / 4096);
+
+    // User stack: pmm_alloc_pages_flags() ile ayrıldı.
+    if (task->user_stack_base)
+        pmm_free_pages((void*)task->user_stack_base,
+                       task->user_stack_size / 4096);
+
+    kfree(task);
 }
 
 // ── signal64.c için: SIGSTOP/SIGCONT desteği ─────────────────
@@ -905,6 +954,9 @@ task_t* task_find_by_pid(uint32_t pid) {
     task_t* t = ready_queue.head;
     while (t) { if (t->pid == pid) return t; t = t->next; }
     if (idle_task && idle_task->pid == pid) return idle_task;
+    // Zombie listesine de bak — waitpid() toplayana kadar burada durur
+    t = zombie_list_head;
+    while (t) { if (t->pid == pid) return t; t = t->next; }
     return NULL;
 }
 

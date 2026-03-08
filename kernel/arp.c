@@ -291,14 +291,15 @@ bool arp_resolve(const uint8_t ip[4], uint8_t out_mac[6]){
         return true;
     }
 
-    // Bulunamadı — PENDING yap ve request gönder
+    // Bulunamadı — ilk kez PENDING yap ve request gönder.
+    // Zaten PENDING ise tekrar request GÖNDERME (flood önleme).
     if(idx < 0){
         idx = cache_alloc();
         memcpy_a(g_cache[idx].ip, ip, 4);
         g_cache[idx].state     = ARP_ENTRY_PENDING;
         g_cache[idx].timestamp = (uint32_t)get_system_ticks();
+        arp_request(ip);
     }
-    arp_request(ip);
     return false;
 }
 

@@ -66,6 +66,10 @@ SECTIONS
         __bss_end = .;
     } :data
 
+    /* Heap: sbrk() ve opendir()/_simple_malloc() bu sembolü kullanır */
+    . = ALIGN(0x1000);
+    PROVIDE(__heap_start = .);
+
     . = ALIGN(0x1000);
 
     /DISCARD/ :

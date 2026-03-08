@@ -761,8 +761,9 @@ syscall_entry:
     ; r15 zaten push edildi
 
     ; syscall_frame_t insa et (syscall.h ile eslesmeli, +0..+72)
-    ; user_rsp (+72): execve yeni RSP yazarsa SYSRET oncesi kullanilir
-    push qword 0    ; frame.user_rsp (+72) — dispatch override edebilir
+    ; user_rsp (+72): gercek user RSP'yi kaydet (sys_fork icin gerekli)
+    ; execve de bu alani yeni RSP ile override edebilir
+    push r15        ; frame.user_rsp (+72) — gercek user RSP (r15'te sakliydi)
     push r11        ; frame.r11  (+64)
     push rcx        ; frame.rcx  (+56)
     push r9         ; frame.r9   (+48)
