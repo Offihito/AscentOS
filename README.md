@@ -16,7 +16,7 @@
 - **Musl libc** integration
 - **First userland application:** [kilo](https://github.com/antirez/kilo) text editor successfully ported
 - **GRUB2 multiboot booting**
-- **Early network stack** preparations in progress
+- **Full Network Stack**
 
 The OS currently **successfully boots on its own**, can read/write files on FAT32, and switches to a basic graphical mode.
 
