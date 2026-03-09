@@ -359,10 +359,7 @@ static void net_stack_init(void) {
     tcp_init();    // IPv4'e proto=6 kaydeder
     serial_print("[NET] TCP hazir.\n");
 
-    dhcp_init();   // UDP port 68 dinlemeye alir
     serial_print("[NET] DHCP hazir. DHCPDISCOVER gonderiliyor...\n");
-
-    dhcp_discover();   // DHCPACK gelince arp_init() + ipv4_set_gateway() otomatik calisir
 }
 
 // ============================================================================

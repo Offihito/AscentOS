@@ -76,7 +76,10 @@ scheduler.o: kernel/scheduler.c kernel/scheduler.h kernel/task.h
 nano64.o: apps/nano64.c apps/nano64.h
 	$(CC) $(CFLAGS) -c apps/nano64.c -o nano64.o
 
-vesa64.o: kernel/vesa64.c kernel/vesa64.h
+font8x16.o: kernel/font8x16.c kernel/font8x16.h
+	$(CC) $(CFLAGS) -c kernel/font8x16.c -o font8x16.o
+
+vesa64.o: kernel/vesa64.c kernel/vesa64.h kernel/font8x16.h
 	$(CC) $(CFLAGS) -c kernel/vesa64.c -o vesa64.o
 
 syscall.o: kernel/syscall.c kernel/syscall.h kernel/signal64.h
@@ -155,7 +158,7 @@ kernel64.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h kernel/wm64.h
 	$(CC) $(CFLAGS) -c kernel/kernel64.c -o kernel64.o
 
 KERNEL_OBJS = boot64.o interrupts64.o \
-              vesa64.o gui64.o compositor64.o wm64.o mouse64.o \
+              font8x16.o vesa64.o gui64.o compositor64.o wm64.o mouse64.o \
               keyboard.o kernel64.o taskbar.o \
               commands64.o syscalltest64.o files64.o disk64.o elf64.o nano64.o \
               pmm.o heap.o vmm64.o timer.o task.o scheduler.o \
