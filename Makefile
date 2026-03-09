@@ -67,6 +67,9 @@ vmm64.o: kernel/vmm64.c kernel/vmm64.h kernel/pmm.h kernel/heap.h
 timer.o: kernel/timer.c kernel/timer.h
 	$(CC) $(CFLAGS) -c kernel/timer.c -o timer.o
 
+pcspk.o: kernel/pcspk.c kernel/pcspk.h
+	$(CC) $(CFLAGS) -c kernel/pcspk.c -o pcspk.o
+
 task.o: kernel/task.c kernel/task.h
 	$(CC) $(CFLAGS) -c kernel/task.c -o task.o
 
@@ -161,7 +164,7 @@ KERNEL_OBJS = boot64.o interrupts64.o \
               font8x16.o vesa64.o gui64.o compositor64.o wm64.o mouse64.o \
               keyboard.o kernel64.o taskbar.o \
               commands64.o syscalltest64.o files64.o disk64.o elf64.o nano64.o \
-              pmm.o heap.o vmm64.o timer.o task.o scheduler.o \
+              pmm.o heap.o vmm64.o timer.o pcspk.o task.o scheduler.o \
               page_fault.o syscall.o signal64.o \
               panic64.o rtl8139.o arp.o ipv4.o icmp.o udp.o dhcp.o tcp.o http.o
 
@@ -336,6 +339,7 @@ run: AscentOS.iso disk.img install-userland
 	  -m 1024M -cpu qemu64 -boot d \
 	  -serial stdio -vga std \
 	  -usb -device usb-tablet \
+	  -audiodev pa,id=snd0 -machine pcspk-audiodev=snd0 \
 	  -netdev user,id=net0,restrict=off,hostfwd=udp::5000-:5000,hostfwd=udp::5001-:5001,hostfwd=udp::5002-:5002,hostfwd=tcp::8080-:8080,hostfwd=tcp::8081-:8081 \
 	  -device rtl8139,netdev=net0 \
 	  -display gtk,zoom-to-fit=off
@@ -351,6 +355,7 @@ net-test: AscentOS.iso disk.img install-userland
 	  -m 1024M -cpu qemu64 -boot d \
 	  -serial stdio -vga std \
 	  -usb -device usb-tablet \
+	  -audiodev pa,id=snd0 -machine pcspk-audiodev=snd0 \
 	  -netdev user,id=net0,restrict=off,hostfwd=udp::5000-:5000,hostfwd=udp::5001-:5001,hostfwd=tcp::8080-:8080 \
 	  -device rtl8139,netdev=net0 \
 	  -object filter-dump,id=dump0,netdev=net0,file=/tmp/ascent_net.pcap \
@@ -363,6 +368,7 @@ debug: AscentOS.iso disk.img
 	  -m 512M -cpu qemu64 -boot d \
 	  -serial stdio -vga std \
 	  -usb -device usb-tablet \
+	  -audiodev pa,id=snd0 -machine pcspk-audiodev=snd0 \
 	  -netdev user,id=net0,restrict=off \
 	  -device rtl8139,netdev=net0 \
 	  -s -S

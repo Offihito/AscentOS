@@ -11,6 +11,7 @@
 #include "../kernel/elf64.h"         // ELF-64 loader
 #include "../kernel/syscall.h"       // SYSCALL/SYSRET altyapısı
 #include "../kernel/signal64.h"      // SYS_SIGACTION, SYS_SIGPROCMASK vb. (v10)
+#include "../kernel/pcspk.h"
 
 // ============================================================================
 // RTL8139 Ağ Sürücüsü — extern bildirimleri
@@ -3959,6 +3960,89 @@ static void cmd_tcptest(const char* args, CommandOutput* output) {
     output_add_line(output, sum, g_tcp_data_recvd ? 0x0A : (g_tcp_connected ? 0x0E : 0x0C));
 }
 
+// PC SPEAKER TEST COMMAND
+
+void cmd_beep(const char* args, CommandOutput* output) {
+    // Argümansız: sistem beep
+    // "beep 440"      → 440 Hz, 300ms
+    // "beep 440 500"  → 440 Hz, 500ms
+    // "beep boot"     → boot melodisi
+    // "beep stop"     → sustur
+
+    if (!args || args[0] == '\0') {
+        // Varsayılan sistem beep
+        pcspk_system_beep();
+        output_add_line(output, "Beep! (440 Hz, 100ms)", VGA_CYAN);
+        return;
+    }
+
+    // "stop" komutu
+    if (str_cmp(args, "stop") == 0) {
+        pcspk_stop();
+        output_add_line(output, "Speaker stopped.", VGA_CYAN);
+        return;
+    }
+
+    // "boot" melodisi
+    if (str_cmp(args, "boot") == 0) {
+        pcspk_boot_melody();
+        output_add_line(output, "Boot melody played!", VGA_CYAN);
+        return;
+    }
+
+    // Sayısal argüman: frekans [ms]
+    uint32_t freq = 0;
+    uint32_t dur  = 300;   // varsayılan süre: 300ms
+
+    const char* p = args;
+
+    // Frekansı parse et
+    while (*p >= '0' && *p <= '9') {
+        freq = freq * 10 + (*p - '0');
+        p++;
+    }
+
+    // İkinci argüman (süre) varsa parse et
+    while (*p == ' ') p++;
+    if (*p >= '0' && *p <= '9') {
+        dur = 0;
+        while (*p >= '0' && *p <= '9') {
+            dur = dur * 10 + (*p - '0');
+            p++;
+        }
+    }
+
+    // Sınır kontrol
+    if (freq < 20)    freq = 20;
+    if (freq > 20000) freq = 20000;
+    if (dur  < 10)    dur  = 10;
+    if (dur  > 5000)  dur  = 5000;
+
+    pcspk_beep(freq, dur);
+
+    // Çıktı: "Beep: 440 Hz, 300 ms"
+    char buf[64];
+    // Basit sayı→string (kernel'deki int_to_str'i kullan)
+    extern void int_to_str(int num, char* str);
+    char fstr[16], dstr[16];
+    int_to_str((int)freq, fstr);
+    int_to_str((int)dur,  dstr);
+
+    // buf = "Beep: " + freq + " Hz, " + dur + " ms"
+    char* bp = buf;
+    const char* prefix = "Beep: ";
+    for (const char* s = prefix; *s; s++) *bp++ = *s;
+    for (const char* s = fstr;   *s; s++) *bp++ = *s;
+    const char* mid = " Hz, ";
+    for (const char* s = mid; *s; s++) *bp++ = *s;
+    for (const char* s = dstr; *s; s++) *bp++ = *s;
+    const char* suf = " ms";
+    for (const char* s = suf; *s; s++) *bp++ = *s;
+    *bp = '\0';
+
+    output_add_line(output, buf, VGA_CYAN);
+}
+
 // ============================================================================
 // GFX KOMUTU — GUI moduna geç
 // ============================================================================
@@ -4065,6 +4149,9 @@ static Command command_table[] = {
 
     // Panic test
     {"panic", "Kernel panic ekranini test et [df|gp|pf|ud|de|stack]", cmd_panic},
+
+    // PC Speaker test
+    {"beep", "PC Speaker ile ses cikar  ornek: beep 440 300", cmd_beep},
 };
 static int command_count = sizeof(command_table) / sizeof(Command);
 
