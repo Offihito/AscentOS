@@ -87,10 +87,25 @@ static pte_t* vmm_get_pte(page_table_t* pml4, uint64_t virtual_addr, int create)
         pdpt = vmm_alloc_page_table();
         if (!pdpt) return NULL;
         uint64_t pdpt_phys = (uint64_t)pdpt - KERNEL_VMA + KERNEL_PHYS;
-        *pml4e = pdpt_phys | PAGE_PRESENT | PAGE_WRITE;
+        *pml4e = pdpt_phys | PAGE_PRESENT | PAGE_WRITE | (pml4_idx < 256 ? PAGE_USER : 0);
     } else {
         uint64_t pdpt_phys = PTE_GET_ADDR(*pml4e);
-        pdpt = (page_table_t*)(pdpt_phys + KERNEL_VMA - KERNEL_PHYS);
+        // Güvenlik: lower-half (PML4[0..255]) entry'lerin PDPT adresi
+        // GRUB'dan kalmış olabilir. phys + offset → non-canonical → #GP.
+        // Sanal adresin canonical aralıkta olup olmadığını kontrol et.
+        uint64_t pdpt_virt = pdpt_phys + KERNEL_VMA - KERNEL_PHYS;
+        uint64_t top_bits  = pdpt_virt >> 48;
+        if (top_bits != 0x0000 && top_bits != 0xFFFF) {
+            // Non-canonical PDPT → bu GRUB'un bıraktığı bozuk entry.
+            // Temizle ve sıfırdan yeni bir PDPT oluştur.
+            if (!create) return NULL;
+            pdpt = vmm_alloc_page_table();
+            if (!pdpt) return NULL;
+            uint64_t new_phys = (uint64_t)pdpt - KERNEL_VMA + KERNEL_PHYS;
+            *pml4e = new_phys | PAGE_PRESENT | PAGE_WRITE | (pml4_idx < 256 ? PAGE_USER : 0);
+        } else {
+            pdpt = (page_table_t*)pdpt_virt;
+        }
     }
     
     // PDPT entry
@@ -148,6 +163,23 @@ void vmm_init(void) {
     kernel_address_space.pml4 = (page_table_t*)(cr3 + KERNEL_VMA - KERNEL_PHYS);
     
     serial_print("VMM: Using existing page tables\n");
+
+    // GRUB/bootloader lower-half PML4 girdilerini temizle.
+    //
+    // GRUB yüklenirken identity-map için PML4[0..255] bazı entry'leri kurar.
+    // Bu entry'lerin içerdiği PDPT fiziksel adresleri, kernel'ın kullandığı
+    // "phys + KERNEL_VMA - KERNEL_PHYS" formülüyle non-canonical sanal adrese
+    // dönüşür → vmm_get_pte içinde #GP.
+    //
+    // Kernel sadece PML4[256..511] (higher-half) kullandığından
+    // [0..255] aralığını sıfırlamak güvenli; kernel kodu buraya erişmez.
+    page_table_t* pml4 = kernel_address_space.pml4;
+    for (int i = 0; i < 256; i++) {
+        pml4->entries[i] = 0;
+    }
+    vmm_flush_tlb_all();
+    serial_print("VMM: Lower-half PML4 entries cleared\n");
+
     serial_print("VMM: Initialization complete\n");
 }
 

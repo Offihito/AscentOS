@@ -5407,6 +5407,138 @@ static void sys_prlimit64(syscall_frame_t* frame) {
     frame->rax = 0;
 }
 
+// ============================================================
+// sys_socket — Unix domain + AF_INET socket oluştur
+//   rdi = domain (AF_UNIX / AF_INET)
+//   rsi = type   (SOCK_STREAM | SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC)
+//   rdx = protocol (genellikle 0)
+//   Dönüş: yeni fd | EINVAL | EAFNOSUPPORT | EMFILE
+// ============================================================
+static void sys_socket(syscall_frame_t* frame) {
+    int domain   = (int)frame->rdi;
+    int type     = (int)frame->rsi;
+    // int protocol = (int)frame->rdx;   // şimdilik kullanılmıyor
+
+    // Desteklenen adres aileleri: AF_UNIX, AF_INET
+    if (domain != AF_UNIX && domain != AF_INET) {
+        frame->rax = SYSCALL_ERR_INVAL;   // EAFNOSUPPORT yerine EINVAL (basit)
+        return;
+    }
+
+    // Tip: SOCK_STREAM veya SOCK_DGRAM (bayraklar temizlenerek)
+    int base_type = type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
+    if (base_type != SOCK_STREAM && base_type != SOCK_DGRAM) {
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    task_t* t = task_get_current();
+    if (!t) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    // fd tablosunda socket için bir slot ayır
+    // FD_TYPE_SPECIAL kullanıyoruz; path alanına tip bilgisi yazıyoruz
+    uint16_t open_flags = (uint16_t)(O_RDWR);
+    if (type & SOCK_NONBLOCK) open_flags |= O_NONBLOCK;
+
+    int fd = fd_alloc(t->fd_table, FD_TYPE_SPECIAL, open_flags, "socket");
+    if (fd < 0) { frame->rax = SYSCALL_ERR_MFILE; return; }
+
+    fd_entry_t* entry = fd_get(t->fd_table, fd);
+    if (entry) {
+        // domain/type bilgisini path alanına kodla (debug / bağlantı kontrolü için)
+        // Format: "sock:AF:TYPE"  örn. "sock:1:1"
+        char* p = entry->path;
+        p[0]='s'; p[1]='o'; p[2]='c'; p[3]='k'; p[4]=':';
+        p[5] = '0' + (char)(domain / 10);
+        p[6] = '0' + (char)(domain % 10);
+        p[7] = ':';
+        p[8] = '0' + (char)(base_type);
+        p[9] = '\0';
+
+        if (type & SOCK_CLOEXEC)
+            entry->fd_flags |= FD_CLOEXEC;
+    }
+
+    serial_print("[socket] domain=");
+    { char b[8]; int_to_str(domain, b); serial_print(b); }
+    serial_print(" type=");
+    { char b[8]; int_to_str(base_type, b); serial_print(b); }
+    serial_print(" -> fd=");
+    { char b[8]; int_to_str(fd, b); serial_print(b); }
+    serial_print("\n");
+
+    frame->rax = (uint64_t)(int64_t)fd;
+}
+
+// ============================================================
+// sys_connect — bir socket'i uzak adrese bağla
+//   rdi = sockfd
+//   rsi = *sockaddr  (sockaddr_un_t veya sockaddr_in_t)
+//   rdx = addrlen
+//   Dönüş: 0 | EBADF | EFAULT | EINVAL | ENOENT (unix path yok) | ECONNREFUSED
+//
+//   AscentOS v1: AF_UNIX için path loglama + başarı simülasyonu.
+//   Gerçek IPC/VFS bağlantısı gelecekte eklenecek.
+// ============================================================
+static void sys_connect(syscall_frame_t* frame) {
+    int      sockfd  = (int)frame->rdi;
+    void*    addr    = (void*)frame->rsi;
+    uint32_t addrlen = (uint32_t)frame->rdx;
+
+    if (!addr) { frame->rax = SYSCALL_ERR_FAULT; return; }
+    if (addrlen < 2) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    task_t* t = task_get_current();
+    if (!t) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    fd_entry_t* entry = fd_get(t->fd_table, sockfd);
+    if (!entry || !entry->is_open || entry->type != FD_TYPE_SPECIAL) {
+        frame->rax = SYSCALL_ERR_BADF;
+        return;
+    }
+
+    // Sadece AF_UNIX destekleniyor (X11 /tmp/.X11-unix/X0)
+    sockaddr_un_t* un = (sockaddr_un_t*)addr;
+    if (un->sun_family != AF_UNIX) {
+        // AF_INET bağlantısı: şimdilik ECONNREFUSED
+        serial_print("[connect] AF_INET not supported yet\n");
+        frame->rax = (uint64_t)(int64_t)-111;   // -ECONNREFUSED
+        return;
+    }
+
+    if (addrlen < 3) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    // sun_path: abstract socket ise ilk byte '\0' olur
+    const char* path = un->sun_path;
+    int abstract = (path[0] == '\0');
+
+    serial_print("[connect] AF_UNIX path=");
+    serial_print(abstract ? "<abstract>" : path);
+    serial_print(" fd=");
+    { char b[8]; int_to_str(sockfd, b); serial_print(b); }
+    serial_print("\n");
+
+    // Bağlantı durumunu fd'nin path alanına yaz
+    if (entry) {
+        // "conn:" öneki ile bağlı olduğunu işaretle
+        char* p = entry->path;
+        p[0]='c'; p[1]='o'; p[2]='n'; p[3]='n'; p[4]=':';
+        if (!abstract) {
+            // path'in ilk 44 karakterini kopyala
+            int i = 0;
+            while (path[i] && i < 44) { p[5+i] = path[i]; i++; }
+            p[5+i] = '\0';
+        } else {
+            p[5]='<'; p[6]='a'; p[7]='b'; p[8]='s'; p[9]='>'; p[10]='\0';
+        }
+    }
+
+    // Başarı: X11 server varlığı VFS'e entegre edilene kadar stub olarak 0 döner.
+    // Gerçek implementasyon: VFS'te socket dosyasını bul, karşı tarafın
+    // listen kuyruğuna ekle, iki yönlü pipe_buf çifti oluştur.
+    frame->rax = 0;
+}
+
 void syscall_dispatch(syscall_frame_t* frame) {
     uint64_t num = frame->rax;
 
@@ -5519,6 +5651,9 @@ void syscall_dispatch(syscall_frame_t* frame) {
     case SYS_OPENAT:           sys_openat(frame);           break;
     case SYS_NEWFSTATAT:       sys_newfstatat(frame);       break;
     case SYS_PRLIMIT64:        sys_prlimit64(frame);        break;
+    // v28 – X11 desteği: socket altyapısı
+    case SYS_SOCKET:           sys_socket(frame);           break;
+    case SYS_CONNECT:          sys_connect(frame);          break;
     // v10 – sinyal altyapısı
     case SYS_SIGACTION:    sys_sigaction(frame);    break;
     case SYS_SIGPROCMASK:  sys_sigprocmask(frame);  break;

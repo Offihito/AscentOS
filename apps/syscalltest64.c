@@ -2,6 +2,7 @@
 // SYSCALLTEST64.C — Syscall komutları
 // commands64.c'den ayrılmıştır.
 // v27: +writev/madvise/exit_group/openat/newfstatat/prlimit64
+// v28: +socket/connect (X11 altyapısı)
 // ===========================================
 
 #include <stddef.h>
@@ -64,7 +65,7 @@ static void sc_result(CommandOutput* output, int idx, const char* name,
 }
 
 // ============================================================
-// CMD_SYSCALLTEST – syscall test paketi v27 (360 test)
+// CMD_SYSCALLTEST – syscall test paketi v28 (372 test)
 //
 // NOTLAR:
 //   - SYS_WRITE serial'a yazar (VGA değil) — kasıtlı.
@@ -221,6 +222,19 @@ static void sc_result(CommandOutput* output, int idx, const char* name,
 //     [358] prlimit64(0, RLIMIT_NOFILE, NULL, old) → cur==MAX_FDS
 //     [359] prlimit64(0, RLIMIT_STACK, NULL, old)  → cur > 0
 //     [360] prlimit64(0, geçersiz res, NULL, NULL) → EINVAL
+//   - v28 – X11 altyapısı: socket(41) / connect(42):
+//     [361] socket(AF_UNIX, SOCK_STREAM, 0)          → fd >= 3
+//     [362] close(socket_fd)                         → 0
+//     [363] socket(AF_INET, SOCK_STREAM, 0)          → fd >= 3
+//     [364] socket(AF_UNIX, SOCK_DGRAM, 0)           → fd >= 3
+//     [365] socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC)→ fd >= 3
+//     [366] socket(AF_UNIX, SOCK_STREAM|SOCK_NONBLOCK)→ fd >= 3
+//     [367] socket(bad domain=99)                    → EINVAL
+//     [368] socket(bad type=99)                      → EINVAL
+//     [369] connect(fd=-1)                           → EBADF
+//     [370] connect(NULL addr)                       → EFAULT
+//     [371] connect(addrlen < 2)                     → EINVAL
+//     [372] connect(AF_UNIX, X11 path)               → 0 (stub)
 // ============================================================
 void cmd_syscalltest(const char* args, CommandOutput* output) {
     (void)args;
@@ -4185,7 +4199,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
     {
         volatile uint32_t uaddr311 = 0;
         // arg4 (timeout) = NULL için R10=0 gerekir; _SC3 yeterli (r10 clobber listede).
-        uint64_t r10_save = 0;
+        uint64_t r10_save = 0; (void)r10_save;
         __asm__ volatile(
             "xor %%r10d, %%r10d\n\t"
             "xor %%r8d,  %%r8d\n\t"
@@ -4792,17 +4806,212 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
                   "expect EINVAL(-22)", &pass, &fail);
     }
 
+    // ── v28 – socket / connect (X11 altyapısı) ──────────────────────────
+    // [361] socket(AF_UNIX, SOCK_STREAM, 0)  → fd >= 3
+    {
+        _SC3(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0);
+        sc_result(output, 361, "socket(AF_UNIX,STREAM)", (int64_t)ret,
+                  (int64_t)ret >= 3,
+                  "expect fd>=3", &pass, &fail);
+        int sock_fd = (int64_t)ret >= 3 ? (int)ret : -1;
+
+        // [362] socket fd'sini close() ile kapat → 0
+        if (sock_fd >= 0) {
+            int64_t cret;
+            __asm__ volatile("syscall"
+                : "=a"(cret)
+                : "a"((uint64_t)SYS_CLOSE), "D"((uint64_t)sock_fd)
+                : "rcx","r11","memory");
+            sc_result(output, 362, "close(socket_fd)", cret,
+                      cret == 0, "expect 0", &pass, &fail);
+        } else {
+            SCPRINT("[362] close(socket_fd)  SKIP (socket failed)", VGA_YELLOW);
+        }
+    }
+
+    // [363] socket(AF_INET, SOCK_STREAM, 0)  → fd >= 3
+    {
+        _SC3(SYS_SOCKET, AF_INET, SOCK_STREAM, 0);
+        sc_result(output, 363, "socket(AF_INET,STREAM)", (int64_t)ret,
+                  (int64_t)ret >= 3,
+                  "expect fd>=3", &pass, &fail);
+        if ((int64_t)ret >= 3) {
+            int fd363 = (int)ret;
+            int64_t cret;
+            __asm__ volatile("syscall"
+                : "=a"(cret)
+                : "a"((uint64_t)SYS_CLOSE), "D"((uint64_t)fd363)
+                : "rcx","r11","memory");
+            (void)cret;
+        }
+    }
+
+    // [364] socket(AF_UNIX, SOCK_DGRAM, 0)   → fd >= 3
+    {
+        _SC3(SYS_SOCKET, AF_UNIX, SOCK_DGRAM, 0);
+        sc_result(output, 364, "socket(AF_UNIX,DGRAM)", (int64_t)ret,
+                  (int64_t)ret >= 3,
+                  "expect fd>=3", &pass, &fail);
+        if ((int64_t)ret >= 3) {
+            int fd364 = (int)ret;
+            int64_t cret;
+            __asm__ volatile("syscall"
+                : "=a"(cret)
+                : "a"((uint64_t)SYS_CLOSE), "D"((uint64_t)fd364)
+                : "rcx","r11","memory");
+            (void)cret;
+        }
+    }
+
+    // [365] socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0) → fd >= 3
+    {
+        _SC3(SYS_SOCKET, AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        sc_result(output, 365, "socket(AF_UNIX,STREAM|CLOEXEC)", (int64_t)ret,
+                  (int64_t)ret >= 3,
+                  "expect fd>=3", &pass, &fail);
+        if ((int64_t)ret >= 3) {
+            int fd365 = (int)ret;
+            int64_t cret;
+            __asm__ volatile("syscall"
+                : "=a"(cret)
+                : "a"((uint64_t)SYS_CLOSE), "D"((uint64_t)fd365)
+                : "rcx","r11","memory");
+            (void)cret;
+        }
+    }
+
+    // [366] socket(AF_UNIX, SOCK_STREAM|SOCK_NONBLOCK, 0) → fd >= 3
+    {
+        _SC3(SYS_SOCKET, AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        sc_result(output, 366, "socket(AF_UNIX,STREAM|NONBLOCK)", (int64_t)ret,
+                  (int64_t)ret >= 3,
+                  "expect fd>=3", &pass, &fail);
+        if ((int64_t)ret >= 3) {
+            int fd366 = (int)ret;
+            int64_t cret;
+            __asm__ volatile("syscall"
+                : "=a"(cret)
+                : "a"((uint64_t)SYS_CLOSE), "D"((uint64_t)fd366)
+                : "rcx","r11","memory");
+            (void)cret;
+        }
+    }
+
+    // [367] socket(geçersiz domain=99) → EINVAL
+    {
+        _SC3(SYS_SOCKET, 99, SOCK_STREAM, 0);
+        sc_result(output, 367, "socket(bad_domain)->EINVAL", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                  "expect EINVAL(-22)", &pass, &fail);
+    }
+
+    // [368] socket(AF_UNIX, geçersiz type=99) → EINVAL
+    {
+        _SC3(SYS_SOCKET, AF_UNIX, 99, 0);
+        sc_result(output, 368, "socket(bad_type)->EINVAL", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                  "expect EINVAL(-22)", &pass, &fail);
+    }
+
+    // [369] connect(geçersiz fd=-1) → EBADF
+    {
+        // sockaddr_un: AF_UNIX + "/tmp/.X11-unix/X0"
+        struct { uint16_t fam; char path[20]; } addr369;
+        addr369.fam = AF_UNIX;
+        addr369.path[0]='/'; addr369.path[1]='t'; addr369.path[2]='m';
+        addr369.path[3]='p'; addr369.path[4]='/'; addr369.path[5]='\0';
+        _SC3(SYS_CONNECT, (uint64_t)(int64_t)-1, &addr369,
+             (uint64_t)(2 + 5));
+        sc_result(output, 369, "connect(bad_fd)->EBADF", (int64_t)ret,
+                  (int64_t)ret == (int64_t)SYSCALL_ERR_BADF,
+                  "expect EBADF(-9)", &pass, &fail);
+    }
+
+    // [370] connect(NULL addr) → EFAULT
+    {
+        _SC3(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0);
+        int fd370 = (int64_t)ret >= 3 ? (int)ret : -1;
+        if (fd370 >= 0) {
+            _SC3(SYS_CONNECT, fd370, 0, 16);
+            sc_result(output, 370, "connect(NULL addr)->EFAULT", (int64_t)ret,
+                      (int64_t)ret == (int64_t)SYSCALL_ERR_FAULT,
+                      "expect EFAULT(-14)", &pass, &fail);
+            int64_t cret;
+            __asm__ volatile("syscall"
+                : "=a"(cret)
+                : "a"((uint64_t)SYS_CLOSE), "D"((uint64_t)fd370)
+                : "rcx","r11","memory");
+            (void)cret;
+        } else {
+            SCPRINT("[370] connect(NULL)->EFAULT  SKIP (socket failed)", VGA_YELLOW);
+        }
+    }
+
+    // [371] connect(addrlen < 2) → EINVAL
+    {
+        _SC3(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0);
+        int fd371 = (int64_t)ret >= 3 ? (int)ret : -1;
+        if (fd371 >= 0) {
+            struct { uint16_t fam; char path[4]; } addr371;
+            addr371.fam = AF_UNIX;
+            _SC3(SYS_CONNECT, fd371, &addr371, 1);   // addrlen=1 < 2
+            sc_result(output, 371, "connect(addrlen<2)->EINVAL", (int64_t)ret,
+                      (int64_t)ret == (int64_t)SYSCALL_ERR_INVAL,
+                      "expect EINVAL(-22)", &pass, &fail);
+            int64_t cret;
+            __asm__ volatile("syscall"
+                : "=a"(cret)
+                : "a"((uint64_t)SYS_CLOSE), "D"((uint64_t)fd371)
+                : "rcx","r11","memory");
+            (void)cret;
+        } else {
+            SCPRINT("[371] connect(addrlen<2)->EINVAL  SKIP", VGA_YELLOW);
+        }
+    }
+
+    // [372] connect(AF_UNIX, "/tmp/.X11-unix/X0") → 0 (stub: başarı)
+    {
+        _SC3(SYS_SOCKET, AF_UNIX, SOCK_STREAM, 0);
+        int fd372 = (int64_t)ret >= 3 ? (int)ret : -1;
+        if (fd372 >= 0) {
+            // sockaddr_un ile X11 socket yolu
+            struct {
+                uint16_t sun_family;
+                char     sun_path[20];
+            } addr372;
+            addr372.sun_family = AF_UNIX;
+            // "/tmp/.X11-unix/X0"
+            const char* p = "/tmp/.X11-unix/X0";
+            int i = 0;
+            while (p[i] && i < 19) { addr372.sun_path[i] = p[i]; i++; }
+            addr372.sun_path[i] = '\0';
+            uint32_t alen = (uint32_t)(2 + i + 1);
+            _SC3(SYS_CONNECT, fd372, &addr372, alen);
+            sc_result(output, 372, "connect(X11_path)->0", (int64_t)ret,
+                      (int64_t)ret == 0,
+                      "expect 0 (stub)", &pass, &fail);
+            int64_t cret;
+            __asm__ volatile("syscall"
+                : "=a"(cret)
+                : "a"((uint64_t)SYS_CLOSE), "D"((uint64_t)fd372)
+                : "rcx","r11","memory");
+            (void)cret;
+        } else {
+            SCPRINT("[372] connect(X11_path)->0  SKIP (socket failed)", VGA_YELLOW);
+        }
+    }
+
     // ── Genel Özet ─────────────────────────────────────────────────
     SCPRINT("", VGA_WHITE);
     SCPRINT("────────────────────────────────────────", VGA_CYAN);
     str_cpy(line, "Result: ");
     {char b[8]; int_to_str(pass, b); str_concat(line, b);}
-    str_concat(line, "/360 passed  (");
+    str_concat(line, "/372 passed  (");
     {char b[8]; int_to_str(fail, b); str_concat(line, b);}
     str_concat(line, " failed)");
     SCPRINT(line, fail == 0 ? VGA_GREEN : VGA_YELLOW);
     if (fail == 0)
-        SCPRINT("All v27 syscall tests passed!", VGA_GREEN);
+        SCPRINT("All v28 syscall tests passed!", VGA_GREEN);
     else
         SCPRINT("Failed tests: check serial log.", VGA_RED);
 

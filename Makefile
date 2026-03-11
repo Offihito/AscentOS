@@ -124,7 +124,10 @@ compositor64.o: kernel/compositor64.c kernel/compositor64.h kernel/gui64.h
 mouse64.o: kernel/mouse64.c kernel/mouse64.h
 	$(CC) $(CFLAGS) -c kernel/mouse64.c -o mouse64.o
 
-keyboard.o: kernel/keyboard_unified.c
+idt64.o: kernel/idt64.c kernel/idt64.h kernel/task.h
+	$(CC) $(CFLAGS) -c kernel/idt64.c -o idt64.o
+
+keyboard.o: kernel/keyboard_unified.c kernel/idt64.h
 	$(CC) $(CFLAGS) -c kernel/keyboard_unified.c -o keyboard.o
 
 taskbar.o: kernel/taskbar64.c kernel/taskbar64.h
@@ -160,7 +163,7 @@ syscalltest64.o: apps/syscalltest64.c apps/commands64.h kernel/syscall.h kernel/
 kernel64.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h kernel/wm64.h
 	$(CC) $(CFLAGS) -c kernel/kernel64.c -o kernel64.o
 
-KERNEL_OBJS = boot64.o interrupts64.o \
+KERNEL_OBJS = boot64.o interrupts64.o idt64.o \
               font8x16.o vesa64.o gui64.o compositor64.o wm64.o mouse64.o \
               keyboard.o kernel64.o taskbar.o \
               commands64.o syscalltest64.o files64.o disk64.o elf64.o nano64.o \
@@ -249,7 +252,7 @@ USERLAND_LDFLAGS := \
 
 USERLAND_CRT0   := userland/libc/crt0.o
 SYSCALLS_OBJ    := userland/out/syscalls.o
-USERLAND_APPS   := hello calculator shell
+USERLAND_APPS   := hello calculator shell snake
 USERLAND_ELFS   := $(addprefix userland/out/, $(addsuffix .elf, $(USERLAND_APPS)))
 
 .PRECIOUS: userland/out/%.o userland/out/%.elf userland/libc/crt0.o $(SYSCALLS_OBJ)
@@ -305,6 +308,9 @@ hello: userland/out/hello.elf
 calculator: userland/out/calculator.elf
 	@echo "  ✓ calculator.elf hazir"
 
+snake: userland/out/snake.elf
+	@echo "  ✓ snake.elf hazir"
+
 shell: userland/out/shell.elf
 	@echo "  ✓ shell.elf hazir"
 
@@ -314,6 +320,7 @@ install-userland: userland
 	@if [ ! -f disk.img ]; then echo "HATA: disk.img yok"; exit 1; fi
 	mcopy -i disk.img@@1048576 -o userland/out/hello.elf      ::HELLO.ELF
 	mcopy -i disk.img@@1048576 -o userland/out/calculator.elf ::CALC.ELF
+	mcopy -i disk.img@@1048576 -o userland/out/snake.elf      ::SNAKE.ELF
 	mcopy -i disk.img@@1048576 -o userland/out/shell.elf      ::SHELL.ELF
 	@echo "✓ Yazildi:"
 	@mdir -i disk.img@@1048576 :: 2>/dev/null | grep -i elf || true

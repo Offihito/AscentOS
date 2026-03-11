@@ -45,10 +45,23 @@ extern uint64_t vmm_get_physical_address(uint64_t virt);
 #define KERNEL_END   0x500000   // 1 MB start + 4 MB kernel
 
 // ---------------------------------------------------------------------------
-// Virtual stack pool (256 MB – 2 GB)
+// Sanal stack havuzları
+//
+// KERNEL stack havuzu — kernel VMA alanında (PML4[511], zaten kurulu).
+//   GRUB'un lower-half PML4 entry'leri phys+offset → non-canonical adres
+//   ürettiğinden kernel stack'ler kernel VMA'da tutulur.
+//   pmm_alloc_pages(flags=0x3) → bu havuzu kullanır.
+//
+// USER stack havuzu — lower-half, user-space erişilebilir.
+//   is_valid_user_ptr() max 0x00007FFFFFFFFFFF kabul eder.
+//   vmm_init() GRUB PML4[0..255] temizlediğinden artık güvenli.
+//   pmm_alloc_pages_flags(flags=0x7) → bu havuzu kullanır.
 // ---------------------------------------------------------------------------
-#define STACK_POOL_BASE  0x10000000ULL
-#define STACK_POOL_MAX   0x80000000ULL
+#define KSTACK_POOL_BASE  0xFFFFFFFF80800000ULL   // kernel image (~4MB) sonrası
+#define KSTACK_POOL_MAX   0xFFFFFFFFC0000000ULL   // ~1GB, hepsi PML4[511]
+
+#define USTACK_POOL_BASE  0x0000000010000000ULL   // 256 MB
+#define USTACK_POOL_MAX   0x0000000080000000ULL   // 2 GB
 
 // ---------------------------------------------------------------------------
 // Default page flags
@@ -68,7 +81,8 @@ static unsigned long  free_frames  = 0;
 
 static uint64_t       total_memory_kb   = 0;
 static int            pmm_enabled       = 0;
-static uint64_t       stack_pool_cursor = STACK_POOL_BASE;
+static uint64_t       kstack_pool_cursor = KSTACK_POOL_BASE;  // kernel stack havuzu
+static uint64_t       ustack_pool_cursor = USTACK_POOL_BASE;  // user stack havuzu
 
 // ============================================================================
 // Bitmap helpers (inline)
@@ -224,17 +238,23 @@ void* pmm_alloc_pages_flags(uint64_t count, uint64_t map_flags) {
     if (!pmm_enabled || count == 0 || count > 4096) return NULL;
     if (free_frames < count) return NULL;
 
-    uint64_t virt_base = stack_pool_cursor;
+    // map_flags & PAGE_USER (0x4) varsa → user havuzu, yoksa → kernel havuzu
+    int is_user = (map_flags & 0x4) != 0;
+
+    uint64_t pool_base = is_user ? USTACK_POOL_BASE : KSTACK_POOL_BASE;
+    uint64_t pool_max  = is_user ? USTACK_POOL_MAX  : KSTACK_POOL_MAX;
+    uint64_t* cursor   = is_user ? &ustack_pool_cursor : &kstack_pool_cursor;
+
+    uint64_t virt_base = *cursor;
     uint64_t virt_end  = virt_base + count * PAGE_SIZE_PMM;
 
-    if (virt_end > STACK_POOL_MAX) {
-        // wrap (simple policy – production OS would track allocations)
-        stack_pool_cursor = STACK_POOL_BASE;
-        virt_base         = stack_pool_cursor;
-        virt_end          = virt_base + count * PAGE_SIZE_PMM;
-        if (virt_end > STACK_POOL_MAX) return NULL;
+    if (virt_end > pool_max) {
+        *cursor    = pool_base;
+        virt_base  = pool_base;
+        virt_end   = virt_base + count * PAGE_SIZE_PMM;
+        if (virt_end > pool_max) return NULL;
     }
-    stack_pool_cursor = virt_end;
+    *cursor = virt_end;
 
     for (uint64_t i = 0; i < count; i++) {
         void* phys = pmm_alloc_frame();

@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "task.h"
+#include "idt64.h"
 // ============================================================================
 // Forward declarations — kullanılmadan önce bildirilir
 // ============================================================================
@@ -34,46 +35,6 @@ static inline uint8_t inb(uint16_t port) {
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile("outb %0,%1"::"a"(val),"Nd"(port));
 }
-
-// ============================================================================
-// IDT
-// ============================================================================
-struct idt_entry {
-    uint16_t offset_low, selector;
-    uint8_t  ist, type_attr;
-    uint16_t offset_mid;
-    uint32_t offset_high, reserved;
-} __attribute__((packed));
-
-struct idt_ptr {
-    uint16_t limit;
-    uint64_t base;
-} __attribute__((packed));
-
-static struct idt_entry idt[256];
-static struct idt_ptr   idtr;
-
-extern void isr_keyboard(void);
-extern void isr_timer(void);
-extern void isr_mouse(void);
-extern void isr_net(void);    // IRQ11 → RTL8139 ağ kartı
-
-// CPU exception handler'lar (interrupts64.asm)
-extern void isr0(void);  extern void isr1(void);  extern void isr2(void);
-extern void isr3(void);  extern void isr4(void);  extern void isr5(void);
-extern void isr6(void);  extern void isr7(void);  extern void isr8_df(void);
-extern void isr9(void);  extern void isr10(void); extern void isr11(void);
-extern void isr12(void); extern void isr13(void); extern void isr14(void);
-extern void isr15(void); extern void isr16(void); extern void isr17(void);
-extern void isr18(void); extern void isr19(void); extern void isr20(void);
-extern void isr21(void); extern void isr22(void); extern void isr23(void);
-extern void isr24(void); extern void isr25(void); extern void isr26(void);
-extern void isr27(void); extern void isr28(void); extern void isr29(void);
-extern void isr30(void); extern void isr31(void);
-
-// #DF IST1 stack + TSS base (interrupts64.asm / boot64_unified.asm)
-extern uint8_t df_stack_top[];
-extern void load_idt64(struct idt_ptr* ptr);
 
 // ============================================================================
 // Kernel mod (kernel64.c'de tanımlı)
@@ -217,106 +178,6 @@ void process_command64(const char* cmd) {
     }
     println64("", VGA_WHITE);
     show_prompt64();
-}
-
-// ============================================================================
-// IDT + PIC + Timer kurulumu
-// ============================================================================
-static void idt_set(int n, uint64_t h, uint16_t sel, uint8_t attr) {
-    idt[n].offset_low  = h & 0xFFFF;
-    idt[n].selector    = sel;
-    idt[n].ist         = 0;
-    idt[n].type_attr   = attr;
-    idt[n].offset_mid  = (h >> 16) & 0xFFFF;
-    idt[n].offset_high = (h >> 32) & 0xFFFFFFFF;
-    idt[n].reserved    = 0;
-}
-static void pic_remap(void) {
-    outb(0x20, 0x11); outb(0x21, 0x20); outb(0x21, 0x04); outb(0x21, 0x01);
-    outb(0xA0, 0x11); outb(0xA1, 0x28); outb(0xA1, 0x02); outb(0xA1, 0x01);
-    outb(0x21, 0xFF); outb(0xA1, 0xFF); // hepsini kapat, sonra açacağız
-}
-static void irq_enable(uint8_t irq) {
-    uint16_t p = (irq < 8) ? 0x21 : 0xA1;
-    if (irq >= 8) irq -= 8;
-    outb(p, inb(p) & ~(1 << irq));
-}
-
-void init_interrupts64(void) {
-    // Tüm 256 girişi boşalt
-    for (int i = 0; i < 256; i++) idt_set(i, 0, 0, 0);
-
-    // ── CPU Exception handler'ları (INT 0-31) ────────────────────────────────
-    // Bu gate'ler boş bırakılırsa herhangi bir CPU exception (örn. #GP, #PF,
-    // #DF) anında triple fault'a yol açar — CPU handler bulamaz, yeniden fault
-    // üretir, sonunda sistemi resetler.
-    idt_set(0,  (uint64_t)isr0,  0x08, 0x8E); // #DE Divide Error
-    idt_set(1,  (uint64_t)isr1,  0x08, 0x8E); // #DB Debug
-    idt_set(2,  (uint64_t)isr2,  0x08, 0x8E); // #NMI
-    idt_set(3,  (uint64_t)isr3,  0x08, 0x8E); // #BP Breakpoint
-    idt_set(4,  (uint64_t)isr4,  0x08, 0x8E); // #OF Overflow
-    idt_set(5,  (uint64_t)isr5,  0x08, 0x8E); // #BR Bound Range
-    idt_set(6,  (uint64_t)isr6,  0x08, 0x8E); // #UD Invalid Opcode
-    idt_set(7,  (uint64_t)isr7,  0x08, 0x8E); // #NM Device Not Available
-
-    // #DF Double Fault — IST1 kullan (ayrı, temiz stack)
-    // Normal exception path'te RSP bozuksa CPU #DF handler'ını çalıştırmak
-    // için yine o bozuk stack'i kullanır → ikinci fault → triple fault.
-    // IST=1 ile CPU, TSS.IST1'deki df_stack_top'a geçer — RSP'den bağımsız.
-    idt_set(8,  (uint64_t)isr8_df, 0x08, 0x8E);
-    idt[8].ist = 1;  // IST1 → TSS offset+36 = df_stack_top
-
-    idt_set(9,  (uint64_t)isr9,  0x08, 0x8E); // Coprocessor Overrun
-    idt_set(10, (uint64_t)isr10, 0x08, 0x8E); // #TS Invalid TSS
-    idt_set(11, (uint64_t)isr11, 0x08, 0x8E); // #NP Segment Not Present
-    idt_set(12, (uint64_t)isr12, 0x08, 0x8E); // #SS Stack Fault
-    idt_set(13, (uint64_t)isr13, 0x08, 0x8E); // #GP General Protection
-    idt_set(14, (uint64_t)isr14, 0x08, 0x8E); // #PF Page Fault
-    idt_set(15, (uint64_t)isr15, 0x08, 0x8E); // Reserved
-    idt_set(16, (uint64_t)isr16, 0x08, 0x8E); // #MF x87 FP Error
-    idt_set(17, (uint64_t)isr17, 0x08, 0x8E); // #AC Alignment Check
-    idt_set(18, (uint64_t)isr18, 0x08, 0x8E); // #MC Machine Check
-    idt_set(19, (uint64_t)isr19, 0x08, 0x8E); // #XF SIMD FP
-    idt_set(20, (uint64_t)isr20, 0x08, 0x8E); // #VE Virtualization
-    idt_set(21, (uint64_t)isr21, 0x08, 0x8E); // #CP Control Protection
-    idt_set(22, (uint64_t)isr22, 0x08, 0x8E);
-    idt_set(23, (uint64_t)isr23, 0x08, 0x8E);
-    idt_set(24, (uint64_t)isr24, 0x08, 0x8E);
-    idt_set(25, (uint64_t)isr25, 0x08, 0x8E);
-    idt_set(26, (uint64_t)isr26, 0x08, 0x8E);
-    idt_set(27, (uint64_t)isr27, 0x08, 0x8E);
-    idt_set(28, (uint64_t)isr28, 0x08, 0x8E);
-    idt_set(29, (uint64_t)isr29, 0x08, 0x8E);
-    idt_set(30, (uint64_t)isr30, 0x08, 0x8E); // #SX Security
-    idt_set(31, (uint64_t)isr31, 0x08, 0x8E);
-
-    // ── TSS.IST1 = df_stack_top ───────────────────────────────────────────────
-    // tss_t layout (Intel SDM): offset +36 = IST1 (8 byte, little-endian)
-    // kernel_tss boot64_unified.asm'de 104-byte sıfırlanmış alan olarak tanımlı.
-    *((uint64_t*)((uint8_t*)&kernel_tss + 36)) = (uint64_t)df_stack_top;
-
-    // ── PIC + IRQ handler'ları ───────────────────────────────────────────────
-    pic_remap();
-    idt_set(32, (uint64_t)isr_timer,    0x08, 0x8E); // IRQ0 timer
-    idt_set(33, (uint64_t)isr_keyboard, 0x08, 0x8E); // IRQ1 klavye
-    idt_set(43, (uint64_t)isr_net,      0x08, 0x8E); // IRQ11 RTL8139 ağ (0x20+11=43=0x2B)
-    idt_set(44, (uint64_t)isr_mouse,    0x08, 0x8E); // IRQ12 mouse
-
-    idtr.limit = sizeof(idt) - 1;
-    idtr.base  = (uint64_t)&idt;
-    load_idt64(&idtr);
-
-    irq_enable(0);   // timer
-    irq_enable(1);   // klavye
-    irq_enable(2);   // cascade (slave PIC için zorunlu)
-    irq_enable(11);  // RTL8139 ağ kartı
-    irq_enable(12);  // mouse
-
-    // PIT 1000 Hz
-    uint32_t div = 1193182 / 1000;
-    outb(0x43, 0x36); outb(0x40, div & 0xFF); outb(0x40, (div >> 8) & 0xFF);
-    __asm__ volatile("sti");
-    serial_print("[IRQ] IDT + IST1(#DF) + PIC + Timer + KB + Net(IRQ11) + Mouse hazir\n");
 }
 
 // ============================================================================

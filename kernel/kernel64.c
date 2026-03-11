@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "idt64.h"
 
 #define COM1 0x3F8
 
@@ -312,7 +313,6 @@ static void gui_loop(void) {
 // ============================================================================
 // Dış init tanımları
 // ============================================================================
-void init_interrupts64(void);
 void init_keyboard64(void);
 void init_commands64(void);
 void show_prompt64(void);
@@ -374,13 +374,20 @@ void kernel_main(uint64_t multiboot_info) {
     vmm_init();
     gdt_install_user_segments();
     tss_init();
+
+    // IDT'yi erkenden kur: task_init/scheduler_init içinde oluşabilecek
+    // herhangi bir CPU exception (#GP, #PF, #DF) handler'a yönlendirilsin.
+    // IDT kurulmadan önce gelen exception → triple fault → sistem resetler.
+    init_interrupts64();   // IDT + PIC + Timer kurulur; STI henüz yok
+
     task_init();
     scheduler_init();
     sse_init();
     syscall_init();
 
-    // IRQ0(timer) + IRQ1(klavye) + IRQ12(mouse) hepsi init_interrupts64 içinde
-    init_interrupts64();
+    // Task + scheduler hazır, artık timer IRQ'yu güvenle açabiliriz
+    __asm__ volatile("sti");
+    serial_print("[IRQ] STI — interrupts enabled\n");
     init_keyboard64();
     init_commands64();
 

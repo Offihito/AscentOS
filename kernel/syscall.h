@@ -359,6 +359,22 @@ typedef struct {
 #define W_OK   2   // yazma izni var mı?
 #define X_OK   1   // çalıştırma izni var mı?
 
+// ── Ağ / Socket syscall'ları  (Linux x86-64 numaraları) ─────────────────────
+#define SYS_SOCKET       41   // socket(domain, type, protocol)          -> fd | err
+#define SYS_CONNECT      42   // connect(fd, *addr, addrlen)             -> 0  | err
+#define SYS_ACCEPT       43   // accept(fd, *addr, *addrlen)             -> fd | err
+#define SYS_SENDTO       44   // sendto(fd,buf,len,flags,addr,addrlen)   -> sent | err
+#define SYS_RECVFROM     45   // recvfrom(fd,buf,len,flags,addr,*alen)   -> recv | err
+#define SYS_SENDMSG      46   // sendmsg(fd, *msghdr, flags)             -> sent | err
+#define SYS_RECVMSG      47   // recvmsg(fd, *msghdr, flags)             -> recv | err
+#define SYS_SHUTDOWN     48   // shutdown(fd, how)                       -> 0  | err
+#define SYS_BIND         49   // bind(fd, *addr, addrlen)                -> 0  | err
+#define SYS_LISTEN       50   // listen(fd, backlog)                     -> 0  | err
+#define SYS_GETSOCKNAME  51   // getsockname(fd, *addr, *len)            -> 0  | err
+#define SYS_GETPEERNAME  52   // getpeername(fd, *addr, *len)            -> 0  | err
+#define SYS_SETSOCKOPT   54   // setsockopt(fd,lvl,opt,*val,len)         -> 0  | err
+#define SYS_GETSOCKOPT   55   // getsockopt(fd,lvl,opt,*val,*len)        -> 0  | err
+
 // AscentOS özel syscall'lar 400-405 aralığında; Linux syscall'ları max ~450'de bitiyor.
 #define SYSCALL_MAX      407  // AscentOS özel alan üst sınırı (SYS_SLEEP=406)
 
@@ -620,6 +636,73 @@ typedef struct {
     int64_t tv_sec;    // Saniye
     int64_t tv_nsec;   // Nanosaniye (0..999_999_999)
 } timespec_t;
+
+// ============================================================
+// Socket — adres ailesi ve tür sabitleri
+// ============================================================
+#define AF_UNSPEC     0
+#define AF_UNIX       1    // Unix domain socket  (/tmp/.X11-unix/X0 vb.)
+#define AF_LOCAL      AF_UNIX
+#define AF_INET       2    // IPv4
+#define AF_INET6      10   // IPv6
+
+#define SOCK_STREAM   1    // Bağlantı odaklı (TCP / Unix stream)
+#define SOCK_DGRAM    2    // Bağlantısız (UDP / Unix datagram)
+#define SOCK_NONBLOCK 0x800   // O_NONBLOCK ile aynı değer
+#define SOCK_CLOEXEC  0x80000 // O_CLOEXEC ile aynı değer
+
+// shutdown() how değerleri
+#define SHUT_RD   0   // Okuma tarafını kapat
+#define SHUT_WR   1   // Yazma tarafını kapat
+#define SHUT_RDWR 2   // Her ikisini kapat
+
+// setsockopt / getsockopt seviye
+#define SOL_SOCKET  1
+
+// SOL_SOCKET seçenek isimleri
+#define SO_DEBUG        1
+#define SO_REUSEADDR    2
+#define SO_TYPE         3
+#define SO_ERROR        4
+#define SO_SNDBUF       7
+#define SO_RCVBUF       8
+#define SO_KEEPALIVE    9
+#define SO_RCVTIMEO     20
+#define SO_SNDTIMEO     21
+#define SO_PASSCRED     16   // Unix socket: kimlik bilgisi gönder
+#define SO_PEERCRED     17   // Unix socket: karşı tarafın kimliği
+
+// ── sockaddr yapıları ─────────────────────────────────────
+typedef struct {
+    uint16_t sa_family;   // AF_* değeri
+    char     sa_data[14]; // Adres verisi (aile bağımlı)
+} sockaddr_t;
+
+// Unix domain socket adresi
+#define UNIX_PATH_MAX  108
+typedef struct {
+    uint16_t sun_family;             // AF_UNIX
+    char     sun_path[UNIX_PATH_MAX]; // Socket dosya yolu
+} sockaddr_un_t;
+
+// IPv4 socket adresi
+typedef struct {
+    uint16_t sin_family;  // AF_INET
+    uint16_t sin_port;    // Port (network byte order)
+    uint32_t sin_addr;    // IPv4 adresi
+    uint8_t  sin_zero[8]; // Dolgu
+} sockaddr_in_t;
+
+// msghdr — sendmsg/recvmsg için
+typedef struct {
+    void*    msg_name;       // Hedef adres (bağlantısız için)
+    uint32_t msg_namelen;    // Adres uzunluğu
+    iovec_t* msg_iov;        // Scatter/gather tampon dizisi
+    uint64_t msg_iovlen;     // iov eleman sayısı
+    void*    msg_control;    // Yardımcı veri (SCM_RIGHTS vb.)
+    uint64_t msg_controllen; // Yardımcı veri uzunluğu
+    int32_t  msg_flags;      // Alınan mesaj bayrakları
+} msghdr_t;
 
 // ============================================================
 // stack_t yapısı  (SYS_SIGALTSTACK)
