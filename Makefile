@@ -1,4 +1,5 @@
 # AscentOS 64-bit Makefile — UNIFIED (tek kernel, gfx ile GUI)
+# Ext2 filesystem backend (FAT32'den geçiş yapıldı)
 
 CC = gcc
 AS = nasm
@@ -26,6 +27,7 @@ LDFLAGS  = -n -T kernel/linker64.ld -nostdlib
 all: AscentOS.iso userland install-userland
 	@echo "╔═══════════════════════════════════════════════════╗"
 	@echo "║  AscentOS Unified Kernel hazir                   ║"
+	@echo "║  Filesystem: Ext2                                ║"
 	@echo "║  Baslangic: TEXT terminali                       ║"
 	@echo "║  'dhcp'     → Otomatik IP al (10.0.2.15)         ║"
 	@echo "║  'tcptest 10.0.2.2 80' → TCP test               ║"
@@ -39,11 +41,15 @@ all: AscentOS.iso userland install-userland
 # SHARED KERNEL COMPONENTS
 # ============================================================================
 
-files64.o: fs/files64.c
+files64.o: fs/files64.c fs/files64.h kernel/ext2.h kernel/ata64.h
 	$(CC) $(CFLAGS) -c fs/files64.c -o files64.o
 
-disk64.o: kernel/disk64.c
-	$(CC) $(CFLAGS) -c kernel/disk64.c -o disk64.o
+ata64.o: kernel/ata64.c kernel/ata64.h
+	$(CC) $(CFLAGS) -c kernel/ata64.c -o ata64.o
+
+# Ext2 filesystem driver (FAT32'nin yerini aldı)
+ext2.o: kernel/ext2.c kernel/ext2.h kernel/ata64.h fs/files64.h
+	$(CC) $(CFLAGS) -c kernel/ext2.c -o ext2.o
 
 elf64.o: kernel/elf64.c kernel/elf64.h
 	$(CC) $(CFLAGS) -c kernel/elf64.c -o elf64.o
@@ -53,10 +59,6 @@ pmm.o: kernel/pmm.c kernel/pmm.h
 
 heap.o: kernel/heap.c kernel/heap.h kernel/pmm.h
 	$(CC) $(CFLAGS) -c kernel/heap.c -o heap.o
-
-# Backward-compat umbrella (artık kullanılmıyor; pmm.o + heap.o'ya bölündü)
-# memory_unified.o: kernel/memory_unified.c kernel/memory_unified.h
-#	$(CC) $(CFLAGS) -c kernel/memory_unified.c -o memory_unified.o
 
 page_fault.o: kernel/page_fault_handler.c
 	$(CC) $(CFLAGS) -c kernel/page_fault_handler.c -o page_fault.o
@@ -160,13 +162,14 @@ http.o: network/http.c network/http.h network/tcp.h network/arp.h network/ipv4.h
 syscalltest64.o: apps/syscalltest64.c apps/commands64.h kernel/syscall.h kernel/signal64.h kernel/task.h
 	$(CC) $(CFLAGS) -c apps/syscalltest64.c -o syscalltest64.o
 
-kernel64.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h kernel/wm64.h
+kernel64.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h kernel/wm64.h \
+            kernel/ata64.h kernel/ext2.h fs/files64.h
 	$(CC) $(CFLAGS) -c kernel/kernel64.c -o kernel64.o
 
 KERNEL_OBJS = boot64.o interrupts64.o idt64.o \
               font8x16.o vesa64.o gui64.o compositor64.o wm64.o mouse64.o \
               keyboard.o kernel64.o taskbar.o \
-              commands64.o syscalltest64.o files64.o disk64.o elf64.o nano64.o \
+              commands64.o syscalltest64.o files64.o ata64.o ext2.o elf64.o nano64.o \
               pmm.o heap.o vmm64.o timer.o pcspk.o task.o scheduler.o \
               page_fault.o syscall.o signal64.o \
               panic64.o rtl8139.o arp.o ipv4.o icmp.o udp.o dhcp.o tcp.o http.o
@@ -174,11 +177,79 @@ KERNEL_OBJS = boot64.o interrupts64.o idt64.o \
 kernel64.elf: $(KERNEL_OBJS)
 	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o kernel64.elf
 
+# ============================================================================
+# DISK IMAGE — Ext2 formatında (FAT32'nin yerini aldı)
+#
+#  Araç gereksinimi: e2tools veya mke2fs (e2fsprogs paketi)
+#    Ubuntu/Debian: sudo apt install e2fsprogs e2tools
+#
+#  disk.img oluşturma adımları:
+#    1. 64 MB ham disk imajı oluştur
+#    2. ext2 ile formatla (1024-byte block, "AscentOS" etiketi)
+#    3. Temel dizin yapısını kur
+#
+#  NOT: İlk oluşturmada root yetkisi gerekmez (loop mount yerine
+#       e2tools kullanılır). Eğer e2tools yoksa mount -o loop ile
+#       alternatif hedef (disk-mount) kullanılabilir.
+# ============================================================================
+# ── disk.img oluşturma ───────────────────────────────────────────────────────
+# Gereksinim: mkfs.ext2  →  sudo pacman -S e2fsprogs
+# (CachyOS imza sorunu varsa önce: sudo pacman-key --refresh-keys)
+#
+# Dizin yapısı debugfs ile oluşturulur (root gerekmez, e2tools gerekmez).
+# debugfs e2fsprogs ile birlikte gelir.
+# Geçici mount noktası
+MNT_TMP := /tmp/ascentos_mnt
+
 disk.img:
-	@echo "📀 Creating 2GB disk image..."
-	qemu-img create -f raw disk.img 2G
-	mformat -i disk.img@@1048576 -F -v "ASCENT" -T 4177920 ::
-	@echo "✓ Disk image ready"
+	@echo "📀 Ext2 disk imajı oluşturuluyor (64MB)..."
+	@if ! command -v mkfs.ext2 >/dev/null 2>&1; then \
+	    echo ""; \
+	    echo "HATA: mkfs.ext2 bulunamadi."; \
+	    echo "  CachyOS imza sorunu cozumu:"; \
+	    echo "    sudo pacman-key --populate archlinux cachyos"; \
+	    echo "    sudo pacman -Sy && sudo pacman -S e2fsprogs"; \
+	    echo ""; \
+	    exit 1; \
+	fi
+	@# Eski imaj varsa sil (FAT32 veya bozuk olabilir)
+	@rm -f disk.img
+	dd if=/dev/zero of=disk.img bs=1M count=64 status=none
+	@# ^metadata_csum: eski kernel (4.x) ext2 uyumluluğu için
+	mkfs.ext2 -b 1024 -L "AscentOS" -m 0 -O ^metadata_csum,^has_journal disk.img
+	@echo "📁 Temel dizin yapısı oluşturuluyor..."
+	@$(MAKE) --no-print-directory _disk_mkdirs
+	@echo "✓ disk.img hazir (Ext2, 64MB, block=1024)"
+	@echo "  Dogrulama: file disk.img"
+	@file disk.img
+
+# İç hedef: debugfs yoksa loop mount dene
+_disk_mkdirs:
+	@if command -v debugfs >/dev/null 2>&1; then \
+	    debugfs -w disk.img -R "mkdir bin"  2>/dev/null; \
+	    debugfs -w disk.img -R "mkdir usr"  2>/dev/null; \
+	    debugfs -w disk.img -R "mkdir etc"  2>/dev/null; \
+	    debugfs -w disk.img -R "mkdir tmp"  2>/dev/null; \
+	    debugfs -w disk.img -R "mkdir home" 2>/dev/null; \
+	else \
+	    echo "⚠ debugfs yok, dizinler ext2_mount sırasında oluşturulacak"; \
+	fi
+
+# Eski/bozuk disk.img'i sil ve yeniden oluştur
+disk-rebuild:
+	@echo "🔄 disk.img yeniden oluşturuluyor..."
+	@rm -f disk.img
+	@$(MAKE) --no-print-directory disk.img
+
+# Alternatif: loop mount ile dizin oluştur (root yetkisi gerekir)
+disk-mount-mkdirs: disk.img
+	@echo "🔧 Loop mount ile dizinler oluşturuluyor (sudo gerekli)..."
+	mkdir -p /tmp/ascentos_mnt
+	sudo mount -o loop disk.img /tmp/ascentos_mnt
+	sudo mkdir -p /tmp/ascentos_mnt/{bin,usr,etc,tmp,home}
+	sudo umount /tmp/ascentos_mnt
+	rmdir /tmp/ascentos_mnt
+	@echo "✓ Dizinler oluşturuldu"
 
 AscentOS.iso: kernel64.elf grub64.cfg disk.img
 	@echo "📦 Building AscentOS Unified ISO..."
@@ -189,15 +260,8 @@ AscentOS.iso: kernel64.elf grub64.cfg disk.img
 	@echo "✓ AscentOS.iso hazir!"
 
 
-
 # ============================================================================
 # MUSL — build (bir kez çalıştır, kütüphane cache'lenir)
-#
-#  Gereksinim: x86_64-elf-gcc PATH'te olmalı
-#  Çıktı:     userland/libc/musl/lib/libc.a
-#             userland/libc/musl/include/
-#
-#  Yalnızca libc.a yoksa ya da "make musl" komutuyla çalışır.
 # ============================================================================
 
 MUSL_STAMP := userland/libc/musl/lib/libc.a
@@ -216,13 +280,6 @@ musl: $(MUSL_STAMP)
 MUSL_INC := userland/libc/musl/include
 MUSL_LIB := userland/libc/musl/lib
 
-# ── Userland compiler flags ───────────────────────────────────────────────────
-#   -ffreestanding  : host stdlib yok
-#   -nostdlib       : otomatik -lc ekleme
-#   -nostdinc       : host /usr/include kullanma
-#   -isystem        : musl header'ları (sistem header'ı gibi davran, warning bastır)
-#   -ffunction/data-sections : kullanılmayan kodu linker temizlesin
-#   -mno-red-zone   : kernel ile aynı ABI tutarlılığı için
 USERLAND_CFLAGS := \
 	-m64                    \
 	-ffreestanding          \
@@ -238,10 +295,6 @@ USERLAND_CFLAGS := \
 
 USERLAND_ASFLAGS := -f elf64
 
-# ── Userland linker flags ─────────────────────────────────────────────────────
-#   --gc-sections : kullanılmayan section'ları at → küçük ELF
-#   Link sırası:  crt0 → app → syscalls → -lc → $(LIBGCC)
-#   $(LIBGCC) = gcc --print-libgcc-file-name çıktısı, tam path olarak geçilir
 USERLAND_LDFLAGS := \
 	-T userland/libc/user.ld \
 	-static                  \
@@ -257,7 +310,6 @@ USERLAND_ELFS   := $(addprefix userland/out/, $(addsuffix .elf, $(USERLAND_APPS)
 
 .PRECIOUS: userland/out/%.o userland/out/%.elf userland/libc/crt0.o $(SYSCALLS_OBJ)
 
-# ── userland ana hedef ───────────────────────────────────────────────────────
 userland: $(MUSL_STAMP) userland/out $(USERLAND_CRT0) $(SYSCALLS_OBJ) $(USERLAND_ELFS)
 	@echo "✓ Userland (musl) derlendi → userland/out/"
 	@ls -lh userland/out/*.elf
@@ -265,14 +317,9 @@ userland: $(MUSL_STAMP) userland/out $(USERLAND_CRT0) $(SYSCALLS_OBJ) $(USERLAND
 userland/out:
 	@mkdir -p userland/out
 
-# ── crt0 ─────────────────────────────────────────────────────────────────────
 userland/libc/crt0.o: userland/libc/crt0.asm
 	$(AS) $(USERLAND_ASFLAGS) -o $@ $<
 
-
-
-# ── syscalls.o — bir kez derle, her ELF'e link et ────────────────────────────
-#   syscalls.c kendi tiplerini tanımlar, musl header'ına ihtiyaç duymaz.
 $(SYSCALLS_OBJ): userland/libc/syscalls.c | userland/out
 	$(USERLAND_CC) -m64 -ffreestanding -nostdlib -nostdinc -isystem $(GCC_INCLUDE) -fno-stack-protector \
 	      -ffunction-sections -fdata-sections -O2 -Wall \
@@ -280,17 +327,9 @@ $(SYSCALLS_OBJ): userland/libc/syscalls.c | userland/out
 	      -fno-builtin-malloc -fno-builtin-free \
 	      -c -o $@ $<
 
-# ── Uygulama .o ──────────────────────────────────────────────────────────────
 userland/out/%.o: userland/apps/%.c | $(MUSL_STAMP)
 	$(USERLAND_CC) $(USERLAND_CFLAGS) -c -o $@ $<
 
-# ── ELF linkleme ─────────────────────────────────────────────────────────────
-#   Link sırası kritik:
-#     crt0.o   → _start tanımı
-#     app.o    → main + uygulama kodu
-#     syscalls.o → _write, _sbrk, _exit ... (musl'ün çağırdığı stub'lar)
-#     -lc      → musl libc.a (malloc, printf, string...)
-#     -lgcc    → compiler runtime (__udivdi3, soft-float...)
 userland/out/%.elf: userland/out/%.o $(USERLAND_CRT0) $(SYSCALLS_OBJ) | $(MUSL_STAMP)
 	$(USERLAND_LD) $(USERLAND_LDFLAGS) -m elf_x86_64 \
 	    --allow-multiple-definition \
@@ -301,7 +340,6 @@ userland/out/%.elf: userland/out/%.o $(USERLAND_CRT0) $(SYSCALLS_OBJ) | $(MUSL_S
 	    -o $@
 	@echo "  ✓ $@ hazir"
 
-# ── Tekil uygulama hedefleri (kolaylık) ──────────────────────────────────────
 hello: userland/out/hello.elf
 	@echo "  ✓ hello.elf hazir"
 
@@ -315,15 +353,55 @@ shell: userland/out/shell.elf
 	@echo "  ✓ shell.elf hazir"
 
 # ── install-userland ──────────────────────────────────────────────────────────
-install-userland: userland
-	@echo "📦 ELF'ler disk.img'e yaziliyor (offset=2048 sektör)..."
-	@if [ ! -f disk.img ]; then echo "HATA: disk.img yok"; exit 1; fi
-	mcopy -i disk.img@@1048576 -o userland/out/hello.elf      ::HELLO.ELF
-	mcopy -i disk.img@@1048576 -o userland/out/calculator.elf ::CALC.ELF
-	mcopy -i disk.img@@1048576 -o userland/out/snake.elf      ::SNAKE.ELF
-	mcopy -i disk.img@@1048576 -o userland/out/shell.elf      ::SHELL.ELF
-	@echo "✓ Yazildi:"
-	@mdir -i disk.img@@1048576 :: 2>/dev/null | grep -i elf || true
+# ELF'leri Ext2 disk.img'e yaz.
+# Öncelik sırası:
+#   1. debugfs  (e2fsprogs ile gelir, ROOT GEREKMEz) ← varsayılan
+#   2. e2cp     (e2tools, AUR)
+#   3. loop mount (sudo gerekir)
+install-userland: userland disk.img
+	@echo "📦 ELF'ler disk.img'e yaziliyor (Ext2 /bin/)..."
+	@if command -v debugfs >/dev/null 2>&1; then \
+	    echo "  → debugfs kullaniliyor (root gerekmez)"; \
+	    debugfs -w disk.img -R "write userland/out/hello.elf      bin/hello.elf"      2>/dev/null; \
+	    debugfs -w disk.img -R "write userland/out/calculator.elf bin/calc.elf"        2>/dev/null; \
+	    debugfs -w disk.img -R "write userland/out/snake.elf      bin/snake.elf"       2>/dev/null; \
+	    debugfs -w disk.img -R "write userland/out/shell.elf      bin/shell.elf"       2>/dev/null; \
+	    echo "✓ ELF'ler /bin/'e yazildi (debugfs)"; \
+	elif command -v e2cp >/dev/null 2>&1; then \
+	    echo "  → e2cp kullaniliyor"; \
+	    e2cp userland/out/hello.elf      disk.img:/bin/hello.elf; \
+	    e2cp userland/out/calculator.elf disk.img:/bin/calc.elf;  \
+	    e2cp userland/out/snake.elf      disk.img:/bin/snake.elf; \
+	    e2cp userland/out/shell.elf      disk.img:/bin/shell.elf; \
+	    echo "✓ ELF'ler /bin/'e yazildi (e2cp)"; \
+	else \
+	    echo "  → loop mount deneniyor (sudo gerekebilir)"; \
+	    $(MAKE) --no-print-directory install-userland-mount; \
+	fi
+
+# Alternatif: loop mount ile kopyala (sudo gerekir)
+install-userland-mount: userland disk.img
+	@echo "🔧 Loop mount ile ELF'ler kopyalanıyor..."
+	mkdir -p /tmp/ascentos_mnt
+	sudo mount -o loop disk.img /tmp/ascentos_mnt
+	sudo mkdir -p /tmp/ascentos_mnt/bin
+	sudo cp userland/out/hello.elf      /tmp/ascentos_mnt/bin/hello.elf
+	sudo cp userland/out/calculator.elf /tmp/ascentos_mnt/bin/calc.elf
+	sudo cp userland/out/snake.elf      /tmp/ascentos_mnt/bin/snake.elf
+	sudo cp userland/out/shell.elf      /tmp/ascentos_mnt/bin/shell.elf
+	sudo umount /tmp/ascentos_mnt
+	rmdir /tmp/ascentos_mnt
+	@echo "✓ ELF'ler kopyalandi"
+
+# ── disk içeriğini listele ────────────────────────────────────────────────────
+disk-ls:
+	@if command -v debugfs >/dev/null 2>&1; then \
+	    debugfs disk.img -R "ls bin" 2>/dev/null; \
+	elif command -v e2ls >/dev/null 2>&1; then \
+	    e2ls disk.img:/bin; \
+	else \
+	    echo "e2fsprogs kurulu degil (debugfs/e2ls yok)"; \
+	fi
 
 # ============================================================================
 # RUN / DEBUG
@@ -331,6 +409,7 @@ install-userland: userland
 
 run: AscentOS.iso disk.img install-userland
 	@echo "▶  AscentOS Unified başlatılıyor..."
+	@echo "   Filesystem: Ext2 (disk.img, 64MB)"
 	@echo "   TEXT modu açılır. 'gfx' yazınca GUI moduna geçer."
 	@echo ""
 	@echo "   ── UDP Port Yönlendirme ──────────────────────────────"
@@ -351,8 +430,6 @@ run: AscentOS.iso disk.img install-userland
 	  -device rtl8139,netdev=net0 \
 	  -display gtk,zoom-to-fit=off
 
-# ARP paketi doğrulama: pcap dump ile gelen/giden frame'leri yakala
-# Çalıştırdıktan sonra: tcpdump -r /tmp/ascent_net.pcap arp
 net-test: AscentOS.iso disk.img install-userland
 	@echo "▶  Ağ testi — ARP paketleri /tmp/ascent_net.pcap'e yakalanıyor..."
 	@echo "   Sonuç için: tcpdump -r /tmp/ascent_net.pcap arp"
@@ -390,7 +467,6 @@ gdb:
 # CLEAN
 # ============================================================================
 
-# Kernel + userland object ve ELF'leri temizle (musl cache'ini korur)
 clean:
 	@echo "🧹 Build dosyaları temizleniyor..."
 	rm -rf *.o *.elf
@@ -400,7 +476,6 @@ clean:
 	rm -rf userland/out userland/libc/crt0.o
 	@echo "✓ Temizlendi!"
 
-# musl cache'ini de temizle (yeniden derlemek için)
 musl-clean:
 	@echo "🧹 musl cache temizleniyor..."
 	rm -rf userland/libc/musl
@@ -408,7 +483,6 @@ musl-clean:
 	rm -f  musl-*.tar.gz
 	@echo "✓ musl temizlendi. Sonraki 'make userland' yeniden derler."
 
-# Her şeyi sıfırla
 clean-all: clean musl-clean
 	@echo "✓ Tam temizlik tamamlandi."
 
@@ -418,30 +492,35 @@ clean-all: clean musl-clean
 
 info:
 	@echo "╔════════════════════════════════════════════════════════════╗"
-	@echo "║   AscentOS Build Information - musl + SYSCALL Edition   ║"
+	@echo "║   AscentOS Build Information - Ext2 + musl + SYSCALL    ║"
 	@echo "╠════════════════════════════════════════════════════════════╣"
+	@echo "║                                                            ║"
+	@echo "║  💾 Filesystem: Ext2                                      ║"
+	@echo "║    • Block size: 1024 byte                                 ║"
+	@echo "║    • Disk image: 64 MB (disk.img)                         ║"
+	@echo "║    • Direkt + indirect + çift indirect blok desteği       ║"
+	@echo "║    • Araç: mkfs.ext2 (e2fsprogs) + e2tools (e2cp/e2ls)   ║"
 	@echo "║                                                            ║"
 	@echo "║  📦 Userland (musl):                                     ║"
 	@echo "║    • malloc, free, realloc                                 ║"
 	@echo "║    • printf, fprintf, sprintf, snprintf                    ║"
 	@echo "║    • strlen, memcpy, memset, strcmp, strcpy                ║"
-	@echo "║    • atoi, strtol, strtoul, exit                          ║"
-	@echo "║    • syscall stub'lar: userland/libc/syscalls.c           ║"
-	@echo "║    • ELF'ler: HELLO.ELF, CALC.ELF, SHELL.ELF             ║"
+	@echo "║    • ELF'ler: /bin/hello.elf, /bin/calc.elf, /bin/shell.elf║"
 	@echo "║                                                            ║"
 	@echo "║  🚀 SYSCALL Support:                                       ║"
 	@echo "║    • fork, execve, waitpid, pipe, dup2                    ║"
 	@echo "║    • sigaction, sigprocmask, kill                         ║"
 	@echo "║    • open, read, write, close, lseek, stat               ║"
 	@echo "║    • getcwd, chdir, opendir, readdir                      ║"
-	@echo "║    • setpgid, setsid, tcsetpgrp (job control)             ║"
 	@echo "║                                                            ║"
 	@echo "║  📋 Build Targets:                                         ║"
 	@echo "║    make              Kernel + userland derle              ║"
-	@echo "║    make musl        musl libc'i derle (ilk kurulum)         ║"
+	@echo "║    make musl         musl libc'i derle (ilk kurulum)      ║"
+	@echo "║    make disk.img     Ext2 disk imajı oluştur              ║"
 	@echo "║    make userland     Userland ELF'leri derle              ║"
 	@echo "║    make run          QEMU'da çalıştır                     ║"
-	@echo "║    make clean        Build temizle (musl korunur)       ║"
+	@echo "║    make disk-ls      Ext2 /bin/ içeriğini listele         ║"
+	@echo "║    make clean        Build temizle (musl korunur)         ║"
 	@echo "║    make clean-all    Her şeyi sıfırla                     ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
 
@@ -451,28 +530,32 @@ info:
 
 help:
 	@echo "╔════════════════════════════════════════════════════════════╗"
-	@echo "║   AscentOS Makefile — musl + SYSCALL + Bash Edition     ║"
+	@echo "║   AscentOS Makefile — Ext2 + musl + SYSCALL + Bash      ║"
 	@echo "╠════════════════════════════════════════════════════════════╣"
 	@echo "║                                                            ║"
 	@echo "║  İlk kurulum:                                              ║"
-	@echo "║    make musl        musl libc'i cross-compile et            ║"
+	@echo "║    sudo apt install e2fsprogs e2tools  (araçlar)          ║"
+	@echo "║    make musl         musl libc'i cross-compile et         ║"
 	@echo "║    make              Her şeyi derle                       ║"
 	@echo "║                                                            ║"
-	@echo "║                                                            ║"
 	@echo "║  Geliştirme:                                               ║"
+	@echo "║    make disk.img     Ext2 disk imajı oluştur (64MB)       ║"
 	@echo "║    make userland     Sadece userland ELF'leri derle       ║"
 	@echo "║    make hello        Sadece hello.elf derle               ║"
 	@echo "║    make calculator   Sadece calculator.elf derle          ║"
-	@echo "║    make shell        Sadece shell.elf (ash) derle         ║"
-	@echo "║    make run          QEMU'da çalıştır                     ║"               
+	@echo "║    make shell        Sadece shell.elf derle               ║"
+	@echo "║    make run          QEMU'da çalıştır                     ║"
+	@echo "║    make disk-ls      /bin/ içeriğini listele              ║"
 	@echo "║                                                            ║"
 	@echo "║  Temizlik:                                                 ║"
-	@echo "║    make clean        Build dosyaları (musl korunur)     ║"
-	@echo "║    make musl-clean    musl cache sil                     ║"
+	@echo "║    make clean        Build dosyaları (musl korunur)       ║"
+	@echo "║    make musl-clean   musl cache sil                       ║"
 	@echo "║    make clean-all    Tam sıfırlama                        ║"
 	@echo "║                                                            ║"
 	@echo "║  Kernel shell komutları:                                   ║"
-	@echo "║    elfload HELLO.ELF / CALC.ELF / SHELL.ELF              ║"
+	@echo "║    elfload /bin/hello.elf                                  ║"
+	@echo "║    elfload /bin/calc.elf                                   ║"
+	@echo "║    elfload /bin/shell.elf                                  ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
 
 # ============================================================================
@@ -480,5 +563,7 @@ help:
 # ============================================================================
 
 .PHONY: all run debug net-test gdb musl userland install-userland \
-        hello calculator shell \
+        install-userland-mount disk-ls disk-mount-mkdirs \
+        disk-rebuild _disk_mkdirs \
+        hello calculator shell snake \
         clean musl-clean clean-all info help

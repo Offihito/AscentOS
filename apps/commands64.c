@@ -7,7 +7,7 @@
 #include "../kernel/pmm.h"
 #include "../kernel/task.h"
 #include "../kernel/scheduler.h"
-#include "../kernel/disk64.h"    // fat32_file_size, fat32_read_file
+#include "../kernel/ext2.h"          // ext2_file_size, ext2_read_file
 #include "../kernel/elf64.h"         // ELF-64 loader
 #include "../kernel/syscall.h"       // SYSCALL/SYSRET altyapısı
 #include "../kernel/signal64.h"      // SYS_SIGACTION, SYS_SIGPROCMASK vb. (v10)
@@ -682,8 +682,80 @@ void cmd_kode(const char* args, CommandOutput* output) {
 // ===========================================
 
 void cmd_ls(const char* args, CommandOutput* output) {
-    (void)args;
-    fs_list_files64(output);
+    // Ext2 üzerinden listele
+    const char* path = (args && str_len(args) > 0) ? args : ext2_getcwd();
+
+    static dirent64_t dents[256];
+    int total = ext2_getdents(path, dents, (int)sizeof(dents));
+
+    if (total < 0) {
+        output_add_line(output, "Error: Cannot read directory (ext2 not mounted?)", VGA_RED);
+        return;
+    }
+
+    // Başlık
+    char hdr[MAX_LINE_LENGTH];
+    str_cpy(hdr, "Directory: ");
+    str_concat(hdr, path);
+    output_add_line(output, hdr, VGA_CYAN);
+
+    int count = 0;
+    int off = 0;
+    while (off < total) {
+        dirent64_t* de = (dirent64_t*)((char*)dents + off);
+        if (de->d_reclen == 0) break;
+
+        // "." ve ".." gizle
+        if (!(de->d_name[0] == '.' &&
+              (de->d_name[1] == '\0' ||
+              (de->d_name[1] == '.' && de->d_name[2] == '\0')))) {
+            char line[MAX_LINE_LENGTH];
+            if (de->d_type == DT_DIR) {
+                str_cpy(line, "  [DIR]  ");
+            } else {
+                str_cpy(line, "  [FILE] ");
+            }
+            str_concat(line, de->d_name);
+
+            // Dosya boyutunu ekle
+            if (de->d_type == DT_REG) {
+                // Tam yolu oluştur
+                char fpath[256];
+                str_cpy(fpath, path);
+                int plen = str_len(fpath);
+                if (plen > 1) { fpath[plen] = '/'; fpath[plen+1] = '\0'; }
+                str_concat(fpath, de->d_name);
+                uint32_t fsz = ext2_file_size(fpath);
+                if (fsz > 0) {
+                    str_concat(line, "  (");
+                    char szb[16];
+                    uint32_t v = fsz; int i = 0;
+                    if (!v) { szb[i++] = '0'; }
+                    else { char t[12]; int n=0; while(v){t[n++]='0'+(v%10);v/=10;}
+                           for(int j=n-1;j>=0;j--) szb[i++]=t[j]; }
+                    szb[i] = '\0';
+                    str_concat(line, szb);
+                    str_concat(line, " B)");
+                }
+            }
+            output_add_line(output, line,
+                de->d_type == DT_DIR ? VGA_YELLOW : VGA_WHITE);
+            count++;
+        }
+        off += de->d_reclen;
+    }
+
+    if (count == 0) {
+        output_add_line(output, "  (empty)", VGA_DARK_GRAY);
+    } else {
+        char footer[64];
+        str_cpy(footer, "  ");
+        char cb[12]; uint32_t v=(uint32_t)count,i=0;
+        if(!v){cb[i++]='0';}else{char t[12];int n=0;while(v){t[n++]='0'+(v%10);v/=10;}for(int j=n-1;j>=0;j--)cb[i++]=t[j];}cb[i]='\0';
+        str_concat(footer, cb);
+        str_concat(footer, " item(s)");
+        output_add_line(output, footer, VGA_DARK_GRAY);
+    }
 }
 
 void cmd_cat(const char* args, CommandOutput* output) {
@@ -692,20 +764,40 @@ void cmd_cat(const char* args, CommandOutput* output) {
         return;
     }
 
-    const EmbeddedFile64* file = fs_get_file64(args);
-    if (!file) {
-        output_add_line(output, "File not found: ", VGA_RED);
-        output_add_line(output, args, VGA_RED);
+    // Tam yol oluştur
+    char path[256];
+    if (args[0] == '/') {
+        str_cpy(path, args);
+    } else {
+        str_cpy(path, ext2_getcwd());
+        int plen = str_len(path);
+        if (plen > 1) { path[plen] = '/'; path[plen+1] = '\0'; }
+        str_concat(path, args);
+    }
+
+    uint32_t fsize = ext2_file_size(path);
+    if (fsize == 0) {
+        output_add_line(output, "File not found or empty: ", VGA_RED);
+        output_add_line(output, path, VGA_RED);
         return;
     }
 
-    const char* p = file->content;
+    // Max 64KB cat için yeterli
+    static uint8_t cat_buf[65536];
+    uint32_t to_read = (fsize < sizeof(cat_buf) - 1) ? fsize : sizeof(cat_buf) - 1;
+    int n = ext2_read_file(path, cat_buf, to_read);
+    if (n <= 0) {
+        output_add_line(output, "Read error", VGA_RED);
+        return;
+    }
+    cat_buf[n] = '\0';
+
+    const char* p = (const char*)cat_buf;
     const char* start = p;
-    
     while (*p) {
         if (*p == '\n') {
             char line[MAX_LINE_LENGTH];
-            int len = p - start;
+            int len = (int)(p - start);
             if (len >= MAX_LINE_LENGTH) len = MAX_LINE_LENGTH - 1;
             for (int i = 0; i < len; i++) line[i] = start[i];
             line[len] = '\0';
@@ -716,7 +808,7 @@ void cmd_cat(const char* args, CommandOutput* output) {
     }
     if (p > start) {
         char line[MAX_LINE_LENGTH];
-        int len = p - start;
+        int len = (int)(p - start);
         if (len >= MAX_LINE_LENGTH) len = MAX_LINE_LENGTH - 1;
         for (int i = 0; i < len; i++) line[i] = start[i];
         line[len] = '\0';
@@ -737,12 +829,17 @@ void cmd_touch(const char* args, CommandOutput* output) {
         }
     }
 
-    int success = fs_touch_file64(args);
-    if (success) {
+    // Tam yol oluştur
+    char tpath[256];
+    if (args[0] == '/') { str_cpy(tpath, args); }
+    else { str_cpy(tpath, ext2_getcwd()); int pl=str_len(tpath); if(pl>1){tpath[pl]='/';tpath[pl+1]='\0';} str_concat(tpath, args); }
+
+    int rc = ext2_create_file(tpath);
+    if (rc == 0) {
         output_add_line(output, "File created: ", VGA_GREEN);
-        output_add_line(output, args, VGA_YELLOW);
+        output_add_line(output, tpath, VGA_YELLOW);
     } else {
-        output_add_line(output, "Error: Cannot create file (too many files or invalid name)", VGA_RED);
+        output_add_line(output, "Error: Cannot create file", VGA_RED);
     }
 }
 
@@ -776,15 +873,22 @@ void cmd_write(const char* args, CommandOutput* output) {
         return;
     }
 
-    int success = fs_write_file64(filename, content);
-    if (success) {
+    // Tam yol oluştur
+    char wpath[256];
+    if (filename[0] == '/') { str_cpy(wpath, filename); }
+    else { str_cpy(wpath, ext2_getcwd()); int pl=str_len(wpath); if(pl>1){wpath[pl]='/';wpath[pl+1]='\0';} str_concat(wpath, filename); }
+
+    // Dosya yoksa oluştur
+    if (!ext2_path_is_file(wpath)) ext2_create_file(wpath);
+
+    int wlen = str_len(content);
+    int wrc = ext2_write_file(wpath, 0, (const uint8_t*)content, (uint32_t)wlen);
+    if (wrc >= 0) {
         char msg[MAX_LINE_LENGTH];
-        str_cpy(msg, "Content written to: ");
-        str_concat(msg, filename);
+        str_cpy(msg, "Written to: "); str_concat(msg, wpath);
         output_add_line(output, msg, VGA_GREEN);
     } else {
-        output_add_line(output, "Error: Cannot write to file (file not found or too large)", VGA_RED);
-        output_add_line(output, "Tip: Use 'touch' to create the file first", VGA_CYAN);
+        output_add_line(output, "Error: Write failed", VGA_RED);
     }
 }
 
@@ -802,15 +906,17 @@ void cmd_rm(const char* args, CommandOutput* output) {
         }
     }
 
-    int success = fs_delete_file64(args);
-    if (success) {
+    char rmpath[256];
+    if (args[0] == '/') { str_cpy(rmpath, args); }
+    else { str_cpy(rmpath, ext2_getcwd()); int pl=str_len(rmpath); if(pl>1){rmpath[pl]='/';rmpath[pl+1]='\0';} str_concat(rmpath, args); }
+
+    int rmrc = ext2_unlink(rmpath);
+    if (rmrc == 0) {
         char msg[MAX_LINE_LENGTH];
-        str_cpy(msg, "File deleted: ");
-        str_concat(msg, args);
+        str_cpy(msg, "Deleted: "); str_concat(msg, rmpath);
         output_add_line(output, msg, VGA_GREEN);
     } else {
-        output_add_line(output, "Error: Cannot delete file (not found or read-only)", VGA_RED);
-        output_add_line(output, "Note: Built-in files cannot be deleted", VGA_YELLOW);
+        output_add_line(output, "Error: Cannot delete (not found or is a directory)", VGA_RED);
     }
 }
 
@@ -853,8 +959,21 @@ void cmd_neofetch(const char* args, CommandOutput* output) {
     uint64_t heap_kb = get_memory_info();
     char memory_str[64];
     format_memory_size(heap_kb, memory_str);
+    // ext2 /bin dosya sayısı
     int file_count = 0;
-    get_all_files_list64(&file_count);
+    {
+        static dirent64_t neo_dents[64];
+        int tot = ext2_getdents("/bin", neo_dents, (int)sizeof(neo_dents));
+        if (tot > 0) {
+            int off = 0;
+            while (off < tot) {
+                dirent64_t* de = (dirent64_t*)((char*)neo_dents + off);
+                if (de->d_reclen == 0) break;
+                if (de->d_type == DT_REG) file_count++;
+                off += de->d_reclen;
+            }
+        }
+    }
     char count_str[16];
     int_to_str(file_count, count_str);
 
@@ -974,12 +1093,24 @@ void cmd_sysinfo(void) {
     hex_str[16] = '\0';
     println64(hex_str, VGA_YELLOW);
     
-    int file_count = 0;
-    get_all_files_list64(&file_count);
-    print_str64("Files in system: ", VGA_WHITE);
-    char count_str[16];
-    int_to_str(file_count, count_str);
-    println64(count_str, VGA_GREEN);
+    {
+        int file_count = 0;
+        static dirent64_t si_dents[64];
+        int tot = ext2_getdents("/bin", si_dents, (int)sizeof(si_dents));
+        if (tot > 0) {
+            int off = 0;
+            while (off < tot) {
+                dirent64_t* de = (dirent64_t*)((char*)si_dents + off);
+                if (de->d_reclen == 0) break;
+                if (de->d_type == DT_REG) file_count++;
+                off += de->d_reclen;
+            }
+        }
+        print_str64("Files in /bin: ", VGA_WHITE);
+        char count_str[16];
+        int_to_str(file_count, count_str);
+        println64(count_str, VGA_GREEN);
+    }
 }
 
 void cmd_cpuinfo(void) {
@@ -1019,11 +1150,7 @@ void cmd_meminfo(void) {
 void cmd_reboot(const char* args, CommandOutput* output) {
     (void)args;
     
-    output_add_line(output, "Saving files to disk...", VGA_YELLOW);
-    save_files_to_disk64();
-    for (volatile int i = 0; i < 5000000; i++);
-    output_add_line(output, "All files saved!", VGA_GREEN);
-    output_add_line(output, "Rebooting now... Why so serious?", VGA_RED);
+    output_add_line(output, "Rebooting...", VGA_YELLOW);
     
     __asm__ volatile ("cli");
     
@@ -1051,14 +1178,17 @@ void cmd_mkdir(const char* args, CommandOutput* output) {
         }
     }
 
-    int success = fs_mkdir64(args);
-    if (success) {
+    char mdpath[256];
+    if (args[0] == '/') { str_cpy(mdpath, args); }
+    else { str_cpy(mdpath, ext2_getcwd()); int pl=str_len(mdpath); if(pl>1){mdpath[pl]='/';mdpath[pl+1]='\0';} str_concat(mdpath, args); }
+
+    int mdrc = ext2_mkdir(mdpath);
+    if (mdrc == 0) {
         char msg[MAX_LINE_LENGTH];
-        str_cpy(msg, "Directory created: ");
-        str_concat(msg, args);
+        str_cpy(msg, "Directory created: "); str_concat(msg, mdpath);
         output_add_line(output, msg, VGA_GREEN);
     } else {
-        output_add_line(output, "Error: Cannot create directory (already exists or limit reached)", VGA_RED);
+        output_add_line(output, "Error: Cannot create directory", VGA_RED);
     }
 }
 
@@ -1076,41 +1206,38 @@ void cmd_rmdir(const char* args, CommandOutput* output) {
         }
     }
 
-    int success = fs_rmdir64(args);
-    if (success) {
+    char rdpath[256];
+    if (args[0] == '/') { str_cpy(rdpath, args); }
+    else { str_cpy(rdpath, ext2_getcwd()); int pl=str_len(rdpath); if(pl>1){rdpath[pl]='/';rdpath[pl+1]='\0';} str_concat(rdpath, args); }
+
+    int rdrc = ext2_rmdir(rdpath);
+    if (rdrc == 0) {
         char msg[MAX_LINE_LENGTH];
-        str_cpy(msg, "Directory removed: ");
-        str_concat(msg, args);
+        str_cpy(msg, "Directory removed: "); str_concat(msg, rdpath);
         output_add_line(output, msg, VGA_GREEN);
     } else {
-        output_add_line(output, "Error: Cannot remove directory (not found, not empty, or read-only)", VGA_RED);
+        output_add_line(output, "Error: Cannot remove (not found, not empty, or is a file)", VGA_RED);
     }
 }
 
 void cmd_cd(const char* args, CommandOutput* output) {
-    if (str_len(args) == 0) {
-        int success = fs_chdir64("/");
-        if (success) {
-            output_add_line(output, "Changed to root directory", VGA_GREEN);
-        }
-        return;
-    }
+    const char* target = (str_len(args) == 0) ? "/" : args;
 
-    int success = fs_chdir64(args);
-    if (success) {
+    int rc = ext2_chdir(target);
+    if (rc == 0) {
         char msg[MAX_LINE_LENGTH];
         str_cpy(msg, "Changed directory to: ");
-        str_concat(msg, fs_getcwd64());
+        str_concat(msg, ext2_getcwd());
         output_add_line(output, msg, VGA_GREEN);
     } else {
         output_add_line(output, "Error: Directory not found", VGA_RED);
-        output_add_line(output, "Use 'ls' to see available directories", VGA_CYAN);
     }
 }
 
 void cmd_pwd(const char* args, CommandOutput* output) {
     (void)args;
-    const char* cwd = fs_getcwd64();
+    const char* cwd = ext2_getcwd();
+    if (!cwd || cwd[0] == '\0') cwd = fs_getcwd64();
     output_add_line(output, cwd, VGA_CYAN);
 }
 
@@ -1659,22 +1786,32 @@ void cmd_elfinfo(const char* args, CommandOutput* output) {
     if (!args || str_len(args) == 0) {
         output_add_line(output, "Usage: elfinfo <FILE.ELF>", VGA_YELLOW);
         output_add_line(output, "  Shows ELF header info without loading.", VGA_DARK_GRAY);
-        output_add_line(output, "  File must be in 8.3 uppercase format on FAT32.", VGA_DARK_GRAY);
-        output_add_line(output, "  Example: elfinfo HELLO.ELF", VGA_DARK_GRAY);
+        output_add_line(output, "  Tam yol veya sadece isim verilebilir.", VGA_DARK_GRAY);
+        output_add_line(output, "  Ornek: elfinfo hello.elf", VGA_DARK_GRAY);
+        output_add_line(output, "  Ornek: elfinfo /bin/hello.elf", VGA_DARK_GRAY);
         return;
     }
 
-    uint32_t fsize = fat32_file_size(args);
+    // Tam yol oluştur: eğer '/' ile başlamıyorsa /bin/ ekle
+    char path[128];
+    if (args[0] == '/') {
+        str_cpy(path, args);
+    } else {
+        str_cpy(path, "/bin/");
+        str_concat(path, args);
+    }
+
+    uint32_t fsize = ext2_file_size(path);
     if (fsize == 0) {
         char line[96];
-        str_cpy(line, "File not found on FAT32: ");
-        str_concat(line, args);
+        str_cpy(line, "File not found on ext2: ");
+        str_concat(line, path);
         output_add_line(output, line, VGA_RED);
         return;
     }
 
     static uint8_t hdr_buf[512];
-    int n = fat32_read_file(args, hdr_buf, 512);
+    int n = ext2_read_file(path, hdr_buf, 512);
     if (n < 64) {
         output_add_line(output, "Read failed or file too small for ELF header", VGA_RED);
         return;
@@ -1683,7 +1820,7 @@ void cmd_elfinfo(const char* args, CommandOutput* output) {
     char line[96];
     char tmp[24];
     uint64_to_string(fsize, tmp);
-    str_cpy(line, "File: "); str_concat(line, args);
+    str_cpy(line, "File: "); str_concat(line, path);
     str_concat(line, "  Size: "); str_concat(line, tmp); str_concat(line, " bytes");
     output_add_line(output, line, VGA_CYAN);
 
@@ -1698,10 +1835,10 @@ void cmd_elfinfo(const char* args, CommandOutput* output) {
 void cmd_exec(const char* args, CommandOutput* output) {
     if (!args || str_len(args) == 0) {
         output_add_line(output, "Usage: exec <FILE.ELF> [base_hex]", VGA_YELLOW);
-        output_add_line(output, "  ELF64 binary'yi FAT32'den yukler, Ring-3 task olusturur.", VGA_DARK_GRAY);
+        output_add_line(output, "  ELF64 binary'yi ext2'den yukler, Ring-3 task olusturur.", VGA_DARK_GRAY);
         output_add_line(output, "  base_hex: PIE (ET_DYN) icin opsiyonel load tabanı.", VGA_DARK_GRAY);
-        output_add_line(output, "  Ornek: exec HELLO.ELF", VGA_DARK_GRAY);
-        output_add_line(output, "  Ornek: exec MYAPP.ELF 0x500000", VGA_DARK_GRAY);
+        output_add_line(output, "  Ornek: exec hello.elf", VGA_DARK_GRAY);
+        output_add_line(output, "  Ornek: exec /bin/hello.elf 0x500000", VGA_DARK_GRAY);
         return;
     }
 
@@ -1745,7 +1882,17 @@ void cmd_exec(const char* args, CommandOutput* output) {
     } while(0)
 
     output_add_line(output, "=== exec: ELF Loader + Ring-3 Task ===", VGA_CYAN);
-    str_cpy(line, "Dosya     : "); str_concat(line, filename);
+
+    // Tam yol oluştur: '/' ile başlamıyorsa /bin/ ekle
+    char filepath[128];
+    if (filename[0] == '/') {
+        str_cpy(filepath, filename);
+    } else {
+        str_cpy(filepath, "/bin/");
+        str_concat(filepath, filename);
+    }
+
+    str_cpy(line, "Dosya     : "); str_concat(line, filepath);
     output_add_line(output, line, VGA_WHITE);
     FMT_HEX64(load_base);
     str_cpy(line, "Load base : "); str_concat(line, tmp);
@@ -1758,9 +1905,9 @@ void cmd_exec(const char* args, CommandOutput* output) {
         return;
     }
 
-    output_add_line(output, "[1/3] ELF FAT32'den yukleniyor...", VGA_WHITE);
+    output_add_line(output, "[1/3] ELF ext2'den yukleniyor...", VGA_WHITE);
     ElfImage image;
-    int rc = elf64_exec_from_fat32(filename, load_base, &image, output);
+    int rc = elf64_exec_from_ext2(filepath, load_base, &image, output);
     if (rc != ELF_OK) {
         str_cpy(line, "[HATA] ELF yuklenemedi: ");
         str_concat(line, elf64_strerror(rc));
@@ -1776,7 +1923,7 @@ void cmd_exec(const char* args, CommandOutput* output) {
 
     {
         int fn = 0;
-        while (filename[fn] && fn < 127) { argv_storage[0][fn] = filename[fn]; fn++; }
+        while (filepath[fn] && fn < 127) { argv_storage[0][fn] = filepath[fn]; fn++; }
         argv_storage[0][fn] = '\0';
         argv_ptrs[exec_argc++] = argv_storage[0];
     }
@@ -1820,7 +1967,7 @@ void cmd_exec(const char* args, CommandOutput* output) {
         }
     }
 
-    task_t* utask = task_create_from_elf(filename, &image, TASK_PRIORITY_NORMAL,
+    task_t* utask = task_create_from_elf(filepath, &image, TASK_PRIORITY_NORMAL,
                                           exec_argc, argv_ptrs);
     if (!utask) {
         output_add_line(output, "[HATA] task_create_from_elf() basarisiz!", VGA_RED);
@@ -1889,9 +2036,55 @@ void cmd_exec(const char* args, CommandOutput* output) {
 // ADVANCED FILE SYSTEM COMMANDS
 // ===========================================
 
+// Yardımcı: ext2 üzerinde rekürsif tree
+static void ext2_tree_recursive(const char* path, int depth, CommandOutput* output) {
+    static dirent64_t dents[128];
+    int total = ext2_getdents(path, dents, (int)sizeof(dents));
+    if (total < 0) return;
+
+    int off = 0;
+    while (off < total) {
+        dirent64_t* de = (dirent64_t*)((char*)dents + off);
+        if (de->d_reclen == 0) break;
+
+        if (!(de->d_name[0] == '.' &&
+              (de->d_name[1] == '\0' ||
+              (de->d_name[1] == '.' && de->d_name[2] == '\0')))) {
+            char line[MAX_LINE_LENGTH];
+            // Girinti
+            for (int d = 0; d < depth && d < 8; d++) str_concat(line, "  ");
+            line[depth * 2 < MAX_LINE_LENGTH ? depth * 2 : MAX_LINE_LENGTH - 1] = '\0';
+            // Sıfırlama gerek: line init edilmedi
+            int dsp = depth * 2; if (dsp >= MAX_LINE_LENGTH) dsp = MAX_LINE_LENGTH - 1;
+            for (int k = 0; k < dsp; k++) line[k] = ' ';
+            line[dsp] = '\0';
+
+            if (de->d_type == DT_DIR) {
+                str_concat(line, "[+] ");
+                str_concat(line, de->d_name);
+                output_add_line(output, line, VGA_YELLOW);
+                // Rekürsif
+                char subpath[256];
+                str_cpy(subpath, path);
+                int plen = str_len(subpath);
+                if (plen > 1) { subpath[plen] = '/'; subpath[plen+1] = '\0'; }
+                str_concat(subpath, de->d_name);
+                if (depth < 4) ext2_tree_recursive(subpath, depth + 1, output);
+            } else {
+                str_concat(line, "    ");
+                str_concat(line, de->d_name);
+                output_add_line(output, line, VGA_WHITE);
+            }
+        }
+        off += de->d_reclen;
+    }
+}
+
 void cmd_tree(const char* args, CommandOutput* output) {
     (void)args;
-    fs_tree64(output);
+    const char* root = "/";
+    output_add_line(output, "/", VGA_CYAN);
+    ext2_tree_recursive(root, 1, output);
 }
 
 void cmd_find(const char* args, CommandOutput* output) {
@@ -1900,12 +2093,76 @@ void cmd_find(const char* args, CommandOutput* output) {
         output_add_line(output, "Example: find txt", VGA_DARK_GRAY);
         return;
     }
-    fs_find64(args, output);
+    // ext2 üzerinde rekürsif arama
+    static dirent64_t find_dents[128];
+    // Basit: sadece /bin, /usr, /etc, /home, /tmp içinde ara
+    const char* search_dirs[] = {"/", "/bin", "/usr", "/etc", "/home", "/tmp", NULL};
+    int found = 0;
+    for (int di = 0; search_dirs[di]; di++) {
+        int tot = ext2_getdents(search_dirs[di], find_dents, (int)sizeof(find_dents));
+        if (tot < 0) continue;
+        int off = 0;
+        while (off < tot) {
+            dirent64_t* de = (dirent64_t*)((char*)find_dents + off);
+            if (de->d_reclen == 0) break;
+            // args pattern içeriyor mu?
+            const char* nm = de->d_name;
+            const char* pat = args;
+            int match = 0;
+            // basit substring arama
+            int nlen = str_len(nm), plen = str_len(pat);
+            for (int si = 0; si <= nlen - plen && !match; si++) {
+                match = 1;
+                for (int pi = 0; pi < plen && match; pi++)
+                    if (nm[si+pi] != pat[pi]) match = 0;
+            }
+            if (match && de->d_name[0] != '.') {
+                char line[MAX_LINE_LENGTH];
+                str_cpy(line, search_dirs[di]);
+                if (str_len(search_dirs[di]) > 1) str_concat(line, "/");
+                str_concat(line, de->d_name);
+                output_add_line(output, line, VGA_GREEN);
+                found++;
+            }
+            off += de->d_reclen;
+        }
+    }
+    if (!found) output_add_line(output, "No matches found", VGA_DARK_GRAY);
 }
 
 void cmd_du(const char* args, CommandOutput* output) {
     const char* path = (args && str_len(args) > 0) ? args : NULL;
-    fs_du64(path, output);
+    const char* du_path = (args && str_len(args) > 0) ? args : ext2_getcwd();
+    static dirent64_t du_dents[256];
+    int tot = ext2_getdents(du_path, du_dents, (int)sizeof(du_dents));
+    if (tot < 0) { output_add_line(output, "Cannot read directory", VGA_RED); return; }
+
+    uint32_t total_bytes = 0;
+    int off = 0;
+    while (off < tot) {
+        dirent64_t* de = (dirent64_t*)((char*)du_dents + off);
+        if (de->d_reclen == 0) break;
+        if (de->d_type == DT_REG && de->d_name[0] != '.') {
+            char fp[256]; str_cpy(fp, du_path);
+            int pl = str_len(fp); if(pl>1){fp[pl]='/';fp[pl+1]='\0';}
+            str_concat(fp, de->d_name);
+            uint32_t fsz = ext2_file_size(fp);
+            total_bytes += fsz;
+            char line[MAX_LINE_LENGTH];
+            str_cpy(line, "  "); str_concat(line, de->d_name);
+            str_concat(line, "\t");
+            char szb[16]; uint32_t v=fsz; int i=0;
+            if(!v){szb[i++]='0';}else{char t[12];int n=0;while(v){t[n++]='0'+(v%10);v/=10;}for(int j=n-1;j>=0;j--)szb[i++]=t[j];}szb[i]='\0';
+            str_concat(line, szb); str_concat(line, " B");
+            output_add_line(output, line, VGA_WHITE);
+        }
+        off += de->d_reclen;
+    }
+    char tot_line[MAX_LINE_LENGTH]; str_cpy(tot_line, "Total: ");
+    char tb[16]; uint32_t v=total_bytes; int i=0;
+    if(!v){tb[i++]='0';}else{char t[12];int n=0;while(v){t[n++]='0'+(v%10);v/=10;}for(int j=n-1;j>=0;j--)tb[i++]=t[j];}tb[i]='\0';
+    str_concat(tot_line, tb); str_concat(tot_line, " B");
+    output_add_line(output, tot_line, VGA_CYAN);
 }
 
 void cmd_rmr(const char* args, CommandOutput* output) {
@@ -1914,10 +2171,32 @@ void cmd_rmr(const char* args, CommandOutput* output) {
         output_add_line(output, "WARNING: Recursively removes directory and all contents!", VGA_RED);
         return;
     }
-    if (fs_rmdir_recursive64(args)) {
-        output_add_line(output, "Directory removed recursively", VGA_GREEN);
+    char rmr_path[256];
+    if (args[0] == '/') { str_cpy(rmr_path, args); }
+    else { str_cpy(rmr_path, ext2_getcwd()); int pl=str_len(rmr_path); if(pl>1){rmr_path[pl]='/';rmr_path[pl+1]=' ';} str_concat(rmr_path, args); }
+    // ext2_rmdir sadece boş dizini siler; recursive için önce içini temizle
+    static dirent64_t rmr_dents[128];
+    int tot = ext2_getdents(rmr_path, rmr_dents, (int)sizeof(rmr_dents));
+    if (tot > 0) {
+        int off = 0;
+        while (off < tot) {
+            dirent64_t* de = (dirent64_t*)((char*)rmr_dents + off);
+            if (de->d_reclen == 0) break;
+            if (de->d_name[0] != '.') {
+                char child[256]; str_cpy(child, rmr_path);
+                int pl=str_len(child); if(pl>1){child[pl]='/';child[pl+1]=' ';}
+                str_concat(child, de->d_name);
+                if (de->d_type == DT_REG) ext2_unlink(child);
+                else if (de->d_type == DT_DIR) ext2_rmdir(child);
+            }
+            off += de->d_reclen;
+        }
+    }
+    int rmr_rc = ext2_rmdir(rmr_path);
+    if (rmr_rc == 0) {
+        output_add_line(output, "Directory removed", VGA_GREEN);
     } else {
-        output_add_line(output, "Failed to remove directory (may be system directory)", VGA_RED);
+        output_add_line(output, "Failed: not empty or not found", VGA_RED);
     }
 }
 
@@ -3671,25 +3950,20 @@ static void cmd_wget(const char* args, CommandOutput* output) {
     output_add_line(output, "  Diske kaydediliyor...", 0x0E);
 
     // Önce dosyayı oluştur (yoksa touch)
-    extern int  fs_touch_file64(const char* filename);
-    extern int  fs_write_file64(const char* filename, const char* content);
-    extern void save_files_to_disk64(void);
+    // Dosya yoksa oluştur, sonra yaz
+    if (!ext2_path_is_file(save_name)) ext2_create_file(save_name);
+    int written = ext2_write_file(save_name, 0, (const uint8_t*)resp.body, (uint32_t)resp.body_len);
 
-    fs_touch_file64(save_name);
-    int written = fs_write_file64(save_name, resp.body);
-
-    if (written) {
+    if (written >= 0) {
         char smsg[64]; str_cpy(smsg, "  Kaydedildi: ");
         str_concat(smsg, save_name);
         str_concat(smsg, "  (");
         char tmp[8]; int_to_str((int)resp.body_len, tmp);
         str_concat(smsg, tmp); str_concat(smsg, " byte)");
         output_add_line(output, smsg, 0x0A);
-        save_files_to_disk64();  // FAT32'ye flush
-        output_add_line(output, "  FAT32'ye yazildi.", 0x0A);
+        output_add_line(output, "  Ext2'ye yazildi.", 0x0A);
     } else {
         output_add_line(output, "  HATA: Diske yazma basarisiz!", 0x0C);
-        output_add_line(output, "  (Dosya boyutu VFS limitini asiyor olabilir)", 0x08);
     }
 
     // ── Özet ──────────────────────────────────────────────────────────────
@@ -4096,7 +4370,7 @@ static Command command_table[] = {
     {"du", "Show disk usage", cmd_du},
 
     // ELF loader commands
-    {"exec",    "Load and execute ELF64 binary from FAT32", cmd_exec},
+    {"exec",    "Load and execute ELF64 binary from ext2", cmd_exec},
     {"elfinfo", "Show ELF64 header info (no load)",         cmd_elfinfo},
 
     // SYSCALL/SYSRET commands
@@ -4229,7 +4503,12 @@ int execute_command64(const char* input, CommandOutput* output) {
             if (is_elf) {
                 char try_name[32];
                 str_cpy(try_name, command);
-                if (fat32_file_size(try_name) == 0) {
+                // ext2'de /bin/ altında ara
+                char try_path[64];
+                str_cpy(try_path, "/bin/");
+                str_concat(try_path, try_name);
+                if (ext2_file_size(try_path) == 0) {
+                    // lowercase dene
                     for (int _k = 0; try_name[_k]; _k++) {
                         char c = try_name[_k];
                         if (c >= 'A' && c <= 'Z') try_name[_k] = c - 'A' + 'a';
@@ -4261,7 +4540,12 @@ int execute_command64(const char* input, CommandOutput* output) {
         elf_filename[cmd_len] = '\0';
         str_concat(elf_filename, ".ELF");
 
-        uint32_t fsize = fat32_file_size(elf_filename);
+        // ELF'i /bin/ altında ara (HELLO → /bin/HELLO.ELF → /bin/hello.elf)
+        char elf_path[64];
+        str_cpy(elf_path, "/bin/");
+        str_concat(elf_path, elf_filename);
+
+        uint32_t fsize = ext2_file_size(elf_path);
         if (fsize == 0) {
             char elf_lower[32];
             for (int _k = 0; _k < cmd_len; _k++) {
@@ -4272,7 +4556,11 @@ int execute_command64(const char* input, CommandOutput* output) {
             elf_lower[cmd_len] = '\0';
             str_concat(elf_lower, ".elf");
 
-            fsize = fat32_file_size(elf_lower);
+            char elf_lower_path[64];
+            str_cpy(elf_lower_path, "/bin/");
+            str_concat(elf_lower_path, elf_lower);
+
+            fsize = ext2_file_size(elf_lower_path);
             if (fsize > 0) {
                 str_cpy(elf_filename, elf_lower);
             } else {

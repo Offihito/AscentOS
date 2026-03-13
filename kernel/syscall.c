@@ -1,6 +1,7 @@
 #include "syscall.h"
 #include "signal64.h"
 #include "../fs/files64.h"
+#include "ext2.h"
 #include "task.h"
 #include "scheduler.h"
 #include "timer.h"
@@ -66,32 +67,10 @@ extern void  kfree(void* ptr);
 extern void* memset64(void* dest, int val, uint64_t n);
 extern void* memcpy64(void* dest, const void* src, uint64_t n);
 
-// VFS / FAT32 – files64.c + disk64.c'de tanımlı
-// sys_mmap (MAP_FILE), sys_lseek (SEEK_END), sys_fstat için gerekli
+// Ext2 filesystem API – kernel/ext2.h
+// Tüm dosya/dizin işlemleri direkt ext2 üzerinden yapılır.
+// fs_get_file64 hâlâ in-memory static dosyalar (gömülü içerik) için kullanılır.
 extern const EmbeddedFile64* fs_get_file64(const char* filename);
-extern uint32_t fat32_file_size(const char* name83);
-extern int      fat32_read_file(const char* name83, uint8_t* buf, uint32_t max_len);
-
-// VFS dizin syscall'ları için – files64.c'de tanımlı
-extern const char* fs_getcwd64(void);
-extern int         fs_chdir64(const char* path);
-
-// VFS stat/access yardımcıları – files64.c'de tanımlı (v8)
-extern int      fs_path_is_file(const char* path);
-extern int      fs_path_is_dir(const char* path);
-extern uint32_t fs_path_filesize(const char* path);
-
-// VFS getdents yardımcısı – files64.c'de tanımlı (v9)
-extern int fs_getdents64(const char* path, dirent64_t* buf, int buf_size);
-
-// VFS yazma işlemleri – files64.c'de tanımlı (v14)
-// İmzalar files64.h ile eşleşmeli
-extern int fs_mkdir64(const char* path);
-extern int fs_rmdir64(const char* path);
-extern int fs_unlink64(const char* path);
-extern int fs_rename64(const char* oldpath, const char* newpath);
-// VFS kırpma – files64.c'de tanımlı (v18)
-extern int fs_truncate64(const char* path, uint64_t length);
 
 // Kısa takma adlar – sadece bu dosyada, extern değil
 #define kmemset(dst, val, n)  memset64((dst),(val),(uint64_t)(n))
@@ -396,7 +375,7 @@ static void sys_write(syscall_frame_t* frame) {
         // fd_entry içinde write_buf biriktirilir, close'da flush edilir
         // Basit yaklaşım: tüm write'ları fd_entry'nin path'inden VFS'e ilet
         // Geçici buffer: ent->write_buf alanı yoksa yeni alan simüle et
-        // files64.c: fs_write_file64(name, content) → FAT32'ye kaydeder
+        // ext2_write_file ile dosyaya yaz (fs_vfs_write ext2 üzerinden çalışır)
 
         // Accumulate in a static per-fd write buffer (offset tabanlı)
         // write_buf_data: fd_table'da yok, bu yüzden global yazma tamponu kullanırız
@@ -542,7 +521,7 @@ static void sys_read(syscall_frame_t* frame) {
     }
 
     if (ent->type == FD_TYPE_FILE) {
-        // VFS + FAT32'den oku
+        // Önce in-memory static VFS'yi dene (gömülü dosyalar)
         const EmbeddedFile64* vf = fs_get_file64(ent->path);
         if (vf && vf->content) {
             uint64_t fsize = (uint64_t)vf->size;
@@ -554,12 +533,12 @@ static void sys_read(syscall_frame_t* frame) {
             frame->rax = copy;
             return;
         }
-        // FAT32'den oku
-        uint32_t fsize = fat32_file_size(ent->path);
+        // Ext2'den oku
+        uint32_t fsize = ext2_file_size(ent->path);
         if (fsize == 0) { frame->rax = 0; return; }
         uint8_t* tmp = (uint8_t*)kmalloc(fsize + 1);
         if (!tmp) { frame->rax = SYSCALL_ERR_NOMEM; return; }
-        int rd = fat32_read_file(ent->path, tmp, fsize);
+        int rd = ext2_read_file(ent->path, tmp, fsize);
         if (rd > 0 && ent->offset < (uint64_t)rd) {
             uint32_t avail = (uint32_t)rd - (uint32_t)ent->offset;
             uint32_t copy  = (avail < (uint32_t)len) ? avail : (uint32_t)len;
@@ -662,19 +641,18 @@ static void sys_open(syscall_frame_t* frame) {
         if (*p == '/') fname = p + 1;
 
     if (fd_type == FD_TYPE_FILE && (flags & O_CREAT)) {
-        extern int fs_touch_file64(const char* filename);
-        extern int fs_truncate64(const char* path, uint64_t length);
-        if (!fs_path_is_file(fname)) {
-            fs_touch_file64(fname);
+        if (!ext2_path_is_file(path)) {
+            ext2_create_file(path);
         }
         if (flags & O_TRUNC) {
-            fs_truncate64(fname, 0);
+            ext2_truncate(path, 0);
         }
     }
 
     if (fd_type == FD_TYPE_FILE && !(flags & O_CREAT)) {
-        // Önce full path ile dene, bulamazsan basename ile tekrar dene
-        if (!fs_path_is_file(path) && !fs_path_is_file(fname)) {
+        // Ext2'de dosya var mı? Static VFS'de de kontrol et
+        const EmbeddedFile64* _vf = fs_get_file64(path);
+        if (!_vf && !ext2_path_is_file(path)) {
             serial_print("[SYSCALL] open: ENOENT ");
             serial_print(path);
             serial_print("\n");
@@ -989,14 +967,14 @@ static void sys_mmap(syscall_frame_t* frame) {
         return;
     }
 
-    // Dosyanın boyutunu sorgula (VFS → FAT32)
+    // Dosyanın boyutunu sorgula
     uint64_t file_size = 0;
     {
         const EmbeddedFile64* vf = fs_get_file64(ent->path);
         if (vf) {
             file_size = (uint64_t)vf->size;
         } else {
-            file_size = (uint64_t)fat32_file_size(ent->path);
+            file_size = (uint64_t)ext2_file_size(ent->path);
         }
     }
 
@@ -1020,18 +998,18 @@ static void sys_mmap(syscall_frame_t* frame) {
     void* mem = (void*)aligned2_addr;
     kmemset(mem, 0, aligned_len);
 
-    // Dosyadan oku: VFS in-memory mi yoksa FAT32 mi?
+    // Dosyadan oku: static VFS (gömülü) veya ext2
     {
         const EmbeddedFile64* vf = fs_get_file64(ent->path);
         if (vf && vf->content && map_bytes > 0) {
             // In-memory VFS: doğrudan kopyala
             kmemcpy(mem, (const void*)(vf->content + offset), map_bytes);
         } else if (map_bytes > 0) {
-            // FAT32: fat32_read_file ile offset'ten oku
-            // fat32_read_file tüm dosyayı okur; offset'i sonradan uygula
+            // Ext2: ext2_read_file ile offset'ten oku
+            // ext2_read_file tüm dosyayı okur; offset'i sonradan uygula
             uint8_t* tmp_buf = (uint8_t*)kmalloc(file_size + 1);
             if (tmp_buf) {
-                int rd = fat32_read_file(ent->path, tmp_buf, (uint32_t)file_size);
+                int rd = ext2_read_file(ent->path, tmp_buf, (uint32_t)file_size);
                 if (rd > 0 && (uint64_t)rd > offset) {
                     uint64_t copy_bytes = (uint64_t)rd - offset;
                     if (copy_bytes > map_bytes) copy_bytes = map_bytes;
@@ -1384,7 +1362,7 @@ static void sys_fork(syscall_frame_t* frame) {
 //
 // Uygulama özeti:
 //   1. path doğrula  (EFAULT / ENOENT)
-//   2. Dosyayı in-memory VFS'den veya FAT32'den oku
+//   2. Dosyayı in-memory VFS'den veya ext2'den oku
 //   3. ELF64 doğrula + yükle  (elf64_validate / elf64_load)
 //   4. Mevcut task'ın user stack'ini temizle, yeni stack ayır
 //   5. argv[] / envp[] dizilerini yeni user stack'e kopyala
@@ -1542,29 +1520,40 @@ static void sys_execve(syscall_frame_t* frame) {
     uint32_t file_size = 0;
     int      read_ok   = 0;
 
-    // Önce in-memory VFS'yi dene
+    // Önce static (gömülü) VFS'yi dene
     const EmbeddedFile64* vfs_file = fs_get_file64(path);
     if (vfs_file && vfs_file->content && vfs_file->size > 0 &&
         vfs_file->size <= EXECVE_BUF_SIZE) {
         kmemcpy(execve_elf_buf, vfs_file->content, vfs_file->size);
         file_size = vfs_file->size;
         read_ok   = 1;
-        serial_print("[EXECVE] loaded from VFS\n");
+        serial_print("[EXECVE] loaded from static VFS\n");
     }
 
-    // VFS'de yoksa FAT32'yi dene
+    // VFS'de yoksa ext2'yi dene (direkt path ile)
     if (!read_ok) {
-        char fat83[16];
-        path_to_fat83(path, fat83);
+        // Göreceli path ise /bin/ prefix ekle
+        char ext2_path[128];
+        if (path[0] == '/') {
+            int pk = 0;
+            while (path[pk] && pk < 127) { ext2_path[pk] = path[pk]; pk++; }
+            ext2_path[pk] = '\0';
+        } else {
+            ext2_path[0]='/'; ext2_path[1]='b'; ext2_path[2]='i';
+            ext2_path[3]='n'; ext2_path[4]='/'; ext2_path[5]='\0';
+            int pk = 0;
+            while (path[pk] && pk < 120) { ext2_path[5+pk] = path[pk]; pk++; }
+            ext2_path[5+pk] = '\0';
+        }
 
-        uint32_t fsize = fat32_file_size(fat83);
+        uint32_t fsize = ext2_file_size(ext2_path);
         if (fsize > 0 && fsize <= EXECVE_BUF_SIZE) {
-            int n = fat32_read_file(fat83, execve_elf_buf, fsize);
+            int n = ext2_read_file(ext2_path, execve_elf_buf, fsize);
             if (n > 0) {
                 file_size = (uint32_t)n;
                 read_ok   = 1;
-                serial_print("[EXECVE] loaded from FAT32: ");
-                serial_print(fat83);
+                serial_print("[EXECVE] loaded from ext2: ");
+                serial_print(ext2_path);
                 serial_print("\n");
             }
         }
@@ -2095,14 +2084,13 @@ static void sys_lseek(syscall_frame_t* frame) {
     uint64_t cur_offset = ent->offset;
     uint64_t file_size  = 0;
 
-    // SEEK_END için dosya boyutunu VFS'ten al
+    // SEEK_END için dosya boyutunu al
     if (whence == SEEK_END) {
         const EmbeddedFile64* f = fs_get_file64(ent->path);
         if (f) {
             file_size = (uint64_t)f->size;
         } else {
-            // FAT32 sorgula (8.3 isim gerektiriyor; ham path ile dene)
-            file_size = (uint64_t)fat32_file_size(ent->path);
+            file_size = (uint64_t)ext2_file_size(ent->path);
         }
     }
 
@@ -2140,7 +2128,7 @@ static void sys_lseek(syscall_frame_t* frame) {
 // fstat(fd, *stat) -> 0 | SYSCALL_ERR_*
 //
 // Açık fd'nin meta verilerini stat_t yapısına yazar.
-// Dosya bilgileri önce VFS (in-memory), sonra FAT32 katmanından sorgulanır.
+// Dosya bilgileri önce static VFS (gömülü), sonra ext2'den sorgulanır.
 // Serial ve pipe fd'leri için st_mode'a uygun bit maskeleri atanır.
 // ---------------------------------------------------------------
 static void sys_fstat(syscall_frame_t* frame) {
@@ -2191,13 +2179,13 @@ static void sys_fstat(syscall_frame_t* frame) {
     // Düzenli dosya
     stat_buf->st_mode = S_IFREG | S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
 
-    // VFS'ten dosya boyutunu sorgula
+    // Dosya boyutunu sorgula: static VFS → ext2
     uint64_t fsize = 0;
     const EmbeddedFile64* vf = fs_get_file64(ent->path);
     if (vf) {
         fsize = (uint64_t)vf->size;
     } else {
-        fsize = (uint64_t)fat32_file_size(ent->path);
+        fsize = (uint64_t)ext2_file_size(ent->path);
     }
 
     stat_buf->st_size   = fsize;
@@ -2831,9 +2819,9 @@ static void sys_getcwd(syscall_frame_t* frame) {
         return;
     }
 
-    // Kernel'deki cwd'yi al; VFS henüz başlamamışsa "/" varsayılan
-    const char* cwd = fs_getcwd64();
-    if (!cwd) cwd = "/";
+    // Kernel'deki cwd'yi al (ext2)
+    const char* cwd = ext2_getcwd();
+    if (!cwd || cwd[0] == '\0') cwd = "/";
 
     // Uzunluk kontrolü: null terminator dahil
     uint64_t cwd_len = 0;
@@ -2882,16 +2870,16 @@ static void sys_chdir(syscall_frame_t* frame) {
     serial_print(path);
     serial_print("\")\n");
 
-    // fs_chdir64: 1 = başarı, 0 = dizin bulunamadı
-    int ok = fs_chdir64(path);
-    if (!ok) {
+    // ext2_chdir: 0 = başarı, -1 = dizin bulunamadı
+    int ok = ext2_chdir(path);
+    if (ok != 0) {
         serial_print("[SYSCALL] chdir: dizin bulunamadı (ENOENT)\n");
         frame->rax = SYSCALL_ERR_NOENT;
         return;
     }
 
     serial_print("[SYSCALL] chdir: ok, yeni cwd=\"");
-    serial_print(fs_getcwd64());
+    serial_print(ext2_getcwd());
     serial_print("\"\n");
 
     frame->rax = SYSCALL_OK;
@@ -2933,8 +2921,13 @@ static void sys_stat(syscall_frame_t* frame) {
 
     uint32_t now = (uint32_t)get_system_ticks();
 
-    int is_dir  = fs_path_is_dir(path);
-    int is_file = (!is_dir) && fs_path_is_file(path);
+    int is_dir  = ext2_path_is_dir(path);
+    int is_file = (!is_dir) && ext2_path_is_file(path);
+    // Static VFS fallback (gömülü dosyalar)
+    if (!is_dir && !is_file) {
+        const EmbeddedFile64* _sv = fs_get_file64(path);
+        if (_sv) is_file = 1;
+    }
 
     if (!is_dir && !is_file) {
         serial_print("[SYSCALL] stat: ENOENT\n");
@@ -2958,7 +2951,11 @@ static void sys_stat(syscall_frame_t* frame) {
         buf->st_size   = 0;
         buf->st_blocks = 0;
     } else {
-        uint32_t fsz = fs_path_filesize(path);
+        uint32_t fsz = ext2_file_size(path);
+        if (fsz == 0) {
+            const EmbeddedFile64* _sv = fs_get_file64(path);
+            if (_sv) fsz = (uint32_t)_sv->size;
+        }
         buf->st_mode   = S_IFREG | 0644;
         buf->st_size   = fsz;
         buf->st_blocks = (fsz + 511) / 512;
@@ -2997,8 +2994,13 @@ static void sys_access(syscall_frame_t* frame) {
     serial_print(path);
     serial_print("\")\n");
 
-    int is_dir  = fs_path_is_dir(path);
-    int is_file = (!is_dir) && fs_path_is_file(path);
+    int is_dir  = ext2_path_is_dir(path);
+    int is_file = (!is_dir) && ext2_path_is_file(path);
+    // Static VFS fallback
+    if (!is_dir && !is_file) {
+        const EmbeddedFile64* _sv = fs_get_file64(path);
+        if (_sv) is_file = 1;
+    }
 
     // F_OK: sadece varlık kontrolü
     if (!(mode & (R_OK | W_OK | X_OK))) {
@@ -3017,18 +3019,17 @@ static void sys_access(syscall_frame_t* frame) {
         // izin verildi
     }
 
-    // W_OK: dizinler ve dinamik dosyalar yazılabilir
+    // W_OK: ext2 dosyaları yazılabilir; static gömülü dosyalar read-only
     if (mode & W_OK) {
         if (is_file) {
             const EmbeddedFile64* f = fs_get_file64(path);
             if (f && !f->is_dynamic) {
-                // Salt-okunur gömülü dosya
                 serial_print("[SYSCALL] access: W_OK EACCES (read-only file)\n");
                 frame->rax = SYSCALL_ERR_PERM;
                 return;
             }
         }
-        // Dizinler ve dinamik dosyalar yazılabilir
+        // Ext2 dosyaları ve dizinler yazılabilir
     }
 
     // X_OK: dizinler her zaman çalıştırılabilir
@@ -3086,7 +3087,7 @@ static void sys_opendir(syscall_frame_t* frame) {
     serial_print(path);
     serial_print("\")\n");
 
-    if (!fs_path_is_dir(path)) {
+    if (!ext2_path_is_dir(path)) {
         frame->rax = SYSCALL_ERR_NOENT;
         return;
     }
@@ -3869,9 +3870,9 @@ static void sys_truncate(syscall_frame_t* frame) {
 
     if (!is_valid_user_ptr(path, 1)) { frame->rax = SYSCALL_ERR_FAULT;  return; }
     if (path[0] == '\0')             { frame->rax = SYSCALL_ERR_NOENT;  return; }
-    if (!fs_path_is_file(path))      { frame->rax = SYSCALL_ERR_NOENT;  return; }
+    if (!ext2_path_is_file(path))    { frame->rax = SYSCALL_ERR_NOENT;  return; }
 
-    int r = fs_truncate64(path, length);
+    int r = ext2_truncate(path, length);
     if (r < 0) { frame->rax = SYSCALL_ERR_PERM; return; }
 
     serial_print("[SYSCALL] truncate ok\n");
@@ -3890,10 +3891,11 @@ static void sys_mkdir(syscall_frame_t* frame) {
     if (path[0] == '\0')             { frame->rax = SYSCALL_ERR_NOENT;  return; }
 
     // Zaten var mı?
-    if (fs_path_is_dir(path))  { frame->rax = SYSCALL_ERR_BUSY;   return; }
-    if (fs_path_is_file(path)) { frame->rax = SYSCALL_ERR_BUSY;   return; }
+    if (ext2_path_is_dir(path))  { frame->rax = SYSCALL_ERR_BUSY;   return; }
+    if (ext2_path_is_file(path)) { frame->rax = SYSCALL_ERR_BUSY;   return; }
 
-    int r = fs_mkdir64(path);
+    int r = ext2_mkdir(path);
+    r = (r == 0) ? 0 : -1;
     if (r < 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
 
     serial_print("[SYSCALL] mkdir: ");
@@ -3912,10 +3914,10 @@ static void sys_rmdir(syscall_frame_t* frame) {
 
     if (!is_valid_user_ptr(path, 1)) { frame->rax = SYSCALL_ERR_FAULT;  return; }
     if (path[0] == '\0')             { frame->rax = SYSCALL_ERR_NOENT;  return; }
-    if (!fs_path_is_dir(path))       { frame->rax = SYSCALL_ERR_NOENT;  return; }
+    if (!ext2_path_is_dir(path))     { frame->rax = SYSCALL_ERR_NOENT;  return; }
 
-    int r = fs_rmdir64(path);
-    if (r == -2) { frame->rax = SYSCALL_ERR_BUSY;  return; }  // dolu dizin
+    int r = ext2_rmdir(path);
+    if (r == -1) { frame->rax = SYSCALL_ERR_BUSY;  return; }  // dolu dizin
     if (r <   0) { frame->rax = SYSCALL_ERR_INVAL; return; }
 
     serial_print("[SYSCALL] rmdir: ");
@@ -3934,10 +3936,10 @@ static void sys_unlink(syscall_frame_t* frame) {
 
     if (!is_valid_user_ptr(path, 1)) { frame->rax = SYSCALL_ERR_FAULT;  return; }
     if (path[0] == '\0')             { frame->rax = SYSCALL_ERR_NOENT;  return; }
-    if (fs_path_is_dir(path))        { frame->rax = SYSCALL_ERR_INVAL;  return; }  // EISDIR
-    if (!fs_path_is_file(path))      { frame->rax = SYSCALL_ERR_NOENT;  return; }
+    if (ext2_path_is_dir(path))      { frame->rax = SYSCALL_ERR_INVAL;  return; }  // EISDIR
+    if (!ext2_path_is_file(path))    { frame->rax = SYSCALL_ERR_NOENT;  return; }
 
-    int r = fs_unlink64(path);
+    int r = ext2_unlink(path);
     if (r < 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
 
     serial_print("[SYSCALL] unlink: ");
@@ -3961,11 +3963,11 @@ static void sys_rename(syscall_frame_t* frame) {
     if (newpath[0] == '\0')             { frame->rax = SYSCALL_ERR_NOENT; return; }
 
     // Kaynak var mı?
-    int src_is_dir  = fs_path_is_dir(oldpath);
-    int src_is_file = !src_is_dir && fs_path_is_file(oldpath);
+    int src_is_dir  = ext2_path_is_dir(oldpath);
+    int src_is_file = !src_is_dir && ext2_path_is_file(oldpath);
     if (!src_is_dir && !src_is_file) { frame->rax = SYSCALL_ERR_NOENT; return; }
 
-    int r = fs_rename64(oldpath, newpath);
+    int r = ext2_rename(oldpath, newpath);
     if (r < 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
 
     serial_print("[SYSCALL] rename: ");
@@ -4137,12 +4139,12 @@ static void sys_link(syscall_frame_t* frame) {
         frame->rax = SYSCALL_ERR_NOENT;
         return;
     }
-    if (!fs_path_is_file(oldpath) && !fs_path_is_dir(oldpath)) {
+    if (!ext2_path_is_file(oldpath) && !ext2_path_is_dir(oldpath)) {
         frame->rax = SYSCALL_ERR_NOENT;
         return;
     }
 
-    // Hard link VFS tarafından desteklenmiyor
+    // Hard link ext2 tarafından desteklenmiyor
     serial_print("[SYSCALL] link: ");
     serial_print(oldpath);
     serial_print(" -> ");
@@ -4460,13 +4462,11 @@ static void sys_chmod(syscall_frame_t* frame) {
     { char b[8]; int_to_str((int)mode, b); serial_print(b); }
     serial_print(")\n");
 
-    // ── VFS varlık kontrolü ───────────────────────────────────
-    // fs_path_is_dir / fs_path_is_file mevcut API'lerdir.
-    // AscentOS VFS FAT32 tabanlı; chmod kalıcı permission desteği yok.
-    // Varlık kontrolü başarılıysa 0 döndür (bash tolerant: chmod sonucu
-    // kontrol etmez, sadece 0 bekler).
-    int is_dir  = fs_path_is_dir(path);
-    int is_file = (!is_dir) && fs_path_is_file(path);
+    // ── Ext2 varlık kontrolü ─────────────────────────────────
+    // chmod ext2'de kalıcı permission desteği yok (stub).
+    // Varlık kontrolü yapılır; başarılıysa 0 döner.
+    int is_dir  = ext2_path_is_dir(path);
+    int is_file = (!is_dir) && ext2_path_is_file(path);
 
     if (!is_dir && !is_file) {
         serial_print("[SYSCALL] chmod: ENOENT (path not found)\n");
@@ -4474,10 +4474,8 @@ static void sys_chmod(syscall_frame_t* frame) {
         return;
     }
 
-    // FAT32'de izin bitleri kalıcı değil; bellekteki stat cache'ini güncelle
-    // (mevcut sys_stat zaten sabit 0644/0755 döndürüyor — bu yeterli).
-    // İleride VFS permission cache eklenirse burada güncellenebilir.
-    serial_print("[SYSCALL] chmod: ok (vfs accepts, fat32 stub)\n");
+    // Ext2'de izin bitleri inode'da var ama şu an stub.
+    serial_print("[SYSCALL] chmod: ok (ext2 stub)\n");
     frame->rax = 0;
 }
 

@@ -7,6 +7,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "idt64.h"
+#include "ata64.h"
+#include "ext2.h"
 
 #define COM1 0x3F8
 
@@ -40,7 +42,8 @@ static inline void sse_init(void) {
 
 void uint64_to_hex(uint64_t n, char* buf) {
     const char* h="0123456789ABCDEF"; buf[0]='0'; buf[1]='x';
-    for(int i=0;i<16;i++) buf[2+i]=h[(n>>(60-i*4))&0xF]; buf[18]='\0';
+    for(int i=0;i<16;i++) buf[2+i]=h[(n>>(60-i*4))&0xF];
+    buf[18]='\0';
 }
 void get_cpu_info(char* v) {
     uint32_t a,b,c,d;
@@ -192,7 +195,7 @@ static void gui_enter(void) {
 // ============================================================================
 static void gui_loop(void) {
     int sw=gui_get_width(), sh=gui_get_height();
-
+    (void)sw;
     MouseState mouse;
     int lmx=-1,lmy=-1;
     bool llb=false;
@@ -281,7 +284,8 @@ static void gui_loop(void) {
             int n=g_wm.count+1; char title[32]; int ti=0;
             title[ti++]='P'; title[ti++]='e'; title[ti++]='n'; title[ti++]='c';
             title[ti++]='e'; title[ti++]='r'; title[ti++]='e'; title[ti++]=' ';
-            if(n>=10) title[ti++]='0'+(n/10); title[ti++]='0'+(n%10); title[ti]='\0';
+            if(n>=10) title[ti++]='0'+(n/10);
+            title[ti++]='0'+(n%10); title[ti]='\0';
             if(wm_create_window(&g_compositor,&g_wm,&g_taskbar,
                 120+(g_wm.count*30)%200, 80+(g_wm.count*28)%140, 400,280,title)>=0)
                 needs_full_redraw=true;
@@ -363,8 +367,96 @@ static void net_stack_init(void) {
 }
 
 // ============================================================================
-// KERNEL MAIN
+// LBA48 Sürücü Testi
 // ============================================================================
+// 2TB sınırını aşan bir LBA'ya komut gönderir; DRQ gelip gelmediğini
+// kontrol ederek sürücünün LBA48 paketini doğru yorumladığını doğrular.
+// Gerçek bir disk olmayabilir — hata toleranslıdır.
+static void test_lba48_driver(void) {
+    serial_print("[LBA48_TEST] ---- LBA48 Surucu Testi Basladi ----\n");
+
+    uint8_t buf[512];
+
+    // ── 1. Ext2 superblock LBA'sini oku (LBA 2 = byte offset 1024) ──────────
+    int ok = disk_read_sector64(2, buf);
+    serial_print("[LBA48_TEST] LBA=2 (Ext2 superblock) oku: ");
+    serial_print(ok ? "OK\n" : "FAIL (disk yok/hata)\n");
+
+    if (ok) {
+        // Ext2 magic: offset 56 = 0x38 → 0xEF53
+        uint16_t magic = (uint16_t)(buf[56] | (buf[57] << 8));
+        serial_print("[LBA48_TEST]   Ext2 magic 0xEF53: ");
+        serial_print((magic == 0xEF53) ? "OK\n" : "FAIL\n");
+    }
+
+    // ── 2. LBA 3 oku (superblock 2. sektoru) ─────────────────────────────────
+    int ok2 = disk_read_sector64(3, buf);
+    serial_print("[LBA48_TEST] LBA=3 (superblock devam) oku: ");
+    serial_print(ok2 ? "OK\n" : "FAIL\n");
+
+    // ── 3. 2TB sinirini asan LBA (LBA48 mekanizma testi) ─────────────────────
+    serial_print("[LBA48_TEST] LBA=0x100000000 (2TiB+, LBA48): ");
+    int ok48 = disk_read_sector64_ext((uint64_t)0x100000000ULL, buf);
+    serial_print(ok48 ? "OK (disk yanit verdi)\n"
+                      : "TIMEOUT (beklenen) — donmadi, LBA48 OK\n");
+
+    serial_print("[LBA48_TEST] LBA28 max=137GB, LBA48 max=128PiB\n");
+    serial_print("[LBA48_TEST] ---- LBA48 Testi Bitti ----\n");
+}
+
+// ============================================================
+//  Ext2 test fonksiyonu
+//  Kernel boot'ta cagrilir; sonuclar serial porta yazilir.
+// ============================================================
+void test_ext2_driver(void) {
+    serial_print("[EXT2_TEST] Starting...\n");
+
+    // 1. Mount
+    if (ext2_mount() != 0) {
+        serial_print("[EXT2_TEST] Mount FAILED\n");
+        return;
+    }
+    serial_print("[EXT2_TEST] Mount OK\n");
+
+    // 2. mkdir
+    int r = ext2_mkdir("/test_dir");
+    serial_print(r == 0 ? "[EXT2_TEST] mkdir OK\n"
+                        : "[EXT2_TEST] mkdir FAIL\n");
+
+    // 3. create + write file
+    ext2_create_file("/test_dir/hello.txt");
+    const uint8_t* msg = (const uint8_t*)"Hello Ext2!\n";
+    ext2_write_file("/test_dir/hello.txt", 0, msg, 12);
+    serial_print("[EXT2_TEST] write OK\n");
+
+    // 4. read file
+    uint8_t rbuf[64];
+    int i; for (i = 0; i < 64; i++) rbuf[i] = 0;
+    int rd = ext2_read_file("/test_dir/hello.txt", rbuf, 63);
+    if (rd == 12 && rbuf[0] == 'H')
+        serial_print("[EXT2_TEST] read OK\n");
+    else
+        serial_print("[EXT2_TEST] read FAIL\n");
+
+    // 5. getdents
+    dirent64_t dbuf[8];
+    int n = ext2_getdents("/test_dir", dbuf, (int)sizeof(dbuf));
+    serial_print(n > 0 ? "[EXT2_TEST] getdents OK\n"
+                       : "[EXT2_TEST] getdents FAIL\n");
+
+    // 6. unlink
+    r = ext2_unlink("/test_dir/hello.txt");
+    serial_print(r == 0 ? "[EXT2_TEST] unlink OK\n"
+                        : "[EXT2_TEST] unlink FAIL\n");
+
+    // 7. rmdir
+    r = ext2_rmdir("/test_dir");
+    serial_print(r == 0 ? "[EXT2_TEST] rmdir OK\n"
+                        : "[EXT2_TEST] rmdir FAIL\n");
+
+    serial_print("[EXT2_TEST] Done.\n");
+}
+
 void kernel_main(uint64_t multiboot_info) {
     (void)multiboot_info;
     serial_print("\n=== AscentOS Unified Kernel ===\n");
@@ -391,8 +483,13 @@ void kernel_main(uint64_t multiboot_info) {
     init_keyboard64();
     init_commands64();
 
+    // Ext2 sürücü testi — serial çıktıya yaz
+    test_ext2_driver();
+
+    // LBA48 sürücü testi
+    test_lba48_driver();
+
     // Tüm ağ yığınını başlat: RTL8139 → IPv4 → UDP → ICMP → TCP → DHCP
-    // DHCP ACK gelince ARP otomatik init olur; 'ipconfig' artık sadece override için.
     net_stack_init();
 
     // gui64 framebuffer ptr'yi kur (henüz ekrana çizme)

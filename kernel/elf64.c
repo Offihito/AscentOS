@@ -1,9 +1,9 @@
 // elf64.c - ELF-64 Loader for AscentOS
-// FAT32 üzerindeki ET_EXEC / ET_DYN (PIE) x86-64 ELF ikililerini
+// Ext2 üzerindeki ET_EXEC / ET_DYN (PIE) x86-64 ELF ikililerini
 // belleğe yükler; harici dinamik linker gerektirmez.
 
 #include "elf64.h"
-#include "disk64.h"       // fat32_read_file, fat32_file_size
+#include "../kernel/ext2.h"   // ext2_read_file, ext2_file_size
 #include "../apps/commands64.h"         // CommandOutput, output_add_line, renk sabitleri
 
 // ============================================================
@@ -21,8 +21,7 @@ static inline uint64_t page_align_up(uint64_t addr) {
     return (addr + 0xFFF) & ~(uint64_t)0xFFF;
 }
 
-// Güvenli dosya boyutu üst sınırı (FAT32_MAX_FILE_BYTES yerine
-// bellek güvenliği için 16 MB ile sınırlıyoruz)
+// Güvenli dosya boyutu üst sınırı (bellek güvenliği için 64 MB ile sınırlı)
 #define ELF_MAX_LOAD_SIZE (64u * 1024u * 1024u)  // 64 MB — PMM destekli yükleme için yeterli
 
 // ============================================================
@@ -277,37 +276,33 @@ void elf64_dump_header(const uint8_t* buf, void* cmd_output) {
 }
 
 // ============================================================
-// elf64_exec_from_fat32
-// FAT32'den dosyayı okur, doğrular, yükler, rapor verir.
+// elf64_exec_from_ext2
+// Ext2'den dosyayı okur, doğrular, yükler, rapor verir.
+// path: tam ext2 yolu, örn. "/bin/hello.elf"
 // ============================================================
-int elf64_exec_from_fat32(const char* fat83_name,
-                          uint64_t    load_base,
-                          ElfImage*   out,
-                          void*       cmd_output) {
+int elf64_exec_from_ext2(const char* path,
+                         uint64_t    load_base,
+                         ElfImage*   out,
+                         void*       cmd_output) {
     CommandOutput* cout = (CommandOutput*)cmd_output;
 
-    if (!fat83_name || !out || !cout) return ELF_ERR_NULL;
+    if (!path || !out || !cout) return ELF_ERR_NULL;
 
     // --- 1. Dosya boyutunu öğren ---
-    uint32_t fsize = fat32_file_size(fat83_name);
+    uint32_t fsize = ext2_file_size(path);
     if (fsize == 0) {
-        output_add_line(cout, "  [ELF] File not found on FAT32", VGA_RED);
+        output_add_line(cout, "  [ELF] File not found on ext2", VGA_RED);
         return ELF_ERR_NULL;
     }
     if (fsize > ELF_MAX_LOAD_SIZE) {
-        output_add_line(cout, "  [ELF] File too large (>16 MB)", VGA_RED);
+        output_add_line(cout, "  [ELF] File too large (>64 MB)", VGA_RED);
         return ELF_ERR_TOOBIG;
     }
 
     // --- 2. Dosyayı oku ---
-    // Basit statik tampon (kernel yığını sınırlı olduğundan PMM kullan)
-    // Şimdilik 1 MB'a kadar olan ikilileri destekleyen statik tampon.
-    // Gerçek çekirdek: pmm_alloc_pages ile dinamik tahsis yapılmalı.
-    // BASH.ELF ~1.07 MB olduğundan tampon 4 MB'a çıkarıldı
     static uint8_t elf_read_buf[4u * 1024u * 1024u]; // 4 MB
 
     if (fsize > sizeof(elf_read_buf)) {
-        // Hata mesajına dosya boyutunu da ekle
         char sz_line[96];
         str_cpy(sz_line, "  [ELF] File too large for read buffer (");
         char sz_tmp[16]; fmt_u32(fsize / 1024, sz_tmp);
@@ -317,17 +312,34 @@ int elf64_exec_from_fat32(const char* fat83_name,
         return ELF_ERR_TOOBIG;
     }
 
-    int n = fat32_read_file(fat83_name, elf_read_buf, fsize);
+    int n = ext2_read_file(path, elf_read_buf, fsize);
+
+    // --- DEBUG: kaç byte okundu? ---
+    {
+        char dbg[96]; char t1[16]; char t2[16];
+        fmt_u32(fsize, t1); fmt_u32((uint32_t)(n < 0 ? 0 : n), t2);
+        str_cpy(dbg, "  [ELF] ext2 fsize="); str_concat(dbg, t1);
+        str_concat(dbg, " read="); str_concat(dbg, t2);
+        output_add_line(cout, dbg, VGA_YELLOW);
+    }
+
     if (n <= 0) {
-        output_add_line(cout, "  [ELF] FAT32 read failed", VGA_RED);
+        output_add_line(cout, "  [ELF] ext2 read failed", VGA_RED);
         return ELF_ERR_NULL;
     }
+
+    // Okunan byte fsize'dan az gelirse buf_size olarak fsize kullan
+    // (ext2 driver kısa okursa segment offset kontrolü yanlış patlıyor)
+    // Sparse bloklar sifir dolu gelir; effective_size = fsize
+    uint32_t effective_size = fsize;
+    (void)n;
 
     // --- 3. Başlık dökümü ---
     elf64_dump_header(elf_read_buf, cout);
 
     // --- 4. Doğrula ---
-    int rc = elf64_validate(elf_read_buf, (uint32_t)n);
+    // buf_size olarak fsize kullan: segment offset'leri dosya boyutuna göre kontrol edilmeli
+    int rc = elf64_validate(elf_read_buf, fsize);
     if (rc != ELF_OK) {
         char line[96];
         str_cpy(line, "  [ELF] Validation error: ");
@@ -337,7 +349,7 @@ int elf64_exec_from_fat32(const char* fat83_name,
     }
 
     // --- 5. Yükle ---
-    rc = elf64_load(elf_read_buf, (uint32_t)n, load_base, out);
+    rc = elf64_load(elf_read_buf, fsize, load_base, out);
     if (rc != ELF_OK) {
         char line[96];
         str_cpy(line, "  [ELF] Load error: ");

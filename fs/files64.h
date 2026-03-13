@@ -40,7 +40,7 @@ typedef struct {
     char     path[MAX_PATH_LENGTH];
     uint8_t  is_dynamic;
     uint8_t  is_system;       // System directory (can't delete)
-    uint8_t  permissions;     // Basic permission bits
+    uint16_t permissions;     // Basic permission bits
     uint32_t created_time;    // Creation timestamp
 } Directory64;
 
@@ -87,6 +87,9 @@ int fs_truncate64(const char* path, uint64_t length);
 
 // ---- SYS_GETDENTS için (v9) ----
 // d_type sabitleri
+#ifndef DIRENT64_T_DEFINED
+#define DIRENT64_T_DEFINED
+
 #define DT_UNKNOWN  0
 #define DT_REG      8   // regular file
 #define DT_DIR      4   // directory
@@ -99,6 +102,8 @@ typedef struct {
     uint8_t  d_type;     // DT_REG | DT_DIR | DT_UNKNOWN
     char     d_name[256]; // null-terminated dosya/dizin adı
 } __attribute__((packed)) dirent64_t;
+
+#endif /* DIRENT64_T_DEFINED */
 
 // path altındaki entry'leri buf'a yazar.
 // Döndürür: yazılan toplam byte sayısı | -1 (hata)

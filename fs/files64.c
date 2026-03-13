@@ -1,19 +1,15 @@
 // files64.c  –  AscentOS 64-bit VFS layer
 //
-// Changes vs. original:
-//   • Removed all 512-byte content caps (was: content_size >= 512 → 511).
-//   • dynamic_content64 now stores pointers into a large heap region so
-//     individual files can be up to MAX_FILE_SIZE (1 MiB by default).
-//   • Persistence rewritten to use fat32_read_file / fat32_write_file
-//     instead of raw LBA sectors.  Each dynamic file becomes one FAT32
-//     file named by its index (e.g. "F0000000.DAT") and the directory
-//     table is stored as "DIRTABLE.DAT".
-//   • All other logic (path handling, mkdir, rmdir, tree, find, du) is
-//     unchanged from the original.
+// Persistence backend: Ext2 (ext2_mount, ext2_read_file, ext2_write_file, ...)
+// Boot-time /bin scan: ext2_getdents("/bin") → ELF'ler VFS'e eklenir
+// fs_list_files64: ext2 getdents fallback (her dizin için)
+// dynamic_content64 pool-based, MAX_FILE_SIZE'a kadar
+// Path handling, mkdir, rmdir, tree, find, du değişmeden korunur
 
 #include "files64.h"
 #include "../apps/commands64.h"
-#include "../kernel/disk64.h"
+#include "../kernel/ata64.h"
+#include "../kernel/ext2.h"
 #include <stddef.h>
 
 #ifndef MAX_FILES
@@ -29,11 +25,11 @@
 #endif
 
 // ------------------------------------------------------------------
-//  Persistence sector / FAT32 file names
+//  Persistence dosya adları (Ext2 kök dizininde saklanır)
 // ------------------------------------------------------------------
-#define FAT32_DIRTABLE  "DIRTABLE.DAT"   // Saved dynamic dirs
-#define FAT32_FTABLE    "FTABLE.DAT"     // Saved dynamic file metadata
-#define FAT32_CONTENT_PREFIX "FC"        // FC + 6-hex-digit index + ".DAT"
+#define EXT2_DIRTABLE  "/DIRTABLE"   // Saved dynamic dirs
+#define EXT2_FTABLE    "/FTABLE"     // Saved dynamic file metadata
+#define EXT2_CONTENT_PREFIX "FC"     // FC + 6-hex-digit index + ".DAT"
 
 // ------------------------------------------------------------------
 //  Current working directory
@@ -79,8 +75,8 @@ static const char file_hosts[] =
 
 static const char file_fstab[] =
     "# <file system>  <mount point>  <type>  <options>  <dump>  <pass>\n"
-    "/dev/sda1        /              fat32   defaults   0       1\n"
-    "/dev/sda2        /home          fat32   defaults   0       2\n";
+    "/dev/sda1        /              ext2    defaults   0       1\n"
+    "/dev/sda2        /home          ext2    defaults   0       2\n";
 
 static const char file_passwd[] =
     "root:x:0:0:root:/root:/bin/bash\n"
@@ -131,10 +127,10 @@ static const char file_nsswitch[] =
     "shadow: files\n";
 
 static const char file_readme[] =
-    "AscentOS File System (FAT32 backend)\n"
+    "AscentOS File System (Ext2 backend)\n"
     "=====================================\n"
     "\n"
-    "This is a Unix-like VFS backed by a FAT32 partition.\n"
+    "This is a Unix-like VFS backed by an Ext2 partition.\n"
     "Individual files can be up to 2 GB (configurable via\n"
     "MAX_FILE_SIZE in files64.h).\n"
     "\n"
@@ -159,7 +155,7 @@ static const char file_readme[] =
     "  du       - Show disk usage\n"
     "  mkdir -p - Create nested directories\n";
 
-static const char file_version[] = "AscentOS 1.2 (64-bit, FAT32)\n";
+static const char file_version[] = "AscentOS 1.2 (64-bit, Ext2)\n";
 static const char file_null[]    = "";
 static const char file_zero[]    = "";
 static const char file_random[]  = "Random device simulation\n";
@@ -517,8 +513,10 @@ static void auto_save_files64(void) {
     }
 
     uint32_t dir_bytes = (uint32_t)(ptr - meta_buf);
-    fat32_create_file(FAT32_DIRTABLE);           /* ignored if exists */
-    fat32_write_file(FAT32_DIRTABLE, meta_buf, dir_bytes);
+    // ext2'ye yaz: önce dosya oluştur (yoksa), sonra yaz
+    if (ext2_path_is_file(EXT2_DIRTABLE) == 0)
+        ext2_create_file(EXT2_DIRTABLE);
+    ext2_write_file(EXT2_DIRTABLE, 0, meta_buf, dir_bytes);
 
     // ---- Save file metadata table ----
     ptr = meta_buf;
@@ -531,6 +529,8 @@ static void auto_save_files64(void) {
 
     for (int i = 0; i < file_count64 && ptr + 512 < end; i++) {
         if (!all_files64[i].is_dynamic) continue;
+        // /bin altındaki ELF'ler: content=NULL, persist etme
+        if (all_files64[i].content == NULL) continue;
 
         uint16_t nlen = (uint16_t)str_len(all_files64[i].name);
         *(uint16_t*)ptr = nlen; ptr += 2;
@@ -542,20 +542,27 @@ static void auto_save_files64(void) {
 
         *(uint32_t*)ptr = all_files64[i].size; ptr += 4;
 
-        // ---- Save file content to its own FAT32 file ----
-        char fname[13];
-        make_content_fname(i, fname);
-        fat32_create_file(fname);
+        // ---- Save file content to its own ext2 file ----
+        char fname[16];
+        fname[0] = '/'; fname[1] = '\0';
+        // make_content_fname sadece isim üretiyor, biz full path istiyoruz
+        char short_fname[13];
+        make_content_fname(i, short_fname);
+        str_concat(fname, short_fname);
+
+        if (ext2_path_is_file(fname) == 0)
+            ext2_create_file(fname);
         if (all_files64[i].size > 0 && all_files64[i].content && all_files64[i].content[0] != '\0') {
-            fat32_write_file(fname,
+            ext2_write_file(fname, 0,
                              (const uint8_t*)all_files64[i].content,
                              all_files64[i].size);
         }
     }
 
     uint32_t ft_bytes = (uint32_t)(ptr - meta_buf);
-    fat32_create_file(FAT32_FTABLE);
-    fat32_write_file(FAT32_FTABLE, meta_buf, ft_bytes);
+    if (ext2_path_is_file(EXT2_FTABLE) == 0)
+        ext2_create_file(EXT2_FTABLE);
+    ext2_write_file(EXT2_FTABLE, 0, meta_buf, ft_bytes);
 }
 
 // ================================================================
@@ -596,26 +603,59 @@ void init_filesystem64(void) {
         all_files64[file_count64++] = static_files64[i];
     }
 
-    // ---- Try to mount FAT32 ----
-    if (!fat32_mount()) {
-        // First boot: format and seed initial files
-        fat32_format();
-
-        // Write the embedded test ELF binary to FAT32 as "TEST.ELF"
-        fat32_create_file("TEST.ELF");
-        fat32_write_file("TEST.ELF", test_elf_binary, TEST_ELF_SIZE);
-
+    // ---- Try to mount Ext2 ----
+    if (ext2_mount() != 0) {
+        // Disk yok veya format edilmemiş — sadece in-memory VFS ile devam et
         return;
     }
 
-    // If already mounted, ensure TEST.ELF exists (idempotent)
-    if (fat32_file_size("TEST.ELF") == 0) {
-        fat32_create_file("TEST.ELF");
-        fat32_write_file("TEST.ELF", test_elf_binary, TEST_ELF_SIZE);
+    // ---- Boot-time: /bin dizinini ext2'den tara, ELF'leri VFS'e kaydet ----
+    {
+        static uint8_t gd_buf[4096];
+        int gd_bytes = ext2_getdents("/bin", (dirent64_t*)gd_buf, (int)sizeof(gd_buf));
+        if (gd_bytes > 0) {
+            int pos = 0;
+            while (pos < gd_bytes) {
+                dirent64_t* de = (dirent64_t*)(gd_buf + pos);
+                if (de->d_reclen == 0) break;
+
+                // Sadece regular file
+                if (de->d_type == DT_REG && de->d_name[0] != '\0') {
+                    // Zaten VFS'te var mı?
+                    int already = 0;
+                    for (int k = 0; k < file_count64; k++) {
+                        if (str_cmp(all_files64[k].name, de->d_name) == 0 &&
+                            str_cmp(all_files64[k].directory, "/bin") == 0) {
+                            already = 1; break;
+                        }
+                    }
+                    if (!already && file_count64 < MAX_FILES) {
+                        // Boyutu ext2'den al
+                        char fpath[MAX_PATH_LENGTH];
+                        str_cpy(fpath, "/bin/");
+                        str_concat(fpath, de->d_name);
+                        uint32_t fsz = ext2_file_size(fpath);
+
+                        int idx = file_count64;
+                        str_cpy(dynamic_names64[idx], de->d_name);
+                        str_cpy(dynamic_dirs64[idx],  "/bin");
+                        dynamic_content_ptr[idx] = NULL;  // içerik yüklenmiyor (büyük ELF)
+
+                        all_files64[idx].name      = dynamic_names64[idx];
+                        all_files64[idx].content   = NULL;
+                        all_files64[idx].size      = fsz;
+                        all_files64[idx].is_dynamic= 1;
+                        all_files64[idx].directory = dynamic_dirs64[idx];
+                        file_count64++;
+                    }
+                }
+                pos += de->d_reclen;
+            }
+        }
     }
 
     // ---- Load directory table ----
-    int dir_bytes = fat32_read_file(FAT32_DIRTABLE, meta_buf, META_BUF_SIZE);
+    int dir_bytes = ext2_read_file("/DIRTABLE", (uint8_t*)meta_buf, META_BUF_SIZE);
     if (dir_bytes > 4) {
         uint8_t* ptr = meta_buf;
         uint32_t saved_dirs = *(uint32_t*)ptr; ptr += 4;
@@ -632,7 +672,7 @@ void init_filesystem64(void) {
     }
 
     // ---- Load file metadata table ----
-    int ft_bytes = fat32_read_file(FAT32_FTABLE, meta_buf, META_BUF_SIZE);
+    int ft_bytes = ext2_read_file(EXT2_FTABLE, (uint8_t*)meta_buf, META_BUF_SIZE);
     if (ft_bytes <= 4) return;
 
     uint8_t* ptr = meta_buf;
@@ -661,12 +701,14 @@ void init_filesystem64(void) {
         if (!cbuf) break;  /* pool exhausted */
         cbuf[0] = '\0';
 
-        // Load content from its FAT32 file
+        // Load content from its ext2 file
         if (content_size > 0) {
-            char fname[13];
-            make_content_fname(idx, fname);
-            int read = fat32_read_file(fname, (uint8_t*)cbuf,
-                                       alloc_size - 1);
+            char short_fname[13];
+            make_content_fname(idx, short_fname);
+            char fname[16];
+            fname[0] = '/'; fname[1] = '\0';
+            str_concat(fname, short_fname);
+            int read = ext2_read_file(fname, (uint8_t*)cbuf, alloc_size - 1);
             if (read > 0) {
                 cbuf[read] = '\0';
                 content_size = (uint32_t)read;
@@ -812,10 +854,10 @@ int fs_delete_file64(const char* name) {
 
     if (file_index == -1 || !all_files64[file_index].is_dynamic) return 0;
 
-    // Remove the FAT32 content file
+    // Remove the ext2 content file
     char fname[13];
     make_content_fname(file_index, fname);
-    fat32_delete_file(fname);
+    { char ext2_path[16]; ext2_path[0]='/'; ext2_path[1]='\0'; str_concat(ext2_path, fname); ext2_unlink(ext2_path); }
 
     // Shift entries down
     for (int i = file_index; i < file_count64 - 1; i++) {
@@ -879,91 +921,73 @@ int fs_list_files64(void* output_ptr) {
         found_files++;
     }
 
-    // ---- FAT32 pass: show .ELF / .BIN files not already in VFS ----
-    // We iterate every FAT32 directory entry and display files that
-    // have a recognised executable extension.  This makes binaries
-    // placed directly on FAT32 (e.g. TEST.ELF) visible in `ls`
-    // without having to register them in the in-memory VFS.
-    //
-    // We only show FAT32 entries when:
-    //   (a) the current directory is "/" or "/bin", AND
-    //   (b) the entry is not already shown via all_files64[]
-    int fat32_count = 0;
-    int show_fat32 = (str_cmp(current_dir, "/")    == 0 ||
-                      str_cmp(current_dir, "/bin")  == 0);
+    // ---- Ext2 getdents fallback: mevcut dizini ext2'den tara ----
+    // VFS'te görünmeyen dosyaları ext2'den çekerek göster.
+    int ext2_extra = 0;
+    {
+        static uint8_t gd_buf[4096];
+        int gd_bytes = ext2_getdents(current_dir, (dirent64_t*)gd_buf, (int)sizeof(gd_buf));
+        if (gd_bytes > 0) {
+            int pos = 0;
+            while (pos < gd_bytes) {
+                dirent64_t* de = (dirent64_t*)(gd_buf + pos);
+                if (de->d_reclen == 0) break;
 
-    if (show_fat32) {
-        Fat32DirEntry entry;
-        uint32_t idx = 0;
-
-        while (fat32_next_entry(&idx, &entry)) {
-            // Skip volume-ID, LFN, deleted, empty entries
-            if (entry.name[0] == 0x00) break;
-            if ((uint8_t)entry.name[0] == 0xE5) continue;   // deleted
-            if (entry.attr & FAT32_ATTR_VOLUME_ID)  continue;
-            if (entry.attr & FAT32_ATTR_DIRECTORY)  continue;
-            if (entry.attr & FAT32_ATTR_HIDDEN)     continue;
-            if (entry.attr == FAT32_ATTR_LFN)       continue;
-
-            // Build "NAME    EXT" → "NAME.EXT" (trim trailing spaces)
-            char fname[13];
-            int  ni = 0, ei = 0, fi = 0;
-
-            // Name part (up to 8 chars, trim trailing spaces)
-            char raw_name[9]; raw_name[8] = '\0';
-            for (int k = 0; k < 8; k++) raw_name[k] = (char)entry.name[k];
-            ni = 7;
-            while (ni >= 0 && raw_name[ni] == ' ') ni--;
-            for (int k = 0; k <= ni; k++) fname[fi++] = raw_name[k];
-
-            // Extension part
-            char raw_ext[4]; raw_ext[3] = '\0';
-            for (int k = 0; k < 3; k++) raw_ext[k] = (char)entry.ext[k];
-            ei = 2;
-            while (ei >= 0 && raw_ext[ei] == ' ') ei--;
-            if (ei >= 0) {
-                fname[fi++] = '.';
-                for (int k = 0; k <= ei; k++) fname[fi++] = raw_ext[k];
-            }
-            fname[fi] = '\0';
-
-            // Only show files with executable or binary extensions
-            // Check last 4 chars for .ELF or .BIN
-            int is_exec = 0;
-            if (fi >= 4) {
-                const char* tail = fname + fi - 4;
-                if (str_cmp(tail, ".ELF") == 0 ||
-                    str_cmp(tail, ".BIN") == 0 ||
-                    str_cmp(tail, ".COM") == 0) {
-                    is_exec = 1;
+                if (de->d_name[0] == '.' || de->d_name[0] == '\0') {
+                    pos += de->d_reclen;
+                    continue;
                 }
-            }
-            if (!is_exec) continue;
 
-            // Skip if this name is already in VFS (avoid duplicates)
-            int already = 0;
-            for (int k = 0; k < file_count64; k++) {
-                if (str_cmp(all_files64[k].name, fname) == 0) {
-                    already = 1; break;
+                if (de->d_type == DT_DIR) {
+                    // Bu dizin zaten VFS'te var mı?
+                    char chk[MAX_PATH_LENGTH];
+                    str_cpy(chk, current_dir);
+                    if (chk[str_len(chk)-1] != '/') str_concat(chk, "/");
+                    str_concat(chk, de->d_name);
+                    int already = 0;
+                    for (int k = 0; k < dir_count; k++) {
+                        if (str_cmp(directories[k].path, chk) == 0) { already = 1; break; }
+                    }
+                    if (!already) {
+                        char line[MAX_LINE_LENGTH];
+                        str_cpy(line, "  [DIR]  ");
+                        str_concat(line, de->d_name);
+                        str_concat(line, " [ext2]");
+                        output_add_line(output, line, VGA_CYAN);
+                        found_dirs++;
+                        ext2_extra++;
+                    }
+                } else if (de->d_type == DT_REG) {
+                    // Bu dosya zaten VFS'te var mı?
+                    int already = 0;
+                    for (int k = 0; k < file_count64; k++) {
+                        if (str_cmp(all_files64[k].name, de->d_name) == 0 &&
+                            str_cmp(all_files64[k].directory, current_dir) == 0) {
+                            already = 1; break;
+                        }
+                    }
+                    if (!already) {
+                        char fpath[MAX_PATH_LENGTH];
+                        str_cpy(fpath, current_dir);
+                        if (fpath[str_len(fpath)-1] != '/') str_concat(fpath, "/");
+                        str_concat(fpath, de->d_name);
+                        uint32_t fsz = ext2_file_size(fpath);
+
+                        char line[MAX_LINE_LENGTH];
+                        char size_str[24];
+                        str_cpy(line, "  ");
+                        str_concat(line, de->d_name);
+                        str_concat(line, " (");
+                        uint64_to_string(fsz, size_str);
+                        str_concat(line, size_str);
+                        str_concat(line, " bytes)");
+                        output_add_line(output, line, VGA_GREEN);
+                        found_files++;
+                        ext2_extra++;
+                    }
                 }
+                pos += de->d_reclen;
             }
-            if (already) continue;
-
-            // Build display line: "  [ELF] TEST.ELF (293 bytes)"
-            char line[MAX_LINE_LENGTH];
-            char size_str[24];
-            uint32_t fsize = ((uint32_t)entry.fst_clus_hi << 16) | entry.fst_clus_lo;
-            (void)fsize; // cluster, not size – use file_size field
-            uint64_to_string(entry.file_size, size_str);
-
-            str_cpy(line, "  [ELF] ");
-            str_concat(line, fname);
-            str_concat(line, " (");
-            str_concat(line, size_str);
-            str_concat(line, " bytes)");
-            output_add_line(output, line, VGA_GREEN);
-            fat32_count++;
-            found_files++;
         }
     }
 
@@ -980,12 +1004,12 @@ int fs_list_files64(void* output_ptr) {
     str_concat(summary, " directories, ");
     str_concat(summary, files_str);
     str_concat(summary, " files");
-    if (fat32_count > 0) {
-        char fat_str[16];
-        uint64_to_string(fat32_count, fat_str);
+    if (ext2_extra > 0) {
+        char ext_str[16];
+        uint64_to_string(ext2_extra, ext_str);
         str_concat(summary, " (");
-        str_concat(summary, fat_str);
-        str_concat(summary, " from FAT32)");
+        str_concat(summary, ext_str);
+        str_concat(summary, " from ext2)");
     }
     output_add_line(output, summary, VGA_DARK_GRAY);
     return 1;
@@ -1074,7 +1098,7 @@ int fs_rmdir_recursive64(const char* dirname) {
             all_files64[i].is_dynamic) {
             char fname[13];
             make_content_fname(i, fname);
-            fat32_delete_file(fname);
+            { char ext2_path[16]; ext2_path[0]='/'; ext2_path[1]='\0'; str_concat(ext2_path, fname); ext2_unlink(ext2_path); }
             for (int j = i; j < file_count64 - 1; j++) {
                 all_files64[j]          = all_files64[j + 1];
                 dynamic_content_ptr[j]  = dynamic_content_ptr[j + 1];
@@ -1209,7 +1233,7 @@ int fs_unlink64(const char* path) {
     // FAT32'den sil
     char fname[13];
     make_content_fname(file_index, fname);
-    fat32_delete_file(fname);
+    { char ext2_path[16]; ext2_path[0]='/'; ext2_path[1]='\0'; str_concat(ext2_path, fname); ext2_unlink(ext2_path); }
 
     // Diziyi sıkıştır
     for (int i = file_index; i < file_count64 - 1; i++) {
@@ -1643,7 +1667,7 @@ int fs_du64(const char* path, void* output_ptr) {
 }
 // ============================================================
 // fs_vfs_write — sys_write'ın dosya fd'leri için bridge'i
-// Syscall.c bu fonksiyonu çağırır; files64.c VFS + FAT32'ye yazar.
+// Syscall.c bu fonksiyonu çağırır; files64.c VFS + Ext2'ye yazar.
 // offset=0 ve O_TRUNC sonrası çağrılır: sadece append/overwrite.
 // ============================================================
 int fs_vfs_write(const char* path, uint64_t offset,
