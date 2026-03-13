@@ -9,7 +9,7 @@
 ## ✨ Current Features (as of March 2026)
 
 - **64-bit x86_64 architecture** — designed for modern hardware
-- **FAT32 filesystem** — read/write support fully working
+- **EXT2 filesystem** — read/write support fully working
 - **Simple text-based shell**
 - **Basic graphics mode** (switch by typing `gfx` in the shell)
 - **Modular memory management** (stabilized in recent updates)

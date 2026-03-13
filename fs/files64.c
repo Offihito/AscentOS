@@ -605,8 +605,16 @@ void init_filesystem64(void) {
 
     // ---- Try to mount Ext2 ----
     if (ext2_mount() != 0) {
-        // Disk yok veya format edilmemiş — sadece in-memory VFS ile devam et
-        return;
+        // Disk formatlanmamış ya da bozuk — otomatik format uygula
+        if (ext2_format() == 0) {
+            if (ext2_mount() != 0) {
+                // Format sonrası da mount olmadı — in-memory VFS ile devam et
+                return;
+            }
+        } else {
+            // Format da başarısız (disk yok?) — in-memory VFS ile devam et
+            return;
+        }
     }
 
     // ---- Boot-time: /bin dizinini ext2'den tara, ELF'leri VFS'e kaydet ----
@@ -1230,7 +1238,7 @@ int fs_unlink64(const char* path) {
     }
     if (file_index < 0 || !all_files64[file_index].is_dynamic) return -1;
 
-    // FAT32'den sil
+    // Ext2'den içerik dosyasını sil
     char fname[13];
     make_content_fname(file_index, fname);
     { char ext2_path[16]; ext2_path[0]='/'; ext2_path[1]='\0'; str_concat(ext2_path, fname); ext2_unlink(ext2_path); }

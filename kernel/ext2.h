@@ -168,9 +168,10 @@ typedef struct {
 //  Public API
 // ----------------------------------------------------------
 
-// Mount / unmount
+// Mount / unmount / format
 int  ext2_mount(void);
 int  ext2_unmount(void);
+int  ext2_format(void);  // Boş diske minimal ext2 yazar; mount başarısız olunca çağrılır
 
 // Okuma işlemleri
 int      ext2_read_file   (const char* path, uint8_t* buf, uint32_t max_len);
@@ -184,6 +185,7 @@ int ext2_write_file  (const char* path, uint64_t offset,
                       const uint8_t* data, uint32_t len);
 int ext2_create_file (const char* path);
 int ext2_mkdir       (const char* path);
+int ext2_mkdir_p     (const char* path);  // recursive — eksik parent'ları da oluşturur
 int ext2_rmdir       (const char* path);
 int ext2_unlink      (const char* path);
 int ext2_rename      (const char* oldpath, const char* newpath);

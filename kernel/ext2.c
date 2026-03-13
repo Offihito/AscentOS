@@ -59,6 +59,76 @@ static void e2_strcat(char* dst, const char* src) {
 }
 
 // ============================================================
+//  Timestamp — unix epoch yaklaşımı
+//  RTC sadece saat/dakika/saniye veriyor; tarih yok.
+//  Boot anını 2025-01-01 00:00:00 (unix=1735689600) olarak sabitleriz,
+//  sonrasını tick sayacıyla ilerletiriz.
+// ============================================================
+extern void gui_get_rtc_time(uint8_t* h, uint8_t* m, uint8_t* s);
+
+#define EXT2_EPOCH_BASE 1735689600u  // 2025-01-01 00:00:00 UTC
+
+static uint32_t ext2_boot_rtc_seconds = 0;   // boot anındaki RTC toplam saniye
+static uint32_t ext2_boot_unix        = 0;   // boot anındaki unix timestamp
+
+// Boot sırasında bir kez çağrılır (ext2_mount içinde)
+static void ext2_init_clock(void) {
+    uint8_t h = 0, m = 0, s = 0;
+    gui_get_rtc_time(&h, &m, &s);
+    ext2_boot_rtc_seconds = (uint32_t)h * 3600u + (uint32_t)m * 60u + (uint32_t)s;
+    ext2_boot_unix        = EXT2_EPOCH_BASE + ext2_boot_rtc_seconds;
+}
+
+// Mevcut unix timestamp'i döndürür
+static uint32_t ext2_now(void) {
+    uint8_t h = 0, m = 0, s = 0;
+    gui_get_rtc_time(&h, &m, &s);
+    uint32_t cur = (uint32_t)h * 3600u + (uint32_t)m * 60u + (uint32_t)s;
+    // Gün geçişi — saniyeler geriye giderse +86400 ekle
+    uint32_t delta = (cur >= ext2_boot_rtc_seconds)
+                   ? (cur - ext2_boot_rtc_seconds)
+                   : (86400u - ext2_boot_rtc_seconds + cur);
+    return ext2_boot_unix + delta;
+}
+
+// ============================================================
+//  Superblock I/O
+// ============================================================
+static int read_superblock(Ext2Superblock* out) {
+    static uint8_t sb_buf[EXT2_SECTOR_SIZE * 2];
+    if (!disk_read_sector64(EXT2_SUPERBLOCK_LBA,     sb_buf))       return 0;
+    if (!disk_read_sector64(EXT2_SUPERBLOCK_LBA + 1, sb_buf + 512)) return 0;
+    e2_memcpy(out, sb_buf, sizeof(Ext2Superblock));
+    return 1;
+}
+
+static int write_superblock(const Ext2Superblock* in) {
+    static uint8_t sb_buf[EXT2_SECTOR_SIZE * 2];
+    e2_memset(sb_buf, 0, sizeof(sb_buf));
+    e2_memcpy(sb_buf, in, sizeof(Ext2Superblock));
+    if (!disk_write_sector64(EXT2_SUPERBLOCK_LBA,     sb_buf))       return 0;
+    if (!disk_write_sector64(EXT2_SUPERBLOCK_LBA + 1, sb_buf + 512)) return 0;
+    return 1;
+}
+
+// Superblock'taki global sayaçları güncelle
+static void sb_update_free_blocks(int delta) {
+    Ext2Superblock sb;
+    if (!read_superblock(&sb)) return;
+    if (delta < 0 && sb.s_free_blocks_count < (uint32_t)(-delta)) return;
+    sb.s_free_blocks_count = (uint32_t)((int)sb.s_free_blocks_count + delta);
+    write_superblock(&sb);
+}
+
+static void sb_update_free_inodes(int delta) {
+    Ext2Superblock sb;
+    if (!read_superblock(&sb)) return;
+    if (delta < 0 && sb.s_free_inodes_count < (uint32_t)(-delta)) return;
+    sb.s_free_inodes_count = (uint32_t)((int)sb.s_free_inodes_count + delta);
+    write_superblock(&sb);
+}
+
+// ============================================================
 //  Global mount state
 // ============================================================
 static Ext2State state;
@@ -211,6 +281,7 @@ static uint32_t alloc_block(void) {
                 if (!write_block(gd.bg_block_bitmap, bmap)) return 0;
                 gd.bg_free_blocks_count--;
                 write_group_desc(g, &gd);
+                sb_update_free_blocks(-1);
                 return g * state.blocks_per_group + b + state.first_data_block;
             }
         }
@@ -236,7 +307,9 @@ static int free_block(uint32_t block) {
     if (!write_block(gd.bg_block_bitmap, bmap)) return 0;
 
     gd.bg_free_blocks_count++;
-    return write_group_desc(g, &gd);
+    write_group_desc(g, &gd);
+    sb_update_free_blocks(+1);
+    return 1;
 }
 
 // ============================================================
@@ -256,8 +329,8 @@ static uint32_t alloc_inode(void) {
                 imap[b / 8] |= (1u << (b % 8));
                 if (!write_block(gd.bg_inode_bitmap, imap)) return 0;
                 gd.bg_free_inodes_count--;
-                // Eğer dizinse used_dirs_count caller tarafından artırılacak
                 write_group_desc(g, &gd);
+                sb_update_free_inodes(-1);
                 return g * state.inodes_per_group + b + 1;  // 1-based
             }
         }
@@ -282,7 +355,9 @@ static int free_inode(uint32_t ino) {
     if (!write_block(gd.bg_inode_bitmap, imap)) return 0;
 
     gd.bg_free_inodes_count++;
-    return write_group_desc(g, &gd);
+    write_group_desc(g, &gd);
+    sb_update_free_inodes(+1);
+    return 1;
 }
 
 // ============================================================
@@ -694,6 +769,187 @@ static int dir_remove_entry(uint32_t dir_ino, const char* name) {
 }
 
 // ============================================================
+//  ext2_format
+//  Boş bir diske minimal ext2 yapısı yazar:
+//    Block 0   : (boot sektörü — dokunulmaz)
+//    Block 1   : Superblock  (byte offset 1024)
+//    Block 2   : Group Descriptor Table
+//    Block 3   : Block bitmap
+//    Block 4   : Inode bitmap
+//    Block 5.. : Inode table  (inodes_per_group / (block_size/inode_size) block)
+//    Sonrası   : Data bölgesi  (root dizin inode=2 buradadır)
+//
+//  Sabit geometri (64 MB disk için):
+//    Block size    : 1024 byte
+//    Blocks/group  : 8192
+//    Inodes/group  : 1024
+//    Toplam block  : 65536  (64 MB / 1024)
+//
+//  Döner: 0 başarı, -1 hata
+// ============================================================
+int ext2_format(void) {
+    serial_print("[EXT2] Formatting disk...\n");
+
+    // ── Sabit geometri ───────────────────────────────────────
+    const uint32_t BLOCK_SIZE        = 1024u;
+    const uint32_t SECTORS_PER_BLOCK = BLOCK_SIZE / EXT2_SECTOR_SIZE;  // 2
+    const uint32_t TOTAL_BLOCKS      = 65536u;   // 64 MB
+    const uint32_t BLOCKS_PER_GROUP  = 8192u;
+    const uint32_t INODES_PER_GROUP  = 1024u;
+    const uint32_t INODE_SIZE        = EXT2_INODE_SIZE_REV0;  // 128 byte
+    const uint32_t FIRST_DATA_BLOCK  = 1u;       // 1024-byte block'larda SB block=1
+    const uint32_t INODES_PER_BLOCK  = BLOCK_SIZE / INODE_SIZE;  // 8
+    const uint32_t INODE_TABLE_BLOCKS= INODES_PER_GROUP / INODES_PER_BLOCK; // 128
+
+    // Grup sayısı (tek grup: 65536 block / 8192 = 8 grup — ama biz 1 grup ile başlıyoruz)
+    // Basitlik için tek grup kullanalım (8192 block = 8 MB veri alanı yeterli)
+    const uint32_t NUM_GROUPS        = 1u;
+    const uint32_t TOTAL_INODES      = INODES_PER_GROUP * NUM_GROUPS;
+
+    // Tek grup layout (block numaraları):
+    //   1 = Superblock
+    //   2 = GDT
+    //   3 = Block bitmap
+    //   4 = Inode bitmap
+    //   5..132 = Inode table  (128 block)
+    //   133..  = Data bölgesi
+    const uint32_t BLK_SUPER   = 1u;
+    const uint32_t BLK_GDT     = 2u;
+    const uint32_t BLK_BMAP    = 3u;
+    const uint32_t BLK_IMAP    = 4u;
+    const uint32_t BLK_ITABLE  = 5u;
+    const uint32_t BLK_DATA    = BLK_ITABLE + INODE_TABLE_BLOCKS;  // 133
+
+    // Meta block sayısı (superblock dahil)
+    const uint32_t META_BLOCKS  = BLK_DATA - FIRST_DATA_BLOCK;  // 132
+    const uint32_t FREE_BLOCKS  = BLOCKS_PER_GROUP - META_BLOCKS - 1u;  // root dir 1 block alır
+
+    static uint8_t buf[1024];
+
+    // ── 1. Superblock ─────────────────────────────────────────
+    e2_memset(buf, 0, sizeof(buf));
+    Ext2Superblock* sb = (Ext2Superblock*)buf;
+
+    sb->s_inodes_count      = TOTAL_INODES;
+    sb->s_blocks_count      = TOTAL_BLOCKS;
+    sb->s_r_blocks_count    = 0;
+    sb->s_free_blocks_count = FREE_BLOCKS;
+    sb->s_free_inodes_count = TOTAL_INODES - 11u;  // 1-10 rezerve, 11=ilk serbest, 2=root
+    sb->s_first_data_block  = FIRST_DATA_BLOCK;
+    sb->s_log_block_size    = 0;   // 1024 << 0 = 1024
+    sb->s_log_frag_size     = 0;
+    sb->s_blocks_per_group  = BLOCKS_PER_GROUP;
+    sb->s_frags_per_group   = BLOCKS_PER_GROUP;
+    sb->s_inodes_per_group  = INODES_PER_GROUP;
+    sb->s_mtime             = 0;
+    sb->s_wtime             = 0;
+    sb->s_mnt_count         = 0;
+    sb->s_max_mnt_count     = 20;
+    sb->s_magic             = EXT2_SUPER_MAGIC;
+    sb->s_state             = 1;   // EXT2_VALID_FS
+    sb->s_errors            = 1;   // EXT2_ERRORS_CONTINUE
+    sb->s_rev_level         = 0;   // old revision — basit
+    sb->s_first_ino         = 11u;
+    sb->s_inode_size        = (uint16_t)INODE_SIZE;
+
+    // Superblock LBA 2-3'e yaz (byte offset 1024 = LBA 2)
+    if (!disk_write_sector64(EXT2_SUPERBLOCK_LBA,     buf))         return -1;
+    if (!disk_write_sector64(EXT2_SUPERBLOCK_LBA + 1, buf + 512))   return -1;
+
+    // ── 2. Group Descriptor Table ─────────────────────────────
+    e2_memset(buf, 0, sizeof(buf));
+    Ext2GroupDesc* gd = (Ext2GroupDesc*)buf;
+
+    gd->bg_block_bitmap     = BLK_BMAP;
+    gd->bg_inode_bitmap     = BLK_IMAP;
+    gd->bg_inode_table      = BLK_ITABLE;
+    gd->bg_free_blocks_count= (uint16_t)FREE_BLOCKS;
+    gd->bg_free_inodes_count= (uint16_t)(INODES_PER_GROUP - 11u);
+    gd->bg_used_dirs_count  = 1;   // root dizin
+
+    // GDT = block 2 → LBA 4-5
+    uint32_t gdt_lba = BLK_GDT * SECTORS_PER_BLOCK;
+    if (!disk_write_sector64(gdt_lba,     buf))       return -1;
+    if (!disk_write_sector64(gdt_lba + 1, buf + 512)) return -1;
+
+    // ── 3. Block bitmap ──────────────────────────────────────
+    e2_memset(buf, 0, sizeof(buf));
+    // İşaretli (kullanılmış) bloklar: block 1..BLK_DATA + root dir block (BLK_DATA)
+    // Toplam META_BLOCKS+1 block = BLK_DATA+1 - FIRST_DATA_BLOCK = 133 block
+    uint32_t used = META_BLOCKS + 1u;  // +1 = root dizin data block
+    for (uint32_t b = 0; b < used; b++)
+        buf[b / 8] |= (uint8_t)(1u << (b % 8));
+
+    uint32_t bmap_lba = BLK_BMAP * SECTORS_PER_BLOCK;
+    if (!disk_write_sector64(bmap_lba,     buf))       return -1;
+    if (!disk_write_sector64(bmap_lba + 1, buf + 512)) return -1;
+
+    // ── 4. Inode bitmap ──────────────────────────────────────
+    e2_memset(buf, 0, sizeof(buf));
+    // Inode 1-11 rezerve (sistem inode'ları); inode 2 = root (kullanımda)
+    // Bit 0 = inode 1, bit 1 = inode 2, ...
+    for (uint32_t i = 0; i < 11u; i++)
+        buf[i / 8] |= (uint8_t)(1u << (i % 8));
+
+    uint32_t imap_lba = BLK_IMAP * SECTORS_PER_BLOCK;
+    if (!disk_write_sector64(imap_lba,     buf))       return -1;
+    if (!disk_write_sector64(imap_lba + 1, buf + 512)) return -1;
+
+    // ── 5. Inode table — hepsini sıfırla, sonra root'u yaz ──
+    uint32_t itable_lba = BLK_ITABLE * SECTORS_PER_BLOCK;
+    e2_memset(buf, 0, sizeof(buf));
+    for (uint32_t s = 0; s < INODE_TABLE_BLOCKS * SECTORS_PER_BLOCK; s++)
+        disk_write_sector64(itable_lba + s, buf);
+
+    // Root inode (inode 2): inode tablosunun başından 1*INODE_SIZE offset
+    // (inode 1 = bad blocks inode, inode 2 = root)
+    e2_memset(buf, 0, sizeof(buf));
+    Ext2Inode* root_ino = (Ext2Inode*)buf;
+    root_ino->i_mode        = EXT2_S_IFDIR | 0755u;
+    root_ino->i_links_count = 2;          // "." + ".."
+    root_ino->i_size        = BLOCK_SIZE; // bir block dolu
+    root_ino->i_blocks      = SECTORS_PER_BLOCK;  // 512-byte biriminde
+    root_ino->i_block[0]    = BLK_DATA;   // root dizinin data block'u
+
+    // Root inode table içinde byte offset = 1 * INODE_SIZE = 128
+    // LBA = itable_lba + (128 / 512) = itable_lba + 0  (aynı sektör)
+    // Byte offset sektör içinde = 128
+    static uint8_t itable_sec[512];
+    e2_memset(itable_sec, 0, 512);
+    e2_memcpy(itable_sec + INODE_SIZE, root_ino, sizeof(Ext2Inode));  // inode 2 = offset 128
+    if (!disk_write_sector64(itable_lba, itable_sec)) return -1;
+
+    // ── 6. Root dizin data block ─────────────────────────────
+    // Ext2 dizin entry'leri: "." ve ".."
+    e2_memset(buf, 0, sizeof(buf));
+    Ext2DirEntry* de;
+
+    // "." entry
+    de = (Ext2DirEntry*)buf;
+    de->inode     = EXT2_ROOT_INO;   // 2
+    de->rec_len   = 12;              // 8 + 1 (name) + 3 (pad)
+    de->name_len  = 1;
+    de->file_type = EXT2_FT_DIR;
+    de->name[0]   = '.';
+
+    // ".." entry
+    de = (Ext2DirEntry*)(buf + 12);
+    de->inode     = EXT2_ROOT_INO;   // root'un parent'ı kendisi
+    de->rec_len   = (uint16_t)(BLOCK_SIZE - 12u);  // bloğun geri kalanı
+    de->name_len  = 2;
+    de->file_type = EXT2_FT_DIR;
+    de->name[0]   = '.';
+    de->name[1]   = '.';
+
+    uint32_t data_lba = BLK_DATA * SECTORS_PER_BLOCK;
+    if (!disk_write_sector64(data_lba,     buf))       return -1;
+    if (!disk_write_sector64(data_lba + 1, buf + 512)) return -1;
+
+    serial_print("[EXT2] Format OK\n");
+    return 0;
+}
+
+// ============================================================
 //  ext2_mount
 // ============================================================
 int ext2_mount(void) {
@@ -735,6 +991,7 @@ int ext2_mount(void) {
     state.cwd[1] = '\0';
     state.mounted = 1;
     gdt_loaded = 0;  // İlk mount'ta GDT cache'i temizle
+    ext2_init_clock();  // Timestamp için boot zamanını kaydet
 
     serial_print("[EXT2] Mounted OK\n");
     return 0;
@@ -863,14 +1120,14 @@ int ext2_write_file(const char* path, uint64_t offset,
     }
 
 write_done:
-    // i_size güncelle
+    // i_size ve i_mtime güncelle
     uint32_t new_end = start + written;
     if (new_end > inode.i_size) {
         inode.i_size = new_end;
-        // i_blocks: toplam 512-byte blok sayısı
         inode.i_blocks = ((new_end + state.block_size - 1) / state.block_size)
-                          * state.sectors_per_block * 1;  // sektör sayısı
+                          * state.sectors_per_block * 1;
     }
+    inode.i_mtime = ext2_now();
     write_inode(ino, &inode);
     return (int)written;
 }
@@ -895,6 +1152,9 @@ int ext2_create_file(const char* path) {
     e2_memset(&inode, 0, sizeof(inode));
     inode.i_mode        = EXT2_S_IFREG | 0644u;
     inode.i_links_count = 1;
+    inode.i_ctime       = ext2_now();
+    inode.i_mtime       = inode.i_ctime;
+    inode.i_atime       = inode.i_ctime;
 
     if (!write_inode(new_ino, &inode)) { free_inode(new_ino); return -1; }
     if (dir_add_entry(parent_ino, leaf, new_ino, EXT2_FT_REG_FILE) != 0) {
@@ -922,6 +1182,9 @@ int ext2_mkdir(const char* path) {
     e2_memset(&inode, 0, sizeof(inode));
     inode.i_mode        = EXT2_S_IFDIR | 0755u;
     inode.i_links_count = 2;  // "." + parent'ın bu dizine linki
+    inode.i_ctime       = ext2_now();
+    inode.i_mtime       = inode.i_ctime;
+    inode.i_atime       = inode.i_ctime;
 
     if (!write_inode(new_ino, &inode)) { free_inode(new_ino); return -1; }
 
@@ -951,6 +1214,45 @@ int ext2_mkdir(const char* path) {
         write_group_desc(g, &gd);
     }
 
+    return 0;
+}
+
+// ============================================================
+//  ext2_mkdir_p — recursive mkdir ("mkdir -p" semantiği)
+//  Path boyunca eksik olan her dizini sırayla oluşturur.
+//  Zaten var olan bileşenler sessizce atlanır.
+//  Döner: 0 başarı, -1 hata
+// ============================================================
+int ext2_mkdir_p(const char* path) {
+    if (!state.mounted || !path || path[0] == '\0') return -1;
+    if (path[0] != '/') return -1;  // sadece mutlak path
+
+    char buf[EXT2_MAX_PATH];
+    int  len = 0;
+    while (path[len] && len < (int)EXT2_MAX_PATH - 1) {
+        buf[len] = path[len];
+        len++;
+    }
+    buf[len] = '\0';
+
+    // Path bileşenlerini sırayla işle
+    for (int i = 1; i <= len; i++) {
+        if (buf[i] == '/' || buf[i] == '\0') {
+            char saved = buf[i];
+            buf[i] = '\0';
+
+            // Bu prefixe kadar olan yolu oluştur (root "/" atla)
+            if (i > 1) {
+                // Zaten var mı?
+                if (!ext2_path_is_dir(buf)) {
+                    int r = ext2_mkdir(buf);
+                    if (r != 0) return -1;  // oluşturulamadı
+                }
+            }
+
+            buf[i] = saved;
+        }
+    }
     return 0;
 }
 
