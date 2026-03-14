@@ -12,6 +12,7 @@
 #include "../kernel/syscall.h"       // SYSCALL/SYSRET altyapısı
 #include "../kernel/signal64.h"      // SYS_SIGACTION, SYS_SIGPROCMASK vb. (v10)
 #include "../kernel/pcspk.h"
+#include <stdbool.h>
 
 // ============================================================================
 // RTL8139 Ağ Sürücüsü — extern bildirimleri
