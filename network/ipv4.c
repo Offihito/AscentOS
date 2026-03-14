@@ -133,7 +133,10 @@ void ipv4_handle_packet(const uint8_t* frame, uint16_t len){
     if(!g_initialized) return;
 
     // Minimum uzunluk: ETH(14) + IPv4(20)
-    if(len < (uint16_t)(ETH_HLEN + IPV4_HDR_LEN)) return;
+    if(len < (uint16_t)(ETH_HLEN + IPV4_HDR_LEN)){
+        serial_print("[IPv4] RX atildi: cok kisa\n");
+        return;
+    }
 
     // EtherType kontrolü
     uint16_t etype = (uint16_t)((frame[12] << 8) | frame[13]);
@@ -143,8 +146,11 @@ void ipv4_handle_packet(const uint8_t* frame, uint16_t len){
 
     // Versiyon ve IHL kontrolü
     uint8_t version = (ip->ver_ihl >> 4) & 0xF;
-    uint8_t ihl     = (ip->ver_ihl & 0xF) * 4;   // byte cinsinden başlık uzunluğu
-    if(version != 4 || ihl < IPV4_HDR_LEN) return;
+    uint8_t ihl     = (ip->ver_ihl & 0xF) * 4;
+    if(version != 4 || ihl < IPV4_HDR_LEN){
+        serial_print("[IPv4] RX atildi: versiyon/IHL hatasi\n");
+        return;
+    }
 
     // Başlık sağlama toplamı doğrula (0 çıkmalı)
     if(ipv4_checksum(ip, ihl) != 0){
@@ -153,7 +159,16 @@ void ipv4_handle_packet(const uint8_t* frame, uint16_t len){
     }
 
     uint16_t total = _ntohs(ip->total_len);
-    if(total < ihl || (uint16_t)(ETH_HLEN + total) > len) return;
+    if(total < ihl){
+        serial_print("[IPv4] RX atildi: total<ihl\n");
+        return;
+    }
+    // RTL8139 Ethernet padding nedeniyle len >= ETH_HLEN+total olabilir — normaldir.
+    // Sadece ip->total_len frame boyutundan açıkça büyükse at (+4 FCS toleransı).
+    if((uint32_t)(ETH_HLEN + total) > (uint32_t)(len + 4)){
+        serial_print("[IPv4] RX atildi: total_len>frame_len\n");
+        return;
+    }
 
     // Parçalanmış paketleri şimdilik atla (MF veya offset > 0)
     uint16_t flags_frag = _ntohs(ip->flags_frag);
@@ -210,12 +225,12 @@ bool ipv4_send(const uint8_t dst_ip[4], uint8_t protocol,
     uint8_t dst_mac[6];
     bool resolved;
 
-    // Broadcast → doğrudan broadcast MAC
-    if(_memcmp(dst_ip, IP_BROADCAST, 4) == 0 || dst_ip[3] == 255){
+    // Broadcast → doğrudan broadcast MAC (sadece 255.255.255.255)
+    if(_memcmp(dst_ip, IP_BROADCAST, 4) == 0){
         _memcpy(dst_mac, MAC_BROADCAST, 6);
         resolved = true;
     } else {
-        // Subnet kontrolü: hedef aynı /24'te değilse gateway MAC'ine yönlendir
+        // Subnet kontrolü: g_subnet maskesi kullanarak aynı ağda mı diye bak
         uint8_t my_ip[4]; arp_get_my_ip(my_ip);
         bool same = true;
         for(int i = 0; i < 4; i++){

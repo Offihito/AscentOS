@@ -418,7 +418,12 @@ run: AscentOS.iso disk.img install-userland
 	@echo "   ── TCP Port Yönlendirme ──────────────────────────────"
 	@echo "   tcplisten   : hostfwd=tcp::8080-:8080  -> nc 127.0.0.1 8080"
 	@echo "   tcptest     : nc -l -p 8080 (host'ta) -> tcptest 10.0.2.15 8080"
+	@echo "   ── ICMP (ping) için ──────────────────────────────────"
+	@echo "   QEMU SLiRP ICMP icin Linux izni gerekir:"
+	@echo "   sudo sysctl -w net.ipv4.ping_group_range='0 2147483647'"
 	@echo "   ─────────────────────────────────────────────────────"
+	@sudo sysctl -w net.ipv4.ping_group_range="0 2147483647" 2>/dev/null || \
+	    echo "   [UYARI] ping_group_range ayarlanamadi — 'ping 1.1.1.1' calismazsa yukardaki komutu elle calistir"
 	qemu-system-x86_64 \
 	  -cdrom AscentOS.iso \
 	  -drive file=disk.img,format=raw,if=ide,cache=writeback \
@@ -426,7 +431,7 @@ run: AscentOS.iso disk.img install-userland
 	  -serial stdio -vga std \
 	  -usb -device usb-tablet \
 	  -audiodev pa,id=snd0 -machine pcspk-audiodev=snd0 \
-	  -netdev user,id=net0,restrict=off,hostfwd=udp::5000-:5000,hostfwd=udp::5001-:5001,hostfwd=udp::5002-:5002,hostfwd=tcp::8080-:8080,hostfwd=tcp::8081-:8081 \
+	  -netdev user,id=net0,restrict=off,ipv6=off,hostname=AscentOS,hostfwd=udp::5000-:5000,hostfwd=udp::5001-:5001,hostfwd=udp::5002-:5002,hostfwd=tcp::8080-:8080,hostfwd=tcp::8081-:8081 \
 	  -device rtl8139,netdev=net0 \
 	  -display gtk,zoom-to-fit=off
 

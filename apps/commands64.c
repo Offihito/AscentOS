@@ -266,7 +266,39 @@ static void net_packet_callback(const uint8_t* buf, uint16_t len) {
         g_net_last_etype = (uint16_t)((buf[12] << 8) | buf[13]);
         // Kaynak MAC (byte 6-11)
         for (int i = 0; i < 6; i++) g_net_last_src[i] = buf[6 + i];
+
+        // Serial debug: gelen her paketin EtherType + uzunluğunu yaz
+        serial_print("[RX] etype=0x");
+        {
+            const char* h = "0123456789ABCDEF";
+            uint16_t et = g_net_last_etype;
+            serial_write(h[(et>>12)&0xF]); serial_write(h[(et>>8)&0xF]);
+            serial_write(h[(et>>4)&0xF]);  serial_write(h[et&0xF]);
+        }
+        serial_print("  len=");
+        {
+            uint16_t v = len; char b[6]; int bi = 0;
+            if (!v) { serial_write('0'); }
+            else { while(v){ b[bi++]='0'+(v%10); v/=10; } while(bi--) serial_write(b[bi]); }
+        }
+        // IPv4 ise proto ve src IP yaz
+        if (g_net_last_etype == 0x0800 && len >= 34) {
+            serial_print("  proto=");
+            uint8_t proto = buf[14+9];
+            { char b[4]; int bi=0; uint8_t v=proto;
+              if(!v){serial_write('0');}
+              else{while(v){b[bi++]='0'+(v%10);v/=10;}while(bi--)serial_write(b[bi]);} }
+            serial_print("  src=");
+            serial_write('0'+buf[26]); serial_write('.');
+            serial_write('0'+(buf[27]/100)); serial_write('0'+((buf[27]/10)%10)); serial_write('0'+(buf[27]%10));
+            serial_write('.');
+            serial_write('0'+(buf[28]/100)); serial_write('0'+((buf[28]/10)%10)); serial_write('0'+(buf[28]%10));
+            serial_write('.');
+            serial_write('0'+(buf[29]/100)); serial_write('0'+((buf[29]/10)%10)); serial_write('0'+(buf[29]%10));
+        }
+        serial_write('\n');
     }
+
     // ARP katmanına ilet (EtherType 0x0806)
     if (arp_is_initialized())
         arp_handle_packet(buf, len);
@@ -2594,6 +2626,14 @@ static void cmd_ipconfig(const char* args, CommandOutput* output) {
     ipv4_set_gateway(gw);
     ipv4_set_subnet(mask);
 
+    // QEMU SLiRP gateway MAC'ini statik ARP cache'e ekle.
+    // Bu sayede 'ping 1.1.1.1' gibi internet adresleri için ARP beklemeye gerek kalmaz.
+    // QEMU SLiRP varsayılan gateway MAC: 52:54:00:12:34:02
+    {
+        static const uint8_t QEMU_GW_MAC[6] = {0x52,0x54,0x00,0x12,0x34,0x02};
+        arp_add_static(gw, QEMU_GW_MAC);
+    }
+
     char buf[64]; char ipstr[16]; ip_to_str(new_ip, ipstr);
     str_cpy(buf, "  IP atandi: "); str_concat(buf, ipstr);
     output_add_line(output, buf, 0x0A);
@@ -2601,9 +2641,12 @@ static void cmd_ipconfig(const char* args, CommandOutput* output) {
     str_cpy(buf, "  Gateway  : "); str_concat(buf, gwstr);
     output_add_line(output, buf, 0x07);
     output_add_line(output, "  IPv4 + ICMP katmanlari aktif.", 0x0A);
+    output_add_line(output, "  Gateway MAC: 52:54:00:12:34:02 (QEMU SLiRP statik)", 0x08);
     output_add_line(output, "  Gratuitous ARP gonderiliyor...", 0x07);
     arp_announce();
-    output_add_line(output, "  Hazir! 'ping 10.0.2.2' veya 'ping 1.1.1.1' dene.", 0x07);
+    output_add_line(output, "  Hazir! Yerel: ping 10.0.2.2", 0x07);
+    output_add_line(output, "         Internet: ping 1.1.1.1  ping 8.8.8.8", 0x07);
+    output_add_line(output, "  NOT: Farkli gateway MAC icin: arpstatic <GW-IP> <MAC>", 0x08);
 }
 
 // ── arping ───────────────────────────────────────────────────────────────────
@@ -2868,35 +2911,59 @@ static void cmd_ping(const char* args, CommandOutput* output) {
     str_concat(hdr, " — ICMP Echo Request");
     output_add_line(output, hdr, 0x0B);
 
-    // Subnet kontrolü: farklı ağ → gateway MAC'ine ARP yap (1.1.1.1 için "who has 1.1.1.1" olmaz)
+    // Subnet kontrolü: hedef aynı /24'te değilse gateway MAC'ine ARP yap
     uint8_t my_ip[4]; arp_get_my_ip(my_ip);
     uint8_t gw[4];    ipv4_get_gateway(gw);
     bool same_subnet = (dst_ip[0] == my_ip[0] &&
                         dst_ip[1] == my_ip[1] &&
                         dst_ip[2] == my_ip[2]);
     uint8_t arp_target[4];
-    for(int k=0;k<4;k++) arp_target[k] = same_subnet ? dst_ip[k] : gw[k];
+    for(int k = 0; k < 4; k++) arp_target[k] = same_subnet ? dst_ip[k] : gw[k];
 
-    // ARP — poll tabanlı bekleme (flood yok, IRQ nesting yok)
+    // Gateway tanımlı mı?
+    if (!same_subnet) {
+        bool gw_zero = (gw[0]==0 && gw[1]==0 && gw[2]==0 && gw[3]==0);
+        if (gw_zero) {
+            output_add_line(output, "  [HATA] Gateway tanimli degil!", 0x0C);
+            output_add_line(output, "  Once: ipconfig 10.0.2.15", 0x0E);
+            return;
+        }
+    }
+
+    // ARP — poll tabanlı bekleme
     {
         uint8_t dummy_mac[6];
         if (!arp_resolve(arp_target, dummy_mac)) {
-            output_add_line(output, "  ARP isteği gönderiliyor...", 0x0E);
-            arp_request(arp_target);     // explicit istek — cache boşsa tetikle
+            if (!same_subnet) {
+                char arp_msg[64]; char gw_str[16]; ip_to_str(arp_target, gw_str);
+                str_cpy(arp_msg, "  Gateway ARP: "); str_concat(arp_msg, gw_str);
+                output_add_line(output, arp_msg, 0x07);
+            }
+            output_add_line(output, "  ARP istegi gonderiliyor...", 0x0E);
+            arp_request(arp_target);
             __asm__ volatile("sti");
             uint64_t t_arp = get_system_ticks();
             bool resolved = false;
             while ((get_system_ticks() - t_arp) < 5000) {
                 rtl8139_poll();
                 if (arp_resolve(arp_target, dummy_mac)) { resolved = true; break; }
-                __asm__ volatile("hlt");  // QEMU'ya CPU ver → IRQ11 ARP reply gelir
             }
             __asm__ volatile("cli");
+
             if (!resolved) {
-                output_add_line(output, "  ARP zaman asimi.", 0x0C);
-                return;
+                if (!same_subnet) {
+                    // QEMU SLiRP gateway ARP reply vermeyebilir — bilinen MAC'i ekle
+                    static const uint8_t QEMU_GW_MAC[6] = {0x52,0x54,0x00,0x12,0x34,0x02};
+                    arp_add_static(arp_target, QEMU_GW_MAC);
+                    output_add_line(output, "  ARP yanit yok — QEMU varsayilan MAC kullaniliyor", 0x0E);
+                    output_add_line(output, "  (52:54:00:12:34:02)  Farkli MAC: arpstatic <GW> <MAC>", 0x08);
+                } else {
+                    output_add_line(output, "  ARP zaman asimi.", 0x0C);
+                    return;
+                }
+            } else {
+                output_add_line(output, "  ARP cozumlendi.", 0x0A);
             }
-            output_add_line(output, "  ARP cozumlendi.", 0x0A);
         }
     }
 
@@ -2917,14 +2984,16 @@ static void cmd_ping(const char* args, CommandOutput* output) {
             continue;
         }
 
-        // Poll tabanlı bekleme — STI ile timer IRQ'nun ilerlemesine izin ver
+        // Poll tabanlı bekleme — sadece rtl8139_poll() kullan, hlt YOK.
+        // hlt IRQ'yu bekler ama cli sonrası tick ilerlemez; pure poll daha güvenilir.
+        // Internet ping'i için RTT 50-200ms olabilir, 8000 tick yeterli.
         {
             __asm__ volatile("sti");
             uint64_t t0 = get_system_ticks();
             while (icmp_ping_state() == PING_PENDING) {
                 rtl8139_poll();
-                if ((get_system_ticks() - t0) >= 5000) break;
-                __asm__ volatile("hlt");
+                uint64_t elapsed = get_system_ticks() - t0;
+                if (elapsed >= 8000) break;  // 8 saniye timeout (internet için yeterli)
             }
             __asm__ volatile("cli");
         }
