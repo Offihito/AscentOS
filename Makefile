@@ -78,9 +78,6 @@ task.o: kernel/task.c kernel/task.h
 scheduler.o: kernel/scheduler.c kernel/scheduler.h kernel/task.h
 	$(CC) $(CFLAGS) -c kernel/scheduler.c -o scheduler.o
 
-nano64.o: apps/nano64.c apps/nano64.h
-	$(CC) $(CFLAGS) -c apps/nano64.c -o nano64.o
-
 font8x16.o: kernel/font8x16.c kernel/font8x16.h
 	$(CC) $(CFLAGS) -c kernel/font8x16.c -o font8x16.o
 
@@ -175,7 +172,7 @@ spinlock64.o: kernel/spinlock64.c kernel/spinlock64.h kernel/cpu64.h
 KERNEL_OBJS = boot64.o interrupts64.o idt64.o \
               font8x16.o vesa64.o gui64.o compositor64.o wm64.o mouse64.o \
               keyboard.o kernel64.o taskbar.o cpu64.o spinlock64.o \
-              commands64.o syscalltest64.o files64.o ata64.o ext2.o elf64.o nano64.o \
+              commands64.o syscalltest64.o files64.o ata64.o ext2.o elf64.o \
               pmm.o heap.o vmm64.o timer.o pcspk.o task.o scheduler.o \
               page_fault.o syscall.o signal64.o \
               panic64.o rtl8139.o arp.o ipv4.o icmp.o udp.o dhcp.o tcp.o http.o

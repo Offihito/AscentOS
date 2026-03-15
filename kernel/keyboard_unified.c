@@ -19,12 +19,9 @@ extern void println64(const char* str, uint8_t color);
 extern void set_position64(size_t row, size_t col);
 extern void clear_screen64(void);
 
-// nano API
-#include "../apps/nano64.h"
-#include "../apps/commands64.h"
-
 // Sinyal altyapısı — Ctrl+C (SIGINT) ve Ctrl+Z (SIGTSTP) için
 #include "signal64.h"
+#include "../apps/commands64.h"
 
 // ============================================================================
 // I/O
@@ -223,84 +220,6 @@ void keyboard_handler64(void) {
     // Ctrl
     if (sc == 0x1D) { ctrl_pressed = 1; outb(0x20, 0x20); return; }
     if (sc == 0x9D) { ctrl_pressed = 0; outb(0x20, 0x20); return; }
-
-    // --- Nano modu ---
-    if (is_nano_mode()) {
-        // Ok tuşları (E0 prefix gerekli)
-        if (extended_key) {
-            extended_key = 0;
-            if      (sc == 0x48) { nano_handle_arrow(0x48); nano_redraw(); }
-            else if (sc == 0x50) { nano_handle_arrow(0x50); nano_redraw(); }
-            else if (sc == 0x4B) { nano_handle_arrow(0x4B); nano_redraw(); }
-            else if (sc == 0x4D) { nano_handle_arrow(0x4D); nano_redraw(); }
-            outb(0x20, 0x20); return;
-        }
-        // Ok tuşu scancodeları E0 olmadan gelirse ignore
-        if (sc == 0x48 || sc == 0x50 || sc == 0x4B || sc == 0x4D) {
-            outb(0x20, 0x20); return;
-        }
-        // Release
-        if (sc & 0x80) { outb(0x20, 0x20); return; }
-
-        // Ctrl kombinasyonları — orijinal nano.h'daki NANO_SAVE / NANO_QUIT
-        if (ctrl_pressed) {
-            int result = NANO_CONTINUE;
-            if      (sc == 0x1F) result = NANO_SAVE;  // Ctrl+S
-            else if (sc == 0x10) result = NANO_QUIT;  // Ctrl+Q
-
-            if (result == NANO_SAVE) {
-                if (nano_save_file()) {
-                    set_position64(23, 0);
-                    print_str64("[ Dosya kaydedildi! ]                    ", 0x0A);
-                    for (volatile int i = 0; i < 15000000; i++);
-                } else {
-                    set_position64(23, 0);
-                    print_str64("[ HATA: Kayit basarisiz! ]               ", 0x0C);
-                    for (volatile int i = 0; i < 15000000; i++);
-                }
-                nano_redraw();
-                outb(0x20, 0x20); return;
-            }
-            if (result == NANO_QUIT) {
-                EditorState* state = nano_get_state();
-                if (state->modified) {
-                    set_position64(23, 0);
-                    print_str64("[ Degistirildi! Ctrl+S kaydet, tekrar Q cik ]   ", 0x0E);
-                    state->modified = 0;
-                    for (volatile int i = 0; i < 20000000; i++);
-                    nano_redraw();
-                } else {
-                    set_nano_mode(0);
-                    clear_screen64();
-                    println64("nano editorden cikild.", 0x0A);
-                    show_prompt64();
-                }
-                outb(0x20, 0x20); return;
-            }
-            // Ctrl+K: satir sil
-            if (sc == 0x25) {
-                EditorState* st = nano_get_state();
-                if (st->line_count > 1) {
-                    for (int i = st->cursor_y; i < st->line_count - 1; i++)
-                        for (int j = 0; j < MAX_LINE_LENGTH; j++)
-                            st->lines[i][j] = st->lines[i+1][j];
-                    st->line_count--;
-                    if (st->cursor_y >= st->line_count) st->cursor_y = st->line_count - 1;
-                } else { st->lines[0][0] = '\0'; }
-                st->cursor_x = 0; st->modified = 1;
-                nano_redraw(); outb(0x20, 0x20); return;
-            }
-            outb(0x20, 0x20); return;
-        }
-
-        // Enter, Backspace, normal karakter
-        if (sc == 0x01) { nano_handle_key(27);   nano_redraw(); outb(0x20, 0x20); return; } // ESC
-        if (sc == 0x1C) { nano_handle_key('\n');  nano_redraw(); outb(0x20, 0x20); return; }
-        if (sc == 0x0E) { nano_handle_key('\b');  nano_redraw(); outb(0x20, 0x20); return; }
-        char nc = sc_to_char(sc);
-        if (nc) { nano_handle_char(nc); nano_redraw(); }
-        outb(0x20, 0x20); return;
-    }
 
     // --- Normal terminal ---
     if (extended_key) {

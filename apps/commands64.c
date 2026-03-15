@@ -1,7 +1,6 @@
 #include <stddef.h>
 #include "commands64.h"
 #include "../fs/files64.h"
-#include "nano64.h"
 #include "../kernel/vmm64.h"
 #include "../kernel/heap.h"
 #include "../kernel/pmm.h"
@@ -322,16 +321,6 @@ extern void print_str64(const char* str, uint8_t color);
 extern uint64_t get_system_ticks(void);
 extern void serial_print(const char* str);
 
-// Nano editor mode flag
-static int nano_mode = 0;
-
-int is_nano_mode(void) {
-    return nano_mode;
-}
-
-void set_nano_mode(int mode) {
-    nano_mode = mode;
-}
 
 // ===========================================
 // CPU USAGE TRACKING
@@ -566,7 +555,7 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_line(output, " touch     - Create new file", VGA_WHITE);
     output_add_line(output, " write     - Write to file", VGA_WHITE);
     output_add_line(output, " rm        - Delete file", VGA_WHITE);
-    output_add_line(output, " kode      - Text editor", VGA_WHITE);
+
     output_add_empty_line(output);
     output_add_line(output, "Advanced File System:", VGA_GREEN);
     output_add_line(output, " tree      - Show full directory tree", VGA_WHITE);
@@ -658,33 +647,6 @@ void cmd_about(const char* args, CommandOutput* output) {
     output_add_line(output, "Featuring: Persistent File System!", VGA_GREEN);
 }
 
-// ===========================================
-// NANO TEXT EDITOR
-// ===========================================
-
-void cmd_kode(const char* args, CommandOutput* output) {
-    if (str_len(args) == 0) {
-        output_add_line(output, "Usage: kode <filename>", VGA_RED);
-        output_add_line(output, "Example: kode myfile.txt", VGA_CYAN);
-        return;
-    }
-    
-    // Check for spaces in filename
-    for (int i = 0; args[i]; i++) {
-        if (args[i] == ' ') {
-            output_add_line(output, "Error: Filename cannot contain spaces", VGA_RED);
-            return;
-        }
-    }
-    
-    // Enter nano mode
-    nano_mode = 1;
-    nano_run(args);
-    
-    // This will be handled by keyboard interrupt
-    output_add_line(output, "Entering kode editor...", VGA_GREEN);
-    output_add_line(output, "Use Ctrl+S to save, Ctrl+Q to quit", VGA_CYAN);
-}
 
 // ===========================================
 // FILE SYSTEM COMMANDS
@@ -855,7 +817,6 @@ void cmd_touch(const char* args, CommandOutput* output) {
 void cmd_write(const char* args, CommandOutput* output) {
     if (str_len(args) == 0) {
         output_add_line(output, "Usage: write <filename> <content>", VGA_RED);
-        output_add_line(output, "Tip: Use 'kode' for better editing experience", VGA_CYAN);
         output_add_line(output, "Example: write test.txt Hello World!", VGA_CYAN);
         return;
     }
@@ -878,7 +839,6 @@ void cmd_write(const char* args, CommandOutput* output) {
 
     if (str_len(content) == 0) {
         output_add_line(output, "Error: No content specified", VGA_RED);
-        output_add_line(output, "Tip: Use 'kode <filename>' for better editing", VGA_CYAN);
         return;
     }
 
@@ -4615,7 +4575,6 @@ static Command command_table[] = {
     {"touch", "Create new file", cmd_touch},
     {"write", "Write to file", cmd_write},
     {"rm", "Delete file", cmd_rm},
-    {"kode", "Text editor", cmd_kode},
     // Advanced file system commands
     {"tree", "Show directory tree", cmd_tree},
     {"find", "Find files by pattern", cmd_find},

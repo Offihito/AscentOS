@@ -97,6 +97,7 @@ void cmd_elfinfo(const char* args, CommandOutput* output);
 // Bu fonksiyonlar execute_command64 içinde doğrudan işlenir,
 // ayrı bir handler'a gerek yoktur.
 
+
 // Multitasking commands
 void cmd_ps(const char* args, CommandOutput* output);
 void cmd_taskinfo(const char* args, CommandOutput* output);
