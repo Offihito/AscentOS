@@ -1,4 +1,4 @@
-# 🚀 AscentOS
+ 🚀 AscentOS
 
 > A modern 64-bit hobby operating system — with its own filesystem and basic GUI support
 
@@ -6,7 +6,7 @@
 ![C](https://img.shields.io/badge/language-C-00599C.svg)
 ![x86_64](https://img.shields.io/badge/arch-x86__64-important)
 
-## ✨ Current Features (as of March 2026)
+Current Features (as of March 2026)
 
 - **64-bit x86_64 architecture** — designed for modern hardware
 - **EXT2 filesystem** — read/write support fully working
@@ -18,17 +18,17 @@
 - **GRUB2 multiboot booting**
 - **Full Network Stack**
 
-The OS currently **successfully boots on its own**, can read/write files on FAT32, and switches to a basic graphical mode.
+The OS currently **successfully boots on its own**, can read/write files on EXT2, and switches to a basic graphical mode.
 
-## 🛠️ Building & Running from Source
+ 🛠️ Building & Running from Source
 
-### Prerequisites
+Prerequisites
 
 - `make`, `gcc` / `clang`, `nasm`, `grub-mkrescue`, `qemu-system-x86_64`
 - `xorriso` (for creating the bootable ISO)
 - Musl cross-toolchain (builds automatically, or install manually if preferred)
 
-### Quick Start
+Quick Start
 
 ```bash
 # Clone the repository
