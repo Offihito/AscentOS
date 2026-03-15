@@ -13,6 +13,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "cpu64.h"   // cpu_get_cr2() ve diğer CPU yardımcıları
 
 // ============================================================================
 // Framebuffer — boot64_unified.asm tarafından doldurulur
@@ -282,13 +283,6 @@ static void strcat_p(char* dst, const char* src) {
 }
 
 // ============================================================================
-// CR2
-// ============================================================================
-static uint64_t read_cr2(void) {
-    uint64_t v; __asm__ volatile("mov %%cr2,%0":"=r"(v)); return v;
-}
-
-// ============================================================================
 // Serial dump
 // ============================================================================
 static void serial_dump(const exception_frame_t* f) {
@@ -303,7 +297,7 @@ static void serial_dump(const exception_frame_t* f) {
     SD("RIP   ", f->rip);   SD("RSP   ", f->rsp);
     SD("CS    ", f->cs);    SD("SS    ", f->ss);
     SD("RFLAGS", f->rflags);SD("ERRCODE", f->err_code);
-    if (f->isr_num == 14)   { SD("CR2   ", read_cr2()); }
+    if (f->isr_num == 14)   { SD("CR2   ", cpu_get_cr2()); }
     serial_print("  --- GPR ---\r\n");
     SD("RAX   ", f->rax);   SD("RBX   ", f->rbx);
     SD("RCX   ", f->rcx);   SD("RDX   ", f->rdx);
@@ -399,7 +393,7 @@ void kernel_panic_handler(exception_frame_t* f) {
 
     // Page Fault özel bilgi
     if (f->isr_num == 14) {
-        uint64_t cr2 = read_cr2();
+        uint64_t cr2 = cpu_get_cr2();
         draw_str_s(CX1, cy, "CR2 (fault addr):", 0x00FFAA55u, 0x00280000u, 1);
         hex64(cr2, buf);
         draw_str_s(CX1 + 144, cy, buf, COL_RIP_FG, 0x00280000u, 1);

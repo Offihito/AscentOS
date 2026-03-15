@@ -163,12 +163,18 @@ syscalltest64.o: apps/syscalltest64.c apps/commands64.h kernel/syscall.h kernel/
 	$(CC) $(CFLAGS) -c apps/syscalltest64.c -o syscalltest64.o
 
 kernel64.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h kernel/wm64.h \
-            kernel/ata64.h kernel/ext2.h fs/files64.h
+            kernel/ata64.h kernel/ext2.h fs/files64.h kernel/cpu64.h
 	$(CC) $(CFLAGS) -c kernel/kernel64.c -o kernel64.o
+
+cpu64.o: kernel/cpu64.c kernel/cpu64.h
+	$(CC) $(CFLAGS) -c kernel/cpu64.c -o cpu64.o
+
+spinlock64.o: kernel/spinlock64.c kernel/spinlock64.h kernel/cpu64.h
+	$(CC) $(CFLAGS) -c kernel/spinlock64.c -o spinlock64.o
 
 KERNEL_OBJS = boot64.o interrupts64.o idt64.o \
               font8x16.o vesa64.o gui64.o compositor64.o wm64.o mouse64.o \
-              keyboard.o kernel64.o taskbar.o \
+              keyboard.o kernel64.o taskbar.o cpu64.o spinlock64.o \
               commands64.o syscalltest64.o files64.o ata64.o ext2.o elf64.o nano64.o \
               pmm.o heap.o vmm64.o timer.o pcspk.o task.o scheduler.o \
               page_fault.o syscall.o signal64.o \
@@ -202,7 +208,7 @@ kernel64.elf: $(KERNEL_OBJS)
 MNT_TMP := /tmp/ascentos_mnt
 
 disk.img:
-	@echo "📀 Ext2 disk imajı oluşturuluyor (64MB)..."
+	@echo "📀 Ext2 disk imajı oluşturuluyor (2048MB)..."
 	@if ! command -v mkfs.ext2 >/dev/null 2>&1; then \
 	    echo ""; \
 	    echo "HATA: mkfs.ext2 bulunamadi."; \
@@ -214,12 +220,12 @@ disk.img:
 	fi
 	@# Eski imaj varsa sil (FAT32 veya bozuk olabilir)
 	@rm -f disk.img
-	dd if=/dev/zero of=disk.img bs=1M count=64 status=none
+	dd if=/dev/zero of=disk.img bs=1M count=2048 status=none
 	@# ^metadata_csum: eski kernel (4.x) ext2 uyumluluğu için
 	mkfs.ext2 -b 1024 -L "AscentOS" -m 0 -O ^metadata_csum,^has_journal disk.img
 	@echo "📁 Temel dizin yapısı oluşturuluyor..."
 	@$(MAKE) --no-print-directory _disk_mkdirs
-	@echo "✓ disk.img hazir (Ext2, 64MB, block=1024)"
+	@echo "✓ disk.img hazir (Ext2, 2048MB, block=1024)"
 	@echo "  Dogrulama: file disk.img"
 	@file disk.img
 

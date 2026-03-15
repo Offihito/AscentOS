@@ -210,6 +210,14 @@ typedef struct task {
     // ── İstatistik ───────────────────────────────────────────
     uint64_t context_switches;  // Bu task kac kez secildi
     uint64_t total_ticks;       // Toplam harcanan tick
+
+    // ── TLS (Thread Local Storage) ────────────────────────────
+    // musl libc arch_prctl(ARCH_SET_FS) ile kurar.
+    // task_switch assembly'si FS selector'ı 0 restore ederken
+    // MSR_FS_BASE (0xC0000100) sıfırlanır; syscall_dispatch girişinde
+    // bu değer wrmsr ile yenilenerek TLS pointer korunur.
+    uint64_t fs_base;           // MSR_FS_BASE değeri — context switch'te korunur
+    uint64_t gs_base;           // MSR_GS_BASE değeri — context switch'te korunur
 } task_t;
 
 typedef struct {
@@ -397,7 +405,8 @@ int task_do_setsid(task_t* t);
 void task_save_context(cpu_context_t* context);
 void task_load_context(cpu_context_t* context);
 void task_switch(task_t* from, task_t* to);
-void task_save_fs_base(void); // isr_timer oncesi mevcut task FS.base kaydet
+void task_save_fs_base(void); // isr_timer öncesi mevcut task FS.base kaydet
+void task_restore_fs_base(void); // isr_timer iretq öncesi FS.base restore et
 
 // Assembly implementasyonlari (interrupts64.asm)
 extern void task_switch_context(cpu_context_t* old_ctx, cpu_context_t* new_ctx);

@@ -7,12 +7,16 @@
 #include "../kernel/pmm.h"
 #include "../kernel/task.h"
 #include "../kernel/scheduler.h"
-#include "../kernel/ext2.h"          // ext2_file_size, ext2_read_file
-#include "../kernel/elf64.h"         // ELF-64 loader
-#include "../kernel/syscall.h"       // SYSCALL/SYSRET altyapısı
-#include "../kernel/signal64.h"      // SYS_SIGACTION, SYS_SIGPROCMASK vb. (v10)
+#include "../kernel/ext2.h"
+#include "../kernel/elf64.h"
+#include "../kernel/syscall.h"
+#include "../kernel/signal64.h"
 #include "../kernel/pcspk.h"
+#include "../kernel/cpu64.h"
+#include "../kernel/spinlock64.h"   // spinlock_t, rwlock_t
 #include <stdbool.h>
+
+extern void spinlock_test(void);    // spinlock64.c
 
 // ============================================================================
 // RTL8139 Ağ Sürücüsü — extern bildirimleri
@@ -486,37 +490,6 @@ void int_to_str(int num, char* str) {
 }
 
 // ===========================================
-// CPUID FUNCTIONS
-// ===========================================
-
-void get_cpu_brand(char* brand) {
-    uint32_t eax, ebx, ecx, edx;
-    
-    for (int i = 0; i < 3; i++) {
-        __asm__ volatile (
-            "cpuid"
-            : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-            : "a"(0x80000002 + i)
-        );
-        
-        *(uint32_t*)(brand + i * 16 + 0) = eax;
-        *(uint32_t*)(brand + i * 16 + 4) = ebx;
-        *(uint32_t*)(brand + i * 16 + 8) = ecx;
-        *(uint32_t*)(brand + i * 16 + 12) = edx;
-    }
-    brand[48] = '\0';
-}
-
-void get_cpu_vendor(char* vendor) {
-    uint32_t eax, ebx, ecx, edx;
-    __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0));
-    *(uint32_t*)(vendor + 0) = ebx;
-    *(uint32_t*)(vendor + 4) = edx;
-    *(uint32_t*)(vendor + 8) = ecx;
-    vendor[12] = '\0';
-}
-
-// ===========================================
 // MEMORY INFO
 // ===========================================
 
@@ -655,6 +628,9 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_line(output, "   panic ud    #UD Invalid Opcode", VGA_DARK_GRAY);
     output_add_line(output, "   panic de    #DE Divide by Zero", VGA_DARK_GRAY);
     output_add_line(output, "   panic stack Stack overflow", VGA_DARK_GRAY);
+    output_add_line(output, " perf        - RDTSC performans olcumu", VGA_WHITE);
+    output_add_line(output, "   perf         Tum testler (dongu/memset/memcpy/overhead)", VGA_DARK_GRAY);
+    output_add_line(output, " spinlock    - Spinlock / RWLock test suite", VGA_WHITE);
 }
 
 void cmd_clear(const char* args, CommandOutput* output) {
@@ -988,7 +964,7 @@ void cmd_neofetch(const char* args, CommandOutput* output) {
     for (int i = 0; i < 18; i++) info_lines[i][0] = '\0';
 
     char cpu_brand[49];
-    get_cpu_brand(cpu_brand);
+    cpu_get_model_name(cpu_brand);
     uint64_t heap_kb = get_memory_info();
     char memory_str[64];
     format_memory_size(heap_kb, memory_str);
@@ -1098,7 +1074,7 @@ void cmd_sysinfo(void) {
     println64("", VGA_WHITE);
     
     char cpu_brand[49];
-    get_cpu_brand(cpu_brand);
+    cpu_get_model_name(cpu_brand);
     print_str64("CPU: ", VGA_WHITE);
     println64(cpu_brand, VGA_YELLOW);
     
@@ -1147,32 +1123,124 @@ void cmd_sysinfo(void) {
 }
 
 void cmd_cpuinfo(void) {
-    uint32_t eax, ebx, ecx, edx;
-    
     println64("CPU Information:", VGA_CYAN);
     println64("", VGA_WHITE);
-    
+
+    // ── Vendor ID ────────────────────────────────────────────────────────
     char vendor[13];
-    get_cpu_vendor(vendor);
-    print_str64("Vendor: ", VGA_WHITE);
+    get_cpu_info(vendor);
+    print_str64("Vendor  : ", VGA_WHITE);
     println64(vendor, VGA_GREEN);
-    
-    __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1));
-    
-    print_str64("Features: ", VGA_WHITE);
-    if (edx & (1 << 0)) print_str64("FPU ", VGA_YELLOW);
-    if (edx & (1 << 4)) print_str64("TSC ", VGA_YELLOW);
-    if (edx & (1 << 6)) print_str64("PAE ", VGA_YELLOW);
-    if (edx & (1 << 23)) print_str64("MMX ", VGA_YELLOW);
-    if (edx & (1 << 25)) print_str64("SSE ", VGA_YELLOW);
-    if (edx & (1 << 26)) print_str64("SSE2 ", VGA_YELLOW);
-    if (ecx & (1 << 0)) print_str64("SSE3 ", VGA_YELLOW);
-    println64("", VGA_WHITE);
-    
-    __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0x80000001));
-    if (edx & (1 << 29)) {
-        println64("Long Mode: Supported", VGA_GREEN);
+
+    // ── Tam model adı ────────────────────────────────────────────────────
+    char model[49];
+    cpu_get_model_name(model);
+    if (model[0] != '\0') {
+        print_str64("Model   : ", VGA_WHITE);
+        println64(model, VGA_YELLOW);
     }
+
+    // ── Family / Model / Stepping ─────────────────────────────────────────
+    CPUStepping step;
+    cpu_get_stepping(&step);
+    {
+        char buf[64]; char tmp[8];
+        buf[0] = '\0';
+        str_concat(buf, "Family:"); int_to_str((int)step.family,   tmp); str_concat(buf, tmp);
+        str_concat(buf, "  Model:");    int_to_str((int)step.model,    tmp); str_concat(buf, tmp);
+        str_concat(buf, "  Stepping:"); int_to_str((int)step.stepping, tmp); str_concat(buf, tmp);
+        str_concat(buf, "  Type:");     int_to_str((int)step.cpu_type, tmp); str_concat(buf, tmp);
+        print_str64("Ident   : ", VGA_WHITE);
+        println64(buf, VGA_CYAN);
+    }
+
+    // ── Tahmini frekans ──────────────────────────────────────────────────
+    {
+        uint32_t mhz = cpu_get_freq_estimate();
+        char buf[32];
+        buf[0] = '\0';
+        char tmp[12];
+        uint64_to_string((uint64_t)mhz, tmp);
+        str_concat(buf, tmp);
+        str_concat(buf, " MHz");
+        // GHz de göster
+        if (mhz >= 1000) {
+            uint32_t ghz_int  = mhz / 1000;
+            uint32_t ghz_frac = (mhz % 1000) / 10;
+            str_concat(buf, "  (~");
+            uint64_to_string((uint64_t)ghz_int, tmp);  str_concat(buf, tmp);
+            str_concat(buf, ".");
+            if (ghz_frac < 10) str_concat(buf, "0");
+            uint64_to_string((uint64_t)ghz_frac, tmp); str_concat(buf, tmp);
+            str_concat(buf, " GHz)");
+        }
+        print_str64("Freq    : ", VGA_WHITE);
+        println64(buf, VGA_YELLOW);
+    }
+
+    // ── Önbellek boyutları ───────────────────────────────────────────────
+    {
+        CacheInfo ci;
+        cpu_get_cache_info(&ci);
+        char buf[64]; char tmp[12];
+
+        // L1
+        buf[0] = '\0';
+        str_concat(buf, "L1D:");
+        uint64_to_string((uint64_t)ci.l1d_kb, tmp); str_concat(buf, tmp);
+        str_concat(buf, "KB  L1I:");
+        uint64_to_string((uint64_t)ci.l1i_kb, tmp); str_concat(buf, tmp);
+        str_concat(buf, "KB");
+        print_str64("Cache   : ", VGA_WHITE);
+        println64(buf, VGA_GREEN);
+
+        // L2 / L3
+        buf[0] = '\0';
+        str_concat(buf, "L2:");
+        if (ci.l2_kb >= 1024) {
+            uint64_to_string((uint64_t)(ci.l2_kb / 1024), tmp); str_concat(buf, tmp);
+            str_concat(buf, "MB");
+        } else {
+            uint64_to_string((uint64_t)ci.l2_kb, tmp); str_concat(buf, tmp);
+            str_concat(buf, "KB");
+        }
+        if (ci.l3_kb > 0) {
+            str_concat(buf, "  L3:");
+            if (ci.l3_kb >= 1024) {
+                uint64_to_string((uint64_t)(ci.l3_kb / 1024), tmp); str_concat(buf, tmp);
+                str_concat(buf, "MB");
+            } else {
+                uint64_to_string((uint64_t)ci.l3_kb, tmp); str_concat(buf, tmp);
+                str_concat(buf, "KB");
+            }
+        }
+        print_str64("          ", VGA_WHITE);
+        println64(buf, VGA_GREEN);
+    }
+
+    // ── Özellikler ───────────────────────────────────────────────────────
+    uint32_t feat = cpu_get_features();
+    print_str64("Features: ", VGA_WHITE);
+    if (feat & CPU_FEAT_FPU)    print_str64("FPU ",    VGA_YELLOW);
+    if (feat & CPU_FEAT_TSC)    print_str64("TSC ",    VGA_YELLOW);
+    if (feat & CPU_FEAT_PAE)    print_str64("PAE ",    VGA_YELLOW);
+    if (feat & CPU_FEAT_MMX)    print_str64("MMX ",    VGA_YELLOW);
+    if (feat & CPU_FEAT_SSE)    print_str64("SSE ",    VGA_YELLOW);
+    if (feat & CPU_FEAT_SSE2)   print_str64("SSE2 ",   VGA_YELLOW);
+    if (feat & CPU_FEAT_SSE3)   print_str64("SSE3 ",   VGA_YELLOW);
+    if (feat & CPU_FEAT_SSSE3)  print_str64("SSSE3 ",  VGA_YELLOW);
+    if (feat & CPU_FEAT_SSE41)  print_str64("SSE4.1 ", VGA_YELLOW);
+    if (feat & CPU_FEAT_SSE42)  print_str64("SSE4.2 ", VGA_YELLOW);
+    if (feat & CPU_FEAT_AVX)    print_str64("AVX ",    VGA_GREEN);
+    if (feat & CPU_FEAT_AES)    print_str64("AES-NI ", VGA_GREEN);
+    if (feat & CPU_FEAT_RDRAND) print_str64("RDRAND ", VGA_GREEN);
+    println64("", VGA_WHITE);
+
+    // ── Long Mode ────────────────────────────────────────────────────────
+    if (feat & CPU_FEAT_LONG)
+        println64("Long Mode: Supported (64-bit)", VGA_GREEN);
+    else
+        println64("Long Mode: NOT supported", VGA_RED);
 }
 
 void cmd_meminfo(void) {
@@ -2238,9 +2306,123 @@ void cmd_rmr(const char* args, CommandOutput* output) {
 // ===========================================
 void cmd_syscalltest(const char* args, CommandOutput* output);
 
-// ===========================================
-// PANIC TEST KOMUTU
-// ===========================================
+// ============================================================================
+// SPINLOCK TEST KOMUTU
+// ============================================================================
+static void cmd_spinlock(const char* args, CommandOutput* output) {
+    (void)args;
+    output_add_line(output, "=== Spinlock / RWLock Testi ===", VGA_CYAN);
+    output_add_empty_line(output);
+    output_add_line(output, "Testler calistiriliyor...", VGA_WHITE);
+    output_add_empty_line(output);
+    spinlock_test();
+    // spinlock_test() dogrudan println64 ile ekrana yaziyor
+    output_add_empty_line(output);
+    output_add_line(output, "Detayli log: serial porta yazildi (COM1).", VGA_DARK_GRAY);
+}
+
+
+// Kullanım: perf          → tüm testleri çalıştır
+//           perf memcpy   → memcpy hız testi
+//           perf memset   → memset hız testi
+//           perf loop     → basit döngü testi
+// ============================================================================
+static void cmd_perf(const char* args, CommandOutput* output) {
+    (void)args;
+
+    output_add_line(output, "=== RDTSC Performans Olcumu ===", VGA_CYAN);
+    output_add_empty_line(output);
+    output_add_line(output, "Sonuclar ayni zamanda serial porta yaziliyor.", VGA_DARK_GRAY);
+    output_add_empty_line(output);
+
+    PerfCounter pc;
+    char line[MAX_LINE_LENGTH];
+    char tmp[24];
+
+    // ── Test 1: Basit döngü (1M iterasyon) ───────────────────────────────
+    output_add_line(output, "[1] Bos dongu  x1.000.000:", VGA_YELLOW);
+    perf_start(&pc);
+    for (volatile int i = 0; i < 1000000; i++);
+    perf_stop(&pc);
+    perf_print(&pc, "empty_loop_1M");
+
+    str_cpy(line, "    Cycles : "); uint64_to_string(perf_cycles(&pc), tmp); str_concat(line, tmp);
+    output_add_line(output, line, VGA_WHITE);
+    str_cpy(line, "    Sure   : ~"); uint64_to_string(perf_us(&pc), tmp); str_concat(line, tmp);
+    str_concat(line, " us  (~"); uint64_to_string(perf_ns(&pc) / 1000000, tmp); str_concat(line, tmp);
+    str_concat(line, " ms)");
+    output_add_line(output, line, VGA_GREEN);
+    output_add_empty_line(output);
+
+    // ── Test 2: memset — 64KB sıfırlama ──────────────────────────────────
+    output_add_line(output, "[2] memset64  64KB:", VGA_YELLOW);
+    static uint8_t perf_buf[65536];
+    perf_start(&pc);
+    extern void* memset64(void*, int, size_t);
+    memset64(perf_buf, 0xAB, sizeof(perf_buf));
+    perf_stop(&pc);
+    perf_print(&pc, "memset64_64KB");
+
+    str_cpy(line, "    Cycles : "); uint64_to_string(perf_cycles(&pc), tmp); str_concat(line, tmp);
+    output_add_line(output, line, VGA_WHITE);
+    str_cpy(line, "    Sure   : ~"); uint64_to_string(perf_us(&pc), tmp); str_concat(line, tmp);
+    str_concat(line, " us");
+    output_add_line(output, line, VGA_GREEN);
+
+    // Bant genişliği: 64KB / us → MB/s
+    uint32_t us = perf_us(&pc);
+    if (us > 0) {
+        uint64_t mbps = 65536ULL / (uint64_t)us;
+        str_cpy(line, "    Bant   : ~"); uint64_to_string(mbps, tmp); str_concat(line, tmp);
+        str_concat(line, " MB/s");
+        output_add_line(output, line, VGA_CYAN);
+    }
+    output_add_empty_line(output);
+
+    // ── Test 3: memcpy — 64KB kopyalama ──────────────────────────────────
+    output_add_line(output, "[3] memcpy64  64KB:", VGA_YELLOW);
+    static uint8_t perf_src[65536];
+    extern void* memcpy64(void*, const void*, size_t);
+    perf_start(&pc);
+    memcpy64(perf_buf, perf_src, sizeof(perf_buf));
+    perf_stop(&pc);
+    perf_print(&pc, "memcpy64_64KB");
+
+    str_cpy(line, "    Cycles : "); uint64_to_string(perf_cycles(&pc), tmp); str_concat(line, tmp);
+    output_add_line(output, line, VGA_WHITE);
+    str_cpy(line, "    Sure   : ~"); uint64_to_string(perf_us(&pc), tmp); str_concat(line, tmp);
+    str_concat(line, " us");
+    output_add_line(output, line, VGA_GREEN);
+
+    us = perf_us(&pc);
+    if (us > 0) {
+        uint64_t mbps = 65536ULL / (uint64_t)us;
+        str_cpy(line, "    Bant   : ~"); uint64_to_string(mbps, tmp); str_concat(line, tmp);
+        str_concat(line, " MB/s");
+        output_add_line(output, line, VGA_CYAN);
+    }
+    output_add_empty_line(output);
+
+    // ── Test 4: RDTSC overhead (kendini ölçüyor) ─────────────────────────
+    output_add_line(output, "[4] RDTSC overhead:", VGA_YELLOW);
+    perf_start(&pc);
+    perf_stop(&pc);
+    perf_print(&pc, "rdtsc_overhead");
+
+    str_cpy(line, "    Cycles : "); uint64_to_string(perf_cycles(&pc), tmp); str_concat(line, tmp);
+    str_concat(line, "  (rdtscp cift okuma maliyeti)");
+    output_add_line(output, line, VGA_WHITE);
+    output_add_empty_line(output);
+
+    // ── CPU frekansı ──────────────────────────────────────────────────────
+    str_cpy(line, "CPU Frekans: ");
+    uint64_to_string((uint64_t)pc.cpu_mhz, tmp); str_concat(line, tmp);
+    str_concat(line, " MHz  (PIT olcumu)");
+    output_add_line(output, line, VGA_CYAN);
+    output_add_line(output, "Detayli log: serial porta yazildi (COM1).", VGA_DARK_GRAY);
+}
+
+
 static void panic_do_div0(void) {
     volatile int a = 42;
     volatile int b = 0;
@@ -4493,6 +4675,12 @@ static Command command_table[] = {
 
     // Panic test
     {"panic", "Kernel panic ekranini test et [df|gp|pf|ud|de|stack]", cmd_panic},
+
+    // Performans ölçümü
+    {"perf",     "RDTSC performans olcumu [memcpy|memset|loop]", cmd_perf},
+
+    // Spinlock testi
+    {"spinlock", "Spinlock / RWLock test suite", cmd_spinlock},
 
     // PC Speaker test
     {"beep", "PC Speaker ile ses cikar  ornek: beep 440 300", cmd_beep},

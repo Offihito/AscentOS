@@ -20,6 +20,7 @@ extern task_get_current_context
 extern task_save_current_stack
 extern task_get_next_context
 extern tss_update_rsp0_from_context
+extern task_restore_fs_base
 
 ; Syscall dispatcher (syscall.c)
 extern syscall_dispatch
@@ -223,6 +224,13 @@ isr_timer:
     mov al, 0x20
     out 0x20, al
 
+    ; ── FS_BASE restore — iretq öncesi ───────────────────────────
+    ; Timer interrupt Ring-3 task çalışırken (syscall içinde bile) gelebilir.
+    ; Context switch olsun ya da olmasın, iretq ile Ring-3'e dönmeden önce
+    ; mevcut task'ın fs_base'ini MSR_FS_BASE'e yaz.
+    ; Aksi halde: musl pthread_self() → %fs:0 → sıfır → BIOS IVT → #GP
+    call task_restore_fs_base
+
     pop r15
     pop r14
     pop r13
@@ -402,12 +410,14 @@ task_load_and_jump_context:
     jmp .load_stack
 
 .set_user_segs:
-    ; Ring-3: user data segment (iretq CS/SS'yi ayarlar ama DS/ES/FS/GS'ye dokunmaz)
+    ; Ring-3: DS/ES ayarla, FS/GS'ye DOKUNMA
+    ; "mov fs, reg" MSR_FS_BASE'i sıfırlar → TLS bozulur → #GP
+    ; FS_BASE syscall_dispatch girişinde wrmsr ile restore edilir.
     mov ax, 0x1B
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
+    ; mov fs, ax  ← KALDIRILDI: FS_BASE/TLS sıfırlanmasın
+    ; mov gs, ax  ← KALDIRILDI
 
 .load_stack:
     ; ── RSP yukle ─────────────────────────────────────────────────
@@ -804,12 +814,13 @@ syscall_entry:
     pop rbx
     pop r15         ; r15 = user RSP (orijinal)
 
-    ; DS/ES/FS/GS -> Ring-3
+    ; DS/ES -> Ring-3 (FS/GS'ye dokunma — FS_BASE TLS pointer'ı taşıyor)
     mov ax, 0x1B
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
+    ; FS ve GS segment register'larına YAZILMIYOR:
+    ; x86-64'te "mov fs, reg" MSR_FS_BASE'i sıfırlar → TLS bozulur → #GP
+    ; FS_BASE zaten syscall_dispatch içinde wrmsr ile restore edildi.
 
     ; user_rsp override: execve yazdiysa (0 degilse) yeni stack kullan
     test r14, r14

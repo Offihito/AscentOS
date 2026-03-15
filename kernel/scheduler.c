@@ -5,12 +5,21 @@
 #include "pmm.h"
 #include "heap.h"
 #include "signal64.h"   // signal_dispatch_pending (v10)
+#include "spinlock64.h" // spinlock_t — switch_pending / pending_next_task koruması
 
 // External functions
 extern void serial_print(const char* str);
 extern void int_to_str(int num, char* str);
 extern uint64_t get_system_ticks(void);
 extern void task_increment_ticks(void);
+
+// Debug log — yalnızca SCHED_DEBUG tanımlıysa aktif
+// Normal çalışmada serial_print devre dışı: 1000Hz × yazma = COM1 darboğazı
+#ifdef SCHED_DEBUG
+  #define SCHED_LOG(s) serial_print(s)
+#else
+  #define SCHED_LOG(s) ((void)0)
+#endif
 
 // ===========================================
 // GLOBAL VARIABLES
@@ -26,6 +35,8 @@ static uint32_t time_quantum = DEFAULT_TIME_QUANTUM;
 static scheduler_stats_t stats;
 
 // Context switch pending flag
+// spinlock ile korunur — SMP'de iki core aynı anda yazabilir
+static spinlock_t sched_lock = SPINLOCK_INIT;
 static int switch_pending = 0;
 static task_t* pending_next_task = NULL;
 
@@ -38,44 +49,42 @@ task_t* previous_task = NULL;
 
 void scheduler_init(void) {
     if (scheduler_initialized) {
-        serial_print("[SCHEDULER] Already initialized\n");
+        SCHED_LOG("[SCHEDULER] Already initialized\n");
         return;
     }
-    
-    serial_print("[SCHEDULER] Initializing scheduler...\n");
-    
+
+    SCHED_LOG("[SCHEDULER] Initializing scheduler...\n");
+
     stats.total_context_switches = 0;
     stats.total_ticks = 0;
     stats.idle_ticks = 0;
     stats.scheduler_mode = SCHED_MODE_ROUND_ROBIN;
     stats.time_quantum = DEFAULT_TIME_QUANTUM;
-    
+
     scheduler_mode = SCHED_MODE_ROUND_ROBIN;
     time_quantum = DEFAULT_TIME_QUANTUM;
     preemption_enabled = 1;
     switch_pending = 0;
     pending_next_task = NULL;
-    
+
     scheduler_initialized = 1;
     scheduler_running = 0;
-    
-    serial_print("[SCHEDULER] Scheduler initialized\n");
+
+    SCHED_LOG("[SCHEDULER] Scheduler initialized\n");
 }
 
 void scheduler_start(void) {
     if (!scheduler_initialized) {
-        serial_print("[SCHEDULER ERROR] Not initialized!\n");
+        serial_print("[SCHEDULER ERROR] Not initialized!\n");  // hata: her zaman yaz
         return;
     }
-    
     if (scheduler_running) {
-        serial_print("[SCHEDULER] Already running\n");
+        SCHED_LOG("[SCHEDULER] Already running\n");
         return;
     }
-    
-    serial_print("[SCHEDULER] Starting scheduler...\n");
+    SCHED_LOG("[SCHEDULER] Starting scheduler...\n");
     scheduler_running = 1;
-    serial_print("[SCHEDULER] Scheduler is now active\n");
+    SCHED_LOG("[SCHEDULER] Scheduler is now active\n");
 }
 
 int scheduler_is_running(void) {
@@ -99,37 +108,38 @@ void task_save_current_stack(uint64_t stack_pointer) {
 }
 
 cpu_context_t* task_get_next_context(void) {
+    uint64_t flags = spinlock_lock_irq(&sched_lock);
+
     if (!switch_pending || !pending_next_task) {
+        spinlock_unlock_irq(&sched_lock, flags);
         return NULL;
     }
-    
+
     task_t* current = task_get_current();
     task_t* next = pending_next_task;
-    
-    serial_print("[SCHEDULER] Switching: ");
-    serial_print(current ? current->name : "NULL");
-    serial_print(" -> ");
-    serial_print(next->name);
-    serial_print("\n");
-    
-    // Update current task
+
+    SCHED_LOG("[SCHEDULER] Switching: ");
+    SCHED_LOG(current ? current->name : "NULL");
+    SCHED_LOG(" -> ");
+    SCHED_LOG(next->name);
+    SCHED_LOG("\n");
+
     task_set_current(next);
     next->state = TASK_STATE_RUNNING;
     next->context_switches++;
-    
-    // Clear pending switch
+
     switch_pending = 0;
     pending_next_task = NULL;
-    
-    stats.total_context_switches++;
 
-    // TSS.RSP0 güncelle: yeni task'ın kernel_stack_top'u kullan.
-    // Bu kritik: Ring-3'ten syscall/interrupt geldiğinde CPU TSS.RSP0'dan
-    // kernel stack alır. context.rsp + 160 YANLIŞ — context.rsp her switch'te
-    // değişen bir kernel stack pointer'ı, kernel_stack_top sabit olmalı.
+    stats.total_context_switches++;
     tss_set_kernel_stack(next->kernel_stack_top);
-    
-    // Return pointer to new task's context
+
+    spinlock_unlock_irq(&sched_lock, flags);
+
+    // Context switch tamamlandı — bekleyen sinyalleri işle
+    // Burada çağrılır çünkü artık yeni task çalışıyor
+    signal_dispatch_pending();
+
     return &next->context;
 }
 
@@ -161,31 +171,25 @@ void tss_update_rsp0_from_context(cpu_context_t* ctx) {
 
 void scheduler_tick(void) {
     if (!scheduler_initialized) return;
-    
-    task_increment_ticks();
-    
-    if (!scheduler_running) {
-        scheduler_running = 1;
-    }
-    
-    stats.total_ticks++;
-    
-    task_t* current = task_get_current();
-    
-    // Clean up terminated tasks
-    if (previous_task && previous_task->state == TASK_STATE_TERMINATED) {
-        serial_print("[SCHEDULER] Cleaning up: ");
-        serial_print(previous_task->name);
-        serial_print("\n");
 
-        // Kernel stack: pmm_alloc_pages ile tahsis edildiyse pmm_free_pages ile serbest bırak.
-        // kfree() ile serbest bırakmak heap'i bozar çünkü adres heap aralığında değil.
+    task_increment_ticks();
+
+    if (!scheduler_running)
+        scheduler_running = 1;
+
+    stats.total_ticks++;
+
+    task_t* current = task_get_current();
+
+    // Sonlanan task'ı temizle
+    if (previous_task && previous_task->state == TASK_STATE_TERMINATED) {
+        SCHED_LOG("[SCHEDULER] Cleaning up terminated task\n");
+
         if (previous_task->kernel_stack_base) {
             extern void pmm_free_pages(void* base, uint64_t count);
             extern uint8_t* heap_start;
             extern uint8_t* heap_current;
             uint8_t* ks = (uint8_t*)previous_task->kernel_stack_base;
-            // Heap aralığında değilse pmm ile serbest bırak
             if (ks < heap_start || ks >= heap_current) {
                 uint64_t page_count = previous_task->kernel_stack_size / 4096;
                 pmm_free_pages((void*)previous_task->kernel_stack_base, page_count);
@@ -194,8 +198,6 @@ void scheduler_tick(void) {
                 kfree((void*)previous_task->kernel_stack_base);
             }
         }
-
-        // User stack: pmm_alloc_pages_flags ile tahsis edildi
         if (previous_task->user_stack_base) {
             extern void pmm_free_pages(void* base, uint64_t count);
             extern uint8_t* heap_start;
@@ -209,48 +211,48 @@ void scheduler_tick(void) {
                 kfree((void*)previous_task->user_stack_base);
             }
         }
-
-        // TCB kendisi heap'ten kmalloc ile alındı
         extern void kfree(void* ptr);
         kfree(previous_task);
         previous_task = NULL;
     }
-    
+
     if (!current) {
         task_t* next = scheduler_pick_next_task();
         if (next) {
+            uint64_t flags = spinlock_lock_irq(&sched_lock);
             pending_next_task = next;
             switch_pending = 1;
+            spinlock_unlock_irq(&sched_lock, flags);
         }
         return;
     }
-    
-    current->time_used++;
-    
-    if (!preemption_enabled) {
-        return;
-    }
 
-    // BLOCKED task: hemen switch — meşgul beklemeden kaçın
+    current->time_used++;
+
+    if (!preemption_enabled)
+        return;
+
+    // BLOCKED/SLEEPING task: hemen switch
     if (current->state == TASK_STATE_BLOCKED ||
         current->state == TASK_STATE_SLEEPING) {
         task_t* next = scheduler_pick_next_task();
         if (next && next != current) {
             previous_task = current;
+            uint64_t flags = spinlock_lock_irq(&sched_lock);
             pending_next_task = next;
             switch_pending = 1;
+            spinlock_unlock_irq(&sched_lock, flags);
         }
         return;
     }
-    
+
+    // Zaman dilimi doldu
     if (current->time_used >= time_quantum) {
         task_t* next = scheduler_pick_next_task();
-        
+
         if (next && next != current) {
-            serial_print("[SCHEDULER] Time slice expired: ");
-            serial_print(current->name);
-            serial_print("\n");
-            
+            SCHED_LOG("[SCHEDULER] Time slice expired\n");
+
             if (current->pid != 0) {
                 current->time_used = 0;
                 current->state = TASK_STATE_READY;
@@ -258,22 +260,23 @@ void scheduler_tick(void) {
             } else {
                 current->time_used = 0;
             }
-            
+
             previous_task = current;
+            uint64_t flags = spinlock_lock_irq(&sched_lock);
             pending_next_task = next;
             switch_pending = 1;
+            spinlock_unlock_irq(&sched_lock, flags);
         } else {
             current->time_used = 0;
         }
     }
-    
-    if (current && current->pid == 0) {
-        stats.idle_ticks++;
-    }
 
-    // Context switch tamamlandıktan sonra yeni task'ın bekleyen
-    // sinyallerini kontrol et ve işle (v10 sinyal altyapısı)
-    signal_dispatch_pending();
+    if (current && current->pid == 0)
+        stats.idle_ticks++;
+
+    // NOT: signal_dispatch_pending() buradan kaldırıldı.
+    // task_get_next_context() içinde, gerçek context switch
+    // tamamlandıktan sonra çağrılıyor — daha doğru zamanlama.
 }
 
 // ===========================================
@@ -310,34 +313,35 @@ void scheduler_remove_task(task_t* task) {
 void scheduler_yield(void) {
     task_t* current = task_get_current();
     if (!current) return;
-    
+
     if (current->pid != 0) {
         current->time_used = 0;
-        // SLEEPING state'i koru — task_sleep() sonrası yield yapılıyorsa
-        // state'i READY'e çevirme; scheduler_tick() wake_tick dolunca uyandırır.
-        if (current->state != TASK_STATE_SLEEPING) {
+        if (current->state != TASK_STATE_SLEEPING)
             current->state = TASK_STATE_READY;
-        }
         scheduler_add_task(current);
     }
-    
+
     task_t* next = scheduler_pick_next_task();
     if (next && next != current) {
+        uint64_t flags = spinlock_lock_irq(&sched_lock);
         pending_next_task = next;
         switch_pending = 1;
+        spinlock_unlock_irq(&sched_lock, flags);
     }
 }
 
 void scheduler_block_current(void) {
     task_t* current = task_get_current();
     if (!current || current->pid == 0) return;
-    
+
     current->state = TASK_STATE_BLOCKED;
-    
+
     task_t* next = scheduler_pick_next_task();
     if (next) {
+        uint64_t flags = spinlock_lock_irq(&sched_lock);
         pending_next_task = next;
         switch_pending = 1;
+        spinlock_unlock_irq(&sched_lock, flags);
     }
 }
 
@@ -356,13 +360,7 @@ void scheduler_set_mode(uint32_t mode) {
     if (mode <= SCHED_MODE_PRIORITY) {
         scheduler_mode = mode;
         stats.scheduler_mode = mode;
-        
-        serial_print("[SCHEDULER] Mode: ");
-        if (mode == SCHED_MODE_ROUND_ROBIN) {
-            serial_print("Round-Robin\n");
-        } else {
-            serial_print("Priority\n");
-        }
+        SCHED_LOG("[SCHEDULER] Mode changed\n");
     }
 }
 
@@ -383,12 +381,12 @@ uint32_t scheduler_get_time_quantum(void) {
 
 void scheduler_enable_preemption(void) {
     preemption_enabled = 1;
-    serial_print("[SCHEDULER] Preemption enabled\n");
+    SCHED_LOG("[SCHEDULER] Preemption enabled\n");
 }
 
 void scheduler_disable_preemption(void) {
     preemption_enabled = 0;
-    serial_print("[SCHEDULER] Preemption disabled\n");
+    SCHED_LOG("[SCHEDULER] Preemption disabled\n");
 }
 
 int scheduler_is_preemption_enabled(void) {

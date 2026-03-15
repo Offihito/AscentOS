@@ -972,10 +972,48 @@ void task_load_context(cpu_context_t* context) {
     task_load_and_jump_context(context);
 }
 
+// task_save_fs_base: mevcut task'ın FS.base değerini task->fs_base'e kaydet.
+// İSR (timer interrupt) öncesi scheduler tarafından çağrılabilir.
+void task_save_fs_base(void) {
+    if (!current_task || current_task == idle_task) return;
+    uint32_t _lo = 0, _hi = 0;
+    __asm__ volatile (
+        "rdmsr"
+        : "=a"(_lo), "=d"(_hi)
+        : "c"(0xC0000100u)   /* MSR_FS_BASE */
+    );
+    current_task->fs_base = ((uint64_t)_hi << 32) | _lo;
+}
+
+// task_restore_fs_base: mevcut task'ın fs_base değerini MSR'a yaz.
+// isr_timer iretq öncesi çağrılır — Ring-3'e dönüşte FS_BASE sıfır kalmasın.
+void task_restore_fs_base(void) {
+    if (!current_task || !current_task->fs_base) return;
+    uint32_t _lo = (uint32_t)(current_task->fs_base & 0xFFFFFFFFu);
+    uint32_t _hi = (uint32_t)(current_task->fs_base >> 32);
+    __asm__ volatile (
+        "wrmsr"
+        : : "c"(0xC0000100u), "a"(_lo), "d"(_hi)
+    );
+}
+
 void task_switch(task_t* from, task_t* to) {
     if (!to) {
         serial_print("[TASK ERROR] Cannot switch to NULL task!\n");
         return;
+    }
+
+    // Context switch öncesi mevcut task'ın FS.base değerini kaydet.
+    // mov fs, 0 CPU'nun MSR_FS_BASE'i sıfırlamasına yol açar; bir sonraki
+    // syscall girişinde syscall_dispatch bu değeri wrmsr ile restore eder.
+    if (from && from != idle_task) {
+        uint32_t _lo = 0, _hi = 0;
+        __asm__ volatile (
+            "rdmsr"
+            : "=a"(_lo), "=d"(_hi)
+            : "c"(0xC0000100u)    /* MSR_FS_BASE */
+        );
+        from->fs_base = ((uint64_t)_hi << 32) | _lo;
     }
 
     tss_set_kernel_stack(to->kernel_stack_top);
@@ -985,7 +1023,26 @@ void task_switch(task_t* from, task_t* to) {
     to->last_run_time  = get_system_ticks();
     to->context_switches++;
 
-    if (!from || from == idle_task) {
+    // ── İlk çalışma kararı ───────────────────────────────────────────────
+    //
+    // task_switch_context çalışma prensibi:
+    //   context.rip → kernel stack'e push → ret → oraya atlar.
+    // Bu mekanizma sadece KERNEL adresleri için geçerli: Ring-0'dan
+    // Ring-0'a ret yeterli. Ring-3'e geçmek için iretq şarttır.
+    //
+    // Ring-3 task'ın ilk çalışmasında (context_switches yeni 1 oldu):
+    //   context.rsp → 15 GPR slot + iretq frame ile kurulu.
+    //   task_load_and_jump_context: pop×15 → iretq → Ring-3. DOĞRU ✓
+    //   task_switch_context: ret → context.rip → Ring-0'dan user-space → #GP. YANLIŞ ✗
+    //
+    // Kural: from=NULL/idle VEYA hedef Ring-3 task ilk kez çalışıyorsa
+    // task_load_and_jump_context kullan.
+    //
+    // context_switches zaten arttırıldı; yeni task → değer == 1.
+    int first_run_user = (to->context_switches == 1 &&
+                          to->privilege_level == TASK_PRIVILEGE_USER);
+
+    if (!from || from == idle_task || first_run_user) {
         task_load_and_jump_context(&to->context);
         return;
     }

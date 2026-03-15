@@ -2015,27 +2015,51 @@ static int builtin_syscall_test(void) {
         TST("chmod  dogrulama (syscall basarili)",   chmod_rc == 0 ? 0 : 1);
         chmod(tpath, 0644);
 
-        // rename (SYS 82)
-        TST("rename (SYS 82)",                   rename(tpath, tpath2) == 0 ? 0 : 1);
-        ash_stat_t rst;
-        TST("rename kaynak silindi",             ash_stat(tpath,  &rst) != 0 ? 0 : 1);
-        TST("rename hedef olustu",               ash_stat(tpath2, &rst) == 0 ? 0 : 1);
-        rename(tpath2, tpath);
-
-        // link (SYS 86): FAT32 desteklemez, SKIP
+        // rename (SYS 82) -- inline syscall ile (stack güvenliği için musl wrapper bypass)
         {
-            int lnk_rc = link(tpath, tpath2);
-            if (lnk_rc == 0) {
+            long _ren_rc;
+            __asm__ volatile(
+                "syscall"
+                : "=a"(_ren_rc)
+                : "a"(82LL), "D"(tpath), "S"(tpath2)
+                : "rcx", "r11", "memory"
+            );
+            TST("rename (SYS 82)", _ren_rc == 0 ? 0 : 1);
+            ash_stat_t rst;
+            TST("rename kaynak silindi", ash_stat(tpath,  &rst) != 0 ? 0 : 1);
+            TST("rename hedef olustu",   ash_stat(tpath2, &rst) == 0 ? 0 : 1);
+            // geri al: tpath2->tpath inline syscall
+            long _ren_rc2;
+            __asm__ volatile(
+                "syscall"
+                : "=a"(_ren_rc2)
+                : "a"(82LL), "D"(tpath2), "S"(tpath)
+                : "rcx", "r11", "memory"
+            );
+            (void)_ren_rc2;
+        }
+
+        // link (SYS 86): inline syscall (musl wrapper bypass)
+        {
+            long _lnk_rc;
+            __asm__ volatile(
+                "syscall"
+                : "=a"(_lnk_rc)
+                : "a"(86LL), "D"(tpath), "S"(tpath2)
+                : "rcx", "r11", "memory"
+            );
+            if (_lnk_rc == 0) {
                 TST("link   (SYS 86)",            0);
                 ash_stat_t lst2, st2;
                 if (ash_stat(tpath, &st2) == 0 && ash_stat(tpath2, &lst2) == 0) {
                     TST_VAL("link   ayni inode",  (long)lst2.kst_ino, (long)st2.kst_ino);
                     TST_VAL("link   nlink == 2",  (long)st2.kst_nlink, 2L);
                 } else { SKIP("link inode dogrulama"); fail += 2; }
-                unlink(tpath2);
+                /* inline unlink */
+                long _ul; __asm__ volatile("syscall":"=a"(_ul):"a"(87LL),"D"(tpath2):"rcx","r11","memory");
             } else {
                 printf("  " CLR_YELLOW "[SKIP]" CLR_RESET
-                       " %-42s (FAT32 hard link yok)\n", "link   (SYS 86)");
+                       " %-42s (hard link yok, rc=%ld)\n", "link   (SYS 86)", _lnk_rc);
                 printf("  " CLR_YELLOW "[SKIP]" CLR_RESET
                        " %-42s\n", "link   ayni inode");
                 printf("  " CLR_YELLOW "[SKIP]" CLR_RESET
@@ -2043,14 +2067,29 @@ static int builtin_syscall_test(void) {
             }
         }
 
-        // readlink: regular dosyada HATA
+        // readlink: regular dosyada HATA -- inline syscall
         char rlbuf[MAX_PATH];
-        ssize_t rln = readlink(tpath, rlbuf, MAX_PATH - 1);
+        long rln;
+        __asm__ volatile(
+            "syscall"
+            : "=a"(rln)
+            : "a"(89LL), "D"(tpath), "S"(rlbuf), "d"((long)(MAX_PATH - 1))
+            : "rcx", "r11", "memory"
+        );
         TST("readlink regular -> hata",          rln < 0 ? 0 : 1);
 
-        // unlink (SYS 87)
-        TST("unlink (SYS 87)",                   unlink(tpath) == 0 ? 0 : 1);
-        TST("unlink sonra stat yok",             ash_stat(tpath, &kst) != 0 ? 0 : 1);
+        // unlink (SYS 87) -- inline syscall
+        {
+            long _ul_rc;
+            __asm__ volatile(
+                "syscall"
+                : "=a"(_ul_rc)
+                : "a"(87LL), "D"(tpath)
+                : "rcx", "r11", "memory"
+            );
+            TST("unlink (SYS 87)",    _ul_rc == 0 ? 0 : 1);
+            TST("unlink sonra stat yok", ash_stat(tpath, &kst) != 0 ? 0 : 1);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════

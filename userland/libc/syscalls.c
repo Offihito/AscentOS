@@ -141,15 +141,27 @@ typedef long           ptrdiff_t;
 #define O_CLOEXEC   0x80000
 
 // ── errno storage ────────────────────────────────────────────────────────
-// syscalls.c musl header'ları olmadan derlenir (sadece GCC include).
-// Bu yüzden __errno_location'ı burada __attribute__((weak)) olarak tanımlarız.
-//   • Weak sembol: musl libc.a linklendiğinde musl'ünkü geçerli olur (strong).
-//   • musl olmadığında (bare metal test vs.) bizimki çalışır.
-// Sonuç: ne çift tanım hatası, ne de implicit declaration uyarısı.
+// NEDEN weak DEĞİL:
+//
+// musl'ün __errno_location() %fs:pthread_self()->errno_val kullanır.
+// Context switch assembly'si "mov fs, 0" yaptığında Intel/AMD MSR_FS_BASE'i
+// sıfırlar. Sonra SET_ERRNO_RET → musl __errno_location() → %fs:0 →
+// adres 0 okur → BIOS IVT verisi (0xF000FF53...) → non-canonical pointer
+// → *errno_ptr = x → #GP. Bu kernel panığin tam sebebidir.
+//
+// Çözüm: syscalls.o objesi musl.a'dan önce link edildiğinde
+// (Makefile'daki standart sıra budur) strong sembolümüz musl'ünkünü gölgeler.
+// musl.a içindeki __errno_location linker tarafından zaten çözülmüş sembol
+// olarak atlanır — çakışma hatası vermez.
+// Böylece SET_ERRNO_RET her zaman güvenli static _errno_storage'a yazar.
+//
+// DİKKAT: musl.a, syscalls.o'dan ÖNCE link ediliyorsa "-z muldefs" ekle.
 static int _errno_storage = 0;
 
-__attribute__((weak))
 int *__errno_location(void) { return &_errno_storage; }
+
+// errno'yu oku (musl errno.h makrosuyla uyumlu)
+static inline int _get_errno(void) { return _errno_storage; }
 
 // ── Linux uyumlu errno set makrosu ───────────────────────────────────────
 #define SET_ERRNO(ret)       do { if ((ret) < 0) *__errno_location() = (int)(-(ret)); } while(0)
@@ -397,54 +409,44 @@ struct dirent {
 // ═══════════════════════════════════════════════════════════════════════════
 
 static inline long _sc0(long nr) {
-    register long _rax __asm__("rax") = nr;
     long ret;
     __asm__ volatile (
         "syscall"
         : "=a"(ret)
-        : "r"(_rax)
+        : "a"(nr)
         : "rcx", "r11", "memory"
     );
     return ret;
 }
 
 static inline long _sc1(long nr, long a1) {
-    register long _rax __asm__("rax") = nr;
-    register long _rdi __asm__("rdi") = a1;
     long ret;
     __asm__ volatile (
         "syscall"
         : "=a"(ret)
-        : "r"(_rax), "r"(_rdi)
+        : "a"(nr), "D"(a1)
         : "rcx", "r11", "memory"
     );
     return ret;
 }
 
 static inline long _sc2(long nr, long a1, long a2) {
-    register long _rax __asm__("rax") = nr;
-    register long _rdi __asm__("rdi") = a1;
-    register long _rsi __asm__("rsi") = a2;
     long ret;
     __asm__ volatile (
         "syscall"
         : "=a"(ret)
-        : "r"(_rax), "r"(_rdi), "r"(_rsi)
+        : "a"(nr), "D"(a1), "S"(a2)
         : "rcx", "r11", "memory"
     );
     return ret;
 }
 
 static inline long _sc3(long nr, long a1, long a2, long a3) {
-    register long _rax __asm__("rax") = nr;
-    register long _rdi __asm__("rdi") = a1;
-    register long _rsi __asm__("rsi") = a2;
-    register long _rdx __asm__("rdx") = a3;
     long ret;
     __asm__ volatile (
         "syscall"
         : "=a"(ret)
-        : "r"(_rax), "r"(_rdi), "r"(_rsi), "r"(_rdx)
+        : "a"(nr), "D"(a1), "S"(a2), "d"(a3)
         : "rcx", "r11", "memory"
     );
     return ret;
@@ -452,15 +454,11 @@ static inline long _sc3(long nr, long a1, long a2, long a3) {
 
 static inline long _sc4(long nr, long a1, long a2, long a3, long a4) {
     long ret;
-    register long _rax __asm__("rax") = nr;
-    register long _rdi __asm__("rdi") = a1;
-    register long _rsi __asm__("rsi") = a2;
-    register long _rdx __asm__("rdx") = a3;
     register long _r10 __asm__("r10") = a4;
     __asm__ volatile (
         "syscall"
         : "=a"(ret)
-        : "r"(_rax), "r"(_rdi), "r"(_rsi), "r"(_rdx), "r"(_r10)
+        : "a"(nr), "D"(a1), "S"(a2), "d"(a3), "r"(_r10)
         : "rcx", "r11", "memory"
     );
     return ret;
@@ -469,17 +467,14 @@ static inline long _sc4(long nr, long a1, long a2, long a3, long a4) {
 static inline long _sc6(long nr, long a1, long a2, long a3,
                          long a4, long a5, long a6) {
     long ret;
-    register long _rax __asm__("rax") = nr;
-    register long _rdi __asm__("rdi") = a1;
-    register long _rsi __asm__("rsi") = a2;
-    register long _rdx __asm__("rdx") = a3;
     register long _r10 __asm__("r10") = a4;
     register long _r8  __asm__("r8")  = a5;
     register long _r9  __asm__("r9")  = a6;
     __asm__ volatile (
         "syscall"
         : "=a"(ret)
-        : "r"(_rax), "r"(_rdi), "r"(_rsi), "r"(_rdx), "r"(_r10), "r"(_r8), "r"(_r9)
+        : "a"(nr), "D"(a1), "S"(a2), "d"(a3),
+          "r"(_r10), "r"(_r8), "r"(_r9)
         : "rcx", "r11", "memory"
     );
     return ret;
@@ -620,15 +615,37 @@ int rmdir(const char *path) {
     return (int)ret;
 }
 
+__attribute__((noinline))
 int unlink(const char *path) {
-    long ret = _sc1(SYS_UNLINK, (long)path);
-    SET_ERRNO_RET(ret, -1);
+    volatile char _stack_guard[5120];
+    _stack_guard[0] = 0; _stack_guard[5119] = 0;
+    (void)_stack_guard;
+    long ret;
+    __asm__ volatile(
+        "syscall"
+        : "=a"(ret)
+        : "a"((long)87), "D"((long)path)
+        : "rcx", "r11", "memory"
+    );
+    if (ret < 0) { *__errno_location() = (int)(-ret); return -1; }
     return (int)ret;
 }
 
+__attribute__((noinline))
 int rename(const char *old, const char *newpath) {
-    long ret = _sc2(SYS_RENAME, (long)old, (long)newpath);
-    SET_ERRNO_RET(ret, -1);
+    // Büyük stack guard: kernel sys_rename ~4KB stack kullanıyor.
+    // 5KB buffer ile wrapper'ın return adresi overflow bölgesinin dışında kalır.
+    volatile char _stack_guard[5120];
+    _stack_guard[0] = 0; _stack_guard[5119] = 0;  // touch pages
+    (void)_stack_guard;
+    long ret;
+    __asm__ volatile(
+        "syscall"
+        : "=a"(ret)
+        : "a"((long)82), "D"((long)old), "S"((long)newpath)
+        : "rcx", "r11", "memory"
+    );
+    if (ret < 0) { *__errno_location() = (int)(-ret); return -1; }
     return (int)ret;
 }
 
@@ -931,26 +948,30 @@ void *sbrk(long incr) {
 }
 
 // ── Userland mmap pool ────────────────────────────────────────────────────
-// musl libc her malloc/free için mmap+munmap syscall'ı yapar.
-// Bu pool, 4KB'lık anonim sayfaları kernel'a gitmeden karşılar.
-// Sonuç: tuş başına onlarca syscall → 0 syscall.
+// musl mallocng mmap(MAP_ANONYMOUS) ile büyük chunk'lar alır (65KB+).
+// Kernel sys_mmap kmalloc tabanlı yüksek adres döndürür (~0x180000+).
+// mcmodel=small ile derlenen Lua bu adresi 32-bit pointer'a sığdıramaz → #GP.
 //
-// Tasarım:
-//   - MMAP_POOL_PAGES adet 4KB sayfa BSS'te statik olarak tutulur (~2MB).
-//   - Her sayfa "kullanımda mı?" bilgisi 1 bitlik slot dizisiyle takip edilir.
-//   - Yalnızca MAP_ANONYMOUS|MAP_PRIVATE, addr=NULL, len=4096 istekleri
-//     pool'dan karşılanır; diğerleri doğrudan kernel'a iletilir.
-//   - munmap: pool aralığına düşüyorsa slot serbest bırakılır, kernel'a gidilmez.
+// Çözüm: Hem 4KB hem de büyük istekleri statik BSS pool'dan karşıla.
+// Pool adresleri BSS'te olduğundan mcmodel=small aralığında (<2GB) kalır.
+//
+// İki pool:
+//   _mmap_pool_small : 512 × 4KB  = 2MB  (musl mutex/errno küçük alloc'lar)
+//   _mmap_pool_large : 32  × 64KB = 2MB  (musl mallocng büyük chunk'lar)
 
-#define MMAP_POOL_PAGES   512          // 512 × 4KB = 2MB statik pool
-#define MMAP_PAGE_SIZE    4096
+#define MMAP_POOL_PAGES     512
+#define MMAP_PAGE_SIZE      4096
 
-// Hizalamalı statik sayfa dizisi (BSS — sıfır başlatılır)
+#define MMAP_LARGE_PAGES    32
+#define MMAP_LARGE_SIZE     (65536)   // 64KB — musl mallocng chunk boyutu
+
 static unsigned char _mmap_pool[MMAP_POOL_PAGES][MMAP_PAGE_SIZE]
     __attribute__((aligned(MMAP_PAGE_SIZE)));
-
-// Kullanım bitmap'i: 1 bit = 1 sayfa (0=boş, 1=kullanımda)
 static unsigned long _mmap_used[(MMAP_POOL_PAGES + 63) / 64];
+
+static unsigned char _mmap_large[MMAP_LARGE_PAGES][MMAP_LARGE_SIZE]
+    __attribute__((aligned(MMAP_PAGE_SIZE)));
+static unsigned long _mmap_large_used[(MMAP_LARGE_PAGES + 63) / 64];
 
 static inline int _pool_slot_used(int i) {
     return (_mmap_used[i / 64] >> (i % 64)) & 1;
@@ -960,29 +981,25 @@ static inline void _pool_slot_set(int i, int v) {
     else   _mmap_used[i / 64] &= ~(1UL << (i % 64));
 }
 
-// Pool'dan boş bir sayfa bul ve döndür
 static void *_pool_alloc(void) {
     for (int i = 0; i < MMAP_POOL_PAGES; i++) {
         if (!_pool_slot_used(i)) {
             _pool_slot_set(i, 1);
-            // Sayfayı sıfırla (mmap anonim sayfalar sıfır gelir)
             unsigned char *p = _mmap_pool[i];
             for (int j = 0; j < MMAP_PAGE_SIZE; j++) p[j] = 0;
             return (void*)p;
         }
     }
-    return (void*)0;  // Pool dolu
+    return (void*)0;
 }
 
-// Adresin pool aralığında olup olmadığını kontrol et
 static int _pool_contains(void *addr) {
-    unsigned char *p = (unsigned char*)addr;
+    unsigned char *p    = (unsigned char*)addr;
     unsigned char *base = _mmap_pool[0];
     unsigned char *end  = _mmap_pool[MMAP_POOL_PAGES - 1] + MMAP_PAGE_SIZE;
     return (p >= base && p < end);
 }
 
-// Pool'daki sayfayı serbest bırak
 static int _pool_free(void *addr) {
     unsigned char *p    = (unsigned char*)addr;
     unsigned char *base = _mmap_pool[0];
@@ -993,17 +1010,74 @@ static int _pool_free(void *addr) {
     return 0;
 }
 
+// ── Büyük blok pool (64KB slot'lar) ──────────────────────────────────────
+static inline int _large_slot_used(int i) {
+    return (_mmap_large_used[i / 64] >> (i % 64)) & 1;
+}
+static inline void _large_slot_set(int i, int v) {
+    if (v) _mmap_large_used[i / 64] |=  (1UL << (i % 64));
+    else   _mmap_large_used[i / 64] &= ~(1UL << (i % 64));
+}
+
+// len için kaç slot gerekli (yukarı yuvarla)
+static void *_large_alloc(size_t len) {
+    int slots_needed = (int)((len + MMAP_LARGE_SIZE - 1) / MMAP_LARGE_SIZE);
+    // Ardışık boş slot bul
+    for (int i = 0; i <= MMAP_LARGE_PAGES - slots_needed; i++) {
+        int ok = 1;
+        for (int j = 0; j < slots_needed; j++)
+            if (_large_slot_used(i + j)) { ok = 0; break; }
+        if (ok) {
+            for (int j = 0; j < slots_needed; j++)
+                _large_slot_set(i + j, 1);
+            unsigned char *p = _mmap_large[i];
+            // Sıfırla
+            size_t total = (size_t)slots_needed * MMAP_LARGE_SIZE;
+            for (size_t k = 0; k < total; k++) p[k] = 0;
+            return (void*)p;
+        }
+    }
+    return (void*)0;  // Pool dolu
+}
+
+static int _large_contains(void *addr) {
+    unsigned char *p    = (unsigned char*)addr;
+    unsigned char *base = _mmap_large[0];
+    unsigned char *end  = _mmap_large[MMAP_LARGE_PAGES - 1] + MMAP_LARGE_SIZE;
+    return (p >= base && p < end);
+}
+
+static int _large_free(void *addr, size_t len) {
+    unsigned char *p    = (unsigned char*)addr;
+    unsigned char *base = _mmap_large[0];
+    if (p < base) return -1;
+    size_t offset = (size_t)(p - base);
+    int slot = (int)(offset / MMAP_LARGE_SIZE);
+    if (slot < 0 || slot >= MMAP_LARGE_PAGES) return -1;
+    int slots = (int)((len + MMAP_LARGE_SIZE - 1) / MMAP_LARGE_SIZE);
+    for (int j = 0; j < slots && (slot + j) < MMAP_LARGE_PAGES; j++)
+        _large_slot_set(slot + j, 0);
+    return 0;
+}
+
 void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
-    // Anonim, sabit adressiz, tam sayfa istekleri pool'dan karşıla
     if (addr == (void*)0
         && (flags & MAP_ANONYMOUS)
         && !(flags & MAP_FIXED)
-        && fd == -1
-        && len <= MMAP_PAGE_SIZE)
+        && fd == -1)
     {
-        void *p = _pool_alloc();
-        if (p) return p;
-        // Pool dolduysa kernel'a düş
+        // 4KB istekler: küçük pool
+        if (len <= MMAP_PAGE_SIZE) {
+            void *p = _pool_alloc();
+            if (p) return p;
+        }
+        // 4KB..2MB arası istekler: büyük pool
+        // musl mallocng ~65KB chunk'lar istiyor; pool'dan karşıla
+        if (len <= (size_t)(MMAP_LARGE_PAGES * MMAP_LARGE_SIZE)) {
+            void *p = _large_alloc(len);
+            if (p) return p;
+        }
+        // Pool dolu veya çok büyük → kernel'a düş
     }
     long ret = _sc6(SYS_MMAP,
         (long)addr, (long)len, (long)prot,
@@ -1013,9 +1087,12 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
 }
 
 int munmap(void *addr, size_t len) {
-    // Pool aralığındaysa sadece slot'u serbest bırak, kernel'a gitme
     if (_pool_contains(addr)) {
         _pool_free(addr);
+        return 0;
+    }
+    if (_large_contains(addr)) {
+        _large_free(addr, len);
         return 0;
     }
     long ret = _sc2(SYS_MUNMAP, (long)addr, (long)len);
@@ -1083,9 +1160,19 @@ int symlink(const char *target, const char *linkpath) {
     SET_ERRNO_RET(ret, -1);
     return (int)ret;
 }
+__attribute__((noinline))
 int link(const char *oldpath, const char *newpath) {
-    long ret = _sc2(SYS_LINK, (long)oldpath, (long)newpath);
-    SET_ERRNO_RET(ret, -1);
+    volatile char _stack_guard[5120];
+    _stack_guard[0] = 0; _stack_guard[5119] = 0;
+    (void)_stack_guard;
+    long ret;
+    __asm__ volatile(
+        "syscall"
+        : "=a"(ret)
+        : "a"((long)86), "D"((long)oldpath), "S"((long)newpath)
+        : "rcx", "r11", "memory"
+    );
+    if (ret < 0) { *__errno_location() = (int)(-ret); return -1; }
     return (int)ret;
 }
 ssize_t readlink(const char *path, char *buf, size_t size) {
@@ -1459,5 +1546,6 @@ int prlimit(pid_t pid, int resource,
 }
 
 // ── errno notu ────────────────────────────────────────────────────────────
-// __errno_location weak sembol olarak yukarıda tanımlıdır.
-// musl libc.a strong tanımı link aşamasında bizimkini override eder.
+// __errno_location strong sembol olarak yukarıda tanımlıdır.
+// syscalls.o musl.a'dan önce link edildiğinde musl'ün archive versiyonu atlanır.
+// Tüm SET_ERRNO_RET çağrıları FS_BASE bağımsız _errno_storage'a yazar.

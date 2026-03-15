@@ -5,6 +5,11 @@
 #include <stdint.h>
 #include "task.h"
 
+// Debug logging — scheduler tick'te serial_print CPU'yu yorar (1000Hz × yazma).
+// Sadece geliştirme sırasında etkinleştir:
+//   gcc ... -DSCHED_DEBUG ...
+// veya Makefile'da: CFLAGS += -DSCHED_DEBUG
+
 // Scheduler modes
 #define SCHED_MODE_ROUND_ROBIN    0
 #define SCHED_MODE_PRIORITY       1

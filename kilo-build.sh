@@ -13,7 +13,6 @@ error() { echo -e "${RED}[ERR ]${NC} $*"; exit 1; }
 
 # ── Diske kopyalama ayarları ───────────────────────────────────
 DISK_IMG="${DISK_IMG:-disk.img}"          # Disk imajı dosyası (varsayılan: disk.img)
-DISK_OFFSET="${DISK_OFFSET:-1048576}"     # FAT32 bölümünün offset'i (bayt) (varsayılan: 1048576)
 
 TARGET="x86_64-elf"
 MUSL_PREFIX="$(pwd)/toolchain/musl-install"
@@ -110,8 +109,7 @@ ${TARGET}-gcc \
     -L"${MUSL_PREFIX}/lib" \
     -T "${USER_LD}" \
     -Wl,--gc-sections \
-    -Wl,-u,___errno_location \
-    -Wl,-u,__errno_location \
+    -Wl,--allow-multiple-definition \
     -o "${OUTPUT_DIR}/kilo.elf" \
     ../crt0.o \
     kilo.c \
@@ -129,21 +127,33 @@ else
     error "kilo.elf oluşturulamadı!"
 fi
 
-# ── Diske kopyalama (mtools ile) ──────────────────────────────
-if command -v mcopy >/dev/null 2>&1; then
-    if [ -f "${DISK_IMG}" ]; then
-        info "Diske kopyalanıyor: ${OUTPUT_DIR}/kilo.elf -> ${DISK_IMG}@@${DISK_OFFSET}::KILO.ELF"
-        mcopy -i "${DISK_IMG}@@${DISK_OFFSET}" -o "${OUTPUT_DIR}/kilo.elf" ::KILO.ELF
-        if [ $? -eq 0 ]; then
-            info "Kopyalama başarılı."
-        else
-            warn "Kopyalama başarısız!"
-        fi
+# ── Diske kopyalama (Ext2 — Makefile ile aynı yöntem) ────────
+if [ -f "${DISK_IMG}" ]; then
+    info "Diske kopyalanıyor: ${OUTPUT_DIR}/kilo.elf -> ${DISK_IMG}:/bin/kilo.elf"
+    if command -v debugfs >/dev/null 2>&1; then
+        info "  → debugfs kullanılıyor (root gerekmez)"
+        debugfs -w "${DISK_IMG}" -R "write ${OUTPUT_DIR}/kilo.elf bin/kilo.elf" 2>/dev/null \
+            && info "Kopyalama başarılı (debugfs)." \
+            || warn "debugfs kopyalama başarısız!"
+    elif command -v e2cp >/dev/null 2>&1; then
+        info "  → e2cp kullanılıyor"
+        e2cp "${OUTPUT_DIR}/kilo.elf" "${DISK_IMG}:/bin/kilo.elf" \
+            && info "Kopyalama başarılı (e2cp)." \
+            || warn "e2cp kopyalama başarısız!"
     else
-        warn "Disk imajı bulunamadı: ${DISK_IMG}. Kopyalama atlandı."
+        info "  → loop mount deneniyor (sudo gerekebilir)"
+        MNT_TMP="/tmp/ascentos_mnt"
+        mkdir -p "${MNT_TMP}"
+        sudo mount -o loop "${DISK_IMG}" "${MNT_TMP}" \
+            && sudo cp "${OUTPUT_DIR}/kilo.elf" "${MNT_TMP}/bin/kilo.elf" \
+            && sudo umount "${MNT_TMP}" \
+            && rmdir "${MNT_TMP}" \
+            && info "Kopyalama başarılı (loop mount)." \
+            || { warn "loop mount kopyalama başarısız!"; sudo umount "${MNT_TMP}" 2>/dev/null; rmdir "${MNT_TMP}" 2>/dev/null; }
     fi
 else
-    warn "mcopy (mtools paketi) bulunamadı. Lütfen 'sudo apt install mtools' ile kurun."
+    warn "Disk imajı bulunamadı: ${DISK_IMG}. Kopyalama atlandı."
+    warn "  → Önce 'make disk.img' ile imajı oluşturun."
 fi
 
 # ── Özet ──────────────────────────────────────────────────────
@@ -156,7 +166,7 @@ echo -e "${GRN}║${NC}  Boyut          : ${SIZE}"
 echo -e "${GRN}║${NC}  Kullanılan libc: musl ${MUSL_PREFIX}"
 echo -e "${GRN}║${NC}  crt0           : ${CRT0_ASM}"
 if [ -f "${DISK_IMG}" ]; then
-    echo -e "${GRN}║${NC}  Diske kopyalandı: ${DISK_IMG}@@${DISK_OFFSET}::KILO.ELF"
+    echo -e "${GRN}║${NC}  Diske kopyalandı: ${DISK_IMG}:/bin/kilo.elf (Ext2)"
 fi
 echo -e "${GRN}║${NC}"
 echo -e "${GRN}║${NC}  ⚠️  ÖNEMLİ: kilo ANSI escape kodları kullanır."

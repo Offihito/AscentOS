@@ -9,17 +9,10 @@
 #include "idt64.h"
 #include "ata64.h"
 #include "ext2.h"
+#include "cpu64.h"   // SSE, CPUID, I/O port yardımcıları
 
 #define COM1 0x3F8
 
-static inline void outb(uint16_t port, uint8_t val) {
-    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
-}
-static inline uint8_t inb(uint16_t port) {
-    uint8_t ret;
-    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
 void serial_write(char c) { while(!(inb(COM1+5)&0x20)); outb(COM1,c); }
 void serial_print(const char* s) { while(*s){if(*s=='\n')serial_write('\r');serial_write(*s++);} }
 void serial_putchar(char c) { serial_write(c); }
@@ -29,27 +22,6 @@ int strcmp64(const char* a, const char* b) { while(*a&&*a==*b){a++;b++;} return 
 void* memset64(void* d, int v, size_t n) { uint8_t*p=d; while(n--)*p++=(uint8_t)v; return d; }
 void* memcpy64(void* d, const void* s, size_t n) { uint8_t*dp=d; const uint8_t*sp=s; while(n--)*dp++=*sp++; return d; }
 
-static inline void sse_init(void) {
-    uint64_t cr0,cr4;
-    __asm__ volatile("mov %%cr0,%0":"=r"(cr0));
-    cr0&=~(1ULL<<2); cr0|=(1ULL<<1); cr0&=~(1ULL<<3);
-    __asm__ volatile("mov %0,%%cr0"::"r"(cr0));
-    __asm__ volatile("mov %%cr4,%0":"=r"(cr4));
-    cr4|=(1ULL<<9)|(1ULL<<10);
-    __asm__ volatile("mov %0,%%cr4"::"r"(cr4));
-    serial_print("[SSE] OK\n");
-}
-
-void uint64_to_hex(uint64_t n, char* buf) {
-    const char* h="0123456789ABCDEF"; buf[0]='0'; buf[1]='x';
-    for(int i=0;i<16;i++) buf[2+i]=h[(n>>(60-i*4))&0xF];
-    buf[18]='\0';
-}
-void get_cpu_info(char* v) {
-    uint32_t a,b,c,d;
-    __asm__ volatile("cpuid":"=a"(a),"=b"(b),"=c"(c),"=d"(d):"a"(0));
-    *(uint32_t*)(v+0)=b; *(uint32_t*)(v+4)=d; *(uint32_t*)(v+8)=c; v[12]='\0';
-}
 
 // Multiboot2
 extern uint64_t multiboot_mmap_addr;

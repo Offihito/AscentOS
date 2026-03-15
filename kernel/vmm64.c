@@ -2,6 +2,7 @@
 #include "vmm64.h"
 #include "pmm.h"
 #include "heap.h"
+#include "cpu64.h"   // cpu_invlpg, cpu_disable_interrupts, cpu_enable_interrupts
 #include <stdint.h>
 #include <stddef.h>
 
@@ -40,7 +41,7 @@ static inline void vmm_write_cr3(uint64_t cr3) {
 
 // Invalidate TLB for single page
 void vmm_flush_tlb_single(uint64_t virtual_addr) {
-    __asm__ volatile ("invlpg (%0)" : : "r"(virtual_addr) : "memory");
+    cpu_invlpg(virtual_addr);   // cpu64.h — tek sayfa TLB invalidation
     vmm_stats.tlb_flushes++;
 }
 
@@ -435,7 +436,8 @@ void vmm_page_fault_handler(uint64_t error_code, uint64_t faulting_addr) {
     serial_print("\n");
     
     // Halt on unhandled page fault
-    __asm__ volatile ("cli; hlt");
+    cpu_disable_interrupts();
+    while (1) __asm__ volatile ("hlt");
 }
 
 // Demand paging control functions

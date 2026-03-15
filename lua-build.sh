@@ -15,8 +15,7 @@ warn()  { echo -e "${YLW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERR ]${NC} $*"; exit 1; }
 
 # ── Diske kopyalama ayarları ───────────────────────────────────
-DISK_IMG="${DISK_IMG:-disk.img}"
-DISK_OFFSET="${DISK_OFFSET:-1048576}"
+DISK_IMG="${DISK_IMG:-disk.img}"          # Disk imajı dosyası (varsayılan: disk.img)
 
 # ── Lua sürümü ────────────────────────────────────────────────
 LUA_VERSION="${LUA_VERSION:-5.4.7}"
@@ -193,21 +192,10 @@ cat > ascentos_compat.c << 'COMPAT_EOF'
 /*
  * ascentos_compat.c — AscentOS Lua 5.4 uyum katmanı
  *
- * İki kritik sorun çözülüyor:
- *
  * 1. LOCALE/TIMEZONE STUB'LARI
- *    musl statik libc.a'da eksik olan iç semboller sağlanır.
- *
- * 2. GÜVENLİ HEAP ALLOCATOR
- *    musl malloc/realloc, mmap(MAP_ANONYMOUS) kullanır.
- *    AscentOS kernel'inde mmap yanlış adres döndürebilir veya
- *    dönen adres mcmodel=small aralığının dışında kalabilir.
- *    Bu allocator sbrk() tabanlı basit bir bump allocator sağlar;
- *    Lua'yı lua_newstate()'e özel allocator ile başlatır.
- *
- *    RAX=0xF000FF54F000FF53 (BIOS ROM) panic'inin kök nedeni:
- *    mmap → yanlış adres → Lua bu pointer'ı struct olarak kullanır
- *    → ilk erişimde #GP.
+ * 2. LUA ALLOCATOR — sbrk tabanlı basit bump allocator
+ *    syscalls.c'deki sbrk() kullanılır (BSS'ten __heap_start)
+ *    mmap/kernel heap kullanılmaz → mcmodel=small uyumlu adresler
  */
 
 #include <stddef.h>
@@ -215,20 +203,14 @@ cat > ascentos_compat.c << 'COMPAT_EOF'
 #include <string.h>
 #include <time.h>
 
-/* ── Lua header'ları (allocator hook için) ──────────────────── */
 #include "lua.h"
 #include "lauxlib.h"
 
-/* ════════════════════════════════════════════════════════════
- * 1. LOCALE / TIMEZONE STUB'LARI
- * ════════════════════════════════════════════════════════════ */
-
+/* ── Locale/timezone stub'ları ─────────────────────────────── */
 void __locale_lock(void)   {}
 void __locale_unlock(void) {}
 void* __get_locale(void)   { return NULL; }
 
-/* __utc timezone struct — musl iç layout'unu taklit eder      */
-/* Gerçek musl: struct { int off; const char *name; ... } __utc */
 typedef struct { int off; const char *name; long long transition; } _tz_rule;
 const _tz_rule __utc = { 0, "UTC", 0 };
 
@@ -243,157 +225,83 @@ void __secs_to_zone(long long t, int local,
     if (zonename) *zonename = "UTC";
 }
 
-const char *__tm_to_tzname(const struct tm *tm)
-{
-    (void)tm;
-    return "UTC";
-}
+const char *__tm_to_tzname(const struct tm *tm) { (void)tm; return "UTC"; }
 
-/* ════════════════════════════════════════════════════════════
- * 2. SBRK TABANLI GÜVENLİ ALLOCATOR
- *
- * musl malloc → mmap(MAP_ANONYMOUS) zinciri AscentOS'ta
- * güvenilir değil. Lua'nın kendi allocator hook'unu kullanarak
- * sbrk() tabanlı basit ama güvenli bir allocator kuruyoruz.
- *
- * Tasarım:
- *   - Her blok bir header (size + magic) ile başlar
- *   - realloc: yeni blok al + kopyala + eskiyi işaretle serbest
- *   - free: bloğu "serbest" olarak işaretle (basit leak-free değil,
- *     ama Lua GC kısa ömürlü binary için yeterli)
- *   - Toplam heap: ASCENT_HEAP_SIZE bayt (sbrk ile alınır)
- * ════════════════════════════════════════════════════════════ */
-
-#define ASCENT_HEAP_SIZE    (8 * 1024 * 1024)   /* 8 MB */
-#define BLOCK_MAGIC_FREE    0xDEADBEEFU
-#define BLOCK_MAGIC_USED    0xCAFEBABEU
-#define ALIGN_SIZE          16
-
-typedef struct block_hdr {
-    uint32_t magic;     /* USED veya FREE */
-    uint32_t size;      /* payload bayt sayısı (header hariç) */
-} block_hdr_t;
-
-#define HDR_SIZE   sizeof(block_hdr_t)
-
-static char  *_heap_base = NULL;
-static char  *_heap_top  = NULL;
-static char  *_heap_end  = NULL;
-
-/* sbrk() ile heap'i başlat */
-static int heap_init(void)
-{
-    if (_heap_base) return 1;
-    /* sbrk(0) → mevcut program break */
-    extern void *sbrk(intptr_t);
-    _heap_base = (char *)sbrk(0);
-    if (_heap_base == (char *)-1) return 0;
-    /* ASCENT_HEAP_SIZE kadar büyüt */
-    if (sbrk(ASCENT_HEAP_SIZE) == (void *)-1) return 0;
-    _heap_top = _heap_base;
-    _heap_end = _heap_base + ASCENT_HEAP_SIZE;
-    return 1;
-}
-
-/* Hizalanmış boyut */
-static uint32_t align_up(uint32_t n)
-{
-    return (n + ALIGN_SIZE - 1) & ~(uint32_t)(ALIGN_SIZE - 1);
-}
-
-/* Heap'ten yeni blok al (bump allocator) */
-static void *heap_alloc(uint32_t size)
-{
-    uint32_t total;
-    block_hdr_t *hdr;
-
-    if (!_heap_base && !heap_init()) return NULL;
-
-    size  = align_up(size);
-    total = (uint32_t)HDR_SIZE + size;
-
-    if (_heap_top + total > _heap_end) return NULL;   /* heap dolu */
-
-    hdr        = (block_hdr_t *)_heap_top;
-    hdr->magic = BLOCK_MAGIC_USED;
-    hdr->size  = size;
-    _heap_top += total;
-    return (char *)hdr + HDR_SIZE;
-}
-
-/* Lua allocator hook:
- *   ptr==NULL, nsize>0  → malloc
- *   ptr!=NULL, nsize==0 → free
- *   ptr!=NULL, nsize>0  → realloc
+/* ── Lua allocator: sbrk tabanlı ───────────────────────────────
+ * syscalls.c'deki sbrk() BSS sonrası __heap_start'tan çalışır.
+ * Bu adresler mcmodel=small (<2GB) aralığında kalır.
+ * mmap veya kernel heap KULLANILMAZ.
  */
+extern void *sbrk(long incr);
+
+#define ALIGN16(n)  (((n) + 15UL) & ~15UL)
+#define HDR_MAGIC   0xCAFEBABEu
+#define HDR_FREE    0xDEADBEEFu
+
+typedef struct { unsigned magic; unsigned size; } hdr_t;
+#define HDR_SZ sizeof(hdr_t)
+
+/* Toplam heap: sbrk(CHUNK) ile büyütülür */
+#define HEAP_CHUNK  (1024 * 1024)   /* 1MB adımlarla büyü */
+
+static char *_brk_base = 0;
+static char *_brk_ptr  = 0;
+static char *_brk_end  = 0;
+
+static void *lua_bump_alloc(unsigned sz) {
+    sz = (unsigned)ALIGN16(sz);
+    unsigned total = sz + (unsigned)HDR_SZ;
+    /* Yeterli alan yoksa sbrk ile genişlet */
+    while (!_brk_base || (_brk_ptr + total > _brk_end)) {
+        unsigned grow = total > HEAP_CHUNK ? total : HEAP_CHUNK;
+        if (!_brk_base) {
+            _brk_base = (char *)sbrk(0);   /* mevcut break */
+            if (_brk_base == (char *)-1) return NULL;
+        }
+        char *got = (char *)sbrk((long)grow);
+        if (got == (char *)-1) return NULL;
+        if (!_brk_ptr) _brk_ptr = _brk_base;
+        _brk_end = _brk_base + (size_t)(got - _brk_base) + grow;
+    }
+    hdr_t *h = (hdr_t *)_brk_ptr;
+    h->magic = HDR_MAGIC;
+    h->size  = sz;
+    _brk_ptr += total;
+    return (char *)h + HDR_SZ;
+}
+
+/* Lua allocator hook */
 void *ascent_lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 {
     (void)ud;
-
-    /* free */
     if (nsize == 0) {
         if (ptr) {
-            block_hdr_t *hdr = (block_hdr_t *)((char *)ptr - HDR_SIZE);
-            if (hdr->magic == BLOCK_MAGIC_USED)
-                hdr->magic = BLOCK_MAGIC_FREE;
+            hdr_t *h = (hdr_t *)((char *)ptr - HDR_SZ);
+            if (h->magic == HDR_MAGIC) h->magic = HDR_FREE;
         }
         return NULL;
     }
+    if (ptr == NULL)
+        return lua_bump_alloc((unsigned)nsize);
 
-    /* malloc */
-    if (ptr == NULL) {
-        return heap_alloc((uint32_t)nsize);
-    }
-
-    /* realloc: yeni blok al, kopyala, eskiyi serbest bırak */
-    {
-        void *newptr = heap_alloc((uint32_t)nsize);
-        if (!newptr) return NULL;
-        {
-            size_t copy = osize < nsize ? osize : nsize;
-            memcpy(newptr, ptr, copy);
-        }
-        {
-            block_hdr_t *hdr = (block_hdr_t *)((char *)ptr - HDR_SIZE);
-            if (hdr->magic == BLOCK_MAGIC_USED)
-                hdr->magic = BLOCK_MAGIC_FREE;
-        }
-        return newptr;
-    }
+    /* realloc */
+    void *newp = lua_bump_alloc((unsigned)nsize);
+    if (!newp) return NULL;
+    size_t copy = osize < nsize ? osize : nsize;
+    memcpy(newp, ptr, copy);
+    hdr_t *h = (hdr_t *)((char *)ptr - HDR_SZ);
+    if (h->magic == HDR_MAGIC) h->magic = HDR_FREE;
+    return newp;
 }
 
-/* ════════════════════════════════════════════════════════════
- * 3. ÖZEL main() SARMALAYICI
- *
- * Lua'nın orijinal main() → lua_newstate(l_alloc, NULL) çağırır.
- * Bizim main() bunu yakalar; lua_newstate'e ascent_lua_alloc'u verir.
- *
- * Yöntem: Lua'nın lua.c main() fonksiyonunu "lua_main" olarak
- * yeniden adlandırıp kendi main()'imizden çağırıyoruz.
- * Bu lua.c'ye -Dmain=lua_main patch'i ile sağlanır.
- * ════════════════════════════════════════════════════════════ */
-
-/* lua.c'deki pmain() → lua_newstate kullanır.
- * lua_newstate hook'unu override etmek için lua.c'yi doğrudan
- * patch etmek gerekir. Bunun yerine daha temiz yol:
- * lstate.c içindeki lua_newstate'i wrap etmek.
- *
- * Lua 5.4'te lua_newstate tanımı lstate.c'de:
- *   lua_State *lua_newstate (lua_Alloc f, void *ud)
- *
- * Biz __wrap_lua_newstate ile bunu intercept ediyoruz.
- * Build'e -Wl,--wrap=lua_newstate eklenmeli.
- */
+/* __wrap_lua_newstate: her zaman kendi allocator'ımızı kullan */
 extern lua_State *__real_lua_newstate(lua_Alloc f, void *ud);
 
 lua_State *__wrap_lua_newstate(lua_Alloc f, void *ud)
 {
-    /* Gelen allocator'ı yoksay; her zaman kendi güvenli allocator'ımızı kullan */
     (void)f; (void)ud;
-    heap_init();
     return __real_lua_newstate(ascent_lua_alloc, NULL);
 }
-
 COMPAT_EOF
 info "ascentos_compat.c oluşturuldu."
 
@@ -488,8 +396,7 @@ ${TARGET}-gcc \
     -L"${MUSL_PREFIX}/lib" \
     -T "${USER_LD}" \
     -Wl,--gc-sections \
-    -Wl,-u,___errno_location \
-    -Wl,-u,__errno_location \
+    -Wl,--allow-multiple-definition \
     -Wl,--wrap=lua_newstate \
     -o "${OUTPUT_DIR}/lua.elf" \
     crt0.o \
@@ -497,7 +404,6 @@ ${TARGET}-gcc \
     ${LUA_CORE_SRCS} \
     "${SYSCALLS_OBJ}" \
     -lc \
-    -lm \
     "${LIBGCC}"
 
 # ── Doğrulama ─────────────────────────────────────────────────
@@ -508,21 +414,33 @@ else
     error "lua.elf oluşturulamadı!"
 fi
 
-# ── Diske kopyalama (mtools ile) ──────────────────────────────
-if command -v mcopy >/dev/null 2>&1; then
-    if [ -f "${DISK_IMG}" ]; then
-        info "Diske kopyalanıyor: ${OUTPUT_DIR}/lua.elf -> ${DISK_IMG}@@${DISK_OFFSET}::LUA.ELF"
-        mcopy -i "${DISK_IMG}@@${DISK_OFFSET}" -o "${OUTPUT_DIR}/lua.elf" ::LUA.ELF
-        if [ $? -eq 0 ]; then
-            info "Kopyalama başarılı."
-        else
-            warn "Kopyalama başarısız!"
-        fi
+# ── Diske kopyalama (Ext2 — Makefile ile aynı yöntem) ────────
+if [ -f "${DISK_IMG}" ]; then
+    info "Diske kopyalanıyor: ${OUTPUT_DIR}/lua.elf -> ${DISK_IMG}:/bin/lua.elf"
+    if command -v debugfs >/dev/null 2>&1; then
+        info "  → debugfs kullanılıyor (root gerekmez)"
+        debugfs -w "${DISK_IMG}" -R "write ${OUTPUT_DIR}/lua.elf bin/lua.elf" 2>/dev/null \
+            && info "Kopyalama başarılı (debugfs)." \
+            || warn "debugfs kopyalama başarısız!"
+    elif command -v e2cp >/dev/null 2>&1; then
+        info "  → e2cp kullanılıyor"
+        e2cp "${OUTPUT_DIR}/lua.elf" "${DISK_IMG}:/bin/lua.elf" \
+            && info "Kopyalama başarılı (e2cp)." \
+            || warn "e2cp kopyalama başarısız!"
     else
-        warn "Disk imajı bulunamadı: ${DISK_IMG}. Kopyalama atlandı."
+        info "  → loop mount deneniyor (sudo gerekebilir)"
+        MNT_TMP="/tmp/ascentos_mnt"
+        mkdir -p "${MNT_TMP}"
+        sudo mount -o loop "${DISK_IMG}" "${MNT_TMP}" \
+            && sudo cp "${OUTPUT_DIR}/lua.elf" "${MNT_TMP}/bin/lua.elf" \
+            && sudo umount "${MNT_TMP}" \
+            && rmdir "${MNT_TMP}" \
+            && info "Kopyalama başarılı (loop mount)." \
+            || { warn "loop mount kopyalama başarısız!"; sudo umount "${MNT_TMP}" 2>/dev/null; rmdir "${MNT_TMP}" 2>/dev/null; }
     fi
 else
-    warn "mcopy (mtools paketi) bulunamadı. Lütfen 'sudo apt install mtools' ile kurun."
+    warn "Disk imajı bulunamadı: ${DISK_IMG}. Kopyalama atlandı."
+    warn "  → Önce 'make disk.img' ile imajı oluşturun."
 fi
 
 # ── Özet ──────────────────────────────────────────────────────
@@ -536,7 +454,7 @@ echo -e "${GRN}║${NC}  Lua sürümü     : ${LUA_VERSION} (C89 uyumluluk modu)
 echo -e "${GRN}║${NC}  Kullanılan libc: musl ${MUSL_PREFIX}"
 echo -e "${GRN}║${NC}  crt0           : ${CRT0_ASM}"
 if [ -f "${DISK_IMG}" ]; then
-    echo -e "${GRN}║${NC}  Diske kopyalandı: ${DISK_IMG}@@${DISK_OFFSET}::LUA.ELF"
+    echo -e "${GRN}║${NC}  Diske kopyalandı: ${DISK_IMG}:/bin/lua.elf (Ext2)"
 fi
 echo -e "${GRN}║${NC}"
 echo -e "${GRN}║${NC}  Bilinen kısıtlamalar:"
