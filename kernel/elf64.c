@@ -4,7 +4,7 @@
 
 #include "elf64.h"
 #include "../kernel/ext2.h"   // ext2_read_file, ext2_file_size
-#include "../apps/commands64.h"         // CommandOutput, output_add_line, renk sabitleri
+#include "../commands/commands64.h"         // CommandOutput, output_add_line, renk sabitleri
 
 // ============================================================
 // Kernel memory helpers (kernel64.c'den extern edilmiş)

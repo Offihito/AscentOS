@@ -9,7 +9,7 @@
 #include "tcp.h"
 #include "arp.h"
 #include "ipv4.h"
-#include "../kernel/rtl8139.h"
+#include "../drivers/rtl8139.h"
 
 // ============================================================================
 // Kernel yardımcıları

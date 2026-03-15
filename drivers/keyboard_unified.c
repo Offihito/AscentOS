@@ -5,8 +5,8 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "task.h"
-#include "idt64.h"
+#include "../kernel/task.h"
+#include "../kernel/idt64.h"
 // ============================================================================
 // Forward declarations — kullanılmadan önce bildirilir
 // ============================================================================
@@ -20,8 +20,8 @@ extern void set_position64(size_t row, size_t col);
 extern void clear_screen64(void);
 
 // Sinyal altyapısı — Ctrl+C (SIGINT) ve Ctrl+Z (SIGTSTP) için
-#include "signal64.h"
-#include "../apps/commands64.h"
+#include "../kernel/signal64.h"
+#include "../commands/commands64.h"
 
 // ============================================================================
 // I/O

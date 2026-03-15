@@ -10,7 +10,7 @@
 #include "../kernel/elf64.h"
 #include "../kernel/syscall.h"
 #include "../kernel/signal64.h"
-#include "../kernel/pcspk.h"
+#include "../drivers/pcspk.h"
 #include "../kernel/cpu64.h"
 #include "../kernel/spinlock64.h"   // spinlock_t, rwlock_t
 #include <stdbool.h>

@@ -16,7 +16,7 @@ extern uint32_t framebuffer_height;  // pixel cinsinden yükseklik
 extern uint8_t  framebuffer_bpp;     // bits per pixel (genellikle 32)
 
 // Font verisi ayrı dosyaya taşındı → kernel/font8x16.c
-#include "font8x16.h"
+#include "../kernel/font8x16.h"
 
 // ============================================================================
 // VGA 16 renk paleti → 32-bit RGB

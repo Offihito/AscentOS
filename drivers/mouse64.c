@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "mouse64.h"
-#include "gui64.h"
+#include "../kernel/gui64.h"
 
 // Port I/O
 static inline void outb(uint16_t port, uint8_t val) {

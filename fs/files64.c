@@ -7,8 +7,8 @@
 // Path handling, mkdir, rmdir, tree, find, du değişmeden korunur
 
 #include "files64.h"
-#include "../apps/commands64.h"
-#include "../kernel/ata64.h"
+#include "../commands/commands64.h"
+#include "../drivers/ata64.h"
 #include "../kernel/ext2.h"
 #include <stddef.h>
 

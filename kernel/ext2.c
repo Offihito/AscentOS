@@ -13,7 +13,7 @@
 //   - getdents64, getcwd, chdir
 
 #include "ext2.h"
-#include "ata64.h"   // disk_read_sector64 / disk_write_sector64 (ata64.h)
+#include "../drivers/ata64.h"   // disk_read_sector64 / disk_write_sector64 (ata64.h)
 #include <stddef.h>
 #include <stdint.h>
 

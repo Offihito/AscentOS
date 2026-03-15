@@ -41,14 +41,14 @@ all: AscentOS.iso userland install-userland
 # SHARED KERNEL COMPONENTS
 # ============================================================================
 
-files64.o: fs/files64.c fs/files64.h kernel/ext2.h kernel/ata64.h
+files64.o: fs/files64.c fs/files64.h kernel/ext2.h drivers/ata64.h
 	$(CC) $(CFLAGS) -c fs/files64.c -o files64.o
 
-ata64.o: kernel/ata64.c kernel/ata64.h
-	$(CC) $(CFLAGS) -c kernel/ata64.c -o ata64.o
+ata64.o: drivers/ata64.c drivers/ata64.h
+	$(CC) $(CFLAGS) -c drivers/ata64.c -o ata64.o
 
 # Ext2 filesystem driver (FAT32'nin yerini aldı)
-ext2.o: kernel/ext2.c kernel/ext2.h kernel/ata64.h fs/files64.h
+ext2.o: kernel/ext2.c kernel/ext2.h drivers/ata64.h fs/files64.h
 	$(CC) $(CFLAGS) -c kernel/ext2.c -o ext2.o
 
 elf64.o: kernel/elf64.c kernel/elf64.h
@@ -69,8 +69,8 @@ vmm64.o: kernel/vmm64.c kernel/vmm64.h kernel/pmm.h kernel/heap.h
 timer.o: kernel/timer.c kernel/timer.h
 	$(CC) $(CFLAGS) -c kernel/timer.c -o timer.o
 
-pcspk.o: kernel/pcspk.c kernel/pcspk.h
-	$(CC) $(CFLAGS) -c kernel/pcspk.c -o pcspk.o
+pcspk.o: drivers/pcspk.c drivers/pcspk.h
+	$(CC) $(CFLAGS) -c drivers/pcspk.c -o pcspk.o
 
 task.o: kernel/task.c kernel/task.h
 	$(CC) $(CFLAGS) -c kernel/task.c -o task.o
@@ -81,8 +81,8 @@ scheduler.o: kernel/scheduler.c kernel/scheduler.h kernel/task.h
 font8x16.o: kernel/font8x16.c kernel/font8x16.h
 	$(CC) $(CFLAGS) -c kernel/font8x16.c -o font8x16.o
 
-vesa64.o: kernel/vesa64.c kernel/vesa64.h kernel/font8x16.h
-	$(CC) $(CFLAGS) -c kernel/vesa64.c -o vesa64.o
+vesa64.o: drivers/vesa64.c drivers/vesa64.h kernel/font8x16.h
+	$(CC) $(CFLAGS) -c drivers/vesa64.c -o vesa64.o
 
 syscall.o: kernel/syscall.c kernel/syscall.h kernel/signal64.h
 	$(CC) $(CFLAGS) -c kernel/syscall.c -o syscall.o
@@ -96,10 +96,10 @@ signal64.o: kernel/signal64.c kernel/signal64.h kernel/syscall.h kernel/task.h
 panic64.o: kernel/panic64.c
 	$(CC) $(CFLAGS) -c kernel/panic64.c -o panic64.o
 
-rtl8139.o: kernel/rtl8139.c kernel/rtl8139.h
-	$(CC) $(CFLAGS) -c kernel/rtl8139.c -o rtl8139.o
+rtl8139.o: drivers/rtl8139.c drivers/rtl8139.h
+	$(CC) $(CFLAGS) -c drivers/rtl8139.c -o rtl8139.o
 
-arp.o: network/arp.c network/arp.h kernel/rtl8139.h
+arp.o: network/arp.c network/arp.h drivers/rtl8139.h
 	$(CC) $(CFLAGS) -c network/arp.c -o arp.o
 
 # ============================================================================
@@ -120,14 +120,14 @@ gui64.o: kernel/gui64.c kernel/gui64.h
 compositor64.o: kernel/compositor64.c kernel/compositor64.h kernel/gui64.h
 	$(CC) $(CFLAGS) -c kernel/compositor64.c -o compositor64.o
 
-mouse64.o: kernel/mouse64.c kernel/mouse64.h
-	$(CC) $(CFLAGS) -c kernel/mouse64.c -o mouse64.o
+mouse64.o: drivers/mouse64.c drivers/mouse64.h
+	$(CC) $(CFLAGS) -c drivers/mouse64.c -o mouse64.o
 
 idt64.o: kernel/idt64.c kernel/idt64.h kernel/task.h
 	$(CC) $(CFLAGS) -c kernel/idt64.c -o idt64.o
 
-keyboard.o: kernel/keyboard_unified.c kernel/idt64.h
-	$(CC) $(CFLAGS) -c kernel/keyboard_unified.c -o keyboard.o
+keyboard.o: drivers/keyboard_unified.c kernel/idt64.h
+	$(CC) $(CFLAGS) -c drivers/keyboard_unified.c -o keyboard.o
 
 taskbar.o: kernel/taskbar64.c kernel/taskbar64.h
 	$(CC) $(CFLAGS) -c kernel/taskbar64.c -o taskbar.o
@@ -135,10 +135,10 @@ taskbar.o: kernel/taskbar64.c kernel/taskbar64.h
 wm64.o: kernel/wm64.c kernel/wm64.h kernel/compositor64.h kernel/taskbar64.h
 	$(CC) $(CFLAGS) -c kernel/wm64.c -o wm64.o
 
-commands64.o: apps/commands64.c apps/commands64.h
-	$(CC) $(CFLAGS) -c apps/commands64.c -o commands64.o
+commands64.o: commands/commands64.c commands/commands64.h
+	$(CC) $(CFLAGS) -c commands/commands64.c -o commands64.o
 
-ipv4.o: network/ipv4.c network/ipv4.h network/arp.h kernel/rtl8139.h
+ipv4.o: network/ipv4.c network/ipv4.h network/arp.h drivers/rtl8139.h
 	$(CC) $(CFLAGS) -c network/ipv4.c -o ipv4.o
 
 icmp.o: network/icmp.c network/icmp.h network/ipv4.h network/arp.h
@@ -150,17 +150,17 @@ udp.o: network/udp.c network/udp.h network/ipv4.h network/arp.h
 dhcp.o: network/dhcp.c network/dhcp.h network/udp.h network/ipv4.h network/arp.h
 	$(CC) $(CFLAGS) -c network/dhcp.c -o dhcp.o
 
-tcp.o: network/tcp.c network/tcp.h network/ipv4.h network/arp.h kernel/rtl8139.h
+tcp.o: network/tcp.c network/tcp.h network/ipv4.h network/arp.h drivers/rtl8139.h
 	$(CC) $(CFLAGS) -c network/tcp.c -o tcp.o
 
 http.o: network/http.c network/http.h network/tcp.h network/arp.h network/ipv4.h
 	$(CC) $(CFLAGS) -c network/http.c -o http.o
 
-syscalltest64.o: apps/syscalltest64.c apps/commands64.h kernel/syscall.h kernel/signal64.h kernel/task.h
-	$(CC) $(CFLAGS) -c apps/syscalltest64.c -o syscalltest64.o
+syscalltest64.o: commands/syscalltest64.c commands/commands64.h kernel/syscall.h kernel/signal64.h kernel/task.h
+	$(CC) $(CFLAGS) -c commands/syscalltest64.c -o syscalltest64.o
 
-kernel64.o: kernel/kernel64.c kernel/gui64.h kernel/mouse64.h kernel/wm64.h \
-            kernel/ata64.h kernel/ext2.h fs/files64.h kernel/cpu64.h
+kernel64.o: kernel/kernel64.c kernel/gui64.h drivers/mouse64.h kernel/wm64.h \
+            drivers/ata64.h kernel/ext2.h fs/files64.h kernel/cpu64.h
 	$(CC) $(CFLAGS) -c kernel/kernel64.c -o kernel64.o
 
 cpu64.o: kernel/cpu64.c kernel/cpu64.h

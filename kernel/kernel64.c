@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "idt64.h"
-#include "ata64.h"
+#include "../drivers/ata64.h"
 #include "ext2.h"
 #include "cpu64.h"   // SSE, CPUID, I/O port yardımcıları
 
@@ -68,7 +68,7 @@ void set_extended_text_mode(void);
 // GUI MODE (gui64 + compositor + wm + mouse)
 // ============================================================================
 #include "gui64.h"
-#include "mouse64.h"
+#include "../drivers/mouse64.h"
 #include "taskbar64.h"
 #include "compositor64.h"
 #include "wm64.h"
