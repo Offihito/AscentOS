@@ -290,8 +290,8 @@ void keyboard_handler64(void) {
     // Enter
     if (sc == 0x1C) {
         if (kb_userland_mode) {
-            // Userland: ring buffer'a \n gönder, input_buffer'a dokunma
-            kb_ring_push('\n');
+            // Userland: kilo ENTER=13='\r' bekliyor — '\n' değil!
+            kb_ring_push('\r');
         } else {
             // Kernel shell: komutu çalıştır
             input_buffer[buffer_pos] = '\0';

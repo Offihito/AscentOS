@@ -452,8 +452,32 @@ static void sys_read(syscall_frame_t* frame) {
                 }
             } while (ch < 0);
 
+            // ── ECHO yardımcısı ──────────────────────────────────────────
+            // ECHO flag set ise okunan karakteri ekrana yansıt.
+            // vesa_write_buf fd=1 yolunu kullanır (ANSI parser dahil).
+            // Kilo ve diğer raw-mod uygulamalar tcsetattr ile ECHO'yu
+            // kapattıkları için burası onları etkilemez.
+            int do_echo = (kernel_termios.c_lflag & ECHO) ? 1 : 0;
+            extern void vesa_write_buf(const char* buf, int len);
+
             if (ch >= 0) {
                 buf[count++] = (char)ch;
+
+                // Echo: ilk karakter
+                if (do_echo) {
+                    char ec = (char)ch;
+                    if (ec == '\r' || ec == '\n') {
+                        // Canonical mod Enter → satır sonu göster
+                        vesa_write_buf("\r\n", 2);
+                    } else if (ec == 0x7f || ec == '\b') {
+                        // Backspace: terminal'de bir karakter geri sil
+                        vesa_write_buf("\b \b", 3);
+                    } else if ((unsigned char)ec < 0x20) {
+                        // Diğer kontrol karakterleri: echo etme
+                    } else {
+                        vesa_write_buf(&ec, 1);
+                    }
+                }
 
                 if (is_canonical) {
                     // Canonical mod: '\n' veya buffer dolu olana kadar devam et
@@ -461,15 +485,32 @@ static void sys_read(syscall_frame_t* frame) {
                         ch = kb_ring_pop();
                         if (ch < 0) break;
                         buf[count++] = (char)ch;
+                        // Echo: sonraki karakterler
+                        if (do_echo) {
+                            char ec = (char)ch;
+                            if (ec == '\r' || ec == '\n') {
+                                vesa_write_buf("\r\n", 2);
+                            } else if (ec == 0x7f || ec == '\b') {
+                                vesa_write_buf("\b \b", 3);
+                            } else if ((unsigned char)ec >= 0x20) {
+                                vesa_write_buf(&ec, 1);
+                            }
+                        }
                         if ((char)ch == '\n') break;
                     }
                 } else {
-                    // Raw mod: VMIN-1 karakter daha al (ilk zaten alındı),
-                    // '\n' bekleme — Lua/kilo gibi karakter bazlı uygulamalar için
+                    // Raw mod: VMIN-1 karakter daha al (ilk zaten alındı).
+                    // ECHO bu modda genellikle kapalıdır (kilo, Lua REPL, vb.)
+                    // ama flag set ise yine de echo et.
                     while (count < (uint64_t)vmin && count < len) {
                         ch = kb_ring_pop();
-                        if (ch < 0) break; // kalan karakterler sonraki read'de
+                        if (ch < 0) break;
                         buf[count++] = (char)ch;
+                        if (do_echo) {
+                            char ec = (char)ch;
+                            if ((unsigned char)ec >= 0x20)
+                                vesa_write_buf(&ec, 1);
+                        }
                     }
                 }
             }

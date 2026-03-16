@@ -702,9 +702,36 @@ void _exit(int code) {
     __builtin_unreachable();
 }
 
+// ── Minimal atexit implementasyonu ───────────────────────────────────────────
+// Musl libc.a'da atexit cross-link sırasında erişilemiyor.
+// Kilo gibi uygulamalar atexit(disableRawMode) çağırır — terminal
+// restore edilmezse kernel_termios raw modda kalır ve shell bozulur.
+#define ATEXIT_MAX 32
+static void (*_atexit_funcs[ATEXIT_MAX])(void);
+static int   _atexit_count = 0;
+
+int atexit(void (*func)(void)) {
+    if (_atexit_count >= ATEXIT_MAX) return -1;
+    _atexit_funcs[_atexit_count++] = func;
+    return 0;
+}
+
+// __cxa_atexit: C++ ve bazı musl iç çağrıları bu ismi kullanır.
+// arg olarak func'ı çağırır, dtor_handle yoksayılır.
+int __cxa_atexit(void (*func)(void*), void* arg, void* dso_handle) {
+    (void)dso_handle;
+    // Basit wrap: arg=NULL ise void(void) olarak çağır
+    if (!arg) return atexit((void(*)(void))func);
+    // arg varsa şimdilik yoksay (kilo kullanmıyor)
+    return 0;
+}
+
 __attribute__((noreturn))
 void exit(int code) {
-    // TODO: atexit handler'larını çağır (newlib bağlıysa newlib halleder)
+    // atexit handler'larını ters sırayla çağır (LIFO — POSIX gereksinimi)
+    for (int i = _atexit_count - 1; i >= 0; i--) {
+        if (_atexit_funcs[i]) _atexit_funcs[i]();
+    }
     _exit(code);
 }
 

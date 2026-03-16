@@ -98,8 +98,7 @@ static int readline(char* buf, int max) {
 
         if (n == 1) {
             consecutive_empty = 0;
-            if (c == '\r') continue;
-            if (c == '\n') break;
+            if (c == '\r' || c == '\n') break;  // CR veya LF → satır sonu
             if (c == '\b' || c == 127) {
                 if (i > 0) {
                     i--;
