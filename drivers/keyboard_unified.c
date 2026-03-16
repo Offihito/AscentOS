@@ -58,6 +58,11 @@ static volatile char kb_ring[KB_RING_SIZE];
 static volatile int  kb_ring_head = 0;
 static volatile int  kb_ring_tail = 0;
 static volatile int  kb_userland_mode = 0;
+// 1 → Enter '\r' gönderir (kilo/raw-mode uygulamalar)
+// 0 → Enter '\n' gönderir (shell, lua, calculator, vb.)
+static volatile int  kb_enter_sends_cr = 0;
+
+void kb_set_enter_cr(int cr) { kb_enter_sends_cr = cr; }
 
 void kb_set_userland_mode(int on) {
     kb_userland_mode = on;
@@ -70,6 +75,7 @@ void kb_set_userland_mode(int on) {
         // Kernel shell'e dönüş: buffer'ı temizle, stale veri kalmasın
         kb_ring_head = kb_ring_tail = 0;
         buffer_pos = 0;
+        kb_enter_sends_cr = 0;  // Kernel shell için her zaman '\n'
     }
 }
 int  kb_userland_active(void)     { return kb_userland_mode; }
@@ -290,8 +296,9 @@ void keyboard_handler64(void) {
     // Enter
     if (sc == 0x1C) {
         if (kb_userland_mode) {
-            // Userland: kilo ENTER=13='\r' bekliyor — '\n' değil!
-            kb_ring_push('\r');
+            // kb_enter_sends_cr=1 → raw-mode uygulamalar (kilo): '\r'
+            // kb_enter_sends_cr=0 → canonical uygulamalar (shell, lua, vb.): '\n'
+            kb_ring_push(kb_enter_sends_cr ? '\r' : '\n');
         } else {
             // Kernel shell: komutu çalıştır
             input_buffer[buffer_pos] = '\0';

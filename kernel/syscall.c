@@ -1806,7 +1806,24 @@ static void sys_execve(syscall_frame_t* frame) {
     // Klavyeyi userland moduna al: keyboard_unified.c'deki kb_ring_push
     // akışı artık bu task'a yönlenecek; sys_read blocking okuma yapabilir.
     extern void kb_set_userland_mode(int on);
+    extern void kb_set_enter_cr(int cr);
     kb_set_userland_mode(1);
+
+    // kilo raw-mode çalışır: Enter → '\r' (CR) bekler.
+    // Diğer tüm uygulamalar (shell, lua, calculator, vb.) → '\n' (LF) bekler.
+    // Path'in sonundaki binary adına bakarak karar ver.
+    {
+        int cr_mode = 0;
+        // Binary adı "kilo" ile başlıyor mu?
+        // Örnekler: "kilo", "kilo.elf", "/bin/kilo", "/bin/kilo.elf"
+        const char* p = path;
+        while (*p) p++;          // sona git
+        while (p > path && *(p-1) != '/') p--;  // son '/' sonrasına gel
+        if (p[0]=='k' && p[1]=='i' && p[2]=='l' && p[3]=='o' &&
+            (p[4]=='\0' || p[4]=='.' || p[4]==' ' || p[4]=='-'))
+            cr_mode = 1;
+        kb_set_enter_cr(cr_mode);
+    }
 
     serial_print("[EXECVE] success: jumping to entry 0x");
     print_hex64(img.entry);

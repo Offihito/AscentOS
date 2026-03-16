@@ -2069,7 +2069,23 @@ void cmd_exec(const char* args, CommandOutput* output) {
     }
 
     extern void kb_set_userland_mode(int on);
+    extern void kb_set_enter_cr(int cr);
     kb_set_userland_mode(1);
+
+    // kilo raw-mode: Enter → '\r' bekler.
+    // Diğer tüm uygulamalar (shell, lua, calculator, vb.) → '\n' bekler.
+    // filename'in sonundaki binary adına bakarak karar ver.
+    {
+        // filename zaten sadece binary adı (path ayrıştırılmış yukarıda)
+        // yine de güvenli olsun: son '/' sonrasını bul
+        const char* p = filename;
+        const char* last = filename;
+        while (*p) { if (*p == '/') last = p + 1; p++; }
+        int cr_mode = (last[0]=='k' && last[1]=='i' && last[2]=='l' &&
+                       last[3]=='o' &&
+                       (last[4]=='\0' || last[4]=='.' || last[4]==' ' || last[4]=='-')) ? 1 : 0;
+        kb_set_enter_cr(cr_mode);
+    }
 
     extern volatile uint32_t foreground_pid;
     foreground_pid = utask->pid;

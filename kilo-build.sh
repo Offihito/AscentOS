@@ -168,6 +168,23 @@ if grep -q "getCursorPosition" kilo.c; then
     info "kilo.c: getWindowSize() fallback yaması uygulandı."
 fi
 
+# ── AscentOS kritik yaması: '\n' → ENTER ─────────────────────────
+# Musl read() kernel'den gelen '\r'ı '\n'e çevirir.
+# editorProcessKeypress'te ENTER case'inin yanına '\n' case'i ekle.
+if grep -q "editorInsertNewline" kilo.c && ! grep -q "ASCENTOS_NEWLINE_FIX" kilo.c; then
+    # Antirez kilo: "case ENTER:" veya "case '\r':" satırını bul,
+    # öncesine "case '\n': /* ASCENTOS_NEWLINE_FIX */" ekle
+    if grep -q "case ENTER:" kilo.c; then
+        sed -i "s/case ENTER:/case '\\\\n': \/* ASCENTOS_NEWLINE_FIX *\/\n        case ENTER:/" kilo.c
+        info "kilo.c: ASCENTOS_NEWLINE_FIX (case ENTER) uygulandı."
+    elif grep -q "case '\\\\r':" kilo.c; then
+        sed -i "s/case '\\\\r':/case '\\\\n': \/* ASCENTOS_NEWLINE_FIX *\/\n        case '\\\\r':/" kilo.c
+        info "kilo.c: ASCENTOS_NEWLINE_FIX (case '\\r') uygulandı."
+    else
+        warn "ASCENTOS_NEWLINE_FIX: ENTER case bulunamadı, yama atlandı."
+    fi
+fi
+
 # ── atexit() notu ────────────────────────────────────────────
 # atexit artık syscalls.c içinde implemente edildi.
 # kilo.c'ye yama gerekmez — orijinal atexit(editorAtExit) çalışır.
