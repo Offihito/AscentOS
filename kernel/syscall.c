@@ -1018,11 +1018,6 @@ static void sys_mmap(syscall_frame_t* frame) {
         }
 
         mmap_table_insert(user_addr, pool_off, aligned_len);
-        // DEBUG: mmap allocation log
-        serial_print("[MMAP] anon addr=0x"); print_hex64(user_addr);
-        serial_print(" len=0x"); print_hex64(aligned_len);
-        serial_print(" bump=0x"); print_hex64(mmap_pool_bump);
-        serial_print("\n");
         frame->rax = user_addr;
         return;
     }
@@ -5117,9 +5112,7 @@ static void sys_arch_prctl(syscall_frame_t* frame) {
         task_t* t = task_get_current();
         if (t) t->fs_base = addr;
         wrmsr(MSR_FS_BASE, addr);
-        serial_print("[SYSCALL] arch_prctl: FS.base=0x");
-        print_hex64(addr);
-        serial_print("\n");
+        serial_print("[SYSCALL] arch_prctl: FS.base set\n");
         frame->rax = 0;
         break;
     }
