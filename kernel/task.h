@@ -218,6 +218,9 @@ typedef struct task {
     // bu değer wrmsr ile yenilenerek TLS pointer korunur.
     uint64_t fs_base;           // MSR_FS_BASE değeri — context switch'te korunur
     uint64_t gs_base;           // MSR_GS_BASE değeri — context switch'te korunur
+    // ELF yükleme aralığı — mmap pool reset'te çakışma tespiti için
+    uint64_t elf_load_min;      // elf64_load'ın yazdığı en düşük VA
+    uint64_t elf_load_max;      // elf64_load'ın yazdığı en yüksek VA
 } task_t;
 
 typedef struct {

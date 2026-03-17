@@ -95,6 +95,24 @@ int elf64_load(const uint8_t* buf, uint32_t buf_size,
     int rc = elf64_validate(buf, buf_size);
     if (rc != ELF_OK) return rc;
 
+    // User-space sayfa tablosu girdilerini temizle (PML4[0..255]).
+    // Önceki task'ın map'leri geçersiz/kirli fiziksel frame'lere işaret eder.
+    // Bu olmadan vmm_get_physical_address eski bozuk adresleri döndürür
+    // ve memset64 yanlış frame'e yazar → BSS sıfırlanmaz → #UD panic.
+    {
+        extern void vmm_flush_tlb_all(void);
+        // CR3'ü doğrudan oku (vmm_read_cr3 static inline, extern erişilemiyor)
+        // Sanal adres = phys + (0xFFFFFFFF80000000 - 0x100000)
+        #define KERNEL_VMA_OFF  (0xFFFFFFFF80000000ULL - 0x100000ULL)
+        uint64_t cr3;
+        __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+        uint64_t* pml4 = (uint64_t*)(cr3 + KERNEL_VMA_OFF);
+        for (int _i = 0; _i < 256; _i++) {
+            pml4[_i] = 0;
+        }
+        vmm_flush_tlb_all();
+    }
+
     const Elf64Header* hdr = (const Elf64Header*)buf;
 
     // Program header tablosunun dosya içindeki sınır denetimi
@@ -134,6 +152,14 @@ int elf64_load(const uint8_t* buf, uint32_t buf_size,
     if ((max_vaddr - min_vaddr) > ELF_MAX_LOAD_SIZE) return ELF_ERR_TOOBIG;
 
     // Geçiş 2: Segmentleri yükle
+    // Her segment için önce fiziksel sayfaları tahsis et, sonra yaz.
+    // Bu olmadan memset64/memcpy64 sayfa tablosunda karşılığı olmayan
+    // adreslere yazar → sessiz başarısızlık → BSS sıfırlanmaz → ikinci
+    // çalışmada kirli veriler kalır → RIP=0x2D (#UD).
+    {
+        extern void* pmm_alloc_frame(void);
+        extern int   vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
+        const uint64_t USER_RW = 0x7ULL; // PRESENT|WRITE|USER
     for (int i = 0; i < hdr->e_phnum; i++) {
         const Elf64Phdr* ph = (const Elf64Phdr*)
             (buf + hdr->e_phoff + i * sizeof(Elf64Phdr));
@@ -149,8 +175,45 @@ int elf64_load(const uint8_t* buf, uint32_t buf_size,
                 return ELF_ERR_TOOBIG;
         }
 
-        // Hedef belleği sıfırla (BSS desteği için memsz boyutunda)
+        // Segment için fiziksel sayfaları tahsis et ve map et.
+        // Sonra sanal adres üzerinden sıfırla + dosyadan kopyala.
+        // PML4[0..255] az önce temizlendi ve vmm_map_page yeni sayfa tablosu
+        // oluşturacak — bu sayede sanal adres geçerli hale gelir.
+        {
+            extern uint64_t vmm_get_physical_address(uint64_t virt);
+            uint64_t pg     = dest_va & ~(uint64_t)0xFFF;
+            uint64_t pg_end = (dest_va + ph->p_memsz + 0xFFF) & ~(uint64_t)0xFFF;
+            while (pg < pg_end) {
+                uint64_t phys = vmm_get_physical_address(pg);
+                if (!phys) {
+                    void* frame = pmm_alloc_frame();
+                    if (!frame) break;
+                    phys = (uint64_t)frame;
+                }
+                // Her durumda yeniden map et (USER flag + TLB flush)
+                vmm_map_page(pg, phys, USER_RW);
+                pg += 0x1000;
+            }
+        }
+
+        // Hedef belleği sıfırla (BSS + kirli frame temizliği için).
+        // vmm_map_page sonrası sanal adres geçerli — doğrudan yaz.
         memset64((void*)dest_va, 0, ph->p_memsz);
+        // DEBUG: verify memset worked at 0xC06840 offset if in range
+        if (dest_va <= 0xC06840ULL && (dest_va + ph->p_memsz) > 0xC06960ULL) {
+            volatile uint8_t* check = (volatile uint8_t*)0xC06960ULL;
+            extern void serial_print(const char*);
+            serial_print("[ELF] CHECK 0xC06960=");
+            {
+                const char* h = "0123456789ABCDEF";
+                char buf[4]={'0','x',h[(*check)>>4],h[(*check)&0xF]};
+                buf[3]='\0'; // hack: only 1 byte
+                // print as hex byte
+                char b2[3]={h[(*check)>>4],h[(*check)&0xF],'\0'};
+                serial_print(b2);
+            }
+            serial_print("\n");
+        }
 
         // Dosya baytlarını kopyala (filesz <= memsz)
         if (ph->p_filesz > 0) {
@@ -158,6 +221,7 @@ int elf64_load(const uint8_t* buf, uint32_t buf_size,
                      buf + ph->p_offset,
                      ph->p_filesz);
         }
+    }
     }
 
     // Çıkış bilgilerini doldur
@@ -167,28 +231,8 @@ int elf64_load(const uint8_t* buf, uint32_t buf_size,
     out->segment_count = seg_count;
     out->entry        = base + hdr->e_entry;
 
-    // ── Ring-3 erişimi için sayfa izinlerini güncelle ──────────
-    // elf64_load kernel kipinde çalışır; memcpy/memset sayfaları
-    // önceden kernel kimlik haritasında (PAGE_PRESENT|PAGE_WRITE, USER yok)
-    // olabilir. Ring-3 task'ın bu sayfalara erişebilmesi için
-    // PAGE_USER (bit 2) flagını da set etmeliyiz.
-    //
-    // load_min..load_max aralığındaki her 4KB sayfayı yeniden map ediyoruz.
-    {
-        extern int      vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags);
-        extern uint64_t vmm_get_physical_address(uint64_t virt);
-        // PAGE_PRESENT | PAGE_WRITE | PAGE_USER
-        const uint64_t USER_RW = 0x7ULL;
-        uint64_t page = min_vaddr & ~(uint64_t)0xFFF;  // 4KB hizala
-        uint64_t end  = (max_vaddr + 0xFFF) & ~(uint64_t)0xFFF;
-        while (page < end) {
-            uint64_t phys = vmm_get_physical_address(page);
-            if (phys) {
-                vmm_map_page(page, phys, USER_RW);
-            }
-            page += 0x1000;
-        }
-    }
+    // Sayfa tahsisi ve izin güncellemesi artık yukarıdaki
+    // segment döngüsünde yapılıyor (pmm_alloc_frame + vmm_map_page).
 
     return ELF_OK;
 }
@@ -300,16 +344,24 @@ int elf64_exec_from_ext2(const char* path,
     }
 
     // --- 2. Dosyayı oku ---
-    static uint8_t elf_read_buf[4u * 1024u * 1024u]; // 4 MB
-
-    if (fsize > sizeof(elf_read_buf)) {
+    // Heap'ten al: static buffer kernel .bss'te sabit adres kaplar ve
+    // yüklenen ELF segment'leriyle fiziksel adres çakışmasına yol açar.
+    #define ELF_READ_BUF_MAX (16u * 1024u * 1024u)
+    if (fsize > ELF_READ_BUF_MAX) {
         char sz_line[96];
-        str_cpy(sz_line, "  [ELF] File too large for read buffer (");
+        str_cpy(sz_line, "  [ELF] File too large (");
         char sz_tmp[16]; fmt_u32(fsize / 1024, sz_tmp);
         str_concat(sz_line, sz_tmp);
-        str_concat(sz_line, " KB > 4096 KB)");
+        str_concat(sz_line, " KB > 16384 KB)");
         output_add_line(cout, sz_line, VGA_RED);
         return ELF_ERR_TOOBIG;
+    }
+    extern void* kmalloc(uint64_t size);
+    extern void  kfree(void* ptr);
+    uint8_t* elf_read_buf = (uint8_t*)kmalloc((uint64_t)fsize);
+    if (!elf_read_buf) {
+        output_add_line(cout, "  [ELF] kmalloc failed for read buffer", VGA_RED);
+        return ELF_ERR_NOMEM;
     }
 
     int n = ext2_read_file(path, elf_read_buf, fsize);
@@ -325,6 +377,7 @@ int elf64_exec_from_ext2(const char* path,
 
     if (n <= 0) {
         output_add_line(cout, "  [ELF] ext2 read failed", VGA_RED);
+        kfree(elf_read_buf);
         return ELF_ERR_NULL;
     }
 
@@ -345,6 +398,7 @@ int elf64_exec_from_ext2(const char* path,
         str_cpy(line, "  [ELF] Validation error: ");
         str_concat(line, elf64_strerror(rc));
         output_add_line(cout, line, VGA_RED);
+        kfree(elf_read_buf);
         return rc;
     }
 
@@ -355,6 +409,7 @@ int elf64_exec_from_ext2(const char* path,
         str_cpy(line, "  [ELF] Load error: ");
         str_concat(line, elf64_strerror(rc));
         output_add_line(cout, line, VGA_RED);
+        kfree(elf_read_buf);
         return rc;
     }
 
@@ -393,5 +448,6 @@ int elf64_exec_from_ext2(const char* path,
     output_add_empty_line(cout);
     output_add_line(cout, "  [ELF] Note: call task_create_from_elf() to run", VGA_DARK_GRAY);
 
+    kfree(elf_read_buf);
     return ELF_OK;
 }

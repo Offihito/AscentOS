@@ -343,7 +343,7 @@ static void sys_write(syscall_frame_t* frame) {
     if (fd < 0 || fd >= MAX_FDS)      { frame->rax = SYSCALL_ERR_BADF;  return; }
     if (!is_valid_user_ptr(buf, len)) { frame->rax = SYSCALL_ERR_FAULT; return; }
     if (len == 0)                     { frame->rax = 0; return; }
-    if (len > 524288)                 { frame->rax = SYSCALL_ERR_INVAL; return; }  // 512KB limit (kilo büyük frame'ler gönderiyor)
+    if (len > (16u * 1024u * 1024u))  { frame->rax = SYSCALL_ERR_INVAL; return; }  // 16MB
     if (fd == 0)                      { frame->rax = SYSCALL_ERR_BADF;  return; }
 
     // stdout ve stderr: VGA + serial
@@ -419,7 +419,8 @@ static void sys_read(syscall_frame_t* frame) {
     if (fd < 0 || fd >= MAX_FDS)      { frame->rax = SYSCALL_ERR_BADF;  return; }
     if (!is_valid_user_ptr(buf, len)) { frame->rax = SYSCALL_ERR_FAULT; return; }
     if (len == 0)                     { frame->rax = 0; return; }
-    if (len > 65536)                  { frame->rax = SYSCALL_ERR_INVAL; return; }
+    // 16MB: büyük dosyalar için
+    if (len > (16u * 1024u * 1024u))  { frame->rax = SYSCALL_ERR_INVAL; return; }
     if (fd == 1 || fd == 2)          { frame->rax = SYSCALL_ERR_BADF;  return; }
 
     if (fd == 0) {
@@ -572,23 +573,23 @@ static void sys_read(syscall_frame_t* frame) {
     }
 
     if (ent->type == FD_TYPE_FILE) {
-        // Ext2'den oku (dinamik dosyalar)
+        // Ext2'den oku — ext2_read_file_at ile offset-aware, kmalloc YOK.
         uint32_t ext2_fsize = ext2_file_size(ent->path);
         if (ext2_fsize > 0) {
-            uint8_t* tmp = (uint8_t*)kmalloc(ext2_fsize + 1);
-            if (!tmp) { frame->rax = SYSCALL_ERR_NOMEM; return; }
-            int rd = ext2_read_file(ent->path, tmp, ext2_fsize);
-            if (rd > 0 && ent->offset < (uint64_t)rd) {
-                uint32_t avail = (uint32_t)rd - (uint32_t)ent->offset;
-                uint32_t copy  = (avail < (uint32_t)len) ? avail : (uint32_t)len;
-                kmemcpy(buf, tmp + ent->offset, copy);
-                ent->offset += copy;
-                kfree(tmp);
-                frame->rax = copy;
+            if (ent->offset >= (uint64_t)ext2_fsize) {
+                frame->rax = 0;   // EOF
                 return;
             }
-            kfree(tmp);
-            frame->rax = 0;
+            int rd = ext2_read_file_at(ent->path,
+                                       (uint32_t)ent->offset,
+                                       (uint8_t*)buf,
+                                       (uint32_t)len);
+            if (rd > 0) {
+                ent->offset += (uint64_t)rd;
+                frame->rax = (uint64_t)rd;
+            } else {
+                frame->rax = 0;
+            }
             return;
         }
         // Ext2'de boyut yok — gömülü statik VFS'yi dene
@@ -804,31 +805,45 @@ static void sys_getticks(syscall_frame_t* frame) {
 // v3 YENİ SYSCALL IMPLEMENTASYONLARI
 // ============================================================
 
-// ── mmap allocation table + freelist cache ───────────────────
-// musl mallocng, mmap() ile aldığı adresi doğrudan munmap()'e verir.
-// Kilo gibi uygulamalar her tuşta mmap+munmap döngüsü yapar (4KB bloklar).
-// Çözüm: munmap'te kfree yerine freelist'e al; aynı boyut tekrar istenirse
-// yeni kmalloc yapmadan direkt ver → mmap/munmap çifti sıfır maliyetli olur.
-#define MMAP_TABLE_SIZE 256
+// ── mmap pool — bump allocator, kmalloc YOK ─────────────────
+//
+// Sorun: eski yaklaşım her mmap() için kmalloc() çağırıyordu.
+// TCC linker yüzlerce mmap yapınca kernel heap dolup taşıyor,
+// kmalloc bozuk/NULL pointer dönüyor → #UD kernel panic.
+//
+// Çözüm: kernel .bss'te büyük bir statik havuz (MMAP_POOL_SIZE).
+// mmap → bump pointer ile havuzdan tahsis.
+// munmap → blok serbest listesine eklenir; aynı boyut tekrar
+//          istenirse sıfır maliyetle geri verilir.
+// Havuz dolduğunda MAP_FAILED döner (daha güvenli).
+//
+// MMAP_POOL_SIZE: TCC + musl link işlemi için 64 MB yeterli.
+// .bss'te yer ayırır, fiziksel belleği program yüklenene kadar
+// tüketmez (BSS zero-init = demand-paged).
+#define MMAP_POOL_SIZE   (64ULL * 1024ULL * 1024ULL)   // 64 MB
+#define MMAP_TABLE_SIZE  512
+#define MMAP_CACHE_SIZE  512
+#define PAGE_SIZE_SC     4096ULL
+
+static uint8_t  mmap_pool[MMAP_POOL_SIZE] __attribute__((aligned(4096)));
+static uint64_t mmap_pool_bump = 0;   // sonraki tahsis ofseti
+static int      mmap_last_pid  = -1;  // pool hangi task'a ait
 
 typedef struct {
-    uint64_t user_addr;   // mmap'in döndürdüğü adres (0 = boş slot)
-    void*    raw_ptr;     // kfree için gerçek kmalloc pointer'ı
-    uint64_t alloc_size;  // kmalloc'a verilen toplam boyut (hizalama dahil)
-    uint64_t aligned_len; // sayfaya hizalanmış kullanıcı boyu
+    uint64_t user_addr;   // kullanıcıya döndürülen adres (0 = boş slot)
+    uint64_t pool_off;    // mmap_pool içindeki başlangıç ofseti
+    uint64_t aligned_len; // sayfaya hizalanmış boyut
 } mmap_entry_t;
 
 static mmap_entry_t mmap_table[MMAP_TABLE_SIZE];
 static int mmap_table_init = 0;
 
-// Serbest bırakılmış ama henüz kfree edilmemiş blok havuzu.
-// musl 4KB'lık iki adresi ping-pong gibi değiştiriyor; onları burada tutuyoruz.
-#define MMAP_CACHE_SIZE 16
+// Serbest bırakılan blokların freelist'i.
+// Aynı boyut tekrar istenirse bump yerine buradan verilir.
 typedef struct {
-    void*    raw_ptr;
-    uint64_t aligned_len; // hangi boyut için geçerli
+    uint64_t pool_off;
+    uint64_t aligned_len;
     uint64_t user_addr;
-    uint64_t alloc_size;
 } mmap_cache_entry_t;
 
 static mmap_cache_entry_t mmap_cache[MMAP_CACHE_SIZE];
@@ -837,105 +852,93 @@ static int mmap_cache_count = 0;
 static void mmap_table_clear(void) {
     for (int i = 0; i < MMAP_TABLE_SIZE; i++) {
         mmap_table[i].user_addr   = 0;
-        mmap_table[i].raw_ptr     = 0;
-        mmap_table[i].alloc_size  = 0;
+        mmap_table[i].pool_off    = 0;
         mmap_table[i].aligned_len = 0;
     }
     for (int i = 0; i < MMAP_CACHE_SIZE; i++) {
-        mmap_cache[i].raw_ptr     = 0;
+        mmap_cache[i].pool_off    = 0;
         mmap_cache[i].aligned_len = 0;
         mmap_cache[i].user_addr   = 0;
-        mmap_cache[i].alloc_size  = 0;
     }
     mmap_cache_count = 0;
-    mmap_table_init = 1;
+    mmap_table_init  = 1;
 }
 
-static void mmap_table_insert(uint64_t user_addr, void* raw_ptr,
-                               uint64_t alloc_size, uint64_t aligned_len) {
+static void mmap_table_insert(uint64_t user_addr, uint64_t pool_off,
+                               uint64_t aligned_len) {
     if (!mmap_table_init) mmap_table_clear();
     for (int i = 0; i < MMAP_TABLE_SIZE; i++) {
         if (mmap_table[i].user_addr == 0) {
             mmap_table[i].user_addr   = user_addr;
-            mmap_table[i].raw_ptr     = raw_ptr;
-            mmap_table[i].alloc_size  = alloc_size;
+            mmap_table[i].pool_off    = pool_off;
             mmap_table[i].aligned_len = aligned_len;
             return;
         }
     }
-    // Tablo doluysa en eskiyi ezeriz (bellek sızıntısı, pratik olmaz)
+    // Tablo dolu — en eski girişi ez (nadiren olur)
+    serial_print("[MMAP] WARNING: table full, evicting slot 0\n");
     mmap_table[0].user_addr   = user_addr;
-    mmap_table[0].raw_ptr     = raw_ptr;
-    mmap_table[0].alloc_size  = alloc_size;
+    mmap_table[0].pool_off    = pool_off;
     mmap_table[0].aligned_len = aligned_len;
 }
 
-// munmap: raw_ptr'ı kfree etmek yerine cache'e al.
-// Dönüş: 1 = cache'e alındı, 0 = cache dolu (caller kfree etmeli)
-static int mmap_cache_push(void* raw_ptr, uint64_t user_addr,
-                            uint64_t alloc_size, uint64_t aligned_len) {
+// munmap: blok freelist'e alınır (tekrar kullanım için).
+static int mmap_cache_push(uint64_t pool_off, uint64_t user_addr,
+                            uint64_t aligned_len) {
     if (mmap_cache_count >= MMAP_CACHE_SIZE) return 0;
-    mmap_cache[mmap_cache_count].raw_ptr     = raw_ptr;
+    mmap_cache[mmap_cache_count].pool_off    = pool_off;
     mmap_cache[mmap_cache_count].user_addr   = user_addr;
-    mmap_cache[mmap_cache_count].alloc_size  = alloc_size;
     mmap_cache[mmap_cache_count].aligned_len = aligned_len;
     mmap_cache_count++;
     return 1;
 }
 
-// mmap: önce cache'de aynı boyuta uygun blok ara.
-// Bulunursa sıfırla ve döndür (kmalloc yok!), bulunamazsa NULL döner.
-static void* mmap_cache_pop(uint64_t needed_aligned_len, uint64_t* out_raw,
-                             uint64_t* out_user, uint64_t* out_alloc) {
+// mmap: freelist'te uygun boyut var mı?
+static int mmap_cache_pop(uint64_t needed, uint64_t* out_pool_off,
+                           uint64_t* out_user, uint64_t* out_len) {
     for (int i = 0; i < mmap_cache_count; i++) {
-        if (mmap_cache[i].aligned_len >= needed_aligned_len) {
-            void*    raw        = mmap_cache[i].raw_ptr;
-            uint64_t user_addr  = mmap_cache[i].user_addr;
-            uint64_t alloc_size = mmap_cache[i].alloc_size;
-            // Slot'u kapat (son girişle değiştir)
+        if (mmap_cache[i].aligned_len >= needed) {
+            *out_pool_off = mmap_cache[i].pool_off;
+            *out_user     = mmap_cache[i].user_addr;
+            *out_len      = mmap_cache[i].aligned_len;
+            // Slot'u kapat
             mmap_cache[i] = mmap_cache[mmap_cache_count - 1];
             mmap_cache_count--;
-            *out_raw   = (uint64_t)raw;
-            *out_user  = user_addr;
-            *out_alloc = alloc_size;
-            return raw;
+            return 1;
         }
     }
-    return (void*)0;
+    return 0;
 }
 
-static void* mmap_table_remove(uint64_t user_addr) {
-    if (!mmap_table_init) return (void*)0;
+static inline uint64_t mmap_table_remove(uint64_t user_addr) {
+    // pool_off döner; 0 = bulunamadı
+    if (!mmap_table_init) return 0;
     for (int i = 0; i < MMAP_TABLE_SIZE; i++) {
         if (mmap_table[i].user_addr == user_addr) {
-            void* raw             = mmap_table[i].raw_ptr;
+            uint64_t off = mmap_table[i].pool_off;
             mmap_table[i].user_addr   = 0;
-            mmap_table[i].raw_ptr     = 0;
-            mmap_table[i].alloc_size  = 0;
+            mmap_table[i].pool_off    = 0;
             mmap_table[i].aligned_len = 0;
-            return raw;
+            return off;
         }
     }
-    return (void*)0;  // bulunamadı
+    return 0;
 }
 
-// Tablo'dan entry'nin aligned_len bilgisini de al (cache için gerekli)
-static void mmap_table_remove_full(uint64_t user_addr, void** out_raw,
-                                    uint64_t* out_alloc, uint64_t* out_alen) {
-    if (!mmap_table_init) { *out_raw = 0; return; }
+static void mmap_table_remove_full(uint64_t user_addr, uint64_t* out_pool_off,
+                                    uint64_t* out_alen) {
+    if (!mmap_table_init) { *out_pool_off = 0; return; }
     for (int i = 0; i < MMAP_TABLE_SIZE; i++) {
         if (mmap_table[i].user_addr == user_addr) {
-            *out_raw   = mmap_table[i].raw_ptr;
-            *out_alloc = mmap_table[i].alloc_size;
-            *out_alen  = mmap_table[i].aligned_len;
+            *out_pool_off = mmap_table[i].pool_off;
+            *out_alen     = mmap_table[i].aligned_len;
             mmap_table[i].user_addr   = 0;
-            mmap_table[i].raw_ptr     = 0;
-            mmap_table[i].alloc_size  = 0;
+            mmap_table[i].pool_off    = 0;
             mmap_table[i].aligned_len = 0;
             return;
         }
     }
-    *out_raw = 0;
+    *out_pool_off = 0;
 }
 
 // ── SYS_MMAP (16) ───────────────────────────────────────────────
@@ -974,38 +977,53 @@ static void sys_mmap(syscall_frame_t* frame) {
     // Sayfa hizalaması (4KB)
     uint64_t aligned_len = (len + 0xFFF) & ~0xFFFULL;
 
-    // ── MAP_ANONYMOUS ─────────────────────────────────────────────
+    // ── MAP_ANONYMOUS — statik pool'dan bump allocator ──────────
+    // MAP_PRIVATE|MAP_ANONYMOUS veya MAP_SHARED|MAP_ANONYMOUS:
+    // fd ihmal edilir (Linux'ta da -1 olması gerekmez, sadece ANON flag yeterli).
     if (flags & MAP_ANONYMOUS) {
-        if (fd_arg != -1 || offset != 0) {
-            frame->rax = (uint64_t)MAP_FAILED;
-            return;
+        // Yeni task başladıysa pool'u sıfırla — önceki task'ın
+        // kirli bloklarını yeni task görmesin.
+        {
+            task_t* _ct = task_get_current();
+            int     _pid = _ct ? (int)_ct->pid : 0;
+            if (_pid != mmap_last_pid) {
+                mmap_table_clear();
+                mmap_pool_bump = 0;
+                mmap_last_pid  = _pid;
+                serial_print("[MMAP] pool reset for new task\n");
+            }
         }
+        uint64_t pool_off;
+        uint64_t user_addr;
 
-        uint64_t alloc_size = aligned_len + PAGE_SIZE_SC;
-        uint64_t aligned_addr;
-        uint8_t* raw;
-
-        // Önce freelist cache'e bak: aynı boyutta daha önce munmap edilmiş
-        // blok varsa kmalloc+memset yapmadan anında geri ver.
-        uint64_t cached_raw = 0, cached_user = 0, cached_alloc = 0;
-        void* cached = mmap_cache_pop(aligned_len, &cached_raw, &cached_user, &cached_alloc);
-        if (cached) {
-            raw          = (uint8_t*)cached_raw;
-            aligned_addr = cached_user;
-            alloc_size   = cached_alloc;
+        // 1. Freelist'te uygun boyut var mı?
+        uint64_t cached_off = 0, cached_user = 0, cached_len = 0;
+        if (mmap_cache_pop(aligned_len, &cached_off, &cached_user, &cached_len)) {
+            pool_off   = cached_off;
+            user_addr  = cached_user;
+            // Bloğu sıfırla (önceki içerik kalmasın)
+            kmemset(mmap_pool + pool_off, 0, cached_len);
         } else {
-            // Cache boş: gerçek kmalloc
-            raw = (uint8_t*)kmalloc(alloc_size);
-            if (!raw) { frame->rax = (uint64_t)MAP_FAILED; return; }
-            aligned_addr = ((uint64_t)raw + PAGE_SIZE_SC - 1) & ~(PAGE_SIZE_SC - 1);
-            kmemset((void*)aligned_addr, 0, aligned_len);
+            // 2. Bump pointer'dan yeni blok
+            if (mmap_pool_bump + aligned_len > MMAP_POOL_SIZE) {
+                serial_print("[MMAP] ERROR: pool exhausted!\n");
+                frame->rax = (uint64_t)MAP_FAILED;
+                return;
+            }
+            pool_off  = mmap_pool_bump;
+            mmap_pool_bump += aligned_len;
+            user_addr = (uint64_t)(mmap_pool + pool_off);
+            // Her zaman sıfırla: pool reset sonrası eski task verisi kalabilir
+            kmemset((void*)user_addr, 0, aligned_len);
         }
 
-        // raw → aligned_addr eşlemesini tabloya kaydet
-        mmap_table_insert(aligned_addr, (void*)raw, alloc_size, aligned_len);
-
-
-        frame->rax = aligned_addr;
+        mmap_table_insert(user_addr, pool_off, aligned_len);
+        // DEBUG: mmap allocation log
+        serial_print("[MMAP] anon addr=0x"); print_hex64(user_addr);
+        serial_print(" len=0x"); print_hex64(aligned_len);
+        serial_print(" bump=0x"); print_hex64(mmap_pool_bump);
+        serial_print("\n");
+        frame->rax = user_addr;
         return;
     }
 
@@ -1053,37 +1071,28 @@ static void sys_mmap(syscall_frame_t* frame) {
     if (offset + map_bytes > file_size)
         map_bytes = file_size - offset;   // dosya sonuna kadar
 
-    // Bellek ayır ve sıfırla (page-aligned, raw ptr tabloda saklanır)
-    uint64_t alloc_size2 = aligned_len + PAGE_SIZE_SC;
-    uint8_t* raw2 = (uint8_t*)kmalloc(alloc_size2);
-    if (!raw2) { frame->rax = (uint64_t)MAP_FAILED; return; }
-    uint64_t aligned2_addr = ((uint64_t)raw2 + PAGE_SIZE_SC - 1) & ~(PAGE_SIZE_SC - 1);
-    mmap_table_insert(aligned2_addr, (void*)raw2, alloc_size2, aligned_len);
+    // Pool'dan bellek al (kmalloc YOK)
+    if (mmap_pool_bump + aligned_len > MMAP_POOL_SIZE) {
+        serial_print("[MMAP] ERROR: pool exhausted (MAP_FILE)!\n");
+        frame->rax = (uint64_t)MAP_FAILED;
+        return;
+    }
+    uint64_t pool_off2 = mmap_pool_bump;
+    mmap_pool_bump += aligned_len;
+    uint64_t aligned2_addr = (uint64_t)(mmap_pool + pool_off2);
+    mmap_table_insert(aligned2_addr, pool_off2, aligned_len);
     void* mem = (void*)aligned2_addr;
-    kmemset(mem, 0, aligned_len);
+    kmemset(mem, 0, aligned_len);  // pool reused sonrası temiz başla
 
     // Dosyadan oku: static VFS (gömülü) veya ext2
     {
         const EmbeddedFile64* vf = fs_get_file64(ent->path);
         if (vf && vf->content && map_bytes > 0) {
-            // In-memory VFS: doğrudan kopyala
             kmemcpy(mem, (const void*)(vf->content + offset), map_bytes);
         } else if (map_bytes > 0) {
-            // Ext2: ext2_read_file ile offset'ten oku
-            // ext2_read_file tüm dosyayı okur; offset'i sonradan uygula
-            uint8_t* tmp_buf = (uint8_t*)kmalloc(file_size + 1);
-            if (tmp_buf) {
-                int rd = ext2_read_file(ent->path, tmp_buf, (uint32_t)file_size);
-                if (rd > 0 && (uint64_t)rd > offset) {
-                    uint64_t copy_bytes = (uint64_t)rd - offset;
-                    if (copy_bytes > map_bytes) copy_bytes = map_bytes;
-                    kmemcpy(mem, tmp_buf + offset, copy_bytes);
-                }
-                kfree(tmp_buf);
-            } else {
-                // Yetersiz bellek: boş haritalama ile devam et (0-dolu)
-                serial_print("[SYSCALL] mmap file: tmp_buf alloc failed, zeroed\n");
-            }
+            // ext2_read_file_at: offset-aware, kmalloc yok
+            ext2_read_file_at(ent->path, (uint32_t)offset,
+                              (uint8_t*)mem, (uint32_t)map_bytes);
         }
     }
 
@@ -1109,23 +1118,26 @@ static void sys_munmap(syscall_frame_t* frame) {
     if (!addr)    { frame->rax = SYSCALL_ERR_INVAL; return; }
     if (len == 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
 
-    // mmap_table'dan raw pointer + boyut bilgisini al.
-    void*    raw        = 0;
-    uint64_t alloc_size = 0;
-    uint64_t aligned_len_cached = 0;
-    mmap_table_remove_full(addr, &raw, &alloc_size, &aligned_len_cached);
+    uint64_t aligned_len = (len + 0xFFF) & ~0xFFFULL;
 
+    // Tablo'dan pool_off + boyut al
+    uint64_t pool_off    = 0;
+    uint64_t cached_alen = 0;
+    mmap_table_remove_full(addr, &pool_off, &cached_alen);
 
-    if (raw) {
-        // kfree yerine freelist cache'e al.
-        // Aynı adresler ping-pong şeklinde mmap/munmap ediliyorsa (musl malloc
-        // döngüsü) bir sonraki mmap isteğine anında cevap verir — kmalloc/kfree
-        // çağrısı tamamen önlenir.
-        if (!mmap_cache_push(raw, addr, alloc_size, aligned_len_cached)) {
-            // Cache dolu: gerçek kfree
-            kfree(raw);
+    if (pool_off || cached_alen) {
+        // Pool bloğunu freelist'e ekle (tekrar kullanım için).
+        // Cache doludan cache'e almayız ama pool belleği asla kfree edilmez —
+        // bump pointer geri gitmez. Sadece küçük/orta blokları cache'leriz.
+        uint64_t alen = cached_alen ? cached_alen : aligned_len;
+        if (!mmap_cache_push(pool_off, addr, alen)) {
+            // Cache dolu: en eski girişi at, yenisini ekle
+            // (slot 0 en eski — basit FIFO eject)
+            for (int _i = 0; _i < MMAP_CACHE_SIZE - 1; _i++)
+                mmap_cache[_i] = mmap_cache[_i + 1];
+            mmap_cache_count = MMAP_CACHE_SIZE - 1;
+            mmap_cache_push(pool_off, addr, alen);
         }
-    } else {
     }
 
     frame->rax = SYSCALL_OK;
@@ -1566,7 +1578,7 @@ static uint8_t execve_elf_buf[EXECVE_BUF_SIZE];
 // Basit path → FAT 8.3 dönüşümü:
 //   "/bin/hello" → "BIN/HELLO"  (nokta yok ise uzantısız 8 kar)
 //   "/usr/bin/hello" → "HELLO"  (sadece son bileşen)
-static void path_to_fat83(const char* path, char* out83) {
+static void __attribute__((unused)) path_to_fat83(const char* path, char* out83) {
     // Son '/' bul
     int last_slash = -1;
     for (int i = 0; path[i]; i++)
@@ -1758,6 +1770,32 @@ static void sys_execve(syscall_frame_t* frame) {
             if (path[i] == '/') base = path + i + 1;
         my_strncpy(cur->name, base, 32);
     }
+
+    // ── 10b. mmap pool sıfırla — yeni binary temiz başlasın ─────
+    // mmap pool reset: bump sıfırla ama mevcut ELF segment aralığını atla.
+    // mmap_pool fiziksel adresi yüklü ELF kodu ile çakışabilir;
+    // pool_bump'ı sıfıra çekmek yerine ELF'in load_max'ının
+    // pool başına olan ofsetine set et.
+    mmap_table_clear();
+    mmap_pool_bump = 0;
+    // Mevcut task'ın ELF aralığını bul ve pool'dan ayır
+    {
+        extern task_t* task_get_current(void);
+        task_t* _nt = task_get_current();
+        if (_nt && _nt->elf_load_min && _nt->elf_load_max) {
+            uint64_t pool_base = (uint64_t)mmap_pool;
+            if (_nt->elf_load_max > pool_base &&
+                _nt->elf_load_min < pool_base + MMAP_POOL_SIZE) {
+                // ELF pool'a giriyor — bump'ı ELF sonrasına taşı
+                uint64_t skip = _nt->elf_load_max - pool_base;
+                skip = (skip + 0xFFF) & ~0xFFFULL;  // sayfa hizala
+                if (skip < MMAP_POOL_SIZE)
+                    mmap_pool_bump = skip;
+                serial_print("[MMAP] pool skip ELF range\n");
+            }
+        }
+    }
+    mmap_last_pid  = -1;
 
     // ── 11. CPU bağlamını yeni entry'e yönlendir ──────────────
     // Ring-3 SYSRET için:
@@ -5079,7 +5117,9 @@ static void sys_arch_prctl(syscall_frame_t* frame) {
         task_t* t = task_get_current();
         if (t) t->fs_base = addr;
         wrmsr(MSR_FS_BASE, addr);
-        serial_print("[SYSCALL] arch_prctl: FS.base set\n");
+        serial_print("[SYSCALL] arch_prctl: FS.base=0x");
+        print_hex64(addr);
+        serial_print("\n");
         frame->rax = 0;
         break;
     }

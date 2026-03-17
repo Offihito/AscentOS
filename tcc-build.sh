@@ -414,13 +414,24 @@ else
     ONE_SOURCE_FLAG="-DONE_SOURCE=0"
 fi
 
+# mcmodel=large ZORUNLU:
+#   mcmodel=small → tüm adresler 0x0–0x7FFFFFFF kabul edilir.
+#   TCC çalışırken mmap() büyük adresler (0x10000000+) döndürür;
+#   small modelde bu adresler 32-bit'e truncate edilir → yanlış bellek
+#   erişimi → #UD / #GP kernel panic.
+#   large modeli tüm adreslere 64-bit mov ile erişir — güvenli.
+#
+# -fno-plt: PLT yok (statik binary), doğrudan çağrı — daha küçük/hızlı.
+# -fno-pic / -fno-pie: statik binary için PIC overhead yok.
 ${TARGET}-gcc \
     -static \
     -nostdlib \
     -ffreestanding \
     -fno-stack-protector \
     -mno-red-zone \
-    -mcmodel=small \
+    -mcmodel=large \
+    -fno-pic \
+    -fno-pie \
     -ffunction-sections \
     -fdata-sections \
     -std=c99 \
@@ -582,16 +593,58 @@ CRTN_EOF
     nasm -f elf64 -o /tmp/ascentos_crtn.o /tmp/crtn_stub.s
     disk_write_file /tmp/ascentos_crtn.o "usr/lib/crtn.o"
 
-    # ── libc.a (AscentOS minimal, musl değil) ────────────────
-    if [ -f "${ASCENTOS_LIBC_A}" ]; then
+    # ── libc.a (musl tam + syscalls.o birleşik) ──────────────
+    # NEDEN: disk imajına sadece syscalls.o giderse TCC'nin
+    # derlediği programlarda printf/malloc/free gibi musl sembolleri
+    # bulunamaz ("undefined symbol 'printf'" hatası).
+    # ÇÖZÜM: musl'ün tam libc.a'sını al, üstüne syscalls.o ekle.
+    # Böylece TCC çalışma zamanında hem printf/malloc/free hem de
+    # AscentOS'a özgü syscall wrapper'larını bulur.
+    COMBINED_LIBC_A="/tmp/ascentos_combined_libc.a"
+    if [ -f "${MUSL_PREFIX}/lib/libc.a" ]; then
+        info "Disk için birleşik libc.a üretiliyor (musl + syscalls)..."
+        cp "${MUSL_PREFIX}/lib/libc.a" "${COMBINED_LIBC_A}"
+
+        # syscalls.o'yu ekle (AscentOS'a özgü wrapper'lar: sleep, yield, debug…)
+        # __syscall zaten musl libc.a içinde var; syscalls.o çakışırsa
+        # --allow-multiple-definition ile link edildiği için sorun olmaz.
+        if [ -f "${SYSCALLS_OBJ}" ]; then
+            ${TARGET}-ar rcs "${COMBINED_LIBC_A}" "${SYSCALLS_OBJ}" \
+                && info "syscalls.o birleşik libc.a'ya eklendi." \
+                || warn "syscalls.o eklenemedi, musl-only libc.a kullanılacak."
+        fi
+
+        # crt1_extras.o'yu da ekle (__heap_start + environ sembolleri)
+        if [ -f /tmp/crt1_extras.o ]; then
+            ${TARGET}-ar rcs "${COMBINED_LIBC_A}" /tmp/crt1_extras.o \
+                && info "crt1_extras.o birleşik libc.a'ya eklendi." \
+                || warn "crt1_extras.o eklenemedi."
+        fi
+
+        ${TARGET}-ranlib "${COMBINED_LIBC_A}"
+
+        # Sembol doğrulama
+        info "Birleşik libc.a sembol kontrolü..."
+        for sym in printf malloc free realloc calloc sprintf fprintf; do
+            COUNT=$(${TARGET}-nm "${COMBINED_LIBC_A}" 2>/dev/null | grep -c " T ${sym}$" || true)
+            if [ "${COUNT}" -gt 0 ]; then
+                info "  ✓ ${sym}"
+            else
+                warn "  ✗ ${sym} — birleşik libc.a'da bulunamadı!"
+            fi
+        done
+
         debugfs -w "${DISK_IMG}" -R "rm usr/lib/libc.a" 2>/dev/null || true
-        disk_write_file "${ASCENTOS_LIBC_A}" "usr/lib/libc.a"
-        info "AscentOS libc.a diske yazıldı (kernel panic olmaz)."
+        disk_write_file "${COMBINED_LIBC_A}" "usr/lib/libc.a"
+        info "Birleşik libc.a diske yazıldı (musl + AscentOS syscalls)."
     else
-        warn "AscentOS libc.a üretilemedi, musl libc.a deneniyor..."
-        [ -f "${MUSL_PREFIX}/lib/libc.a" ] \
-            && disk_write_file "${MUSL_PREFIX}/lib/libc.a" "usr/lib/libc.a" \
-            || warn "musl libc.a da bulunamadı, atlandı."
+        warn "musl libc.a bulunamadı: ${MUSL_PREFIX}/lib/libc.a"
+        warn "  → Önce './musl-build.sh' çalıştırın!"
+        # Son çare: eski minimal libc.a
+        if [ -f "${ASCENTOS_LIBC_A}" ]; then
+            disk_write_file "${ASCENTOS_LIBC_A}" "usr/lib/libc.a"
+            warn "Minimal AscentOS libc.a diske yazıldı (printf/malloc ÇALIŞMAZ)."
+        fi
     fi
 
     # ── libtcc1.a ────────────────────────────────────────────
@@ -684,25 +737,37 @@ TCCDEFS_EOF
     done
     info "Musl header'ları kopyalandı."
 
-    # ── test.c (syscall tabanlı, -nostdlib uyumlu) ───────────
+    # ── test.c (hem libc hem syscall tabanlı) ────────────────
     info "test.c oluşturuluyor..."
     cat > /tmp/ascentos_test.c << 'TESTC_EOF'
-/* AscentOS TCC test — libc gerektirmez, doğrudan syscall kullanır */
-static int sys_write(int fd, const char *buf, int n)
-{
-    long ret;
-    __asm__ volatile (
-        "syscall"
-        : "=a"(ret)
-        : "0"(1L), "D"((long)fd), "S"(buf), "d"((long)n)
-        : "rcx", "r11", "memory"
-    );
-    return (int)ret;
-}
+/* AscentOS TCC test — libc (printf/malloc) + syscall doğrulama
+ * Derleme: tcc.elf -o /bin/test.elf test.c
+ * Çalıştır: /bin/test.elf
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 int main(void)
 {
-    const char msg[] = "Merhaba AscentOS! TCC calisiyor.\n";
-    sys_write(1, msg, sizeof(msg) - 1);
+    /* 1. printf testi */
+    printf("Merhaba AscentOS! TCC + musl libc calisiyor.\n");
+
+    /* 2. malloc/free testi */
+    char *buf = (char *)malloc(64);
+    if (buf) {
+        strcpy(buf, "malloc/free calisiyor");
+        printf("malloc: %s\n", buf);
+        free(buf);
+    } else {
+        printf("malloc BASARISIZ!\n");
+    }
+
+    /* 3. sprintf testi */
+    char tmp[64];
+    sprintf(tmp, "sprintf: 6 * 7 = %d\n", 6 * 7);
+    printf("%s", tmp);
+
     return 0;
 }
 TESTC_EOF
@@ -732,7 +797,7 @@ echo -e "${GRN}║${NC}    /bin/tcc.elf          — derleyici"
 echo -e "${GRN}║${NC}    /usr/lib/crt1.o        — C runtime entry"
 echo -e "${GRN}║${NC}    /usr/lib/crti.o        — constructor stub"
 echo -e "${GRN}║${NC}    /usr/lib/crtn.o        — destructor stub"
-echo -e "${GRN}║${NC}    /usr/lib/libc.a        — AscentOS minimal libc"
+echo -e "${GRN}║${NC}    /usr/lib/libc.a        — musl tam libc (printf/malloc/free dahil)"
 echo -e "${GRN}║${NC}    /usr/lib/libtcc1.a     — TCC runtime yardımcıları"
 echo -e "${GRN}║${NC}    /usr/include/tccdefs.h — TCC iç tanımlar"
 echo -e "${GRN}║${NC}    /usr/include/*.h       — Temel musl header'ları"
@@ -745,6 +810,7 @@ echo -e "${GRN}║${NC}  • tcc -run   → mmap(EXEC) yok; bellek çalıştırm
 echo -e "${GRN}║${NC}  • pthread    → yok (tek iş parçacıklı ortam)"
 echo -e "${GRN}║${NC}"
 echo -e "${GRN}║${NC}  Temel kullanım:"
-echo -e "${GRN}║${NC}    tcc.elf -nostdlib -o /bin/hello.elf /usr/lib/crt1.o /test.c"
-echo -e "${GRN}║${NC}    tcc.elf -I/usr/include -o program.elf program.c"
+echo -e "${GRN}║${NC}    tcc.elf -o /bin/hello.elf hello.c          (libc otomatik)"
+echo -e "${GRN}║${NC}    tcc.elf -I/usr/include -o prog.elf prog.c  (musl header)"
+echo -e "${GRN}║${NC}    tcc.elf -nostdlib -o raw.elf /usr/lib/crt1.o raw.c  (syscall)"
 echo -e "${GRN}╚══════════════════════════════════════════════════════╝${NC}"

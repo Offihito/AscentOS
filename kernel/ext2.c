@@ -1633,3 +1633,51 @@ int ext2_chdir(const char* path) {
 
     return 0;
 }
+// ============================================================
+//  ext2_read_file_at — offset tabanlı kısmi okuma
+//  sys_read için: tüm dosyayı kmalloc etmeden sadece
+//  [offset, offset+max_len] aralığını okur.
+//  Büyük dosyalarda (libc.a vb.) bellek taşmasını önler.
+// ============================================================
+int ext2_read_file_at(const char* path, uint32_t offset,
+                      uint8_t* buf, uint32_t max_len) {
+    if (!state.mounted || !path || !buf) return -1;
+    if (max_len == 0) return 0;
+
+    uint32_t ino = path_resolve(path, 0, NULL);
+    if (!ino) return -1;
+
+    Ext2Inode inode;
+    if (!read_inode(ino, &inode)) return -1;
+    if ((inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFREG) return -1;
+
+    uint32_t fsize = inode.i_size;
+    if (offset >= fsize) return 0;           // EOF
+
+    uint32_t avail   = fsize - offset;
+    uint32_t to_read = (avail < max_len) ? avail : max_len;
+    uint32_t done    = 0;
+
+    // abs_pos: dosya içindeki mutlak byte konumu
+    static uint8_t fblk[MAX_BLOCK_SIZE];
+
+    while (done < to_read) {
+        uint32_t abs_pos   = offset + done;
+        uint32_t blk_idx   = abs_pos / state.block_size;
+        uint32_t intra_off = abs_pos % state.block_size;
+        uint32_t phys      = read_file_block(&inode, blk_idx);
+
+        uint32_t chunk = state.block_size - intra_off;
+        if (done + chunk > to_read) chunk = to_read - done;
+
+        if (!phys) {
+            e2_memset(buf + done, 0, chunk);
+        } else {
+            if (!read_block(phys, fblk)) break;
+            e2_memcpy(buf + done, fblk + intra_off, chunk);
+        }
+        done += chunk;
+    }
+
+    return (int)done;
+}

@@ -199,3 +199,6 @@ int         ext2_chdir (const char* path);
 const Ext2State* ext2_get_state(void);
 
 #endif // EXT2_H
+// offset tabanlı kısmi okuma — sys_read için (büyük dosyalarda kmalloc'suz)
+int ext2_read_file_at(const char* path, uint32_t offset,
+                      uint8_t* buf, uint32_t max_len);

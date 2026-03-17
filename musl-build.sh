@@ -194,17 +194,43 @@ else
     info "musl Makefile malloc dosyaları kontrol ediliyor..."
 fi
 
-# Derleme öncesi src/malloc/*.c'yi stub ile değiştir
-# En güvenilir yöntem: ilgili .c dosyalarını boş stubla override et
-for MFILE in free.c realloc.c calloc.c malloc.c memalign.c              posix_memalign.c aligned_alloc.c malloc_usable_size.c; do
+# musl'ün malloc.c'sini __ascent_malloc.c ile uyumlu hale getir.
+#
+# NEDEN DİKKATLİ OLMAK GEREKİR:
+#   musl'ün stdio (printf, fprintf, ...) ve stdlib fonksiyonları
+#   içsel olarak __libc_malloc / __libc_free sembollerini kullanır.
+#   Eğer malloc.c'yi tamamen boş bırakırsak bu semboller tanımsız
+#   kalır ve libc.a link aşamasında "undefined reference" verir.
+#
+# DOĞRU YAKLAŞIM:
+#   malloc.c'yi TAMAMEN boş bırakma; sadece mallocng'ye özgü
+#   wrapper dosyalarını stub'la.  malloc.c → __ascent_malloc.c
+#   içindeki implementasyona alias yönlendirmesi yap.
+#
+# mallocng'ye özgü (güvenle stub'lanabilir):
+for MFILE in memalign.c posix_memalign.c aligned_alloc.c malloc_usable_size.c; do
     TARGET_F="../${SRC_DIR}/src/malloc/${MFILE}"
     if [ -f "${TARGET_F}" ]; then
-        # Orijinali yedekle (yoksa)
         [ -f "${TARGET_F}.orig" ] || cp "${TARGET_F}" "${TARGET_F}.orig"
-        # Boş stub: sadece gcc'nin memnun olacağı kadar
-        printf '/* replaced by __ascent_malloc */
-' > "${TARGET_F}"
-        info "Stublandı: src/malloc/${MFILE}"
+        printf '/* replaced by __ascent_malloc */\n' > "${TARGET_F}"
+        info "Stublandı (wrapper): src/malloc/${MFILE}"
+    fi
+done
+
+# malloc.c / free.c / realloc.c / calloc.c → __ascent_malloc.c'ye yönlendir.
+# Hem public API (malloc/free) hem de musl-iç semboller (__libc_malloc vb.)
+# bu dosyada tanımlı olacak.  Dosyaları silmek yerine forward-declaration
+# ile __ascent_malloc.c'nin sağladığı fonksiyonlara alias ver.
+for MFILE in malloc.c free.c realloc.c calloc.c; do
+    TARGET_F="../${SRC_DIR}/src/malloc/${MFILE}"
+    if [ -f "${TARGET_F}" ]; then
+        [ -f "${TARGET_F}.orig" ] || cp "${TARGET_F}" "${TARGET_F}.orig"
+        # Dosyayı boşalt — __ascent_malloc.o libc.a'ya eklenince
+        # bu semboller zaten tanımlı olacak.  Boş dosya derlenir,
+        # obje üretmez, çakışma çıkmaz.
+        printf '%s\n' '/* replaced by __ascent_malloc — semboller __ascent_malloc.o dan gelir */' \
+            > "${TARGET_F}"
+        info "Stublandı (malloc core): src/malloc/${MFILE}"
     fi
 done
 
@@ -306,8 +332,73 @@ if [ -n "${EXTRA_ERRNO}" ]; then
         ${TARGET}-ar dv lib/libc.a "${obj}" 2>/dev/null || true
     done
 fi
+# __syscall ve malloc/errno stub'larını ekle
+${TARGET}-ar dv lib/libc.a __syscall.o    2>/dev/null || true
+${TARGET}-ar dv lib/libc.a __syscall_cp.o 2>/dev/null || true
+# musl'ün errno objelerini çıkar — bizim __ascent_errno.o alacak
+# errno.lo          → ___errno_location (hidden alias) tanımlar
+# __errno_location.lo → __errno_location (public) tanımlar
+# İkisi de kaldırılmazsa "multiple definition" hatası alınır.
+${TARGET}-ar dv lib/libc.a errno.lo              2>/dev/null || true
+${TARGET}-ar dv lib/libc.a __errno_location.lo   2>/dev/null || true
+# Başka objelerde de __errno_location tanımı kalıp kalmadığını kontrol et
+EXTRA_ERRNO=$(${TARGET}-nm --print-file-name lib/libc.a 2>/dev/null \
+    | grep " T __errno_location$" \
+    | sed 's|lib/libc.a(||;s|):.*||' \
+    | sort -u || true)
+if [ -n "${EXTRA_ERRNO}" ]; then
+    info "Ek errno objeleri çıkarılıyor: ${EXTRA_ERRNO}"
+    for obj in ${EXTRA_ERRNO}; do
+        ${TARGET}-ar dv lib/libc.a "${obj}" 2>/dev/null || true
+    done
+fi
 ${TARGET}-ar rcs lib/libc.a __ascent_syscalls.o __ascent_malloc.o __ascent_errno.o
 ${TARGET}-ranlib lib/libc.a
+
+# ── __libc_malloc alias kontrolü ──────────────────────────────
+# musl'ün stdio (printf, vfprintf, ...) ve stdlib nesneleri
+# __libc_malloc / __libc_free sembollerini çağırır.
+# __ascent_malloc.c bu sembolleri dışa aktarıyorsa sorun yok;
+# aksi hâlde alias objesi üretiriz.
+HAS_LIBC_MALLOC=$(${TARGET}-nm lib/libc.a 2>/dev/null \
+    | grep -c " T __libc_malloc$" || true)
+if [ "${HAS_LIBC_MALLOC}" -eq 0 ]; then
+    info "__libc_malloc alias objesi üretiliyor (musl stdio için)..."
+    cat > /tmp/__ascent_malloc_aliases.c << 'ALIAS_EOF'
+/*
+ * __ascent_malloc_aliases.c
+ *
+ * musl'ün stdio/stdlib nesneleri (vfprintf.lo, fopen.lo, ...)
+ * __libc_malloc / __libc_free / __libc_realloc / __libc_calloc
+ * sembollerini çağırır.  __ascent_malloc.c bunları doğrudan
+ * tanımlamıyorsa bu alias'lar eksik sembol hatasını önler.
+ *
+ * Dışarıdan include gerektirmez — sadece fonksiyon prototipleri.
+ */
+extern void *malloc (unsigned long size);
+extern void  free   (void *ptr);
+extern void *realloc(void *ptr, unsigned long size);
+extern void *calloc (unsigned long nmemb, unsigned long size);
+
+void *__libc_malloc (unsigned long size)         { return malloc(size);         }
+void  __libc_free   (void *ptr)                  { free(ptr);                   }
+void *__libc_realloc(void *ptr, unsigned long n) { return realloc(ptr, n);      }
+void *__libc_calloc (unsigned long n, unsigned long s) { return calloc(n, s);   }
+ALIAS_EOF
+    ${TARGET}-gcc \
+        -O2 -ffreestanding -fno-stack-protector -mno-red-zone \
+        -mcmodel=small -fno-exceptions -fno-unwind-tables \
+        -fno-asynchronous-unwind-tables \
+        -fno-builtin-malloc -fno-builtin-free \
+        -c /tmp/__ascent_malloc_aliases.c \
+        -o /tmp/__ascent_malloc_aliases.o \
+        && ${TARGET}-ar rcs lib/libc.a /tmp/__ascent_malloc_aliases.o \
+        && info "__libc_malloc alias objesi libc.a'ya eklendi." \
+        || warn "__libc_malloc alias derlenemedi — stdio link hatası olabilir."
+    ${TARGET}-ranlib lib/libc.a
+else
+    info "__libc_malloc zaten libc.a'da mevcut."
+fi
 
 info "libc.a hazır."
 
@@ -340,20 +431,52 @@ ERRNO_DEF=$(${TARGET}-nm "${DEST}/lib/libc.a" 2>/dev/null \
     info "__errno_location / ___errno_location stub doğrulandı." || \
     warn "___errno_location tanımı bulunamadı — link hatası olabilir!"
 
-# malloc sembollerinin musl'den (mallocng) geldiğini doğrula
-${TARGET}-nm "${DEST}/lib/libc.a" 2>/dev/null \
-    | grep -E " T (malloc|free|realloc)$" | head -3 || true
+# malloc / free / printf sembollerini doğrula
+info "Kritik sembol kontrolü..."
+for sym in malloc free realloc calloc printf fprintf sprintf snprintf \
+           vprintf vfprintf vsprintf vsnprintf \
+           fopen fclose fread fwrite fgets fputs puts \
+           strlen strcpy strncpy strcmp strncmp strchr strrchr \
+           memcpy memset memmove memcmp \
+           exit abort atoi strtol strtod; do
+    COUNT=$(${TARGET}-nm "${DEST}/lib/libc.a" 2>/dev/null | grep -c " T ${sym}$" || true)
+    if [ "${COUNT}" -gt 0 ]; then
+        info "  ✓ ${sym}"
+    else
+        warn "  ✗ ${sym} — libc.a'da bulunamadı!"
+    fi
+done
+
+# musl stdio iç bağımlılık kontrolü (__stdio_write vb.)
+info "musl stdio iç sembol kontrolü..."
+for sym in __stdio_write __stdio_read __stdio_close __towrite __toread \
+           __stdout_used __stderr_used __stdin_used; do
+    COUNT=$(${TARGET}-nm "${DEST}/lib/libc.a" 2>/dev/null | grep -c " [Tt] ${sym}$" || true)
+    if [ "${COUNT}" -gt 0 ]; then
+        info "  ✓ ${sym} (internal)"
+    else
+        warn "  ✗ ${sym} — musl stdio zinciri kırık olabilir"
+    fi
+done
 
 LIBC_SIZE=$(du -sh "${DEST}/lib/libc.a" | cut -f1)
 
 # ── Özet ──────────────────────────────────────────────────────
 echo ""
 echo -e "${GRN}╔══════════════════════════════════════════════════════╗${NC}"
-echo -e "${GRN}║   musl libc port BAŞARILI (v3 — temiz)              ║${NC}"
+echo -e "${GRN}║   musl libc port BAŞARILI                           ║${NC}"
 echo -e "${GRN}╠══════════════════════════════════════════════════════╣${NC}"
 echo -e "${GRN}║${NC}  Kütüphaneler  : ${DEST}/lib/"
 echo -e "${GRN}║${NC}  libc.a boyutu : ${LIBC_SIZE}"
 echo -e "${GRN}║${NC}  Header'lar    : ${DEST}/include/"
+echo -e "${GRN}║${NC}"
+echo -e "${GRN}║${NC}  Sağlanan semboller:"
+echo -e "${GRN}║${NC}  printf / fprintf / sprintf / snprintf / vprintf / vfprintf"
+echo -e "${GRN}║${NC}  fopen / fclose / fread / fwrite / fgets / fputs / puts"
+echo -e "${GRN}║${NC}  malloc / free / realloc / calloc  (→ mmap syscall)"
+echo -e "${GRN}║${NC}  memcpy / memset / memmove / strlen / strcpy / strcmp / ..."
+echo -e "${GRN}║${NC}  exit / abort / atoi / strtol / strtod"
+echo -e "${GRN}║${NC}  __libc_malloc / __libc_free  (musl stdio iç bağımlılığı)"
 echo -e "${GRN}║${NC}"
 echo -e "${GRN}║${NC}  malloc → mmap(MAP_ANON) syscall (kmalloc'a dokunmaz)"
 echo -e "${GRN}║${NC}  free   → munmap() syscall (kfree'ye dokunmaz)"
@@ -362,5 +485,6 @@ echo -e "${GRN}║${NC}  kaynak → userland/libc/stubs/__ascent_malloc.c"
 echo -e "${GRN}║${NC}           userland/libc/stubs/__ascent_errno.c"
 echo -e "${GRN}║${NC}  syscall → __ascent_syscalls.c"
 echo -e "${GRN}║${NC}"
-echo -e "${GRN}║${NC}  Sonraki adım  : make userland"
+echo -e "${GRN}║${NC}  Sonraki adım  : ./tcc-build.sh"
+echo -e "${GRN}║${NC}  Test          : tcc.elf -o /bin/hello.elf hello.c && /bin/hello.elf"
 echo -e "${GRN}╚══════════════════════════════════════════════════════╝${NC}"

@@ -665,28 +665,39 @@ task_t* task_create_from_elf(const char* name,
 
     // ── 2. SysV ABI: argv stringlerini + pointer tablosunu user stack'a yaz ──
     //
-    // User stack'ın üst kısmına (tepeden aşağı) yaz:
-    //   1. Önce string verileri (argv[argc-1]..argv[0])
-    //   2. 16-byte hizala
-    //   3. NULL (envp sonu)
-    //   4. NULL (argv sonu)
-    //   5. argv pointer'ları (argv[argc-1]..argv[0])
-    //   6. argc
-    //   → RSP buraya işaret eder
+    // SysV AMD64 ABI _start çağrı kuralı:
+    //   _start girişinde RSP'nin kendisi 16-byte hizalı OLMALI.
+    //   (Normal fonksiyonlarda call 8 byte push eder, fonksiyon girişinde
+    //    RSP = 16n+8 olur. _start ise doğrudan iretq ile başlar, push yok;
+    //    bu yüzden RSP'nin 16-byte hizalı olması gerekir.)
+    //
+    // Stack düzeni (yüksek → alçak, RSP burayı gösterir):
+    //   argc          (8 byte)
+    //   argv[0]       (8 byte pointer)
+    //   ...
+    //   argv[n-1]     (8 byte pointer)
+    //   NULL          (argv sonu)
+    //   NULL          (envp sonu)
+    //   ...string verileri...
+    //
+    // argc + (argc+1) pointer + 1 NULL envp = (argc + 2) adet 8-byte slot
+    // Toplam pointer alanı: (argc + 2) * 8 byte
+    // RSP = 16-byte hizalı olmalı:
+    //   (argc + 2) çift ise RSP zaten hizalı
+    //   (argc + 2) tek  ise 8 byte padding ekle
 
-    // Sınır: max 8 argüman, her biri max 128 karakter
     #define MAX_ARGV 8
     #define MAX_ARG_LEN 128
 
     uint64_t sp = task->user_stack_top;
 
-    // Stringleri stack'e kopyala (yukarıdan aşağı)
+    // Stringleri stack'e kopyala (tepeden aşağı — son argüman önce)
     uint64_t str_ptrs[MAX_ARGV];
     int real_argc = (argc > MAX_ARGV) ? MAX_ARGV : argc;
 
     for (int i = real_argc - 1; i >= 0; i--) {
         const char* arg = argv[i];
-        int len = str_len_local(arg) + 1;  // null terminator dahil
+        int len = str_len_local(arg) + 1;
         sp -= (uint64_t)len;
         memcpy_task((void*)sp, arg, (uint64_t)len);
         str_ptrs[i] = sp;
@@ -697,8 +708,23 @@ task_t* task_create_from_elf(const char* name,
         serial_print("\n");
     }
 
-    // 16-byte hizala
-    sp &= ~(uint64_t)0xF;
+    // String bölümünü 8-byte hizala (pointer tablosu 8-byte hizalı başlamalı)
+    sp &= ~(uint64_t)0x7;
+
+    // Pointer alanı kaç slot:
+    //   argv[0..argc-1]  → real_argc slot
+    //   NULL (argv sonu) → 1 slot
+    //   NULL (envp sonu) → 1 slot
+    //   argc             → 1 slot
+    //   Toplam: (real_argc + 3) slot × 8 byte
+    //
+    // _start girişinde RSP 16-byte hizalı olmalı.
+    // (real_argc + 3) tek ise 1 ekstra NULL padding ekle (8 byte).
+    int total_slots = real_argc + 3;  // argc + argv[] + NULL + NULL
+    if (total_slots % 2 != 0) {
+        sp -= 8;
+        *((uint64_t*)sp) = 0;   // padding
+    }
 
     // envp sonu = NULL
     sp -= 8;
@@ -717,6 +743,15 @@ task_t* task_create_from_elf(const char* name,
     // argc
     sp -= 8;
     *((uint64_t*)sp) = (uint64_t)real_argc;
+
+    // Debug: hizalamayı doğrula
+    {
+        serial_print("[TASK_ELF] Stack alignment check: sp=0x");
+        uint64_to_string(sp, buf); serial_print(buf);
+        serial_print(" mod16=");
+        int_to_str((int)(sp & 0xF), buf); serial_print(buf);
+        serial_print(" (should be 0)\n");
+    }
 
     // ── 3. Kernel stack'teki iretq frame'ini ELF için düzelt ────
     //
@@ -739,6 +774,10 @@ task_t* task_create_from_elf(const char* name,
     uint64_t* frame_ss  = frame_rip + 4;
 
     *frame_rip = img->entry;            // ELF entry point
+
+    // ELF yükleme aralığını kaydet — mmap pool çakışma koruması için
+    task->elf_load_min = img->load_min;
+    task->elf_load_max = img->load_max;
     *frame_cs  = GDT_USER_CODE_RPL3;   // 0x23 — Ring-3 code
     *frame_rfl = 0x202;                 // IF=1
     *frame_rsp = sp;                    // argv kurulmuş RSP
