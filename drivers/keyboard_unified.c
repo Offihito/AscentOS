@@ -249,21 +249,37 @@ void keyboard_handler64(void) {
     if (extended_key) {
         extended_key = 0;
         if (kb_userland_mode) {
-            switch (sc) {
-            case 0x48: kb_ring_push((char)0xad); break; // ↑
-            case 0x50: kb_ring_push((char)0xaf); break; // ↓
-            case 0x4D: kb_ring_push((char)0xae); break; // →
-            case 0x4B: kb_ring_push((char)0xac); break; // ←
-            case 0x47: kb_ring_push((char)0xac); break; // Home
-            case 0x4F: kb_ring_push((char)0xae); break; // End
-            case 0x49: kb_ring_push((char)0xad); break; // PgUp
-            case 0x51: kb_ring_push((char)0xaf); break; // PgDn
-            case 0x53: kb_ring_push((char)0x7f); break; // Del
-            // Release ok tuşları (0x80 | scancode) — Doom için release event
-            case 0xC8: if (kb_raw_mode) { kb_ring_push((char)0x80); kb_ring_push((char)0xad); } break;
-            case 0xD0: if (kb_raw_mode) { kb_ring_push((char)0x80); kb_ring_push((char)0xaf); } break;
-            case 0xCD: if (kb_raw_mode) { kb_ring_push((char)0x80); kb_ring_push((char)0xae); } break;
-            case 0xCB: if (kb_raw_mode) { kb_ring_push((char)0x80); kb_ring_push((char)0xac); } break;
+            if (kb_raw_mode) {
+                // Doom raw mode: custom single-byte key codes + release events
+                switch (sc) {
+                case 0x48: kb_ring_push((char)0xad); break; // ↑ press
+                case 0x50: kb_ring_push((char)0xaf); break; // ↓ press
+                case 0x4D: kb_ring_push((char)0xae); break; // → press
+                case 0x4B: kb_ring_push((char)0xac); break; // ← press
+                case 0x47: kb_ring_push((char)0xac); break; // Home
+                case 0x4F: kb_ring_push((char)0xae); break; // End
+                case 0x49: kb_ring_push((char)0xad); break; // PgUp
+                case 0x51: kb_ring_push((char)0xaf); break; // PgDn
+                case 0x53: kb_ring_push((char)0x7f); break; // Del
+                // Release events (0x80 | press scancode)
+                case 0xC8: kb_ring_push((char)0x80); kb_ring_push((char)0xad); break; // ↑ release
+                case 0xD0: kb_ring_push((char)0x80); kb_ring_push((char)0xaf); break; // ↓ release
+                case 0xCD: kb_ring_push((char)0x80); kb_ring_push((char)0xae); break; // → release
+                case 0xCB: kb_ring_push((char)0x80); kb_ring_push((char)0xac); break; // ← release
+                }
+            } else {
+                // Canonical mode (kilo vb.): VT100 escape sequences
+                switch (sc) {
+                case 0x48: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('A'); break; // ↑
+                case 0x50: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('B'); break; // ↓
+                case 0x4D: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('C'); break; // →
+                case 0x4B: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('D'); break; // ←
+                case 0x47: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('H'); break; // Home
+                case 0x4F: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('F'); break; // End
+                case 0x53: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('3'); kb_ring_push('~'); break; // Del
+                case 0x49: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('5'); kb_ring_push('~'); break; // PgUp
+                case 0x51: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('6'); kb_ring_push('~'); break; // PgDn
+                }
             }
         } else {
             if (sc == 0x48) { scroll_up(3);   outb(0x20, 0x20); return; }

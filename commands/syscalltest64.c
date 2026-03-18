@@ -1,10 +1,3 @@
-// ===========================================
-// SYSCALLTEST64.C — Syscall komutları
-// commands64.c'den ayrılmıştır.
-// v27: +writev/madvise/exit_group/openat/newfstatat/prlimit64
-// v28: +socket/connect (X11 altyapısı)
-// ===========================================
-
 #include <stddef.h>
 #include "commands64.h"
 #include "../fs/files64.h"

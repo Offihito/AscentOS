@@ -1,5 +1,5 @@
 ; boot64_unified.asm - 64-bit Higher Half Kernel Bootloader
-; AscentOS - Ring-3 + TSS destekli GDT
+; AscentOS - GDT with Ring-3 + TSS support
 
 global _start
 extern kernel_main
@@ -25,9 +25,8 @@ multiboot_header:
     dd 8
     dd 0
 
-; VESA framebuffer tag — hem GUI_MODE hem de TEXT_MODE kullanır
-; TEXT_MODE: 1280x800 (geniş terminal alanı)
-; GUI_MODE:  1280x720
+; VESA framebuffer tag
+; TEXT_MODE: 1280x800   GUI_MODE: 1280x720
 %ifdef GUI_MODE
     align 8
     framebuffer_tag_start:
@@ -44,8 +43,8 @@ multiboot_header:
     dw 5
     dw 0
     dd framebuffer_tag_end - framebuffer_tag_start
-    dd 1280        ; genişlik (pixel) — 1280/8 = 160 sütun
-    dd 720        ; yükseklik (pixel) — 720/16 = 45 satır
+    dd 1280        ; width (pixels) — 1280/8 = 160 cols
+    dd 720         ; height (pixels) — 720/16 = 45 rows
     dd 32          ; bpp
     framebuffer_tag_end:
 %endif
@@ -84,13 +83,13 @@ framebuffer_width:  dd 0
 framebuffer_height: dd 0
 framebuffer_bpp:    db 0
 
-; Multiboot2 memory map bilgisi (C tarafından okunur)
+; Multiboot2 memory map info (read by C side)
 global multiboot_mmap_addr
 global multiboot_mmap_entry_size
 global multiboot_mmap_total_size
-multiboot_mmap_addr:       dq 0   ; memory map entry dizisinin fiziksel adresi
-multiboot_mmap_entry_size: dd 0   ; her entry'nin boyutu (byte)
-multiboot_mmap_total_size: dd 0   ; toplam entry verisi boyutu (byte)
+multiboot_mmap_addr:       dq 0   ; physical address of memory map entry array
+multiboot_mmap_entry_size: dd 0   ; size of each entry in bytes
+multiboot_mmap_total_size: dd 0   ; total size of entry data in bytes
 
 ; ============================================================================
 ; GDT - 64-bit  (Ring-0 + Ring-3 + TSS)
@@ -104,16 +103,16 @@ multiboot_mmap_total_size: dd 0   ; toplam entry verisi boyutu (byte)
 ;   5    0x28   TSS Low      (16-byte system descriptor, low 8 bytes)
 ;   6    0x30   TSS High     (16-byte system descriptor, high 8 bytes)
 ;
-; SYSRET 64-bit hesabı (Intel SDM Vol.2):
+; SYSRET 64-bit (Intel SDM Vol.2):
 ;   CS = STAR[63:48] + 16 | 3
 ;   SS = STAR[63:48] + 8  | 3
 ;
-; STAR[63:48] = 0x10 olarak ayarlanır (syscall.h'da USER_CS_BASE=0x10):
-;   SS = (0x10 + 8)  | 3 = 0x18 | 3 = 0x1B  -> User Data  (0x18, DPL=3) OK
-;   CS = (0x10 + 16) | 3 = 0x20 | 3 = 0x23  -> User Code  (0x20, DPL=3) OK
+; STAR[63:48] = 0x10 (USER_CS_BASE=0x10 in syscall.h):
+;   SS = 0x1B -> User Data  (DPL=3)
+;   CS = 0x23 -> User Code  (DPL=3)
 ;
 ; STAR[47:32] = 0x08 (Kernel CS):
-;   SYSCALL: CS = 0x08, SS = 0x08+8 = 0x10  -> Kernel Data OK
+;   SYSCALL: CS=0x08, SS=0x10 -> Kernel Data
 ; ============================================================================
 align 16
 global gdt64
@@ -121,62 +120,50 @@ global gdt64_pointer
 gdt64:
 
 .null: equ $ - gdt64
-    ; 0x00: Null
     dq 0x0000000000000000
 
 .code: equ $ - gdt64
-    ; 0x08: Kernel Code (Ring 0, 64-bit)
-    ; Access=0x9A: P=1,DPL=0,S=1,Type=1010(code,exec,read)
-    ; Flags =0x20: G=0,L=1(64-bit),D=0
+    ; Kernel Code (Ring 0, 64-bit) — Access=0x9A, Flags=0x20 (L=1)
     dq 0x00209A0000000000
 
 .data: equ $ - gdt64
-    ; 0x10: Kernel Data (Ring 0)
-    ; Access=0x92: P=1,DPL=0,S=1,Type=0010(data,write)
+    ; Kernel Data (Ring 0) — Access=0x92
     dq 0x0000920000000000
 
 .user_data: equ $ - gdt64
-    ; 0x18: User Data (Ring 3)
-    ; Access=0xF2: P=1,DPL=3,S=1,Type=0010(data,write)
-    ; Flags =0xCF: G=1,D=1,L=0
+    ; User Data (Ring 3) — Access=0xF2, Flags=0xCF (G=1, D=1)
     dq 0x00CFF20000000000
 
 .user_code: equ $ - gdt64
-    ; 0x20: User Code (Ring 3, 64-bit)
-    ; Access=0xFA: P=1,DPL=3,S=1,Type=1010(code,exec,read)
-    ; Flags =0xAF: G=1,D=0,L=1(64-bit)
+    ; User Code (Ring 3, 64-bit) — Access=0xFA, Flags=0xAF (G=1, L=1)
     dq 0x00AFFA0000000000
 
 .tss_low: equ $ - gdt64
-    ; 0x28: TSS Descriptor low 8 bytes
-    ; base ve limit C tarafindan tss_init() ile doldurulur
+    ; TSS Descriptor low 8 bytes — filled by tss_init() in C
     dq 0x0000000000000000
 
 .tss_high: equ $ - gdt64
-    ; 0x30: TSS Descriptor high 8 bytes (base[63:32])
-    ; C tarafindan tss_init() ile doldurulur
+    ; TSS Descriptor high 8 bytes (base[63:32]) — filled by tss_init() in C
     dq 0x0000000000000000
 
 .end:
 
-; GDT Pointer (lgdt icin)
-; limit = toplam boyut - 1 = (0x38 - 1) = 0x37
-; base  = gdt64 sanal adresi (64-bit higher half'te)
+; GDT Pointer for lgdt — base updated to higher half address at runtime
 gdt64_pointer:
     dw gdt64.end - gdt64 - 1    ; limit = 0x37
-    dq gdt64                    ; base (64-bit, runtime'da higher half adrese guncellenir)
+    dq gdt64
 
 ; ============================================================================
-; TSS Verisi
-; C tarafinda "extern tss_t kernel_tss" olarak erisilir.
-; tss_init() bu alani sifirlar ve GDT descriptor'ini doldurur.
+; TSS
+; Accessed as "extern tss_t kernel_tss" from C.
+; tss_init() zeroes this region and fills the GDT descriptor.
 ; ============================================================================
 align 16
 global kernel_tss
 kernel_tss:
-    times 104 db 0   ; sizeof(tss_t) = 104 byte, tamamen sifirlanmis
+    times 104 db 0   ; sizeof(tss_t) = 104 bytes, zeroed
 
-; Debug mesajlari
+; Debug messages
 section .data
 msg_boot_start:     db "[BOOT] AscentOS Higher Half Starting...", 0x0A, 0
 msg_fb_addr:        db "[BOOT] Framebuffer at: 0x", 0
@@ -184,13 +171,13 @@ msg_fb_size:        db "[BOOT] Resolution: ", 0
 msg_entering_long:  db "[BOOT] Entering long mode (Higher Half)...", 0x0A, 0
 
 ; ============================================================================
-; CODE - 32-bit baslangic
+; TEXT - 32-bit entry point
 ; ============================================================================
 section .text
 bits 32
 _start:
     mov esp, boot_stack_top
-    mov edi, ebx
+    mov edi, ebx                  ; save multiboot info pointer
     call check_multiboot
     call init_serial
     mov esi, msg_boot_start
@@ -210,6 +197,7 @@ check_multiboot:
     call serial_write_32
     hlt
 
+; COM1 (0x3F8) — 38400 baud, 8N1
 init_serial:
     mov dx, 0x3F8 + 1
     mov al, 0x00
@@ -281,6 +269,12 @@ serial_print_hex_32:
     pop eax
     ret
 
+; Multiboot2 memory map tag (type=6) layout:
+;   +0  uint32 type         = 6
+;   +4  uint32 size         = total tag size
+;   +8  uint32 entry_size   = size per entry (typically 24)
+;   +12 uint32 entry_version= 0
+;   +16 entry[]             = memory map entry array
 parse_multiboot_info:
     push eax
     push ebx
@@ -302,24 +296,15 @@ parse_multiboot_info:
     and esi, ~7
     jmp .tag_loop
 
-    ; -----------------------------------------------
-    ; Multiboot2 Memory Map Tag (type=6) layout:
-    ;   +0  uint32 type       = 6
-    ;   +4  uint32 size       = tag toplam boyutu
-    ;   +8  uint32 entry_size = her entry boyutu (genellikle 24)
-    ;   +12 uint32 entry_version = 0
-    ;   +16 entry[]          = memory map entry dizisi
-    ; -----------------------------------------------
 .found_mmap:
     mov eax, esi
-    add eax, 16             ; entry dizisinin baslangici
+    add eax, 16
     mov [multiboot_mmap_addr], eax
-    mov eax, [esi + 8]      ; entry_size
+    mov eax, [esi + 8]
     mov [multiboot_mmap_entry_size], eax
-    mov ecx, [esi + 4]      ; tag toplam boyutu
-    sub ecx, 16             ; entry verisi boyutu = toplam - header(16)
+    mov ecx, [esi + 4]
+    sub ecx, 16                  ; entry data size = total - header(16)
     mov [multiboot_mmap_total_size], ecx
-    ; tag'i parse etmeye devam et (framebuffer da olabilir)
     mov ecx, [esi + 4]
     add esi, ecx
     add esi, 7
@@ -363,6 +348,12 @@ parse_multiboot_info:
     pop eax
     ret
 
+; Maps 4GB identity + higher half using 2MB pages.
+; P4/P3 entries: Present + RW + User (U=1 required; child tables
+; are inaccessible if any ancestor has U=0).
+; P2 flags 0x87: Present | RW | User | PS(2MB)
+; NOTE: flat model used for now; production kernels should manage
+;       user/kernel mappings with separate page tables.
 setup_page_tables:
     mov edi, p4_table
     mov ecx, 4096
@@ -376,16 +367,16 @@ setup_page_tables:
     mov ecx, 16384
     xor eax, eax
     rep stosd
-    ; P4 -> P3: Present + RW + User (U bit=2 zorunlu, ust seviye U=0 ise alt seviye erisilemez)
+
     mov eax, p3_table_low
-    or eax, 0b111          ; P + RW + User
+    or eax, 0b111
     mov [p4_table], eax
     mov eax, p3_table_high
-    or eax, 0b111          ; P + RW + User
+    or eax, 0b111
     mov [p4_table + 511 * 8], eax
-    ; P3 -> P2: Present + RW + User
+
     mov eax, p2_table
-    or eax, 0b111          ; P + RW + User
+    or eax, 0b111
     mov [p3_table_low], eax
     add eax, 4096
     mov [p3_table_low + 8], eax
@@ -393,25 +384,19 @@ setup_page_tables:
     mov [p3_table_low + 16], eax
     add eax, 4096
     mov [p3_table_low + 24], eax
+
     mov eax, p2_table
-    or eax, 0b111          ; P + RW + User
+    or eax, 0b111
     mov [p3_table_high + 510 * 8], eax
     add eax, 4096
     mov [p3_table_high + 511 * 8], eax
-    ; P2 page entries: 2MB pages, Present + RW + User + PS
-    ; Flags = 0x87:
-    ;   bit 0: Present     = 1
-    ;   bit 1: Read/Write  = 1 (yazilabilir)
-    ;   bit 2: User/Super  = 1 (Ring-3 erisebilir -- gelistirme asamasi)
-    ;   bit 7: Page Size   = 1 (2MB page)
-    ; NOT: Uretim kernelde bu flag ayri user/kernel sayfa tablolariyla
-    ;      daha hassas yonetilmeli. Simdilik flat model kullaniyoruz.
+
     mov edi, p2_table
-    mov eax, 0x00000087    ; P + RW + User + PS(2MB)
-    mov ecx, 2048          ; 2048 x 2MB = 4GB
+    mov eax, 0x00000087         ; P + RW + User + PS(2MB)
+    mov ecx, 2048               ; 2048 x 2MB = 4GB
 .map_p2:
     mov [edi], eax
-    add eax, 0x200000      ; 2MB artir
+    add eax, 0x200000
     add edi, 8
     loop .map_p2
     ret
@@ -420,14 +405,14 @@ enable_paging:
     mov eax, p4_table
     mov cr3, eax
     mov eax, cr4
-    or eax, 1 << 5
+    or eax, 1 << 5              ; PAE
     mov cr4, eax
-    mov ecx, 0xC0000080
+    mov ecx, 0xC0000080         ; EFER MSR
     rdmsr
-    or eax, 1 << 8
+    or eax, 1 << 8              ; LME
     wrmsr
     mov eax, cr0
-    or eax, 1 << 31
+    or eax, 1 << 31             ; PG
     mov cr0, eax
     mov esi, msg_entering_long
     call serial_print_32
@@ -447,7 +432,7 @@ long_mode_start:
 
     mov rsp, kernel_stack_top
 
-    mov rdi, rbx
+    mov rdi, rbx                ; pass multiboot info to kernel_main
 
     mov rax, kernel_main
     call rax

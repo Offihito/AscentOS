@@ -1,5 +1,5 @@
-; interrupts64.asm - Interrupt & Syscall Handlers (Ring-3 SYSRET destekli)
-; + Kernel Panic: CPU exception'ları artık kernel_panic_handler'a yönlendirilir.
+; interrupts64.asm - Interrupt & Syscall Handlers (Ring-3 SYSRET support)
+; CPU exceptions are forwarded to kernel_panic_handler.
 
 global load_idt64
 global isr_keyboard
@@ -22,24 +22,21 @@ extern task_get_next_context
 extern tss_update_rsp0_from_context
 extern task_restore_fs_base
 
-; Syscall dispatcher (syscall.c)
 extern syscall_dispatch
-
-; Kernel panic handler (panic64.c)
 extern kernel_panic_handler
 
 section .text
 bits 64
 
 ; ============================================================================
-; IDT Yukle
+; Load IDT
 ; ============================================================================
 load_idt64:
     lidt [rdi]
     ret
 
 ; ============================================================================
-; KLAVYE INTERRUPT (IRQ1)
+; KEYBOARD INTERRUPT (IRQ1)
 ; ============================================================================
 isr_keyboard:
     push rax
@@ -61,7 +58,7 @@ isr_keyboard:
     call keyboard_handler64
 
     mov al, 0x20
-    out 0x20, al
+    out 0x20, al        ; Master PIC EOI
 
     pop r15
     pop r14
@@ -82,7 +79,7 @@ isr_keyboard:
     iretq
 
 ; ============================================================================
-; MOUSE INTERRUPT (IRQ12) - Sadece GUI mode
+; MOUSE INTERRUPT (IRQ12) - GUI mode only
 ; ============================================================================
 %ifndef TEXT_MODE_BUILD
 isr_mouse:
@@ -105,8 +102,8 @@ isr_mouse:
     call mouse_handler64
 
     mov al, 0x20
-    out 0xA0, al
-    out 0x20, al
+    out 0xA0, al        ; Slave PIC EOI
+    out 0x20, al        ; Master PIC EOI
 
     pop r15
     pop r14
@@ -128,10 +125,9 @@ isr_mouse:
 %endif
 
 ; ============================================================================
-; AĞ INTERRUPT (IRQ11 → INT 0x2B) — RTL8139
-; IRQ11 slave PIC'e bağlıdır (IRQ8-15).
-; EOI sırası: önce slave (0xA0), sonra master (0x20).
-; keyboard_unified.c → init_interrupts64() idt_set(43,...) ile IDT vektör 0x2B'ye kurulur.
+; NETWORK INTERRUPT (IRQ11 → INT 0x2B) — RTL8139
+; IRQ11 is on the slave PIC (IRQ8-15); EOI order: slave (0xA0) then master (0x20).
+; Installed at IDT vector 0x2B via idt_set(43,...) in init_interrupts64().
 ; ============================================================================
 isr_net:
     push rax
@@ -153,8 +149,8 @@ isr_net:
     call rtl8139_irq_handler
 
     mov al, 0x20
-    out 0xA0, al    ; Slave PIC EOI  (IRQ11 → slave)
-    out 0x20, al    ; Master PIC EOI
+    out 0xA0, al        ; Slave PIC EOI  (IRQ11 -> slave)
+    out 0x20, al        ; Master PIC EOI
 
     pop r15
     pop r14
@@ -175,7 +171,7 @@ isr_net:
     iretq
 
 ; ============================================================================
-; TIMER INTERRUPT (IRQ0) - Context switch destekli
+; TIMER INTERRUPT (IRQ0) - Context switch support
 ; ============================================================================
 isr_timer:
     push rax
@@ -207,28 +203,26 @@ isr_timer:
     test rax, rax
     jz .no_switch
 
-    ; ── TSS.RSP0 güncelle ────────────────────────────────────────
-    ; Yeni task Ring-3'e geçtikten sonra interrupt/syscall aldığında
-    ; CPU, TSS.RSP0'dan kernel stack pointer'ını alır.
-    ; Güncellenmezse yanlış stack → #DF → triple fault.
-    ; rax = cpu_context_t* (task_get_next_context dönüşü)
-    ; tss_update_rsp0_from_context(cpu_context_t*) → kernel_tss.rsp0 set eder.
+    ; Update TSS.RSP0 for the incoming task.
+    ; When the new task takes an interrupt/syscall from Ring-3, the CPU
+    ; loads the kernel stack pointer from TSS.RSP0.
+    ; Stale RSP0 -> wrong stack -> #DF -> triple fault.
+    ; rax = cpu_context_t* (returned by task_get_next_context)
     push rax
     mov rdi, rax
     call tss_update_rsp0_from_context
     pop rax
 
-    mov rsp, [rax + 56]     ; Load RSP from cpu_context_t.rsp
+    mov rsp, [rax + 56]     ; load RSP from cpu_context_t.rsp
 
 .no_switch:
     mov al, 0x20
-    out 0x20, al
+    out 0x20, al            ; Master PIC EOI
 
-    ; ── FS_BASE restore — iretq öncesi ───────────────────────────
-    ; Timer interrupt Ring-3 task çalışırken (syscall içinde bile) gelebilir.
-    ; Context switch olsun ya da olmasın, iretq ile Ring-3'e dönmeden önce
-    ; mevcut task'ın fs_base'ini MSR_FS_BASE'e yaz.
-    ; Aksi halde: musl pthread_self() → %fs:0 → sıfır → BIOS IVT → #GP
+    ; Restore FS_BASE before iretq.
+    ; The timer can fire while a Ring-3 task is running (even inside a syscall).
+    ; Write the current task's fs_base to MSR_FS_BASE regardless of whether a
+    ; switch occurred; otherwise musl pthread_self() -> %fs:0 -> zero -> #GP.
     call task_restore_fs_base
 
     pop r15
@@ -250,10 +244,10 @@ isr_timer:
     iretq
 
 ; ============================================================================
-; CONTEXT SWITCH FONKSIYONLARI
+; CONTEXT SWITCH FUNCTIONS
 ; ============================================================================
 ;
-; cpu_context_t offset haritasi (task.h ile eslesmeli):
+; cpu_context_t offset map (must match task.h):
 ;   +0    rax    +8    rbx    +16   rcx    +24   rdx
 ;   +32   rsi    +40   rdi    +48   rbp    +56   rsp
 ;   +64   r8     +72   r9     +80   r10    +88   r11
@@ -269,25 +263,25 @@ task_switch_context:
     test rdi, rdi
     jz .load_new
 
-    ; Mevcut context'i kaydet
-    ; BUG FIX: rdi hem pointer (old_ctx) hem kaydedilmesi gereken register.
-    ; "mov [rdi+40], rdi" yazilirsa ctx->rdi'ye pointer adresi gider, asil
-    ; deger kaybolur. Cozum: rdi'yi onceden stack'e push et.
-    push rdi                 ; rdi gercek degerini stack'te sakla
-    ; Simdi rsp 8 byte kaymis durumda. Tum kayitlar buna gore yapilacak:
-    ;   - rdi: [rsp+0]'dan alinacak
-    ;   - rsp: push oncesi deger = rsp+8 (cagiran fonksiyonun RSP'si)
-    ;   - rip: [rsp+8] (return address, push rdi'nin ustunde)
+    ; Save current context.
+    ; BUG FIX: rdi is both the pointer (old_ctx) and a register to be saved.
+    ; Writing "mov [rdi+40], rdi" would store the pointer address, not the
+    ; original register value. Fix: push rdi first so the real value is on stack.
+    push rdi                 ; save real rdi on stack
+    ; RSP is now shifted by 8 bytes. Offsets accounted for:
+    ;   - rdi: read back from [rsp+0]
+    ;   - rsp: pre-push value = rsp+8
+    ;   - rip: [rsp+8] (return address, above the pushed rdi)
     mov [rdi + 0],   rax
     mov [rdi + 8],   rbx
     mov [rdi + 16],  rcx
     mov [rdi + 24],  rdx
     mov [rdi + 32],  rsi
-    mov rax, [rsp]           ; rax = gercek rdi degeri (stack'ten)
-    mov [rdi + 40],  rax     ; ctx->rdi = dogru deger
+    mov rax, [rsp]           ; real rdi value from stack
+    mov [rdi + 40],  rax     ; ctx->rdi = correct value
     mov [rdi + 48],  rbp
-    lea rax, [rsp + 8]       ; rsp + 8 = push rdi oncesindeki RSP (gercek RSP)
-    mov [rdi + 56],  rax     ; ctx->rsp = gercek RSP
+    lea rax, [rsp + 8]       ; rsp+8 = RSP before push rdi
+    mov [rdi + 56],  rax     ; ctx->rsp = real RSP
     mov [rdi + 64],  r8
     mov [rdi + 72],  r9
     mov [rdi + 80],  r10
@@ -297,23 +291,23 @@ task_switch_context:
     mov [rdi + 112], r14
     mov [rdi + 120], r15
 
-    mov rax, [rsp + 8]       ; return address ([rsp+8] = push rdi ustundeki ret addr)
+    mov rax, [rsp + 8]       ; return address (above pushed rdi)
     mov [rdi + 128], rax     ; rip
 
     pushfq
     pop rax
     mov [rdi + 136], rax     ; rflags
 
-    pop rdi                  ; rdi'yi geri al (stack temizle)
-    mov rax, [rdi + 0]       ; rax'i orijinal degerine geri yukle
+    pop rdi                  ; restore rdi, clean stack
+    mov rax, [rdi + 0]       ; restore rax to original value
 
 .load_new:
-    ; Yeni context'i yukle (RSI = new_ctx)
+    ; Load new context (RSI = new_ctx)
     mov rax, [rsi + 0]
     mov rbx, [rsi + 8]
     mov rcx, [rsi + 16]
     mov rdx, [rsi + 24]
-    ; rsi'yi en son yukle (adres kaynagidir)
+    ; load rsi last (it is the source pointer)
     mov rdi, [rsi + 40]
     mov rbp, [rsi + 48]
     mov rsp, [rsi + 56]
@@ -333,23 +327,23 @@ task_switch_context:
     mov r10, [rsi + 128]     ; rip (return address)
     push r10
 
-    mov rsi, [rsi + 32]      ; rsi'yi en son yukle
+    mov rsi, [rsi + 32]      ; load rsi last
     ret
 
 global task_save_current_context
 task_save_current_context:
     ; RDI = cpu_context_t*
-    ; BUG FIX: rdi bug'i burada da ayni sekilde mevcut, ayni cozum uygulanir.
+    ; Same rdi bug fix as in task_switch_context.
     push rdi
     mov [rdi + 0],   rax
     mov [rdi + 8],   rbx
     mov [rdi + 16],  rcx
     mov [rdi + 24],  rdx
     mov [rdi + 32],  rsi
-    mov rax, [rsp]           ; gercek rdi degeri
+    mov rax, [rsp]           ; real rdi value from stack
     mov [rdi + 40],  rax
     mov [rdi + 48],  rbp
-    lea rax, [rsp + 8]       ; gercek RSP (push rdi oncesi)
+    lea rax, [rsp + 8]       ; real RSP (before push rdi)
     mov [rdi + 56],  rax
     mov [rdi + 64],  r8
     mov [rdi + 72],  r9
@@ -367,36 +361,34 @@ task_save_current_context:
     pop rax
     mov [rdi + 136], rax     ; rflags
 
-    pop rdi                  ; stack temizle
-    mov rax, [rdi + 0]       ; rax'i orijinaline geri al
+    pop rdi                  ; clean stack
+    mov rax, [rdi + 0]       ; restore rax
     ret
 
 global task_load_and_jump_context
 task_load_and_jump_context:
     ; RDI = cpu_context_t*
     ;
-    ; Her iki privilege level (Ring-0 ve Ring-3) icin ayni mekanizma:
-    ; context.rsp -> kernel stack tepesi
-    ;   [dusuk adr]  15 x register (pop edilir)
-    ;   [yuksek adr] iretq frame: RIP / CS / RFLAGS / RSP* / SS*
-    ;                (* = Ring-3'te user RSP/SS; Ring-0'da CPU bunlari almaz)
+    ; Works for both privilege levels (Ring-0 and Ring-3):
+    ;   context.rsp -> kernel stack top
+    ;     [low  addr]  15 x registers  (popped)
+    ;     [high addr]  iretq frame: RIP / CS / RFLAGS / RSP* / SS*
+    ;                  (* only present for Ring-3; CPU ignores them for Ring-0)
     ;
-    ; Adimlar:
-    ;   1. DS/ES/FS/GS'yi dogru segment'e set et
+    ; Steps:
+    ;   1. Set DS/ES/FS/GS to the correct segment
     ;   2. RSP = context.rsp
-    ;   3. 15 pop
+    ;   3. 15 pops
     ;   4. iretq
     ;
-    ; Ring-0 iretq: CS.DPL=0 == CPL=0 -> privilege degismez, RSP/SS alinmaz.
-    ;   Stack'te 3 kelime (RIP/CS/RFLAGS) okunur.
-    ; Ring-3 iretq: CS.DPL=3 != CPL=0 -> privilege gecisi, RSP/SS alinir.
-    ;   Stack'te 5 kelime (RIP/CS/RFLAGS/RSP/SS) okunur.
+    ; Ring-0 iretq: CS.DPL=0 == CPL=0 -> no privilege change, RSP/SS not read.
+    ;   Stack must have 3 words: RIP / CS / RFLAGS.
+    ; Ring-3 iretq: CS.DPL=3 != CPL=0 -> privilege change, RSP/SS are read.
+    ;   Stack must have 5 words: RIP / CS / RFLAGS / RSP / SS.
     ;
-    ; Her iki durumda da stack yapisi ayni formatta hazirlanmis olmali
-    ; (task_create ve task_create_user bunu saglar).
+    ; Both cases share the same stack layout (prepared by task_create / task_create_user).
 
-    ; ── DS/ES/FS/GS ayarla ───────────────────────────────────────
-    ; context.cs'ye bakarak Ring belirle
+    ; Determine ring from context.cs
     mov r10, [rdi + 144]    ; context.cs
     cmp r10, 0x23
     je  .set_user_segs
@@ -410,22 +402,19 @@ task_load_and_jump_context:
     jmp .load_stack
 
 .set_user_segs:
-    ; Ring-3: DS/ES ayarla, FS/GS'ye DOKUNMA
-    ; "mov fs, reg" MSR_FS_BASE'i sıfırlar → TLS bozulur → #GP
-    ; FS_BASE syscall_dispatch girişinde wrmsr ile restore edilir.
+    ; Ring-3: set DS/ES, do NOT touch FS/GS.
+    ; "mov fs, reg" zeroes MSR_FS_BASE -> corrupts TLS -> #GP.
+    ; FS_BASE is restored via wrmsr in syscall_dispatch.
     mov ax, 0x1B
     mov ds, ax
     mov es, ax
-    ; mov fs, ax  ← KALDIRILDI: FS_BASE/TLS sıfırlanmasın
-    ; mov gs, ax  ← KALDIRILDI
+    ; mov fs, ax  <- REMOVED: would zero FS_BASE/TLS
+    ; mov gs, ax  <- REMOVED
 
 .load_stack:
-    ; ── RSP yukle ─────────────────────────────────────────────────
-    mov rsp, [rdi + 56]     ; context.rsp -> kernel stack tepesi
+    mov rsp, [rdi + 56]     ; context.rsp -> kernel stack top
 
-    ; ── 15 register pop ───────────────────────────────────────────
-    ; task_create/task_create_user dongusu: for(0..14) *(--stk)=0
-    ; Stack'te en dusuk adres = son push = ilk pop
+    ; Pop 15 registers (pushed in order by task_create / task_create_user)
     pop r15
     pop r14
     pop r13
@@ -435,40 +424,36 @@ task_load_and_jump_context:
     pop r9
     pop r8
     pop rbp
-    pop rdi     ; rdi artik adres kaynagi degil, guvenle pop edilir
+    pop rdi     ; rdi is no longer the context pointer, safe to pop
     pop rsi
     pop rdx
     pop rcx
     pop rbx
     pop rax
 
-    ; ── iretq ─────────────────────────────────────────────────────
-    ; Stack'te simdi iretq frame:
-    ;   Ring-0: [RSP+0]=RIP [RSP+8]=CS(0x08) [RSP+16]=RFLAGS
-    ;           CPU RSP/SS'yi stack'ten ALMAZ (ayni ring)
-    ;   Ring-3: [RSP+0]=RIP [RSP+8]=CS(0x23) [RSP+16]=RFLAGS [RSP+24]=RSP [RSP+32]=SS
-    ;           CPU user RSP ve SS'yi stack'ten alir
+    ; iretq frame now at stack top:
+    ;   Ring-0: [RSP+0]=RIP  [RSP+8]=CS(0x08)  [RSP+16]=RFLAGS
+    ;   Ring-3: [RSP+0]=RIP  [RSP+8]=CS(0x23)  [RSP+16]=RFLAGS  [RSP+24]=RSP  [RSP+32]=SS
     iretq
 
 ; ============================================================================
-; CPU EXCEPTION HANDLER'LAR — PANIC DESTEKLI
+; CPU EXCEPTION HANDLERS — PANIC SUPPORT
 ;
-; Stack düzeni (isr_panic_common'a gelince):
+; Stack layout on entry to isr_panic_common:
 ;
-;   ISR_NOERRCODE için CPU push sırası:
-;     [RSP+0]  = isr_num    (makro push etti)
-;     [RSP+8]  = 0          (pseudo err_code, makro push etti)
+;   ISR_NOERRCODE — CPU push order:
+;     [RSP+0]  = isr_num    (pushed by macro)
+;     [RSP+8]  = 0          (pseudo err_code, pushed by macro)
 ;     [RSP+16] = RIP        \
-;     [RSP+24] = CS          | CPU'nun otomatik push ettiği iretq frame
+;     [RSP+24] = CS          | CPU iretq frame
 ;     [RSP+32] = RFLAGS     /
-;     [RSP+40] = RSP*        \ (sadece privilege değişiminde CPU push eder)
+;     [RSP+40] = RSP*        \ (only pushed on privilege change)
 ;     [RSP+48] = SS*         /
 ;
-;   ISR_ERRCODE için:
-;     CPU önce err_code'u push eder, sonra makro isr_num push eder.
-;     Düzen aynı kalır.
+;   ISR_ERRCODE — CPU pushes err_code first, then macro pushes isr_num.
+;   Layout is otherwise identical.
 ;
-;   isr_panic_common tüm GPR'leri push ettikten sonra stack:
+;   After isr_panic_common pushes all GPRs:
 ;     [RSP+0]   r15  \
 ;     [RSP+8]   r14   |
 ;     [RSP+16]  r13   |
@@ -492,13 +477,13 @@ task_load_and_jump_context:
 ;     [RSP+160] RSP*    |
 ;     [RSP+168] SS*    /
 ;
-;   Bu layout panic64.c'deki exception_frame_t ile BİREBİR eşleşmeli.
+;   This layout must match exception_frame_t in panic64.c exactly.
 ; ============================================================================
 
 %macro ISR_NOERRCODE 1
 global isr%1
 isr%1:
-    push 0      ; pseudo err_code (CPU bu exception için push etmez)
+    push 0      ; pseudo err_code (CPU does not push one for this exception)
     push %1     ; isr_num
     jmp isr_panic_common
 %endmacro
@@ -506,14 +491,13 @@ isr%1:
 %macro ISR_ERRCODE 1
 global isr%1
 isr%1:
-    ; CPU bu exception için err_code'u zaten push etti
+    ; CPU already pushed err_code for this exception
     push %1     ; isr_num
     jmp isr_panic_common
 %endmacro
 
-; ── Ortak panic giriş noktası ────────────────────────────────────────────────
+; Common panic entry point
 isr_panic_common:
-    ; Tüm GPR'leri push et (exception_frame_t.r15 → rax sırası)
     push rax
     push rbx
     push rcx
@@ -530,18 +514,15 @@ isr_panic_common:
     push r14
     push r15
 
-    ; RSP şu an exception_frame_t*'ın başını gösteriyor
     mov  rdi, rsp
-    call kernel_panic_handler   ; kernel_panic_handler(exception_frame_t*)
-                                ; bu fonksiyon CLI+HLT ile sistemi dondurur, dönmez
+    call kernel_panic_handler   ; kernel_panic_handler(exception_frame_t*) — does not return
 
-    ; Buraya hiçbir zaman gelinmemeli — güvenlik için yine de halt
     cli
 .hang:
     hlt
     jmp .hang
 
-; ── Exception tablosu ────────────────────────────────────────────────────────
+; Exception table
 ISR_NOERRCODE 0    ; #DE Divide Error
 ISR_NOERRCODE 1    ; #DB Debug
 ISR_NOERRCODE 2    ; #NMI Non-Maskable Interrupt
@@ -552,18 +533,18 @@ ISR_NOERRCODE 6    ; #UD Invalid Opcode
 ISR_NOERRCODE 7    ; #NM Device Not Available
 ; #DF handled by isr8_df below (IST1 stack)
 
-; ── #DF Double Fault — IST1 stack kullanır ──────────────────────────────────
-; Triple fault sebebi: RSP bozukken #DF handler çalışmaya çalışırsa CPU
-; ikinci fault üretir → triple fault. Çözüm: IDT gate IST=1. CPU o zaman
-; TSS.IST1'deki temiz, ayrı stack'e geçer — bozuk RSP'den bağımsız.
+; #DF Double Fault — uses IST1 stack.
+; If #DF fires with a corrupt RSP the CPU would generate a second fault ->
+; triple fault. Fix: set IDT gate IST=1 so the CPU switches to TSS.IST1,
+; an independent clean stack unaffected by the corrupted RSP.
 ;
-; Gerekli kurulum:
-;   tss.ist1 = (uint64_t)df_stack_top   ← tss_init() içinde
-;   idt[8] gate IST field = 1           ← init_interrupts64() içinde
+; Required setup:
+;   tss.ist1 = (uint64_t)df_stack_top   <- in tss_init()
+;   idt[8] gate IST field = 1           <- in init_interrupts64()
 global isr8_df
 isr8_df:
-    ; CPU IST1 stack'ine geçti, RSP temiz.
-    ; #DF err_code her zaman 0'dir (CPU zaten push etti).
+    ; CPU switched to IST1 stack; RSP is clean.
+    ; #DF err_code is always 0 (already pushed by CPU).
     push 8          ; isr_num
     jmp isr_panic_common
 
@@ -572,7 +553,7 @@ ISR_ERRCODE   10   ; #TS Invalid TSS
 ISR_ERRCODE   11   ; #NP Segment Not Present
 ISR_ERRCODE   12   ; #SS Stack-Segment Fault
 ISR_ERRCODE   13   ; #GP General Protection
-ISR_ERRCODE   14   ; #PF Page Fault          ← CR2 = fault address
+ISR_ERRCODE   14   ; #PF Page Fault          <- CR2 = fault address
 ISR_NOERRCODE 15   ; #15 Reserved
 ISR_NOERRCODE 16   ; #MF x87 FP Error
 ISR_ERRCODE   17   ; #AC Alignment Check
@@ -595,114 +576,75 @@ ISR_NOERRCODE 31
 ; SYSCALL ENTRY POINT
 ; ============================================================================
 ;
-; Bu handler hem kernel-mode hem user-mode (Ring-3) syscall'larini destekler.
+; Supports both kernel-mode (CPL=0) and user-mode (CPL=3) syscalls.
 ;
-; SYSCALL donanimsal olarak su islemleri yapar (MSR konfigurasyonuyla):
-;   RCX    <- RIP        (donus adresi — syscall'dan sonraki instruction)
-;   R11    <- RFLAGS     (caller'in RFLAGS'i)
-;   RIP    <- LSTAR      (bu fonksiyon)
-;   CS     <- STAR[47:32]      = 0x08 (Kernel Code)
-;   SS     <- STAR[47:32]+8    = 0x10 (Kernel Data)
-;   RFLAGS &= ~FMASK           (IF ve DF sifirlanir)
-;   RSP    -> DEGISMEZ         (caller'in RSP'si hala gecerli!)
+; Hardware SYSCALL actions (via MSR configuration):
+;   RCX    <- RIP        (return address — instruction after syscall)
+;   R11    <- RFLAGS     (caller's RFLAGS)
+;   RIP    <- LSTAR      (this function)
+;   CS     <- STAR[47:32]       = 0x08 (Kernel Code)
+;   SS     <- STAR[47:32]+8     = 0x10 (Kernel Data)
+;   RFLAGS &= ~FMASK            (IF and DF cleared)
+;   RSP    -> UNCHANGED         (caller's RSP is still active!)
 ;
-; ONEMLI: Ring-3 task SYSCALL yaptiginda RSP hala user stack'i gosteriyor.
-; Bu nedenle ilk is kernel stack'e gecmektir.
-; TSS RSP0, task_switch()'te tss_set_kernel_stack() ile her zaman guncellenmis.
+; When a Ring-3 task issues SYSCALL, RSP still points to the user stack.
+; The first thing to do is switch to the kernel stack.
+; TSS RSP0 is always up-to-date (updated by tss_set_kernel_stack() on task_switch).
 ;
-; Ring-3 -> Ring-0 gecisi icin stack degisimi:
-;   1. RSP'yi gecici olarak sakla (user RSP)
-;   2. TSS RSP0'dan kernel RSP'yi al (swapgs + gs:[kernel_rsp_offset] veya
-;      dogrudan TSS'ten okuma — biz burada basit yaklasim kullaniyoruz)
+; CPL DETECTION: the RPL field of SS (bits[1:0]) holds the CPL at the
+; time of the SYSCALL:
+;   SS = 0x10 -> RPL=0 -> came from Ring-0 -> kernel path
+;   SS = 0x1B -> RPL=3 -> came from Ring-3 -> user path
 ;
-; BASIT YAKLASIM (single-CPU, kernel-only sayfa tablosu):
-;   TSS RSP0 her context switch'te kernel_stack_top ile guncelleniyor.
-;   SYSCALL geldiginde CPU otomatik olarak Ring-3'ten Ring-0'a
-;   IRETQ framiyle gecmez — bu sadece interrupt'ta olur.
-;   SYSCALL'da RSP degismez; manuel olarak kernel stack'e gecmeliyiz.
+; KERNEL-MODE PATH (CPL=0):
+;   RSP is already on the kernel stack — use it directly.
+;   Return: restore RFLAGS from R11 via pushfq, then jmp rcx.
+;   Do NOT use iretq — kernel-mode SYSCALL has no RSP/SS on the stack;
+;   a partial iretq frame causes #GP -> #DF -> triple fault.
 ;
-; ADIMLAR:
-;   1. User RSP'yi gecici bir yere kaydet
-;   2. Kernel RSP'yi TSS'ten al (kernel_tss.rsp0)
-;   3. Kernel stack'e gec
-;   4. User RSP ve diger register'lari kaydet
-;   5. syscall_dispatch() cagir
-;   6. User RSP'yi geri yukle
-;   7. SYSRET ile Ring-3'e don
+; USER-MODE PATH (CPL=3):
+;   RSP = user stack -> switch to kernel stack (TSS RSP0).
+;   Dispatch -> return to Ring-3 with o64 sysret.
 ;
-; syscall_frame_t layout (syscall.h ile eslesmeli):
-;   +0:  rax  syscall num / return value
+; syscall_frame_t layout (must match syscall.h):
+;   +0:  rax  syscall number / return value
 ;   +8:  rdi  arg1
 ;   +16: rsi  arg2
 ;   +24: rdx  arg3
 ;   +32: r10  arg4
 ;   +40: r8   arg5
 ;   +48: r9   arg6
-;   +56: rcx  saved RIP  (SYSCALL'in kaydettigi, SYSRET icin gerekli)
-;   +64: r11  saved RFLAGS (SYSRET icin gerekli)
+;   +56: rcx  saved RIP   (saved by SYSCALL hardware, needed for SYSRET)
+;   +64: r11  saved RFLAGS (needed for SYSRET)
 
-; Kernel TSS (task.h extern tss_t kernel_tss; -> boot64_unified.asm'de tanimli)
 extern kernel_tss
 
-; ============================================================================
-; SYSCALL ENTRY — Kernel-mode ve User-mode SYSCALL ayirimi
-;
-; SYSCALL donanimiyla (MSR):
-;   RCX  <- RIP        donus adresi
-;   R11  <- RFLAGS     caller RFLAGS
-;   RIP  <- LSTAR      bu fonksiyon
-;   CS   <- 0x08       Kernel Code (STAR[47:32])
-;   SS   <- 0x10       Kernel Data (STAR[47:32]+8)
-;   RFLAGS &= ~FMASK   IF+DF sifirlanir
-;   RSP  -> DEGISMEZ   caller RSP
-;
-; CPL TESPITI: CS register'inin RPL field'i (bit[1:0]) CPL'i verir:
-;   CS = 0x08 -> RPL=0 -> Ring-0'dan gelmis   -> kernel path
-;   SS = 0x1B -> RPL=3 -> Ring-3'ten gelmis   -> user path
-;
-; KERNEL-MODE PATH (CPL=0):
-;   RSP zaten kernel stack'te -> direkt kullan.
-;   Donus: RFLAGS'i R11'den restore et, RIP=RCX, dogrudan ret-benzeri donus.
-;   NOT: iretq KULLANMA — kernel-mode SYSCALL'da iretq icin tam 5-kelimelik
-;   (RIP/CS/RFLAGS/RSP/SS) frame lazim; eksik frame triple fault'a yol acar.
-;   Bunun yerine: push r11 / popfq ile RFLAGS restore, sonra jmp rcx.
-;
-; USER-MODE PATH (CPL=3):
-;   RSP = user stack -> kernel stack'e gec (TSS RSP0).
-;   dispatch -> o64 sysret ile Ring-3'e don.
-; ============================================================================
-
 syscall_entry:
-    ; ── CPL tespiti: CS RPL field'ine bak ──────────────────────
-    ; SYSCALL sonrasi CS = STAR[47:32] = 0x08 (kernel, RPL=0) olarak set edilir.
-    ; Fakat biz SYSCALL'dan onceki CPL'i bilmek istiyoruz.
-    ; Cozum: SYSCALL aninda SS'nin eski degeri korunur:
-    ;   CPL=0 -> SS=0x10, bit[1:0]=0  -> kernel path
-    ;   CPL=3 -> SS=0x1B, bit[1:0]=3  -> user path
-    ;
-    ; RAX'in yalnizca alt 16 bitini bozarak SS'yi kontrol ediyoruz.
-    ; RAX'i stack'e push etmeden yapiyoruz: movzx ax, ss yeterli.
-    push rax            ; RAX'i gecici kaydet
+    ; Detect CPL via SS RPL field.
+    ; After SYSCALL, CS is set to 0x08 (kernel, RPL=0) by hardware.
+    ; To know the *previous* CPL we check SS, which is preserved:
+    ;   CPL=0 -> SS=0x10, bits[1:0]=0 -> kernel path
+    ;   CPL=3 -> SS=0x1B, bits[1:0]=3 -> user path
+    push rax            ; save RAX temporarily
     mov ax, ss
     test ax, 3          ; RPL=3 -> user-mode; RPL=0 -> kernel-mode
-    pop rax             ; RAX'i geri al (flags degismez, test sonucu korunur)
-    jnz .user_syscall   ; Ring-3'ten gelmis -> user path
+    pop rax             ; restore RAX (flags preserved, test result intact)
+    jnz .user_syscall
 
 ; ============================================================
 ; KERNEL-MODE SYSCALL PATH (CPL=0 -> CPL=0)
 ;
-; Donus mekanizmasi: iretq DEGIL, RFLAGS/RIP manuel restore.
-; Sebep: iretq, kernel stack'te tam 5-kelimelik (RIP, CS, RFLAGS, RSP, SS)
-; frame bekler. Bu path'te RSP/SS push edilmemis olur ve eksik frame
-; General Protection Fault -> Double Fault -> Triple Fault zinciri baslatir.
+; Return mechanism: manual RFLAGS/RIP restore, NOT iretq.
+; iretq expects a full 5-word frame (RIP/CS/RFLAGS/RSP/SS) on the stack.
+; This path has no RSP/SS pushed, so iretq would fault.
 ;
-; Dogru yaklasim:
-;   1. Dispatch'ten sonra callee-saved + frame register'larini geri al.
-;   2. push r11 / popfq  -> RFLAGS'i (IF dahil) geri yukle.
-;   3. jmp rcx           -> RCX = SYSCALL'in kaydettigi donus RIP.
+; Correct approach:
+;   1. Restore callee-saved registers and frame.
+;   2. push r11 / popfq -> restore RFLAGS (including IF).
+;   3. jmp rcx          -> RCX = return RIP saved by SYSCALL.
 ; ============================================================
 .kernel_syscall:
-    ; Callee-saved register'lari kaydet (ABI geregi)
+    ; Save callee-saved registers (System V ABI)
     push rbx
     push rbp
     push r12
@@ -710,33 +652,32 @@ syscall_entry:
     push r14
     push r15
 
-    ; syscall_frame_t insa et (syscall.h ile eslesmeli, +0..+64)
+    ; Build syscall_frame_t (must match syscall.h, offsets +0..+64)
     push r11        ; frame.r11  (+64) — saved RFLAGS
-    push rcx        ; frame.rcx  (+56) — saved RIP (donus adresi)
+    push rcx        ; frame.rcx  (+56) — saved RIP (return address)
     push r9         ; frame.r9   (+48)
     push r8         ; frame.r8   (+40)
     push r10        ; frame.r10  (+32)
     push rdx        ; frame.rdx  (+24)
     push rsi        ; frame.rsi  (+16)
     push rdi        ; frame.rdi  (+8)
-    push rax        ; frame.rax  (+0)  — syscall numarasi
+    push rax        ; frame.rax  (+0)  — syscall number
 
-    ; syscall_dispatch(frame)
     mov rdi, rsp
     call syscall_dispatch
 
-    ; Donus degerini al (frame.rax), frame'i temizle
-    pop rax         ; donus degeri
+    ; Retrieve return value (frame.rax) and unwind frame
+    pop rax
     pop rdi
     pop rsi
     pop rdx
     pop r10
     pop r8
     pop r9
-    pop rcx         ; RCX = saved RIP  (donus adresi)
+    pop rcx         ; RCX = saved RIP
     pop r11         ; R11 = saved RFLAGS
 
-    ; Callee-saved register'lari geri al
+    ; Restore callee-saved registers
     pop r15
     pop r14
     pop r13
@@ -744,36 +685,35 @@ syscall_entry:
     pop rbp
     pop rbx
 
-    ; RFLAGS'i restore et: IF'yi (bit 9) geri ac, sonra jmp rcx
+    ; Restore RFLAGS: re-enable interrupts (IF bit 9), then jump to return address
     push r11
-    or qword [rsp], (1 << 9)    ; IF=1 — interrupt'lari yeniden ac
-    popfq                        ; RFLAGS = R11 | IF
-    jmp rcx                      ; RIP = saved return address (iretq YOK)
+    or qword [rsp], (1 << 9)    ; IF=1
+    popfq
+    jmp rcx                      ; RIP = saved return address (no iretq)
 
 ; ============================================================
-; USER-MODE SYSCALL PATH (CPL=3 -> CPL=3, SYSRET ile don)
+; USER-MODE SYSCALL PATH (CPL=3 -> CPL=3, return via SYSRET)
 ; ============================================================
 .user_syscall:
-    ; RSP = user stack -> kernel stack'e gec
-    mov r15, rsp            ; r15 = user RSP (callee-saved, henuz bozulmadi)
+    ; RSP = user stack -> switch to kernel stack
+    mov r15, rsp            ; r15 = user RSP (callee-saved, not yet clobbered)
 
     ; TSS RSP0 = kernel_stack_top
-    ; tss_t packed: +0=reserved0(4B), +4=rsp0(8B)
+    ; tss_t packed layout: +0=reserved0(4B), +4=rsp0(8B)
     mov rsp, [rel kernel_tss + 4]
 
-    ; Callee-saved + user RSP'yi kernel stack'e kaydet
-    push r15        ; user RSP (adim 9'da geri alinacak)
+    ; Save callee-saved registers and user RSP on kernel stack
+    push r15        ; user RSP (retrieved in step 9)
     push rbx
     push rbp
     push r12
     push r13
     push r14
-    ; r15 zaten push edildi
+    ; r15 already pushed
 
-    ; syscall_frame_t insa et (syscall.h ile eslesmeli, +0..+72)
-    ; user_rsp (+72): gercek user RSP'yi kaydet (sys_fork icin gerekli)
-    ; execve de bu alani yeni RSP ile override edebilir
-    push r15        ; frame.user_rsp (+72) — gercek user RSP (r15'te sakliydi)
+    ; Build syscall_frame_t (must match syscall.h, offsets +0..+72)
+    ; frame.user_rsp (+72): real user RSP for sys_fork; execve may override it
+    push r15        ; frame.user_rsp (+72)
     push r11        ; frame.r11  (+64)
     push rcx        ; frame.rcx  (+56)
     push r9         ; frame.r9   (+48)
@@ -784,52 +724,48 @@ syscall_entry:
     push rdi        ; frame.rdi  (+8)
     push rax        ; frame.rax  (+0)
 
-    ; dispatch
     mov rdi, rsp
     call syscall_dispatch
 
-    ; user_rsp override kontrolu (execve yeni RSP yazdiysa kullan)
-    ; frame.user_rsp ofset = +72, frame basini gosterir rsp
+    ; Check for user_rsp override (execve may have written a new RSP)
     mov r14, [rsp + 72]     ; r14 = frame.user_rsp (callee-saved)
 
-    ; frame temizle: rax..r11 (10 alan = 80 byte)
-    pop rax         ; +0  donus degeri
+    ; Unwind frame: rax..r11 (10 slots = 80 bytes)
+    pop rax         ; +0  return value
     pop rdi         ; +8
     pop rsi         ; +16
     pop rdx         ; +24
     pop r10         ; +32
     pop r8          ; +40
     pop r9          ; +48
-    pop rcx         ; +56 saved RIP (SYSRET icin)
-    pop r11         ; +64 saved RFLAGS (SYSRET icin)
-    add rsp, 8      ; +72 user_rsp slot'unu atla
+    pop rcx         ; +56 saved RIP (for SYSRET)
+    pop r11         ; +64 saved RFLAGS (for SYSRET)
+    add rsp, 8      ; +72 skip user_rsp slot
 
-    ; callee-saved geri yukle
-    ; r14'u dispatch oncesi user_rsp icin kullandik,
-    ; simdi stack'ten gercek degerini geri alalim
+    ; Restore callee-saved registers
+    ; r14 was used for user_rsp; restore its real value from stack now
     pop r14
     pop r13
     pop r12
     pop rbp
     pop rbx
-    pop r15         ; r15 = user RSP (orijinal)
+    pop r15         ; r15 = original user RSP
 
-    ; DS/ES -> Ring-3 (FS/GS'ye dokunma — FS_BASE TLS pointer'ı taşıyor)
+    ; Set DS/ES to Ring-3; do NOT touch FS/GS.
+    ; "mov fs, reg" zeroes MSR_FS_BASE -> corrupts TLS -> #GP.
+    ; FS_BASE was already restored via wrmsr in syscall_dispatch.
     mov ax, 0x1B
     mov ds, ax
     mov es, ax
-    ; FS ve GS segment register'larına YAZILMIYOR:
-    ; x86-64'te "mov fs, reg" MSR_FS_BASE'i sıfırlar → TLS bozulur → #GP
-    ; FS_BASE zaten syscall_dispatch içinde wrmsr ile restore edildi.
 
-    ; user_rsp override: execve yazdiysa (0 degilse) yeni stack kullan
+    ; If execve wrote a new RSP (non-zero), use it; otherwise restore original
     test r14, r14
     jnz .use_new_rsp
-    mov rsp, r15    ; normal path: orijinal user RSP
+    mov rsp, r15    ; normal path: original user RSP
     jmp .do_sysret
 
 .use_new_rsp:
-    mov rsp, r14    ; execve path: yeni user stack
+    mov rsp, r14    ; execve path: new user stack
 
 .do_sysret:
     ; 64-bit SYSRET -> Ring-3
@@ -837,11 +773,11 @@ syscall_entry:
     o64 sysret
 
 ; ============================================================================
-; #DF için IST1 stack — 16 KB, TSS.IST1'e set edilmeli
+; IST1 stack for #DF — 16 KB, must be set in TSS.IST1
 ; ============================================================================
 section .bss
 align 16
 df_stack_bottom:
-    resb 16384          ; 16 KB — stack overflow testleri için yeterli
+    resb 16384          ; 16 KB
 global df_stack_top
 df_stack_top:
