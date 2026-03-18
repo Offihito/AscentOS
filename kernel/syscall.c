@@ -22,6 +22,227 @@ extern void update_cursor64(void);
 // print_str64'ten farklı olarak kısmi/scroll durumunda da güvenilir.
 extern void putchar64(char c, uint8_t color);
 
+// vesa64.c / boot64_unified.asm — framebuffer bilgileri (Doom/grafik için)
+extern uint64_t framebuffer_addr;
+extern uint32_t framebuffer_pitch;
+extern uint32_t framebuffer_width;
+extern uint32_t framebuffer_height;
+extern uint8_t  framebuffer_bpp;
+
+// ============================================================
+// v29 – Doom grafik syscall'ları
+// ============================================================
+
+// is_valid_user_ptr aşağıda tanımlı — forward declaration
+static int is_valid_user_ptr(const void* ptr, uint64_t len);
+
+// Klavye raw mode bayrağı — sys_read tarafindan da kullaniliyor (extern)
+int kb_raw_mode = 0;
+
+// kernel_termios forward declaration — asıl tanım sys_ioctl bölümünde (~satır 2566).
+// sys_kb_raw bu değişkeni erken kullandığı için burada extern bildirimi gerekli.
+extern termios_t kernel_termios;
+
+// sys_fb_info: framebuffer bilgisini user-space fb_info_t*'a yazar
+// RDI = user-space fb_info_t* pointer
+void sys_fb_info(syscall_frame_t* frame) {
+    serial_print("[SYS_FB_INFO] called, framebuffer_addr=");
+    {
+        char buf[32];
+        // basit hex print
+        uint64_t v = framebuffer_addr;
+        buf[0]='0'; buf[1]='x';
+        const char* h = "0123456789abcdef";
+        for (int i = 0; i < 16; i++)
+            buf[2+i] = h[(v >> (60 - i*4)) & 0xf];
+        buf[18] = '\n'; buf[19] = 0;
+        serial_print(buf);
+    }
+    fb_info_t* out = (fb_info_t*)(uintptr_t)frame->rdi;
+    if (!is_valid_user_ptr(out, sizeof(fb_info_t))) {
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+    // v4: uint64_t field'larına yaz — hizalama sorunu yok
+    out->addr   = framebuffer_addr;
+    out->width  = (uint64_t)framebuffer_width;
+    out->height = (uint64_t)framebuffer_height;
+    out->pitch  = (uint64_t)framebuffer_pitch;
+    out->bpp    = (uint64_t)framebuffer_bpp;
+
+    serial_print("[SYS_FB_INFO] w=");
+    { char b[16]; int_to_str((int)framebuffer_width, b); serial_print(b); }
+    serial_print(" h=");
+    { char b[16]; int_to_str((int)framebuffer_height, b); serial_print(b); }
+    serial_print(" pitch=");
+    { char b[16]; int_to_str((int)framebuffer_pitch, b); serial_print(b); }
+    serial_print(" bpp=");
+    { char b[16]; int_to_str((int)framebuffer_bpp, b); serial_print(b); }
+    serial_print("\n");
+
+    frame->rax = 0;
+}
+
+// sys_kb_raw: klavye raw scancode modunu açar (1) veya kapatır (0)
+// RDI = 1 → raw aç, 0 → kapat
+//
+// v7 düzeltmesi: kb_raw_mode bayrağının yanı sıra kernel_termios'u da güncelle.
+// Aksi hâlde sys_read ICANON=1/VMIN=1 ile blocking okuma yapmaya devam eder
+// ve Doom game loop'u DG_DrawFrame'e hiç ulaşamaz.
+void sys_kb_raw(syscall_frame_t* frame) {
+    kb_raw_mode = (int)frame->rdi;
+    if (kb_raw_mode) {
+        // Raw/game mod: satır bazlı okuma, echo ve sinyal üretimi kapat.
+        // VMIN=0, VTIME=0 → sys_read non-blocking hâle gelir (EAGAIN döner).
+        kernel_termios.c_lflag &= ~((uint32_t)(ICANON | ECHO | ECHOE | ECHOK | IEXTEN | ISIG));
+        kernel_termios.c_cc[VMIN]  = 0;
+        kernel_termios.c_cc[VTIME] = 0;
+        serial_print("[SYS_KB_RAW] raw=1: ICANON/ECHO kaldi, VMIN=0 (non-blocking)\n");
+    } else {
+        // Normal mod geri yükle (shell için)
+        kernel_termios.c_lflag = (uint32_t)(ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN);
+        kernel_termios.c_cc[VMIN]  = 1;
+        kernel_termios.c_cc[VTIME] = 0;
+        serial_print("[SYS_KB_RAW] raw=0: canonical mod geri yuklendi\n");
+    }
+    frame->rax = 0;
+}
+
+// ── SYS_FB_BLIT (409) ──────────────────────────────────────────────────────
+// Doom'un user-space screen buffer'ını doğrudan kernel VRAM'ına
+// nearest-neighbor ölçekleme ile kopyalar.
+//
+// v9 düzeltmeleri:
+//   1. İlk çağrıda tüm parametreleri serial'a basar (debug).
+//   2. bpp_bytes sıfır koruması eklendi (bpp=0 → varsayılan 4).
+//   3. pitch hesabında uint64_t cast: fb_y * pitch taşmaz.
+//   4. Renk kanalı dönüşümü (XRGB→BGRX) port katmanına (doomgeneric_ascent.c v9)
+//      taşındı; kernel burada doğrudan src pikselini yazar.
+//      Port katmanı zaten swap yapılmış g_conv_buf'u iletir.
+//
+// Neden gerekli:
+//   Fiziksel framebuffer adresi (örn. 0xfd000000) user-space page table'larında
+//   map'li değildir. User-space'den bu adrese yazmak sayfa hatasına ya da
+//   sessiz veri kaybına yol açar. Kernel zaten bu adresi kullandığı için
+//   Ring-0'da yazmak güvenli ve doğrudur.
+//
+// RDI = user-space ascent_fb_blit_t* pointer
+// RAX = 0 (başarı) | negatif hata kodu
+// ────────────────────────────────────────────────────────────────────────────
+void sys_fb_blit(syscall_frame_t* frame) {
+    // ── Struct pointer doğrula ──────────────────────────────────────────
+    ascent_fb_blit_t* req = (ascent_fb_blit_t*)(uintptr_t)frame->rdi;
+    if (!is_valid_user_ptr(req, sizeof(ascent_fb_blit_t))) {
+        serial_print("[SYS_FB_BLIT] EFAULT: req pointer gecersiz\n");
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+
+    // ── Parametreleri oku (uint64_t field'ları) ─────────────────────────
+    const uint32_t* src   = (const uint32_t*)(uintptr_t)req->src_pixels;
+    uint32_t        src_w = (uint32_t)req->src_w;
+    uint32_t        src_h = (uint32_t)req->src_h;
+    uint32_t        dst_x = (uint32_t)req->dst_x;
+    uint32_t        dst_y = (uint32_t)req->dst_y;
+    uint32_t        scale = (uint32_t)req->scale;
+
+    // ── İlk çağrıda debug log bas ───────────────────────────────────────
+    {
+        static int _blit_first = 1;
+        if (_blit_first) {
+            _blit_first = 0;
+            serial_print("[SYS_FB_BLIT] ilk cagri: src_w=");
+            { char b[16]; int_to_str((int)src_w,  b); serial_print(b); }
+            serial_print(" src_h=");
+            { char b[16]; int_to_str((int)src_h,  b); serial_print(b); }
+            serial_print(" dst_x=");
+            { char b[16]; int_to_str((int)dst_x,  b); serial_print(b); }
+            serial_print(" dst_y=");
+            { char b[16]; int_to_str((int)dst_y,  b); serial_print(b); }
+            serial_print(" scale=");
+            { char b[16]; int_to_str((int)scale,  b); serial_print(b); }
+            serial_print(" fb_w=");
+            { char b[16]; int_to_str((int)framebuffer_width,  b); serial_print(b); }
+            serial_print(" fb_h=");
+            { char b[16]; int_to_str((int)framebuffer_height, b); serial_print(b); }
+            serial_print(" fb_pitch=");
+            { char b[16]; int_to_str((int)framebuffer_pitch,  b); serial_print(b); }
+            serial_print(" fb_bpp=");
+            { char b[16]; int_to_str((int)framebuffer_bpp,    b); serial_print(b); }
+            serial_print("\n");
+            serial_print("[SYS_FB_BLIT] src_pixels=0x");
+            {
+                uint64_t v = (uint64_t)(uintptr_t)src;
+                char buf[17]; buf[16] = '\0';
+                const char* h = "0123456789abcdef";
+                for (int i = 0; i < 16; i++) buf[i] = h[(v >> (60 - i*4)) & 0xf];
+                serial_print(buf);
+            }
+            serial_print("\n");
+        }
+    }
+
+    // ── Kaynak buffer doğrula ───────────────────────────────────────────
+    uint64_t src_size = (uint64_t)src_w * src_h * 4;
+    if (!is_valid_user_ptr(src, src_size)) {
+        serial_print("[SYS_FB_BLIT] EFAULT: src buffer pointer gecersiz\n");
+        frame->rax = SYSCALL_ERR_FAULT;
+        return;
+    }
+
+    // ── Sınır kontrolleri ──────────────────────────────────────────────
+    if (src_w == 0 || src_h == 0 || scale == 0 || scale > 4) {
+        serial_print("[SYS_FB_BLIT] EINVAL: src veya scale degeri gecersiz\n");
+        frame->rax = SYSCALL_ERR_INVAL;
+        return;
+    }
+
+    // ── Kernel framebuffer hazır mı? ────────────────────────────────────
+    if (framebuffer_addr == 0 || framebuffer_width == 0 || framebuffer_height == 0) {
+        serial_print("[SYS_FB_BLIT] ENODEV: framebuffer hazir degil\n");
+        frame->rax = SYSCALL_ERR_NODEV;
+        return;
+    }
+
+    // ── Kaç satır/sütun gerçekten çizebiliriz? ──────────────────────────
+    if (dst_x >= framebuffer_width)  dst_x = 0;
+    if (dst_y >= framebuffer_height) dst_y = 0;
+
+    uint32_t max_cols = (framebuffer_width  > dst_x) ? (framebuffer_width  - dst_x) : 0;
+    uint32_t max_rows = (framebuffer_height > dst_y) ? (framebuffer_height - dst_y) : 0;
+
+    uint32_t draw_cols = src_w;
+    uint32_t draw_rows = src_h;
+    if (draw_cols * scale > max_cols) draw_cols = max_cols / scale;
+    if (draw_rows * scale > max_rows) draw_rows = max_rows / scale;
+
+    // ── Blit (nearest-neighbor) ────────────────────────────────────────────
+    // Doom: red_off=16, green_off=8, blue_off=0 → 0x00RRGGBB
+    // VESA GOP (bpp=32): genellikle ayni format → swap GEREK YOK.
+    // Eger renkler ters gorunurse bv/rv satirlarini degistir.
+    uint8_t*  fb_base   = (uint8_t*)(uintptr_t)framebuffer_addr;
+    uint32_t  bpp_bytes = (framebuffer_bpp >= 8) ? (uint32_t)(framebuffer_bpp / 8u) : 4u;
+
+    for (uint32_t y = 0; y < draw_rows; y++) {
+        const uint32_t* src_row = src + y * src_w;
+        for (uint32_t sy = 0; sy < scale; sy++) {
+            uint32_t fb_y = dst_y + y * scale + sy;
+            if (fb_y >= framebuffer_height) break;
+            uint32_t* dst_row = (uint32_t*)(fb_base
+                                + (uint64_t)fb_y * (uint64_t)framebuffer_pitch
+                                + (uint64_t)dst_x * (uint64_t)bpp_bytes);
+            for (uint32_t x = 0; x < draw_cols; x++) {
+                uint32_t px = src_row[x];
+                for (uint32_t sx = 0; sx < scale; sx++) {
+                    dst_row[x * scale + sx] = px;
+                }
+            }
+        }
+    }
+
+    frame->rax = 0;
+}
+
 // Assembly entry point
 extern void syscall_entry(void);
 
@@ -348,11 +569,13 @@ static void sys_write(syscall_frame_t* frame) {
 
     // stdout ve stderr: VGA + serial
     if (fd == 1 || fd == 2) {
-        // vesa_write_buf: tüm buffer'ı tek seferde ANSI parser'dan geçirir.
-        // putchar64 ile karakter karakter yazmak kilo gibi uygulamalarda
-        // yavaş ve artefaktlı olur. vesa_write_buf batch işlem yapar.
-        extern void vesa_write_buf(const char* buf, int len);
-        vesa_write_buf(buf, (int)len);
+        // kb_raw_mode=1 iken (Doom veya başka grafik uygulama çalışırken)
+        // framebuffer'a terminal yazısı YAZMIYORUZ — uygulama framebuffer'ı
+        // tamamen kendisi yönetiyor. Sadece serial'a yaz (debug için).
+        if (!kb_raw_mode) {
+            extern void vesa_write_buf(const char* buf, int len);
+            vesa_write_buf(buf, (int)len);
+        }
         for (uint64_t i = 0; i < len; i++)
             serial_putchar(buf[i]);
         frame->rax = len;
@@ -426,27 +649,49 @@ static void sys_read(syscall_frame_t* frame) {
     if (fd == 0) {
         extern int kb_ring_pop(void);
         extern int kb_userland_active(void);
+        extern int kb_raw_mode;   // sys_kb_raw tarafindan set edilen flag
 
-        uint64_t count = 0;
+        uint64_t count = 0;  // hem userland hem kernel context icin kullanilir
 
         if (kb_userland_active()) {
-            // ── termios ICANON kontrolü ──────────────────────────────────
-            // ICANON=1 (canonical): satır bazlı okuma, '\n' bekle (shell, vb.)
-            // ICANON=0 (raw):       VMIN kadar byte al, '\n' bekleme (Lua REPL, kilo, vb.)
-            int is_canonical = (kernel_termios.c_lflag & ICANON) ? 1 : 0;
-            // Raw modda VMIN: kaç byte beklenecek (0 = non-blocking, 1+ = o kadar bekle)
-            uint8_t vmin = is_canonical ? 1 : kernel_termios.c_cc[VMIN];
-            if (vmin == 0) vmin = 1; // en az 1 byte al (yoksa sonsuz döngü olur)
+            // kb_raw_mode=1 (Doom, kilo vb.): her zaman non-blocking
+            // Karakter yoksa EAGAIN don — sti;hlt YAPMA (kernel panic kaynagi)
+            if (kb_raw_mode) {
+                int ch = kb_ring_pop();
+                if (ch < 0) {
+                    frame->rax = SYSCALL_ERR_AGAIN;
+                    return;
+                }
+                buf[0] = (char)ch;
+                frame->rax = 1;
+                return;
+            }
 
-            // Blocking read: VMIN kadar karakter gelene kadar bekle
+            // kb_raw_mode=0: termios ayarlarina bak
+            int is_canonical = (kernel_termios.c_lflag & ICANON) ? 1 : 0;
+            uint8_t vmin = is_canonical ? 1 : kernel_termios.c_cc[VMIN];
+
+            if (!is_canonical && vmin == 0) {
+                int ch = kb_ring_pop();
+                if (ch < 0) {
+                    frame->rax = SYSCALL_ERR_AGAIN;
+                    return;
+                }
+                buf[0] = (char)ch;
+                frame->rax = 1;
+                return;
+            }
+
+            // Blocking read: karakter gelene kadar bekle.
+            // SYSCALL girişinde RFLAGS.IF=0 (MSR_FMASK 0x200 maskeler).
+            // "pause" döngüsü IRQ hiç gelmediğinden sonsuza kilitlenir.
+            // sys_sleep/sys_waitpid ile aynı mekanizma: sti açar, hlt bekler,
+            // klavye IRQ'su gelir → keyboard_handler64 → kb_ring_push → devam.
             int ch;
             do {
                 ch = kb_ring_pop();
                 if (ch < 0) {
-                    // Karakter yok — interrupt bekle, task'ı meşgul etme
                     __asm__ volatile ("sti; hlt" ::: "memory");
-
-                    // Task sonlandırılıyorsa çık (sonsuz döngü engeli)
                     task_t* cur = task_get_current();
                     if (cur && cur->state == TASK_STATE_TERMINATED)
                         break;
@@ -643,8 +888,11 @@ static void sys_getpid(syscall_frame_t* frame) {
 }
 
 // ── SYS_YIELD (5) ───────────────────────────────────────────────
+// NOT: scheduler_yield() → sti;hlt → timer IRQ → context switch
+// Bu yolda task CS/FS_BASE yanlış restore edilebiliyor (#GP panic).
+// Doom single-task calistigi icin yield gercekte gereksiz;
+// SYSCALL_OK dondurerek Doom'un game loop'unun devam etmesini sagla.
 static void sys_yield(syscall_frame_t* frame) {
-    scheduler_yield();
     frame->rax = SYSCALL_OK;
 }
 
@@ -656,7 +904,7 @@ static void sys_sleep(syscall_frame_t* frame) {
 
     uint64_t end = get_system_ticks() + ticks;
     while (get_system_ticks() < end)
-        __asm__ volatile ("sti; hlt" ::: "memory");
+        __asm__ volatile ("pause" ::: "memory");
 
     frame->rax = SYSCALL_OK;
 }
@@ -1996,10 +2244,7 @@ static void sys_waitpid(syscall_frame_t* frame)
         }
 
         // Kesmeler ac, timer bekle, child calissin
-        // sys_sleep() ile ayni mekanizma: timer ISR parent'i iretq formatinda
-        // kaydeder; child'in task_exit'i task_load_and_jump_context(parent)
-        // cagirir ve parent hlt'ten sonra devam eder.
-        __asm__ volatile ("sti; hlt" ::: "memory");
+        __asm__ volatile ("pause" ::: "memory");
     }
     #undef WAITPID_MAX_ITER
 
@@ -5357,7 +5602,9 @@ static void sys_writev(syscall_frame_t* frame) {
             const char* p   = (const char*)iov[i].iov_base;
             uint64_t    len = iov[i].iov_len;
             if (len == 0 || !p) continue;
-            vesa_write_buf(p, (int)len);
+            // kb_raw_mode=1 iken (grafik uygulama) framebuffer'a yazma
+            if (!kb_raw_mode)
+                vesa_write_buf(p, (int)len);
             for (uint64_t j = 0; j < len; j++) serial_putchar(p[j]);
             total += (int64_t)len;
         }
@@ -5383,7 +5630,8 @@ static void sys_writev(syscall_frame_t* frame) {
         }
         if (fde->type == FD_TYPE_SERIAL) {
             extern void vesa_write_buf(const char* b, int l);
-            vesa_write_buf(p, (int)len);
+            if (!kb_raw_mode)
+                vesa_write_buf(p, (int)len);
             for (uint64_t j = 0; j < len; j++) serial_putchar(p[j]);
             total += (int64_t)len;
         } else if (fde->type == FD_TYPE_PIPE && fde->pipe) {
@@ -5886,6 +6134,26 @@ void syscall_dispatch(syscall_frame_t* frame) {
     // v28 – X11 desteği: socket altyapısı
     case SYS_SOCKET:           sys_socket(frame);           break;
     case SYS_CONNECT:          sys_connect(frame);          break;
+    // v29 – Doom / grafik syscall'ları
+    case SYS_FB_INFO:          sys_fb_info(frame);          break;
+    case SYS_KB_RAW:           sys_kb_raw(frame);           break;
+    case SYS_FB_BLIT:          sys_fb_blit(frame);          break;
+    // 410 – SYS_KB_READ: termios bypass klavye okuma (Doom icin)
+    // RDI = buf, RDX = len. Her cagri en fazla len byte doner.
+    // Karakter yoksa EAGAIN (hlt YOK, panic YOK).
+    case 410: {
+        char*    kbuf = (char*)(uintptr_t)frame->rdi;
+        uint64_t klen = frame->rdx;
+        if (!kbuf || klen == 0) { frame->rax = 0; break; }
+        uint64_t kcount = 0;
+        while (kcount < klen) {
+            int kch = kb_ring_pop();
+            if (kch < 0) break;
+            kbuf[kcount++] = (char)kch;
+        }
+        frame->rax = kcount > 0 ? kcount : SYSCALL_ERR_AGAIN;
+        break;
+    }
     // v10 – sinyal altyapısı
     case SYS_SIGACTION:    sys_sigaction(frame);    break;
     case SYS_SIGPROCMASK:  sys_sigprocmask(frame);  break;

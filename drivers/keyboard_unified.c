@@ -38,6 +38,8 @@ static inline void outb(uint16_t port, uint8_t val) {
 // ============================================================================
 extern volatile int kernel_mode;
 extern volatile int gui_request_new_window;
+// syscall.c'de tanımlı — Doom raw mod aktifken 1, normal modda 0
+extern int kb_raw_mode;
 
 // ============================================================================
 // Userland ring buffer
@@ -218,77 +220,88 @@ void keyboard_handler64(void) {
     // E0 extended prefix (ok tuşları)
     if (sc == 0xE0) { extended_key = 1; outb(0x20, 0x20); return; }
 
-    // Shift
-    if (sc == 0x2A || sc == 0x36) { shift_pressed = 1; outb(0x20, 0x20); return; }
-    if (sc == 0xAA || sc == 0xB6) { shift_pressed = 0; outb(0x20, 0x20); return; }
+    // Shift press/release
+    if (sc == 0x2A || sc == 0x36) {
+        shift_pressed = 1;
+        if (kb_userland_mode && kb_raw_mode) kb_ring_push((char)0xb6); // KEY_RSHIFT press
+        outb(0x20, 0x20); return;
+    }
+    if (sc == 0xAA || sc == 0xB6) {
+        shift_pressed = 0;
+        if (kb_userland_mode && kb_raw_mode) { kb_ring_push((char)0x80); kb_ring_push((char)0xb6); } // KEY_RSHIFT release
+        outb(0x20, 0x20); return;
+    }
     // Caps
     if (sc == 0x3A) { caps_lock = !caps_lock; outb(0x20, 0x20); return; }
-    // Ctrl
-    if (sc == 0x1D) { ctrl_pressed = 1; outb(0x20, 0x20); return; }
-    if (sc == 0x9D) { ctrl_pressed = 0; outb(0x20, 0x20); return; }
+    // Ctrl press/release
+    if (sc == 0x1D) {
+        ctrl_pressed = 1;
+        if (kb_userland_mode && kb_raw_mode) kb_ring_push((char)0x9d); // KEY_RCTRL press
+        outb(0x20, 0x20); return;
+    }
+    if (sc == 0x9D) {
+        ctrl_pressed = 0;
+        if (kb_userland_mode && kb_raw_mode) { kb_ring_push((char)0x80); kb_ring_push((char)0x9d); } // KEY_RCTRL release
+        outb(0x20, 0x20); return;
+    }
 
-    // --- Normal terminal ---
+    // Extended key (ok tuşları)
     if (extended_key) {
         extended_key = 0;
-
         if (kb_userland_mode) {
-            // Userland çalışıyor: ok tuşlarını VT100 escape sequence olarak gönder
-            // kilo bu sequence'leri editorReadKey() içinde parse eder
             switch (sc) {
-            case 0x48: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('A'); break; // ↑
-            case 0x50: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('B'); break; // ↓
-            case 0x4D: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('C'); break; // →
-            case 0x4B: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('D'); break; // ←
-            case 0x47: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('H'); break; // Home
-            case 0x4F: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('F'); break; // End
-            case 0x53: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('3'); kb_ring_push('~'); break; // Del
-            case 0x49: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('5'); kb_ring_push('~'); break; // PgUp
-            case 0x51: kb_ring_push('\x1b'); kb_ring_push('['); kb_ring_push('6'); kb_ring_push('~'); break; // PgDn
+            case 0x48: kb_ring_push((char)0xad); break; // ↑
+            case 0x50: kb_ring_push((char)0xaf); break; // ↓
+            case 0x4D: kb_ring_push((char)0xae); break; // →
+            case 0x4B: kb_ring_push((char)0xac); break; // ←
+            case 0x47: kb_ring_push((char)0xac); break; // Home
+            case 0x4F: kb_ring_push((char)0xae); break; // End
+            case 0x49: kb_ring_push((char)0xad); break; // PgUp
+            case 0x51: kb_ring_push((char)0xaf); break; // PgDn
+            case 0x53: kb_ring_push((char)0x7f); break; // Del
+            // Release ok tuşları (0x80 | scancode) — Doom için release event
+            case 0xC8: if (kb_raw_mode) { kb_ring_push((char)0x80); kb_ring_push((char)0xad); } break;
+            case 0xD0: if (kb_raw_mode) { kb_ring_push((char)0x80); kb_ring_push((char)0xaf); } break;
+            case 0xCD: if (kb_raw_mode) { kb_ring_push((char)0x80); kb_ring_push((char)0xae); } break;
+            case 0xCB: if (kb_raw_mode) { kb_ring_push((char)0x80); kb_ring_push((char)0xac); } break;
             }
         } else {
-            // Kernel shell: scroll
             if (sc == 0x48) { scroll_up(3);   outb(0x20, 0x20); return; }
             if (sc == 0x50) { scroll_down(3); outb(0x20, 0x20); return; }
         }
         outb(0x20, 0x20); return;
     }
-    if (sc & 0x80) { outb(0x20, 0x20); return; } // release
+
+    // Key release — Doom modunda release event gönder
+    if (sc & 0x80) {
+        if (kb_userland_mode && kb_raw_mode) {
+            uint8_t press_sc = sc & 0x7F;
+            // Modifier tuşlar yukarıda zaten işlendi
+            if (press_sc != 0x1D && press_sc != 0x2A && press_sc != 0x36) {
+                char c = sc_to_char(press_sc);
+                if (c) { kb_ring_push((char)0x80); kb_ring_push(c); }
+            }
+        }
+        outb(0x20, 0x20); return;
+    }
 
     // Ctrl+L: temizle (sadece kernel shell)
     if (ctrl_pressed && sc == 0x26 && !kb_userland_mode) { clear_screen64(); show_prompt64(); outb(0x20, 0x20); return; }
 
-    // Ctrl kombinasyonları
+    // Ctrl kombinasyonları — Doom raw modunda Ctrl zaten yukarıda işlendi
     if (ctrl_pressed) {
-        if (kb_userland_mode) {
-            // Ctrl+C → userland'a karakter 3 (ETX) gönder — shell bunu yakalar
-            if (sc == 0x2E) { kb_ring_push(3); outb(0x20, 0x20); return; }
-            // Ctrl+Z → karakter 26 (SUB)
-            if (sc == 0x2C) { kb_ring_push(26); outb(0x20, 0x20); return; }
-            // Ctrl+D → karakter 4 (EOT) — EOF sinyali
-            if (sc == 0x20) { kb_ring_push(4); outb(0x20, 0x20); return; }
-            // Diğer Ctrl+key → ASCII kontrol kodu (Ctrl+a=0x01 ... Ctrl+z=0x1A)
+        if (kb_userland_mode && !kb_raw_mode) {
+            if (sc == 0x2E) { kb_ring_push(3);  outb(0x20, 0x20); return; } // Ctrl+C
+            if (sc == 0x2C) { kb_ring_push(26); outb(0x20, 0x20); return; } // Ctrl+Z
+            if (sc == 0x20) { kb_ring_push(4);  outb(0x20, 0x20); return; } // Ctrl+D
             char ascii = sc_to_char(sc);
-            if (ascii >= 'a' && ascii <= 'z') {
-                kb_ring_push(ascii & 0x1F);
-            } else if (ascii >= 'A' && ascii <= 'Z') {
-                kb_ring_push(ascii & 0x1F);
-            } else if (sc == 0x01) {
-                kb_ring_push(0x1B); // ESC
-            }
+            if (ascii >= 'a' && ascii <= 'z') kb_ring_push(ascii & 0x1F);
+            else if (ascii >= 'A' && ascii <= 'Z') kb_ring_push(ascii & 0x1F);
             outb(0x20, 0x20); return;
         }
-        // Kernel shell: Ctrl+C → SIGINT, Ctrl+Z → SIGTSTP foreground task'a
-        if (sc == 0x2E) {
-            extern task_t* task_get_current(void);
-            task_t* fg = task_get_current();
-            if (fg) signal_send((int)fg->pid, SIGINT);
-            outb(0x20, 0x20); return;
-        }
-        if (sc == 0x2C) {
-            extern task_t* task_get_current(void);
-            task_t* fg = task_get_current();
-            if (fg) signal_send((int)fg->pid, SIGTSTP);
-            outb(0x20, 0x20); return;
+        if (!kb_userland_mode) {
+            if (sc == 0x2E) { extern task_t* task_get_current(void); task_t* fg = task_get_current(); if (fg) signal_send((int)fg->pid, SIGINT); outb(0x20, 0x20); return; }
+            if (sc == 0x2C) { extern task_t* task_get_current(void); task_t* fg = task_get_current(); if (fg) signal_send((int)fg->pid, SIGTSTP); outb(0x20, 0x20); return; }
         }
         outb(0x20, 0x20); return;
     }
@@ -296,11 +309,8 @@ void keyboard_handler64(void) {
     // Enter
     if (sc == 0x1C) {
         if (kb_userland_mode) {
-            // kb_enter_sends_cr=1 → raw-mode uygulamalar (kilo): '\r'
-            // kb_enter_sends_cr=0 → canonical uygulamalar (shell, lua, vb.): '\n'
             kb_ring_push(kb_enter_sends_cr ? '\r' : '\n');
         } else {
-            // Kernel shell: komutu çalıştır
             input_buffer[buffer_pos] = '\0';
             char cmd[256];
             int ci = 0;
@@ -311,9 +321,9 @@ void keyboard_handler64(void) {
         }
         outb(0x20, 0x20); return;
     }
-    // ESC tuşu → userland'a \x1b gönder (kilo search/quit için)
+    // ESC
     if (sc == 0x01) {
-        if (kb_userland_mode) kb_ring_push('\x1b');
+        if (kb_userland_mode) kb_ring_push((char)27);
         outb(0x20, 0x20); return;
     }
     // Backspace
@@ -323,7 +333,7 @@ void keyboard_handler64(void) {
         } else if (buffer_pos > 0) { buffer_pos--; putchar64('\b', VGA_WHITE); }
         outb(0x20, 0x20); return;
     }
-    // Karakter
+    // Normal karakter
     char c = sc_to_char(sc);
     if (c) {
         if (kb_userland_mode) {
