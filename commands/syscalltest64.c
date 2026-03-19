@@ -7,7 +7,7 @@
 
 extern void println64(const char* str, uint8_t color);
 
-// String yardımcıları (commands64.c'den)
+// String utils
 extern int     str_len(const char* str);
 extern int     str_cmp(const char* s1, const char* s2);
 extern void    str_cpy(char* dest, const char* src);
@@ -18,7 +18,7 @@ extern void    output_add_line(CommandOutput* output, const char* line, uint8_t 
 extern void    output_add_empty_line(CommandOutput* output);
 extern void    output_init(CommandOutput* output);
 // ============================================================
-// YARDIMCI MAKROLAR – syscalltest icinde inline ASM kisaltmalari
+// Helper Macros
 // ============================================================
 #define _SC0(num) \
     __asm__ volatile("syscall":"=a"(ret):"a"((uint64_t)(num)):"rcx","r11")
@@ -40,7 +40,7 @@ static void u64_to_dec(uint64_t v, char* out) {
     }
 }
 
-// PASS/FAIL satiri olustur — output buffer'a ekle ve doğrudan ekrana yaz
+// Create Pass/Fail
 static void sc_result(CommandOutput* output, int idx, const char* name,
                       int64_t ret_val, int pass_cond,
                       const char* extra, int* pass, int* fail) {
@@ -57,178 +57,6 @@ static void sc_result(CommandOutput* output, int idx, const char* name,
     pass_cond ? (*pass)++ : (*fail)++;
 }
 
-// ============================================================
-// CMD_SYSCALLTEST – syscall test paketi v28 (372 test)
-//
-// NOTLAR:
-//   - SYS_WRITE serial'a yazar (VGA değil) — kasıtlı.
-//   - SYS_READ non-blocking; veri yoksa 0 döner = PASS.
-//   - SYS_FORK: kernel context'te smoke test; çocuk hemen exit eder.
-//   - SYS_MMAP: 6-arg syscall; R10 ile ayrı asm bloğu kullanılır.
-//   - SYS_EXECVE (v12): ELF loader entegre; gerçek yükleme test edilir.
-//     [132] NULL path       -> EFAULT
-//     [133] Geçersiz path   -> ENOENT
-//     [134] Çok uzun path (>canonical) -> EFAULT
-//     [135] Boş path ""     -> ENOENT
-//     [136] VFS'de ELF magic olmayan dosya -> EINVAL
-//     [137] /bin/ önekiyle var olmayan dosya -> ENOENT
-//     [138] execve ENOENT öncesi task state değişmemeli
-//     [139] execve sonrası FD_CLOEXEC fd'si kapandı mı (simülasyon)
-//     [140] path = NULL (0) -> EFAULT
-//     [141] argv=NULL güvenli geçiş -> ENOENT (path yok ama crash yok)
-//     [142] ELF olmayan içerik kısa buffer -> EINVAL
-//     [143] path "/" kök dizin -> ENOENT
-//     [144] Çok kısa (4 byte) ELF magic-only -> EINVAL/ENOENT
-//     [145] Birden fazla execve hatası art arda -> tutarlılık
-//   - v13 – Process Group & Session (bash iş kontrolü):
-//     [146] setpgid(0,0)   → yeni grup lideri (pgid=pid)
-//     [147] getpgid(0)     → çağıranın pgid'ini sorgula
-//     [148] setpgid geçersiz pgid → EPERM/EINVAL
-//     [149] setpgid(0,pgid) → mevcut gruba katıl
-//     [150] setsid()       → yeni session (sid=pgid=pid)
-//     [151] setsid() tekrar → EPERM (zaten lider)
-//     [152] tcsetpgrp(0, pgid) → foreground grubu ayarla
-//     [153] tcgetpgrp(0)   → foreground pgid'i sorgula
-//     [154] tcsetpgrp geçersiz fd → EBADF
-//     [155] tcsetpgrp(0, pgid=0) → EINVAL
-//     [156] tcgetpgrp sonucu tcsetpgrp ile tutarlı
-//     [157] setpgid → getpgid round-trip tutarlılık
-//     [158] fork sonrası child pgid miras
-//     [159] tcsetpgrp + kill(self,SIGSTOP) tepki
-//     [160] getpgid(geçersiz pid) → EINVAL
-//   - SYS_LSEEK: serial/stdin seek'i EINVAL döner (beklenen).
-//   - SYS_FSTAT: fd türüne göre st_mode doğrulanır.
-//   - SYS_IOCTL: TCGETS/TCSETS/TIOCGWINSZ/FIONREAD yuvarlak trip.
-//   - v19 – Kaynak limitleri:
-//     [247] getrlimit(RLIMIT_NOFILE) cur==MAX_FDS
-//     [248] getrlimit(RLIMIT_STACK)  cur==8MiB
-//     [249] getrlimit(999 geçersiz)  → EINVAL
-//     [250] getrlimit(NULL buf)      → EFAULT
-//     [251] setrlimit(NPROC,32) round-trip
-//     [252] setrlimit(cur>max)       → EINVAL
-//     [253] setrlimit(hard artır)    → EPERM
-//     [254] setrlimit(NULL buf)      → EFAULT
-//   - v20 – newlib uyumu & bash eksikleri:
-//     [255] lstat(mevcut dosya)         → 0, st_size > 0
-//     [256] lstat(mevcut dizin)         → 0, S_ISDIR
-//     [257] lstat(olmayan path)         → ENOENT
-//     [258] lstat(NULL path)            → EFAULT
-//     [259] lstat vs stat tutarlılık    → aynı st_size
-//     [260] link(mevcut, yeni)          → EPERM (hard link desteklenmiyor)
-//     [261] link(olmayan src)           → ENOENT
-//     [262] link(NULL src)              → EFAULT
-//     [263] times(buf)                  → elapsed >= 0, tms_utime==0
-//     [264] times(NULL)                 → elapsed >= 0 (sadece tick ister)
-//     [265] times ardışık → elapsed monoton artar
-//   - v21 – bash port eksikleri (umask / symlink / readlink):
-//     [266] umask(0022) → eski mask döner (>= 0)
-//     [267] umask(0077) → eski 0022 dönmeli
-//     [268] umask round-trip 0055 → eski 0077 dönmeli
-//     [269] umask(0) → eski 0055 dönmeli
-//     [270] umask(0777) → eski 0 dönmeli (alt 9 bit)
-//     [271] umask restore 0022 → eski 0777 dönmeli
-//     [272] symlink("target","link") → 0
-//     [273] symlink aynı linkpath tekrar → EBUSY
-//     [274] symlink boş target → ENOENT
-//     [275] symlink NULL target → EFAULT
-//     [276] symlink NULL linkpath → EFAULT
-//     [277] readlink("/proc/self/exe") → len > 0
-//     [278] readlink symlink tablosundaki link → hedef döner
-//     [279] readlink gerçek dosya (symlink değil) → EINVAL
-//     [280] readlink NULL path → EFAULT
-//     [281] readlink bufsiz=0 → EINVAL
-//     [282] readlink küçük buf (1) → ret==1
-//     [283] readlink /proc/self/fd/1 → path boş değil
-//   - v22 – dosya/bellek izinleri + atomik pipe (chmod / mprotect / pipe2):
-//     [284] chmod(mevcut dosya, 0644)    → 0
-//     [285] chmod(dizin, 0755)           → 0
-//     [286] chmod(0777)+stat doğrulama  → st_mode alt 9 bit = 0777
-//     [287] chmod(yok)                  → ENOENT
-//     [288] chmod(NULL)                 → EFAULT
-//     [289] chmod(boş path)             → ENOENT
-//     [290] chmod(04755 setuid-ish)     → 0 (üst bitler yoksayılır)
-//     [291] mprotect(page,PROT_READ)    → 0
-//     [292] mprotect(page,RWX)          → 0
-//     [293] mprotect(NULL addr)         → EFAULT
-//     [294] mprotect(hizasız addr)      → EINVAL
-//     [295] mprotect(len=0)             → EINVAL
-//     [296] mprotect(prot=0xFF)         → EINVAL
-//     [297] pipe2(flags=0)              → SYS_PIPE ile aynı
-//     [298] pipe2(O_CLOEXEC)            → FD_CLOEXEC her iki fd
-//     [299] pipe2 write+read round-trip → "PIPE2OK"
-//     [300] pipe2(NULL pipefd)          → EFAULT
-//     [301] pipe2(bad flags)            → EINVAL
-//     [302] pipe vs pipe2 fd range      → her ikisi >= 3
-//     [303] pipe2 + FCNTL F_GETFD       → FD_CLOEXEC = 1
-//   - v24 – futex & getrandom (Linux numaraları: futex=202, getrandom=318):
-//     [311] FUTEX_WAKE(no waiters)       → 0
-//     [312] FUTEX_WAIT(val mismatch)     → EAGAIN
-//     [313] FUTEX(NULL uaddr)            → EFAULT
-//     [314] FUTEX(geçersiz op)           → EINVAL|ENOSYS
-//     [315] FUTEX_WAKE_PRIVATE           → 0
-//     [316] GETRANDOM(16,0)             → 16 bytes
-//     [317] GETRANDOM(0)               → 0
-//     [318] GETRANDOM(NULL buf)         → EFAULT
-//     [319] GETRANDOM(GRND_RANDOM)      → 8 bytes
-//     [320] GETRANDOM(bad flags)        → EINVAL
-//   - v25 – arch_prctl & clone (Linux numaraları: arch_prctl=158, clone=56):
-//     [321] ARCH_SET_FS(addr)           → 0
-//     [322] ARCH_GET_FS(*addr)          → addr round-trip tutarlı
-//     [323] ARCH_SET_GS(addr)           → 0
-//     [324] ARCH_GET_GS(*addr)          → addr round-trip tutarlı
-//     [325] ARCH_GET_FS(NULL)           → EFAULT
-//     [326] ARCH_GET_GS(NULL)           → EFAULT
-//     [327] arch_prctl(geçersiz code)   → EINVAL
-//     [328] clone(flags=SIGCHLD)        → fork-like, child_pid > 0
-//     [329] clone(CLONE_THREAD no stack) → EINVAL
-//     [330] clone(CLONE_THREAD no VM)   → EINVAL
-//   - v26 – musl libc başlatma (set_tid_address=218, set_robust_list=273):
-//     [331] set_tid_address(valid ptr)  → tid > 0
-//     [332] set_tid_address(NULL)       → tid > 0  (NULL kabul edilir)
-//     [333] set_tid_address round-trip  → dönen tid == getpid()
-//     [334] set_robust_list(head, 24)   → 0
-//     [335] set_robust_list(NULL, 24)   → 0  (liste temizleme)
-//     [336] set_robust_list(bad len 0)  → EINVAL
-//     [337] set_robust_list(bad len 16) → EINVAL
-//     [338] set_robust_list(bad len 32) → EINVAL
-//     [339] set_tid_address ardışık çağrı → her seferinde aynı tid
-//     [340] set_robust_list + set_tid_address birlikte → her ikisi 0/tid
-//   - v27 – musl libc çalışması (writev=20, madvise=28, exit_group=231,
-//                                openat=257, newfstatat=262, prlimit64=302):
-//     [341] writev(stdout, iov[1])         → bytes yazıldı
-//     [342] writev(stdout, iov[2])         → toplam bytes
-//     [343] writev(bad fd)                 → EBADF
-//     [344] writev(NULL iov)               → EFAULT
-//     [345] writev(iovcnt=0)               → 0
-//     [346] madvise(page, MADV_DONTNEED)   → 0
-//     [347] madvise(page, MADV_FREE)       → 0
-//     [348] madvise(hizasız addr)          → EINVAL
-//     [349] madvise(len=0)                 → 0
-//     [350] openat(AT_FDCWD, path, O_RDONLY) → fd >= 3
-//     [351] openat(AT_FDCWD, no path)      → ENOENT
-//     [352] openat(AT_FDCWD, NULL)         → EFAULT
-//     [353] openat(bad dirfd, rel path)    → EBADF|EINVAL
-//     [354] newfstatat(AT_FDCWD, file)     → 0, st_size > 0
-//     [355] newfstatat(AT_FDCWD, dir)      → 0, S_ISDIR
-//     [356] newfstatat(AT_FDCWD, nopath)   → ENOENT
-//     [357] newfstatat(AT_FDCWD, NULL)     → EFAULT
-//     [358] prlimit64(0, RLIMIT_NOFILE, NULL, old) → cur==MAX_FDS
-//     [359] prlimit64(0, RLIMIT_STACK, NULL, old)  → cur > 0
-//     [360] prlimit64(0, geçersiz res, NULL, NULL) → EINVAL
-//   - v28 – X11 altyapısı: socket(41) / connect(42):
-//     [361] socket(AF_UNIX, SOCK_STREAM, 0)          → fd >= 3
-//     [362] close(socket_fd)                         → 0
-//     [363] socket(AF_INET, SOCK_STREAM, 0)          → fd >= 3
-//     [364] socket(AF_UNIX, SOCK_DGRAM, 0)           → fd >= 3
-//     [365] socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC)→ fd >= 3
-//     [366] socket(AF_UNIX, SOCK_STREAM|SOCK_NONBLOCK)→ fd >= 3
-//     [367] socket(bad domain=99)                    → EINVAL
-//     [368] socket(bad type=99)                      → EINVAL
-//     [369] connect(fd=-1)                           → EBADF
-//     [370] connect(NULL addr)                       → EFAULT
-//     [371] connect(addrlen < 2)                     → EINVAL
-//     [372] connect(AF_UNIX, X11 path)               → 0 (stub)
-// ============================================================
 void cmd_syscalltest(const char* args, CommandOutput* output) {
     (void)args;
 
@@ -247,7 +75,6 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
     char tmp[32]; char line[96];
     const char* hexc = "0123456789ABCDEF";
 
-    // Doğrudan ekrana yaz (buffer dolunca drop olmaz)
     #define SCPRINT(txt, col) do { \
         println64((txt), (col)); \
         output_add_line(output, (txt), (col)); \
@@ -4994,7 +4821,6 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         }
     }
 
-    // ── Genel Özet ─────────────────────────────────────────────────
     SCPRINT("", VGA_WHITE);
     SCPRINT("────────────────────────────────────────", VGA_CYAN);
     str_cpy(line, "Result: ");

@@ -1582,6 +1582,8 @@ int prlimit(pid_t pid, int resource,
 #define SYS_FB_INFO  407
 #define SYS_KB_RAW   408
 #define SYS_FB_BLIT  409
+#define SYS_KB_READ  410
+#define SYS_SB16_PLAY 411
 
 // fb_info_t — kernel fb_info_t ile birebir aynı olmalı
 // Kernel syscall.h: TÜM FIELD'LAR uint64_t
@@ -1625,6 +1627,30 @@ int kb_raw(int enable) {
 // Dönüş: 0 başarı, -1 hata
 int fb_blit(ascent_fb_blit_t* req) {
     long ret = _sc1(SYS_FB_BLIT, (long)req);
+
+// ── SYS_SB16_PLAY (411): SB16 PCM calmak icin ──────────────────────────────
+// buf      : PCM verisi (user-space, max 4096 byte)
+// len      : byte sayisi (max 4096, SB16 DMA kisiti)
+// rate_hz  : ornekleme hizi (4000-44100 Hz)
+// fmt      : 0=8bit_mono 1=8bit_stereo 2=16bit_mono 3=16bit_stereo
+// Donus    : 0=basari, -19=ENODEV (SB16 yok), -22=EINVAL, -5=EIO
+#define SYS_SB16_PLAY 411
+// __attribute__((used)): -Wunused-function uyarısını önler.
+// wav_player.c bu fonksiyonu inline syscall ile çağırıyor;
+// gerekirse doğrudan bu stub da kullanılabilir.
+int __attribute__((used)) sb16_play(const void* buf, int len, int rate_hz, int fmt) {
+    // errno.h gerektirmemek için -EINVAL değerini doğrudan döndür
+    if (!buf || len <= 0 || len > 4096) return -22; // EINVAL, SET_ERRNO_RET bypass
+    long ret;
+    register long r10 __asm__("r10") = (long)fmt;
+    __asm__ volatile ("syscall"
+        : "=a"(ret)
+        : "0"(411L), "D"((long)buf), "S"((long)len), "d"((long)rate_hz), "r"(r10)
+        : "rcx", "r11", "memory");
+    SET_ERRNO_RET(ret, -1);
+    return (int)ret;
+}
+
     SET_ERRNO_RET(ret, -1);
     return (int)ret;
 }

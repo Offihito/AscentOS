@@ -379,6 +379,8 @@ typedef struct {
 #define SYS_FB_INFO      407  // fb_info(fb_info_t* out)        -> 0 | err  [AscentOS özel]
 #define SYS_KB_RAW       408  // kb_raw(int enable)             -> 0 | err  [AscentOS özel]
 #define SYS_FB_BLIT      409  // fb_blit(ascent_fb_blit_t* req) -> 0 | err  [AscentOS özel]
+#define SYS_KB_READ      410  // kb_read(buf, len)              -> n | err  [AscentOS özel]
+#define SYS_SB16_PLAY    411  // sb16_play(buf,len,rate,fmt)    -> 0 | err  [AscentOS özel]
 #define SYSCALL_MAX      410  // AscentOS özel alan üst sınırı
 
 // ============================================================
@@ -894,6 +896,8 @@ typedef struct {
     uint64_t    offset;      // dosya okuma/yazma ofseti
     char        path[52];    // açık dosyanın yolu (debug / gelecek VFS)
     pipe_buf_t* pipe;        // FD_TYPE_PIPE ise tampon; diğer türler için NULL
+    uint32_t    cached_ino;  // ext2 inode no — open()'da resolve edilir, read()'da path_resolve atlar
+                             // 0 = cache yok (VFS/pipe/serial dosyaları için)
 } fd_entry_t;
 
 // ============================================================

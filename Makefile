@@ -72,6 +72,9 @@ timer.o: kernel/timer.c kernel/timer.h
 pcspk.o: drivers/pcspk.c drivers/pcspk.h
 	$(CC) $(CFLAGS) -c drivers/pcspk.c -o pcspk.o
 
+sb16.o: drivers/sb16.c drivers/sb16.h
+	$(CC) $(CFLAGS) -c drivers/sb16.c -o sb16.o
+
 task.o: kernel/task.c kernel/task.h
 	$(CC) $(CFLAGS) -c kernel/task.c -o task.o
 
@@ -84,7 +87,7 @@ font8x16.o: kernel/font8x16.c kernel/font8x16.h
 vesa64.o: drivers/vesa64.c drivers/vesa64.h kernel/font8x16.h
 	$(CC) $(CFLAGS) -c drivers/vesa64.c -o vesa64.o
 
-syscall.o: kernel/syscall.c kernel/syscall.h kernel/signal64.h
+syscall.o: kernel/syscall.c kernel/syscall.h drivers/sb16.h kernel/signal64.h
 	$(CC) $(CFLAGS) -c kernel/syscall.c -o syscall.o
 
 signal64.o: kernel/signal64.c kernel/signal64.h kernel/syscall.h kernel/task.h
@@ -135,7 +138,8 @@ taskbar.o: kernel/taskbar64.c kernel/taskbar64.h
 wm64.o: kernel/wm64.c kernel/wm64.h kernel/compositor64.h kernel/taskbar64.h
 	$(CC) $(CFLAGS) -c kernel/wm64.c -o wm64.o
 
-commands64.o: commands/commands64.c commands/commands64.h
+commands64.o: commands/commands64.c commands/commands64.h \
+              drivers/sb16.h drivers/pcspk.h
 	$(CC) $(CFLAGS) -c commands/commands64.c -o commands64.o
 
 ipv4.o: network/ipv4.c network/ipv4.h network/arp.h drivers/rtl8139.h
@@ -160,7 +164,8 @@ syscalltest64.o: commands/syscalltest64.c commands/commands64.h kernel/syscall.h
 	$(CC) $(CFLAGS) -c commands/syscalltest64.c -o syscalltest64.o
 
 kernel64.o: kernel/kernel64.c kernel/gui64.h drivers/mouse64.h kernel/wm64.h \
-            drivers/ata64.h kernel/ext2.h fs/files64.h kernel/cpu64.h
+            drivers/ata64.h kernel/ext2.h fs/files64.h kernel/cpu64.h \
+            drivers/sb16.h
 	$(CC) $(CFLAGS) -c kernel/kernel64.c -o kernel64.o
 
 cpu64.o: kernel/cpu64.c kernel/cpu64.h
@@ -173,7 +178,7 @@ KERNEL_OBJS = boot64.o interrupts64.o idt64.o \
               font8x16.o vesa64.o gui64.o compositor64.o wm64.o mouse64.o \
               keyboard.o kernel64.o taskbar.o cpu64.o spinlock64.o \
               commands64.o syscalltest64.o files64.o ata64.o ext2.o elf64.o \
-              pmm.o heap.o vmm64.o timer.o pcspk.o task.o scheduler.o \
+              pmm.o heap.o vmm64.o timer.o pcspk.o sb16.o task.o scheduler.o \
               page_fault.o syscall.o signal64.o \
               panic64.o rtl8139.o arp.o ipv4.o icmp.o udp.o dhcp.o tcp.o http.o
 
@@ -308,7 +313,7 @@ USERLAND_LDFLAGS := \
 
 USERLAND_CRT0   := userland/libc/crt0.o
 SYSCALLS_OBJ    := userland/out/syscalls.o
-USERLAND_APPS   := hello calculator shell snake
+USERLAND_APPS   := hello calculator shell snake wav_player
 USERLAND_ELFS   := $(addprefix userland/out/, $(addsuffix .elf, $(USERLAND_APPS)))
 
 .PRECIOUS: userland/out/%.o userland/out/%.elf userland/libc/crt0.o $(SYSCALLS_OBJ)
@@ -369,6 +374,7 @@ install-userland: userland disk.img
 	    debugfs -w disk.img -R "write userland/out/calculator.elf bin/calc.elf"        2>/dev/null; \
 	    debugfs -w disk.img -R "write userland/out/snake.elf      bin/snake.elf"       2>/dev/null; \
 	    debugfs -w disk.img -R "write userland/out/shell.elf      bin/shell.elf"       2>/dev/null; \
+	    debugfs -w disk.img -R "write userland/out/wav_player.elf bin/wav_player.elf"  2>/dev/null; \
 	    echo "✓ ELF'ler /bin/'e yazildi (debugfs)"; \
 	elif command -v e2cp >/dev/null 2>&1; then \
 	    echo "  → e2cp kullaniliyor"; \
@@ -376,6 +382,7 @@ install-userland: userland disk.img
 	    e2cp userland/out/calculator.elf disk.img:/bin/calc.elf;  \
 	    e2cp userland/out/snake.elf      disk.img:/bin/snake.elf; \
 	    e2cp userland/out/shell.elf      disk.img:/bin/shell.elf; \
+	    e2cp userland/out/wav_player.elf disk.img:/bin/wav_player.elf; \
 	    echo "✓ ELF'ler /bin/'e yazildi (e2cp)"; \
 	else \
 	    echo "  → loop mount deneniyor (sudo gerekebilir)"; \
@@ -392,6 +399,7 @@ install-userland-mount: userland disk.img
 	sudo cp userland/out/calculator.elf /tmp/ascentos_mnt/bin/calc.elf
 	sudo cp userland/out/snake.elf      /tmp/ascentos_mnt/bin/snake.elf
 	sudo cp userland/out/shell.elf      /tmp/ascentos_mnt/bin/shell.elf
+	sudo cp userland/out/wav_player.elf /tmp/ascentos_mnt/bin/wav_player.elf
 	sudo umount /tmp/ascentos_mnt
 	rmdir /tmp/ascentos_mnt
 	@echo "✓ ELF'ler kopyalandi"
@@ -424,6 +432,9 @@ run: AscentOS.iso disk.img install-userland
 	@echo "   ── ICMP (ping) için ──────────────────────────────────"
 	@echo "   QEMU SLiRP ICMP icin Linux izni gerekir:"
 	@echo "   sudo sysctl -w net.ipv4.ping_group_range='0 2147483647'"
+	@echo "   ── Ses (SB16) ───────────────────────────────────────"
+	@echo "   sb16 tone | sb16 ding | sb16 vol 200 | beep"
+	@echo "   wav_player /bin/sound.wav  (WAV oynatici)"
 	@echo "   ─────────────────────────────────────────────────────"
 	@sudo sysctl -w net.ipv4.ping_group_range="0 2147483647" 2>/dev/null || \
 	    echo "   [UYARI] ping_group_range ayarlanamadi — 'ping 1.1.1.1' calismazsa yukardaki komutu elle calistir"
@@ -434,6 +445,7 @@ run: AscentOS.iso disk.img install-userland
 	  -serial stdio -vga std \
 	  -usb -device usb-tablet \
 	  -audiodev pa,id=snd0 -machine pcspk-audiodev=snd0 \
+	  -device sb16,audiodev=snd0 \
 	  -netdev user,id=net0,restrict=off,ipv6=off,hostname=AscentOS,hostfwd=udp::5000-:5000,hostfwd=udp::5001-:5001,hostfwd=udp::5002-:5002,hostfwd=tcp::8080-:8080,hostfwd=tcp::8081-:8081 \
 	  -device rtl8139,netdev=net0 \
 	  -display gtk,zoom-to-fit=off
@@ -448,6 +460,7 @@ net-test: AscentOS.iso disk.img install-userland
 	  -serial stdio -vga std \
 	  -usb -device usb-tablet \
 	  -audiodev pa,id=snd0 -machine pcspk-audiodev=snd0 \
+	  -device sb16,audiodev=snd0 \
 	  -netdev user,id=net0,restrict=off,hostfwd=udp::5000-:5000,hostfwd=udp::5001-:5001,hostfwd=tcp::8080-:8080 \
 	  -device rtl8139,netdev=net0 \
 	  -object filter-dump,id=dump0,netdev=net0,file=/tmp/ascent_net.pcap \
@@ -461,6 +474,7 @@ debug: AscentOS.iso disk.img
 	  -serial stdio -vga std \
 	  -usb -device usb-tablet \
 	  -audiodev pa,id=snd0 -machine pcspk-audiodev=snd0 \
+	  -device sb16,audiodev=snd0 \
 	  -netdev user,id=net0,restrict=off \
 	  -device rtl8139,netdev=net0 \
 	  -s -S
@@ -570,7 +584,7 @@ help:
 # PHONY
 # ============================================================================
 
-.PHONY: all run debug net-test gdb musl userland install-userland \
+.PHONY: all run debug net-test gdb musl userland install-userland wav_player \
         install-userland-mount disk-ls disk-mount-mkdirs \
         disk-rebuild _disk_mkdirs \
         hello calculator shell snake \

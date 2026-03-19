@@ -51,6 +51,7 @@ extern void isr_keyboard(void);
 extern void isr_timer(void);
 extern void isr_mouse(void);
 extern void isr_net(void);     // IRQ11 → RTL8139 ağ kartı
+extern void isr_sb16(void);    // IRQ5  -> Sound Blaster 16
 
 // CPU Exception handler'lar (ISR 0-31)
 extern void isr0(void);  extern void isr1(void);  extern void isr2(void);
@@ -195,9 +196,10 @@ void init_interrupts64(void) {
     // ── IRQ Handler'larını IDT'ye bağla ─────────────────────────────────────
     idt_write(32, (uint64_t)isr_timer,    0x08, 0x8E); // IRQ0  Timer
     idt_write(33, (uint64_t)isr_keyboard, 0x08, 0x8E); // IRQ1  Klavye
+    idt_write(37, (uint64_t)isr_sb16,     0x08, 0x8E); // IRQ5  SB16 (0x20+5=0x25)
     idt_write(43, (uint64_t)isr_net,      0x08, 0x8E); // IRQ11 RTL8139 (0x20+11=0x2B)
     idt_write(44, (uint64_t)isr_mouse,    0x08, 0x8E); // IRQ12 Mouse
-    serial_print("[IDT] IRQ handlers: Timer(32) KB(33) Net(43) Mouse(44)\n");
+    serial_print("[IDT] IRQ handlers: Timer(32) KB(33) SB16(37) Net(43) Mouse(44)\n");
 
     // ── IDTR'yi yükle ────────────────────────────────────────────────────────
     idtr.limit = sizeof(idt) - 1;
@@ -209,9 +211,10 @@ void init_interrupts64(void) {
     idt_irq_enable(0);   // Timer
     idt_irq_enable(1);   // Klavye
     idt_irq_enable(2);   // Cascade (slave PIC için zorunlu)
+    idt_irq_enable(5);   // SB16 -- IRQ5 master PIC
     idt_irq_enable(11);  // RTL8139 ağ kartı
     idt_irq_enable(12);  // Mouse
-    serial_print("[IDT] IRQ lines unmasked: 0(Timer) 1(KB) 2(Cascade) 11(Net) 12(Mouse)\n");
+    serial_print("[IDT] IRQ lines unmasked: 0(Timer) 1(KB) 2(Cascade) 5(SB16) 11(Net) 12(Mouse)\n");
 
     // ── PIT 1000 Hz Timer ────────────────────────────────────────────────────
     // Kanal 0, Mode 3 (kare dalga), 1193182 / 1000 ≈ 1193 bölen

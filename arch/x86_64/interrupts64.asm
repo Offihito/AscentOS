@@ -6,6 +6,7 @@ global isr_keyboard
 global isr_timer
 global syscall_entry
 global isr_net
+global isr_sb16
 
 %ifndef TEXT_MODE_BUILD
 global isr_mouse
@@ -14,6 +15,7 @@ extern mouse_handler64
 
 extern keyboard_handler64
 extern rtl8139_irq_handler
+extern sb16_irq_handler
 extern scheduler_tick
 extern task_needs_switch
 extern task_get_current_context
@@ -125,7 +127,7 @@ isr_mouse:
 %endif
 
 ; ============================================================================
-; NETWORK INTERRUPT (IRQ11 → INT 0x2B) — RTL8139
+; NETWORK INTERRUPT (IRQ11 â INT 0x2B) â RTL8139
 ; IRQ11 is on the slave PIC (IRQ8-15); EOI order: slave (0xA0) then master (0x20).
 ; Installed at IDT vector 0x2B via idt_set(43,...) in init_interrupts64().
 ; ============================================================================
@@ -151,6 +153,52 @@ isr_net:
     mov al, 0x20
     out 0xA0, al        ; Slave PIC EOI  (IRQ11 -> slave)
     out 0x20, al        ; Master PIC EOI
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+
+    iretq
+
+; ============================================================================
+; SB16 INTERRUPT (IRQ5 → INT 0x25) — Sound Blaster 16
+; IRQ5 is on the master PIC (IRQ0-7).
+; EOI order: master PIC only (0x20).
+; Installed at IDT vector 37 (0x20+5) via idt_set_entry(37,...) in init_interrupts64().
+; sb16_irq_handler() sends DSP ACK and clears g_sb16.playing.
+; ============================================================================
+isr_sb16:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    call sb16_irq_handler       ; DSP acknowledge + g_sb16.playing=false
+                                ; EOI is handled inside sb16_irq_handler()
+                                ; to allow it to read IRQ status first.
 
     pop r15
     pop r14
@@ -437,11 +485,11 @@ task_load_and_jump_context:
     iretq
 
 ; ============================================================================
-; CPU EXCEPTION HANDLERS — PANIC SUPPORT
+; CPU EXCEPTION HANDLERS â PANIC SUPPORT
 ;
 ; Stack layout on entry to isr_panic_common:
 ;
-;   ISR_NOERRCODE — CPU push order:
+;   ISR_NOERRCODE â CPU push order:
 ;     [RSP+0]  = isr_num    (pushed by macro)
 ;     [RSP+8]  = 0          (pseudo err_code, pushed by macro)
 ;     [RSP+16] = RIP        \
@@ -450,7 +498,7 @@ task_load_and_jump_context:
 ;     [RSP+40] = RSP*        \ (only pushed on privilege change)
 ;     [RSP+48] = SS*         /
 ;
-;   ISR_ERRCODE — CPU pushes err_code first, then macro pushes isr_num.
+;   ISR_ERRCODE â CPU pushes err_code first, then macro pushes isr_num.
 ;   Layout is otherwise identical.
 ;
 ;   After isr_panic_common pushes all GPRs:
@@ -515,7 +563,7 @@ isr_panic_common:
     push r15
 
     mov  rdi, rsp
-    call kernel_panic_handler   ; kernel_panic_handler(exception_frame_t*) — does not return
+    call kernel_panic_handler   ; kernel_panic_handler(exception_frame_t*) â does not return
 
     cli
 .hang:
@@ -533,7 +581,7 @@ ISR_NOERRCODE 6    ; #UD Invalid Opcode
 ISR_NOERRCODE 7    ; #NM Device Not Available
 ; #DF handled by isr8_df below (IST1 stack)
 
-; #DF Double Fault — uses IST1 stack.
+; #DF Double Fault â uses IST1 stack.
 ; If #DF fires with a corrupt RSP the CPU would generate a second fault ->
 ; triple fault. Fix: set IDT gate IST=1 so the CPU switches to TSS.IST1,
 ; an independent clean stack unaffected by the corrupted RSP.
@@ -579,7 +627,7 @@ ISR_NOERRCODE 31
 ; Supports both kernel-mode (CPL=0) and user-mode (CPL=3) syscalls.
 ;
 ; Hardware SYSCALL actions (via MSR configuration):
-;   RCX    <- RIP        (return address — instruction after syscall)
+;   RCX    <- RIP        (return address â instruction after syscall)
 ;   R11    <- RFLAGS     (caller's RFLAGS)
 ;   RIP    <- LSTAR      (this function)
 ;   CS     <- STAR[47:32]       = 0x08 (Kernel Code)
@@ -597,9 +645,9 @@ ISR_NOERRCODE 31
 ;   SS = 0x1B -> RPL=3 -> came from Ring-3 -> user path
 ;
 ; KERNEL-MODE PATH (CPL=0):
-;   RSP is already on the kernel stack — use it directly.
+;   RSP is already on the kernel stack â use it directly.
 ;   Return: restore RFLAGS from R11 via pushfq, then jmp rcx.
-;   Do NOT use iretq — kernel-mode SYSCALL has no RSP/SS on the stack;
+;   Do NOT use iretq â kernel-mode SYSCALL has no RSP/SS on the stack;
 ;   a partial iretq frame causes #GP -> #DF -> triple fault.
 ;
 ; USER-MODE PATH (CPL=3):
@@ -653,15 +701,15 @@ syscall_entry:
     push r15
 
     ; Build syscall_frame_t (must match syscall.h, offsets +0..+64)
-    push r11        ; frame.r11  (+64) — saved RFLAGS
-    push rcx        ; frame.rcx  (+56) — saved RIP (return address)
+    push r11        ; frame.r11  (+64) â saved RFLAGS
+    push rcx        ; frame.rcx  (+56) â saved RIP (return address)
     push r9         ; frame.r9   (+48)
     push r8         ; frame.r8   (+40)
     push r10        ; frame.r10  (+32)
     push rdx        ; frame.rdx  (+24)
     push rsi        ; frame.rsi  (+16)
     push rdi        ; frame.rdi  (+8)
-    push rax        ; frame.rax  (+0)  — syscall number
+    push rax        ; frame.rax  (+0)  â syscall number
 
     mov rdi, rsp
     call syscall_dispatch
@@ -773,7 +821,7 @@ syscall_entry:
     o64 sysret
 
 ; ============================================================================
-; IST1 stack for #DF — 16 KB, must be set in TSS.IST1
+; IST1 stack for #DF â 16 KB, must be set in TSS.IST1
 ; ============================================================================
 section .bss
 align 16

@@ -10,6 +10,7 @@
 #include "../drivers/ata64.h"
 #include "ext2.h"
 #include "cpu64.h"   // SSE, CPUID, I/O port yardımcıları
+#include "../drivers/sb16.h"
 
 #define COM1 0x3F8
 
@@ -118,11 +119,15 @@ static void text_boot_screen(void) {
     println64("===        ASCENTOS 64-bit  v1.2  Unified Kernel          ===", VGA_LIGHT_GREEN);
     println64("===============================================================", VGA_CYAN);
     print_str64("  CPU : ", VGA_GREEN); println64(cpu, VGA_YELLOW);
-    println64("  PMM, VMM, GDT, TSS, Scheduler, SYSCALL hazir", VGA_GREEN);
-    println64("  Klavye + Mouse interrupt-driven aktif", VGA_GREEN);
+    println64("  PMM, VMM, GDT, TSS, Scheduler, SYSCALL READY", VGA_GREEN);
+    println64("  Klavye + Mouse interrupt-driven Active", VGA_GREEN);
     println64("", VGA_WHITE);
-    println64("  help   - tum komutlari goster", VGA_LIGHT_GREEN);
-    println64("  gfx    - GUI moduna gec (pencere yoneticisi)", VGA_YELLOW);
+    println64("  help   - Show All Commands", VGA_LIGHT_GREEN);
+    println64("  gfx    - Switch to Deprecated GUI mode", VGA_YELLOW);
+    if (g_sb16.initialized)
+        println64("  SB16   - Sound Blaster 16 aktif  (sb16 komutu ile kullanin)", VGA_GREEN);
+    else
+        println64("  Audio  - PC Speaker aktif  (beep komutu ile kullanin)", VGA_GREEN);
     println64("", VGA_WHITE);
 }
 
@@ -463,6 +468,15 @@ void kernel_main(uint64_t multiboot_info) {
 
     // Tüm ağ yığınını başlat: RTL8139 → IPv4 → UDP → ICMP → TCP → DHCP
     net_stack_init();
+
+    // SB16 ses kartini baslat (IRQ5 zaten IDT ve PIC'te aktif)
+    // false donerse cihaz yok -- pcspk fallback devrede
+    if (sb16_init()) {
+        serial_print("[SB16] Sound Blaster 16 hazir.\n");
+        sb16_print_info();
+    } else {
+        serial_print("[SB16] Cihaz bulunamadi (pcspk aktif).\n");
+    }
 
     // gui64 framebuffer ptr'yi kur (henüz ekrana çizme)
     gui_init();

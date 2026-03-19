@@ -5,6 +5,22 @@ OUTPUT_FORMAT(elf64-x86-64)
 
 SECTIONS
 {
+    /* ── DMA-safe buffer (ISA DMA: max 16 MB) ──────────────────────────────
+     * _dma_buf (sb16.c) buraya map edilir: fiziksel 0x10000 = 64 KB.
+     * 0x500 – 0x7FFFF: BIOS data'nın üstü, kernel'den önce, < 16 MB.
+     * AT(0x10000): LMA = fiziksel adres (identity mapped kernel).
+     * Bu blok kernel yüklemesinden önce linker tarafından işlenir. */
+    /* DMA-safe buffer: NOLOAD = ELF dosyasına yazılmaz.
+     * Sadece VMA/LMA adresi 0x10000 olarak rezerve edilir.
+     * GRUB bu segment için dosya okuması yapmaz → multiboot header
+     * dosya içinde 0x10000 ileriye kaymaz, başta kalır.
+     * _dma_buf içeriği boot sırasında sıfır (BSS gibi davranır).
+     * sb16_init() _dma_ptr ve _dma_phys'i runtime'da hesaplar. */
+    .dma_low 0x10000 (NOLOAD) : AT(0x10000) {
+        *(.dma_low)
+        . = ALIGN(8192);
+    }
+
     /* Kernel 1MB'den başlar (higher half kernel için 0xFFFFFFFF80000000 da kullanılabilir) */
     . = 1M;
     

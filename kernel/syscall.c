@@ -1,5 +1,14 @@
 #include "syscall.h"
 #include "signal64.h"
+// SYS_SB16_PLAY (411) icin minimal forward declarations
+// sb16.h include edilmiyor: buyuk include zinciri linker segment duzenini bozabilir.
+typedef enum { SB16_FMT_8BIT_MONO=0, SB16_FMT_8BIT_STEREO=1,
+               SB16_FMT_16BIT_MONO=2, SB16_FMT_16BIT_STEREO=3 } sb16_format_t;
+typedef struct { int initialized; } sb16_state_minimal_t;
+extern int  g_sb16_initialized;   // sb16.c'de tanımlanacak yardımcı flag
+extern volatile int g_sb16_playing;  // sb16.c: DMA aktif mi (syscall 412)
+extern int  sb16_play_pcm_raw(const void* buf, unsigned short len,
+                              unsigned int rate_hz, int fmt);
 #include "../fs/files64.h"
 #include "ext2.h"
 #include "task.h"
@@ -46,18 +55,32 @@ extern termios_t kernel_termios;
 // sys_fb_info: framebuffer bilgisini user-space fb_info_t*'a yazar
 // RDI = user-space fb_info_t* pointer
 void sys_fb_info(syscall_frame_t* frame) {
-    serial_print("[SYS_FB_INFO] called, framebuffer_addr=");
-    {
-        char buf[32];
-        // basit hex print
-        uint64_t v = framebuffer_addr;
-        buf[0]='0'; buf[1]='x';
-        const char* h = "0123456789abcdef";
-        for (int i = 0; i < 16; i++)
-            buf[2+i] = h[(v >> (60 - i*4)) & 0xf];
-        buf[18] = '\n'; buf[19] = 0;
-        serial_print(buf);
+    // Sadece ilk çağrıda log bas; her frame'de serial porta yazmayı önle.
+    static int _fb_info_logged = 0;
+    if (!_fb_info_logged) {
+        _fb_info_logged = 1;
+        serial_print("[SYS_FB_INFO] called, framebuffer_addr=");
+        {
+            char buf[32];
+            uint64_t v = framebuffer_addr;
+            buf[0]='0'; buf[1]='x';
+            const char* h = "0123456789abcdef";
+            for (int i = 0; i < 16; i++)
+                buf[2+i] = h[(v >> (60 - i*4)) & 0xf];
+            buf[18] = '\n'; buf[19] = 0;
+            serial_print(buf);
+        }
+        serial_print("[SYS_FB_INFO] w=");
+        { char b[16]; int_to_str((int)framebuffer_width, b); serial_print(b); }
+        serial_print(" h=");
+        { char b[16]; int_to_str((int)framebuffer_height, b); serial_print(b); }
+        serial_print(" pitch=");
+        { char b[16]; int_to_str((int)framebuffer_pitch, b); serial_print(b); }
+        serial_print(" bpp=");
+        { char b[16]; int_to_str((int)framebuffer_bpp, b); serial_print(b); }
+        serial_print("\n");
     }
+
     fb_info_t* out = (fb_info_t*)(uintptr_t)frame->rdi;
     if (!is_valid_user_ptr(out, sizeof(fb_info_t))) {
         frame->rax = SYSCALL_ERR_FAULT;
@@ -69,16 +92,6 @@ void sys_fb_info(syscall_frame_t* frame) {
     out->height = (uint64_t)framebuffer_height;
     out->pitch  = (uint64_t)framebuffer_pitch;
     out->bpp    = (uint64_t)framebuffer_bpp;
-
-    serial_print("[SYS_FB_INFO] w=");
-    { char b[16]; int_to_str((int)framebuffer_width, b); serial_print(b); }
-    serial_print(" h=");
-    { char b[16]; int_to_str((int)framebuffer_height, b); serial_print(b); }
-    serial_print(" pitch=");
-    { char b[16]; int_to_str((int)framebuffer_pitch, b); serial_print(b); }
-    serial_print(" bpp=");
-    { char b[16]; int_to_str((int)framebuffer_bpp, b); serial_print(b); }
-    serial_print("\n");
 
     frame->rax = 0;
 }
@@ -966,9 +979,6 @@ static void sys_open(syscall_frame_t* frame) {
         // Ext2'de dosya var mı? Static VFS'de de kontrol et
         const EmbeddedFile64* _vf = fs_get_file64(path);
         if (!_vf && !ext2_path_is_file(path)) {
-            serial_print("[SYSCALL] open: ENOENT ");
-            serial_print(path);
-            serial_print("\n");
             frame->rax = SYSCALL_ERR_NOENT;
             return;
         }
@@ -2550,13 +2560,6 @@ static void sys_lseek(syscall_frame_t* frame) {
     if (new_offset < 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
 
     ent->offset = (uint64_t)new_offset;
-
-    serial_print("[SYSCALL] lseek fd=");
-    { char b[8]; int_to_str(fd, b); serial_print(b); }
-    serial_print(" new_offset=");
-    print_uint64((uint64_t)new_offset);
-    serial_print("\n");
-
     frame->rax = (uint64_t)new_offset;
 }
 
@@ -5584,10 +5587,6 @@ static void sys_writev(syscall_frame_t* frame) {
     iovec_t* iov    = (iovec_t*)(uintptr_t)frame->rsi;
     int      iovcnt = (int)(int64_t)frame->rdx;
 
-    serial_print("[SYSCALL] writev fd=");
-    { char b[8]; int_to_str(fd, b); serial_print(b); }
-    serial_print("\n");
-
     if (!iov || !is_valid_user_ptr(iov, sizeof(iovec_t) * (uint64_t)iovcnt)) {
         frame->rax = SYSCALL_ERR_FAULT; return;
     }
@@ -6022,6 +6021,25 @@ void syscall_dispatch(syscall_frame_t* frame) {
 
     uint64_t num = frame->rax;
 
+    // ── SYS_SB16_PLAY (411): sinyal dispatch OLMADAN işle ─────────────────
+    // signal_dispatch_pending() context switch yapabiliyor; bu wav_player'ı
+    // beklenmedik anlarda durduruyor → DMA buffer boşalıyor → cızırtı.
+    // Ses syscall'ı zamana duyarlı — sinyal kontrolü atlanır.
+    if (num == 411) {
+        const void* ubuf  = (const void*)(uintptr_t)frame->rdi;
+        uint64_t    ulen  = frame->rsi;
+        uint32_t    rate  = (uint32_t)frame->rdx;
+        uint32_t    fmt   = (uint32_t)frame->r10;
+        if (!ubuf || ulen == 0 || ulen > 8192) { frame->rax = SYSCALL_ERR_INVAL; return; }
+        if (!is_valid_user_ptr(ubuf, ulen))     { frame->rax = SYSCALL_ERR_FAULT; return; }
+        if (rate < 4000 || rate > 48000)        { frame->rax = SYSCALL_ERR_INVAL; return; }
+        if (fmt > 3)                            { frame->rax = SYSCALL_ERR_INVAL; return; }
+        if (!g_sb16_initialized)                { frame->rax = -19; return; }
+        int ok = sb16_play_pcm_raw(ubuf, (unsigned short)ulen, rate, (int)fmt);
+        frame->rax = (ok == 0) ? 0 : -5;
+        return;  // signal_dispatch_pending() ATLANDI
+    }
+
     switch (num) {
     case SYS_WRITE:        sys_write(frame);       break;
     case SYS_READ:         sys_read(frame);        break;
@@ -6152,6 +6170,33 @@ void syscall_dispatch(syscall_frame_t* frame) {
             kbuf[kcount++] = (char)kch;
         }
         frame->rax = kcount > 0 ? kcount : SYSCALL_ERR_AGAIN;
+        break;
+    }
+    // 411 – SYS_SB16_PLAY: Ring-3'ten SB16 PCM çal
+    // RDI=buf, RSI=len(max 4096), RDX=rate_hz, R10=sb16_fmt(0-3)
+    // sb16_fmt: 0=8bit_mono 1=8bit_stereo 2=16bit_mono 3=16bit_stereo
+    case 411: {
+        const void* ubuf    = (const void*)(uintptr_t)frame->rdi;
+        uint64_t    ulen    = frame->rsi;
+        uint32_t    rate    = (uint32_t)frame->rdx;
+        uint32_t    fmt_raw = (uint32_t)frame->r10;
+
+        if (!ubuf || ulen == 0 || ulen > 8192)  { frame->rax = SYSCALL_ERR_INVAL; break; }
+        if (!is_valid_user_ptr(ubuf, ulen))      { frame->rax = SYSCALL_ERR_FAULT; break; }
+        if (rate < 4000 || rate > 48000)         { frame->rax = SYSCALL_ERR_INVAL; break; }
+        if (fmt_raw > 3)                         { frame->rax = SYSCALL_ERR_INVAL; break; }
+        if (!g_sb16_initialized)                 { frame->rax = -19; break; } // ENODEV
+
+        // sb16_play_pcm_raw: sb16.c'deki wrapper (g_sb16 yerine flag kullaniyor)
+        int ok = sb16_play_pcm_raw(ubuf, (unsigned short)ulen, rate, (int)fmt_raw);
+        frame->rax = (ok == 0) ? 0 : -5;  // 0=OK, -5=EIO
+        break;
+    }
+    // 412 – SYS_SB16_PLAYING: g_sb16_playing flag'ini döndür
+    // RAX = 1 (çalıyor) | 0 (bitti) | -19 (ENODEV)
+    case 412: {
+        if (!g_sb16_initialized) { frame->rax = -19; break; }
+        frame->rax = g_sb16_playing ? 1 : 0;
         break;
     }
     // v10 – sinyal altyapısı

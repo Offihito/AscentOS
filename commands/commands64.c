@@ -11,14 +11,15 @@
 #include "../kernel/syscall.h"
 #include "../kernel/signal64.h"
 #include "../drivers/pcspk.h"
+#include "../drivers/sb16.h"
 #include "../kernel/cpu64.h"
-#include "../kernel/spinlock64.h"   // spinlock_t, rwlock_t
+#include "../kernel/spinlock64.h"   
 #include <stdbool.h>
 
-extern void spinlock_test(void);    // spinlock64.c
+extern void spinlock_test(void); 
 
 // ============================================================================
-// RTL8139 Ağ Sürücüsü — extern bildirimleri
+// Networking
 // ============================================================================
 extern bool     rtl8139_init(void);
 extern bool     rtl8139_send(const uint8_t* data, uint16_t len);
@@ -32,9 +33,7 @@ extern uint32_t rtl8139_get_rx_count(void);
 extern uint32_t rtl8139_get_tx_count(void);
 extern void     rtl8139_poll(void);
 
-// ============================================================================
-// ARP Katmanı — extern bildirimleri (arp.c)
-// ============================================================================
+
 extern void     arp_init(const uint8_t my_ip[4], const uint8_t my_mac[6]);
 extern void     arp_handle_packet(const uint8_t* frame, uint16_t len);
 extern bool     arp_resolve(const uint8_t ip[4], uint8_t out_mac[6]);
@@ -48,13 +47,10 @@ extern bool     arp_is_initialized(void);
 extern void     ip_to_str(const uint8_t ip[4], char* out);
 extern bool     str_to_ip(const char* str, uint8_t out[4]);
 
-// arp_cache_foreach için callback tip tanımı
 typedef void (*arp_line_cb)(const char* line, uint8_t color, void* ctx);
 extern void arp_cache_foreach(arp_line_cb cb, void* ctx);
 
-// ============================================================================
-// IPv4 Katmanı — extern bildirimleri (ipv4.c)
-// ============================================================================
+
 extern void     ipv4_init(void);
 extern void     ipv4_handle_packet(const uint8_t* frame, uint16_t len);
 extern bool     ipv4_send(const uint8_t dst_ip[4], uint8_t protocol,
@@ -66,27 +62,23 @@ extern void     ipv4_set_gateway(const uint8_t gw[4]);
 extern void     ipv4_set_subnet(const uint8_t mask[4]);
 extern void     ipv4_get_gateway(uint8_t out[4]);
 
-// ============================================================================
-// ICMP Katmanı — extern bildirimleri (icmp.c)
-// ============================================================================
+
 extern void     icmp_init(void);
 extern bool     icmp_ping(const uint8_t dst_ip[4]);
-extern int      icmp_ping_state(void);   // PingState enum: 0=IDLE,1=PENDING,2=SUCCESS (hata:3/4)
+extern int      icmp_ping_state(void);   
 extern uint32_t icmp_last_rtt_ms(void);
 extern uint16_t icmp_last_seq(void);
 extern void     icmp_get_last_src(uint8_t out[4]);
 extern void     icmp_ping_reset(void);
 
-// PING_* enum değerleri (icmp.h'daki PingState ile eşleşmeli)
+
 #define PING_IDLE        0
 #define PING_PENDING     1
 #define PING_SUCCESS     2
 #define PING_TIMEOUT     3
 #define PING_UNREACHABLE 4
 
-// ============================================================================
-// UDP Katmanı — extern bildirimleri (udp.c)
-// ============================================================================
+
 typedef struct {
     uint8_t  src_ip[4];
     uint16_t src_port;
@@ -96,7 +88,7 @@ typedef struct {
 } UDPPacket;
 typedef void (*udp_handler_t)(const UDPPacket* pkt, void* ctx);
 
-extern void     udp_init_csum(int csum_enable);   // udp_init(mode) wrapper — aşağıda sarılır
+extern void     udp_init_csum(int csum_enable);   
 extern bool     udp_bind(uint16_t port, udp_handler_t handler, void* ctx);
 extern void     udp_unbind(uint16_t port);
 extern bool     udp_send(const uint8_t dst_ip[4], uint16_t dst_port, uint16_t src_port,
@@ -107,17 +99,13 @@ extern bool     udp_is_initialized(void);
 extern uint32_t udp_get_rx_count(void);
 extern uint32_t udp_get_tx_count(void);
 
-// udp_sockets_foreach için callback tip tanımı
 typedef void (*udp_line_cb)(const char* line, uint8_t color, void* ctx);
 extern void udp_sockets_foreach(udp_line_cb cb, void* ctx);
 
-// UDP_CSUM_ENABLE = 1 (udp.h'dan)
-// udp.c içindeki udp_init(UDPCsumMode) fonksiyonunu doğrudan çağırıyoruz:
+
 extern void udp_init(int csum_mode);
 
-// ============================================================================
-// DHCP İstemcisi — extern bildirimleri (dhcp.c)
-// ============================================================================
+
 typedef enum {
     DHCP_STATE_IDLE       = 0,
     DHCP_STATE_SELECTING,
@@ -145,15 +133,13 @@ typedef struct {
 extern void        dhcp_init(void);
 extern bool        dhcp_discover(void);
 extern void        dhcp_release(void);
-extern int         dhcp_get_state(void);      // DHCPState enum
+extern int         dhcp_get_state(void);      
 extern void        dhcp_get_config(DHCPConfig* out);
 extern const char* dhcp_state_str(void);
 extern bool        dhcp_is_initialized(void);
 extern uint32_t    dhcp_get_xid(void);
 
-// ============================================================================
-// TCP Katmanı — extern bildirimleri (tcp.c) — Aşama 6
-// ============================================================================
+
 typedef enum {
     TCP_STATE_CLOSED      = 0,
     TCP_STATE_LISTEN,
@@ -189,7 +175,7 @@ extern int          tcp_listen(uint16_t port, tcp_accept_cb_t accept_cb, void* c
 extern int          tcp_send(int conn_id, const uint8_t* data, uint16_t len);
 extern void         tcp_close(int conn_id);
 extern void         tcp_abort(int conn_id);
-extern int          tcp_get_state(int conn_id);   // TCPState_t
+extern int          tcp_get_state(int conn_id);   
 extern bool         tcp_is_connected(int conn_id);
 extern uint16_t     tcp_read(int conn_id, uint8_t* out, uint16_t max_len);
 extern void         tcp_tick(void);
@@ -200,7 +186,7 @@ extern uint32_t     tcp_get_rx_count(void);
 extern int          tcp_get_conn_count(void);
 extern const char*  tcp_state_str(int state);
 
-// ── HTTP istemcisi (http.c) ──────────────────────────────────────────────────
+
 typedef struct {
     int      status;
     uint16_t header_len;
@@ -232,45 +218,41 @@ extern const char*  http_err_str(HTTPError err);
 extern const char*  http_status_str(int status);
 extern void         http_response_reset(HTTPResponse* resp);
 
-// TCP test için global durum (cmd_tcpconnect / cmd_tcptest ortak kullanır)
+
 static volatile int    g_tcp_conn_id      = -1;
 static volatile bool   g_tcp_connected    = false;
 static volatile bool   g_tcp_data_recvd   = false;
 static volatile bool   g_tcp_closed       = false;
 static volatile bool   g_tcp_error        = false;
-// Alınan verinin ilk 128 baytını VGA'ya yazmak için
+
 static char            g_tcp_recv_preview[128];
 static volatile uint16_t g_tcp_recv_len   = 0;
 
-// ============================================================================
-// Sürücünün başlatılıp başlatılmadığını sorgulayan dahili değişken
-// (rtl8139.c içinde static, doğrudan erişemeyiz — init sonucu burada saklarız)
-// NOT: kernel64.c'den net_register_packet_handler() üzerinden güncellenir.
-// ============================================================================
 int g_net_initialized = 0;
 
-// Son alınan paketin özet bilgisini TEXT modda göstermek için
-static volatile uint32_t g_net_rx_display  = 0;  // gösterilecek paket sayısı
-static volatile uint16_t g_net_last_etype  = 0;  // son paketin EtherType
-static volatile uint8_t  g_net_last_src[6] = {0}; // son paketin kaynak MAC
+extern void serial_print(const char* str);
+extern void serial_write(char c);
+extern void println64(const char* str, uint8_t color);
+extern void print_str64(const char* str, uint8_t color);
+extern uint64_t get_system_ticks(void);
 
-// Forward declaration — tanım dosyanın sonundadır
+static volatile uint32_t g_net_rx_display  = 0;  
+static volatile uint16_t g_net_last_etype  = 0;  
+static volatile uint8_t  g_net_last_src[6] = {0}; 
+
 void net_register_packet_handler(void);
 
 // ============================================================================
-// Paket alma callback: RTL8139'dan gelen her çerçeveyi
-//   → ARP katmanına   (EtherType 0x0806)
-//   → IPv4 katmanına  (EtherType 0x0800)
+// Receiving packages
 // ============================================================================
 static void net_packet_callback(const uint8_t* buf, uint16_t len) {
     g_net_rx_display++;
     // EtherType (byte 12-13)
     if (len >= 14) {
         g_net_last_etype = (uint16_t)((buf[12] << 8) | buf[13]);
-        // Kaynak MAC (byte 6-11)
+        // Source Mac (byte 6-11)
         for (int i = 0; i < 6; i++) g_net_last_src[i] = buf[6 + i];
 
-        // Serial debug: gelen her paketin EtherType + uzunluğunu yaz
         serial_print("[RX] etype=0x");
         {
             const char* h = "0123456789ABCDEF";
@@ -284,7 +266,6 @@ static void net_packet_callback(const uint8_t* buf, uint16_t len) {
             if (!v) { serial_write('0'); }
             else { while(v){ b[bi++]='0'+(v%10); v/=10; } while(bi--) serial_write(b[bi]); }
         }
-        // IPv4 ise proto ve src IP yaz
         if (g_net_last_etype == 0x0800 && len >= 34) {
             serial_print("  proto=");
             uint8_t proto = buf[14+9];
@@ -302,13 +283,9 @@ static void net_packet_callback(const uint8_t* buf, uint16_t len) {
         serial_write('\n');
     }
 
-    // ARP katmanına ilet (EtherType 0x0806)
     if (arp_is_initialized())
         arp_handle_packet(buf, len);
 
-    // IPv4 katmanına ilet (EtherType 0x0800)
-    // icmp_handle_packet ve udp_handle_packet, ipv4_register_handler
-    // üzerinden otomatik çağrılır.
     if (ipv4_is_initialized() && len >= 14) {
         uint16_t etype = (uint16_t)((buf[12] << 8) | buf[13]);
         if (etype == 0x0800)
@@ -316,10 +293,6 @@ static void net_packet_callback(const uint8_t* buf, uint16_t len) {
     }
 }
 
-extern void println64(const char* str, uint8_t color);
-extern void print_str64(const char* str, uint8_t color);
-extern uint64_t get_system_ticks(void);
-extern void serial_print(const char* str);
 
 
 // ===========================================
@@ -438,7 +411,6 @@ void uint64_to_string(uint64_t num, char* str) {
     }
     str[i] = '\0';
     
-    // Reverse
     for (int j = 0; j < i / 2; j++) {
         char temp = str[j];
         str[j] = str[i - j - 1];
@@ -485,7 +457,7 @@ void int_to_str(int num, char* str) {
 uint64_t get_memory_info() {
     extern uint8_t* heap_start;
     extern uint8_t* heap_current;
-    return ((uint64_t)heap_current - (uint64_t)heap_start) / 1024; // KB
+    return ((uint64_t)heap_current - (uint64_t)heap_start) / 1024; 
 }
 
 void format_memory_size(uint64_t kb, char* buffer) {
@@ -512,17 +484,9 @@ void format_memory_size(uint64_t kb, char* buffer) {
 // COMMAND HANDLERS - BASIC
 // ===========================================
 
-void cmd_hello(const char* args, CommandOutput* output) {
-    (void)args;
-    output_add_line(output, "Hello from AscentOS 64-bit! Why so serious? ;)", VGA_YELLOW);
-}
-
-
-
 void cmd_help(const char* args, CommandOutput* output) {
     (void)args;
     output_add_line(output, "Available commands:", VGA_CYAN);
-    output_add_line(output, " hello     - Say hello", VGA_WHITE);
     output_add_line(output, " clear     - Clear screen", VGA_WHITE);
     output_add_line(output, " help      - Show this help", VGA_WHITE);
     output_add_line(output, " echo      - Echo text", VGA_WHITE);
@@ -534,9 +498,6 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_line(output, "ELF Loader Commands:", VGA_YELLOW);
     output_add_line(output, " exec      - Load ELF64 + Ring-3 task olustur", VGA_WHITE);
     output_add_line(output, " elfinfo   - Show ELF64 header (no load)", VGA_WHITE);
-    output_add_line(output, " kilo      - Kilo editor'u calistir: kilo <dosya>", VGA_WHITE);
-    output_add_line(output, " lua       - Lua interpreter'i calistir: lua <script>", VGA_WHITE);
-    output_add_line(output, "  (kilo/lua -> exec KILO.ELF / LUA.ELF otomatik)", VGA_DARK_GRAY);
     output_add_empty_line(output);
     output_add_line(output, "Multitasking Commands:", VGA_YELLOW);
     output_add_line(output, " ps        - List all tasks", VGA_WHITE);
@@ -574,51 +535,51 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_line(output, "              v10: signal/sigaction/sigprocmask", VGA_WHITE);
     output_add_empty_line(output);
     output_add_line(output, "Network Commands (RTL8139):", VGA_CYAN);
-    output_add_line(output, " netinit   - RTL8139 ag surucusunu baslat", VGA_WHITE);
-    output_add_line(output, " netstat   - Ag karti durumu + sayaclar", VGA_WHITE);
-    output_add_line(output, " netsend   - Test paketi gonder [adet]", VGA_WHITE);
-    output_add_line(output, " netmon    - Alinan paketleri izle", VGA_WHITE);
+    output_add_line(output, " netinit   - Start the RTL8139 network driver", VGA_WHITE);
+    output_add_line(output, " netstat   - Network card status + counters", VGA_WHITE);
+    output_add_line(output, " netsend   - Send test packet(s) [count]", VGA_WHITE);
+    output_add_line(output, " netmon    - Monitor received packets", VGA_WHITE);
     output_add_empty_line(output);
     output_add_line(output, "Network Commands (ARP/IPv4/ICMP):", VGA_CYAN);
-    output_add_line(output, " ipconfig  - IP ata / goster   ornek: ipconfig 10.0.2.15", VGA_WHITE);
-    output_add_line(output, " arping    - ARP request gonder ornek: arping 10.0.2.2", VGA_WHITE);
-    output_add_line(output, " arpcache  - ARP cache tablosunu goster", VGA_WHITE);
-    output_add_line(output, " arpflush  - ARP cache temizle", VGA_WHITE);
-    output_add_line(output, " arpstatic - Statik ARP: arpstatic <IP> <MAC>", VGA_WHITE);
-    output_add_line(output, " ipv4info  - IPv4 katman durumu ve sayaclari", VGA_WHITE);
-    output_add_line(output, " ping      - ICMP ping   ornek: ping 10.0.2.2", VGA_WHITE);
-    output_add_line(output, " ping      - Birden fazla: ping 10.0.2.2 4", VGA_DARK_GRAY);
+    output_add_line(output, " ipconfig  - Assign / show IP     example: ipconfig 10.0.2.15", VGA_WHITE);
+    output_add_line(output, " arping    - Send ARP request     example: arping 10.0.2.2", VGA_WHITE);
+    output_add_line(output, " arpcache  - Display ARP cache table", VGA_WHITE);
+    output_add_line(output, " arpflush  - Clear ARP cache", VGA_WHITE);
+    output_add_line(output, " arpstatic - Static ARP entry: arpstatic <IP> <MAC>", VGA_WHITE);
+    output_add_line(output, " ipv4info  - IPv4 layer status and counters", VGA_WHITE);
+    output_add_line(output, " ping      - ICMP ping            example: ping 10.0.2.2", VGA_WHITE);
+    output_add_line(output, " ping      - Multiple pings:     ping 10.0.2.2 4", VGA_DARK_GRAY);
     output_add_empty_line(output);
-    output_add_line(output, "Network Commands (UDP - Asama 4):", VGA_CYAN);
-    output_add_line(output, " udpinit              - UDP katmanini baslat (ipconfig sonrasi)", VGA_WHITE);
-    output_add_line(output, " udplisten <port>     - Porta UDP echo sunucusu bagla", VGA_WHITE);
-    output_add_line(output, " udpsend <ip> <p> <m> - UDP mesaji gonder", VGA_WHITE);
-    output_add_line(output, " udpclose <port>      - Port dinleyicisini kaldir", VGA_WHITE);
-    output_add_line(output, " udpstat              - UDP soket tablosu ve sayaclar", VGA_WHITE);
+    output_add_line(output, "Network Commands (UDP - Phase 4):", VGA_CYAN);
+    output_add_line(output, " udpinit              - Start UDP layer (after ipconfig)", VGA_WHITE);
+    output_add_line(output, " udplisten <port>     - Bind UDP echo server to port", VGA_WHITE);
+    output_add_line(output, " udpsend <ip> <port> <msg> - Send UDP message", VGA_WHITE);
+    output_add_line(output, " udpclose <port>      - Remove listener from port", VGA_WHITE);
+    output_add_line(output, " udpstat              - UDP socket table and counters", VGA_WHITE);
     output_add_line(output, "", VGA_WHITE);
-    output_add_line(output, "Network Commands (DHCP - Asama 5):", VGA_CYAN);
-    output_add_line(output, " dhcp                 - DHCP ile otomatik IP al", VGA_WHITE);
-    output_add_line(output, " dhcpstat             - DHCP durum + atanan IP/GW/DNS", VGA_WHITE);
-    output_add_line(output, " dhcprel              - DHCP Release (IP iade et)", VGA_WHITE);
+    output_add_line(output, "Network Commands (DHCP - Phase 5):", VGA_CYAN);
+    output_add_line(output, " dhcp                 - Obtain IP automatically via DHCP", VGA_WHITE);
+    output_add_line(output, " dhcpstat             - DHCP status + assigned IP/GW/DNS", VGA_WHITE);
+    output_add_line(output, " dhcprel              - DHCP Release (return the IP)", VGA_WHITE);
     output_add_empty_line(output);
-    output_add_line(output, "Network Commands (TCP - Asama 6):", VGA_CYAN);
-    output_add_line(output, " tcpstat              - Tum TCP baglantilarini goster", VGA_WHITE);
-    output_add_line(output, " tcpconnect <ip> <p>  - TCP baglantisi kur", VGA_WHITE);
-    output_add_line(output, " tcpsend <id> <msg>   - Baglantiya veri gonder", VGA_WHITE);
-    output_add_line(output, " tcpclose <id>        - Baglantiyi kapat (FIN)", VGA_WHITE);
-    output_add_line(output, " tcplisten <port>     - TCP sunucu baslatir", VGA_WHITE);
-    output_add_line(output, " tcptest <ip> <port>  - HTTP GET testi (ornek: tcptest 10.0.2.2 80)", VGA_WHITE);
+    output_add_line(output, "Network Commands (TCP - Phase 6):", VGA_CYAN);
+    output_add_line(output, " tcpstat              - Show all TCP connections", VGA_WHITE);
+    output_add_line(output, " tcpconnect <ip> <port>  - Establish TCP connection", VGA_WHITE);
+    output_add_line(output, " tcpsend <id> <msg>   - Send data on connection", VGA_WHITE);
+    output_add_line(output, " tcpclose <id>        - Close connection (send FIN)", VGA_WHITE);
+    output_add_line(output, " tcplisten <port>     - Start TCP server/listener", VGA_WHITE);
+    output_add_line(output, " tcptest <ip> <port>  - HTTP GET test    example: tcptest 10.0.2.2 80", VGA_WHITE);
     output_add_empty_line(output);
     output_add_line(output, "Debug Commands:", VGA_RED);
-    output_add_line(output, " panic       - Panic ekranini test et", VGA_WHITE);
+    output_add_line(output, " panic       - Test Panic Screen", VGA_WHITE);
     output_add_line(output, "   panic df    #DF Double Fault", VGA_DARK_GRAY);
     output_add_line(output, "   panic gp    #GP General Protection", VGA_DARK_GRAY);
-    output_add_line(output, "   panic pf    #PF Page Fault (NULL deref)", VGA_DARK_GRAY);
+    output_add_line(output, "   panic pf    #PF Page Fault (NULL dereference)", VGA_DARK_GRAY);
     output_add_line(output, "   panic ud    #UD Invalid Opcode", VGA_DARK_GRAY);
     output_add_line(output, "   panic de    #DE Divide by Zero", VGA_DARK_GRAY);
     output_add_line(output, "   panic stack Stack overflow", VGA_DARK_GRAY);
-    output_add_line(output, " perf        - RDTSC performans olcumu", VGA_WHITE);
-    output_add_line(output, "   perf         Tum testler (dongu/memset/memcpy/overhead)", VGA_DARK_GRAY);
+    output_add_line(output, " perf        - RDTSC performance measurement", VGA_WHITE);
+    output_add_line(output, "   perf         All Tests", VGA_DARK_GRAY);
     output_add_line(output, " spinlock    - Spinlock / RWLock test suite", VGA_WHITE);
 }
 
@@ -653,7 +614,6 @@ void cmd_about(const char* args, CommandOutput* output) {
 // ===========================================
 
 void cmd_ls(const char* args, CommandOutput* output) {
-    // Ext2 üzerinden listele
     const char* path = (args && str_len(args) > 0) ? args : ext2_getcwd();
 
     static dirent64_t dents[256];
@@ -664,7 +624,6 @@ void cmd_ls(const char* args, CommandOutput* output) {
         return;
     }
 
-    // Başlık
     char hdr[MAX_LINE_LENGTH];
     str_cpy(hdr, "Directory: ");
     str_concat(hdr, path);
@@ -676,7 +635,6 @@ void cmd_ls(const char* args, CommandOutput* output) {
         dirent64_t* de = (dirent64_t*)((char*)dents + off);
         if (de->d_reclen == 0) break;
 
-        // "." ve ".." gizle
         if (!(de->d_name[0] == '.' &&
               (de->d_name[1] == '\0' ||
               (de->d_name[1] == '.' && de->d_name[2] == '\0')))) {
@@ -688,9 +646,8 @@ void cmd_ls(const char* args, CommandOutput* output) {
             }
             str_concat(line, de->d_name);
 
-            // Dosya boyutunu ekle
+
             if (de->d_type == DT_REG) {
-                // Tam yolu oluştur
                 char fpath[256];
                 str_cpy(fpath, path);
                 int plen = str_len(fpath);
@@ -735,7 +692,6 @@ void cmd_cat(const char* args, CommandOutput* output) {
         return;
     }
 
-    // Tam yol oluştur
     char path[256];
     if (args[0] == '/') {
         str_cpy(path, args);
@@ -753,7 +709,6 @@ void cmd_cat(const char* args, CommandOutput* output) {
         return;
     }
 
-    // Max 64KB cat için yeterli
     static uint8_t cat_buf[65536];
     uint32_t to_read = (fsize < sizeof(cat_buf) - 1) ? fsize : sizeof(cat_buf) - 1;
     int n = ext2_read_file(path, cat_buf, to_read);
@@ -800,7 +755,6 @@ void cmd_touch(const char* args, CommandOutput* output) {
         }
     }
 
-    // Tam yol oluştur
     char tpath[256];
     if (args[0] == '/') { str_cpy(tpath, args); }
     else { str_cpy(tpath, ext2_getcwd()); int pl=str_len(tpath); if(pl>1){tpath[pl]='/';tpath[pl+1]='\0';} str_concat(tpath, args); }
@@ -842,12 +796,10 @@ void cmd_write(const char* args, CommandOutput* output) {
         return;
     }
 
-    // Tam yol oluştur
     char wpath[256];
     if (filename[0] == '/') { str_cpy(wpath, filename); }
     else { str_cpy(wpath, ext2_getcwd()); int pl=str_len(wpath); if(pl>1){wpath[pl]='/';wpath[pl+1]='\0';} str_concat(wpath, filename); }
 
-    // Dosya yoksa oluştur
     if (!ext2_path_is_file(wpath)) ext2_create_file(wpath);
 
     int wlen = str_len(content);
@@ -928,7 +880,6 @@ void cmd_neofetch(const char* args, CommandOutput* output) {
     uint64_t heap_kb = get_memory_info();
     char memory_str[64];
     format_memory_size(heap_kb, memory_str);
-    // ext2 /bin dosya sayısı
     int file_count = 0;
     {
         static dirent64_t neo_dents[64];
@@ -947,7 +898,7 @@ void cmd_neofetch(const char* args, CommandOutput* output) {
     int_to_str(file_count, count_str);
 
     // Calculate uptime
-    uint64_t ticks = get_system_ticks();  // Ticks since boot (1000 Hz)
+    uint64_t ticks = get_system_ticks(); 
     uint64_t seconds = ticks / 1000;
     uint64_t minutes = seconds / 60;
     uint64_t hours = minutes / 60;
@@ -982,7 +933,7 @@ void cmd_neofetch(const char* args, CommandOutput* output) {
     str_concat(uptime_str, sec_str);
     str_concat(uptime_str, "s");
 
-    // Sistem bilgileri
+    // System Info
     str_cpy(info_lines[0],  "AscentOS v0.1 64-bit");
     str_cpy(info_lines[1],  "---------------------");
     str_cpy(info_lines[3],  "OS: AscentOS x86_64 - Why So Serious?");
@@ -1092,7 +1043,6 @@ void cmd_cpuinfo(void) {
     print_str64("Vendor  : ", VGA_WHITE);
     println64(vendor, VGA_GREEN);
 
-    // ── Tam model adı ────────────────────────────────────────────────────
     char model[49];
     cpu_get_model_name(model);
     if (model[0] != '\0') {
@@ -1114,7 +1064,7 @@ void cmd_cpuinfo(void) {
         println64(buf, VGA_CYAN);
     }
 
-    // ── Tahmini frekans ──────────────────────────────────────────────────
+    // ── Estimated frequency ───────────────────────────────────────────────
     {
         uint32_t mhz = cpu_get_freq_estimate();
         char buf[32];
@@ -1123,7 +1073,7 @@ void cmd_cpuinfo(void) {
         uint64_to_string((uint64_t)mhz, tmp);
         str_concat(buf, tmp);
         str_concat(buf, " MHz");
-        // GHz de göster
+        // Also show in GHz
         if (mhz >= 1000) {
             uint32_t ghz_int  = mhz / 1000;
             uint32_t ghz_frac = (mhz % 1000) / 10;
@@ -1134,11 +1084,11 @@ void cmd_cpuinfo(void) {
             uint64_to_string((uint64_t)ghz_frac, tmp); str_concat(buf, tmp);
             str_concat(buf, " GHz)");
         }
-        print_str64("Freq    : ", VGA_WHITE);
+        print_str64("Frequency: ", VGA_WHITE);
         println64(buf, VGA_YELLOW);
     }
 
-    // ── Önbellek boyutları ───────────────────────────────────────────────
+    // ── Cache sizes ───────────────────────────────────────────────────────
     {
         CacheInfo ci;
         cpu_get_cache_info(&ci);
@@ -1146,41 +1096,41 @@ void cmd_cpuinfo(void) {
 
         // L1
         buf[0] = '\0';
-        str_concat(buf, "L1D:");
+        str_concat(buf, "L1D: ");
         uint64_to_string((uint64_t)ci.l1d_kb, tmp); str_concat(buf, tmp);
-        str_concat(buf, "KB  L1I:");
+        str_concat(buf, " KB  L1I: ");
         uint64_to_string((uint64_t)ci.l1i_kb, tmp); str_concat(buf, tmp);
-        str_concat(buf, "KB");
-        print_str64("Cache   : ", VGA_WHITE);
+        str_concat(buf, " KB");
+        print_str64("Cache    : ", VGA_WHITE);
         println64(buf, VGA_GREEN);
 
         // L2 / L3
         buf[0] = '\0';
-        str_concat(buf, "L2:");
+        str_concat(buf, "L2: ");
         if (ci.l2_kb >= 1024) {
             uint64_to_string((uint64_t)(ci.l2_kb / 1024), tmp); str_concat(buf, tmp);
-            str_concat(buf, "MB");
+            str_concat(buf, " MB");
         } else {
             uint64_to_string((uint64_t)ci.l2_kb, tmp); str_concat(buf, tmp);
-            str_concat(buf, "KB");
+            str_concat(buf, " KB");
         }
         if (ci.l3_kb > 0) {
-            str_concat(buf, "  L3:");
+            str_concat(buf, "  L3: ");
             if (ci.l3_kb >= 1024) {
                 uint64_to_string((uint64_t)(ci.l3_kb / 1024), tmp); str_concat(buf, tmp);
-                str_concat(buf, "MB");
+                str_concat(buf, " MB");
             } else {
                 uint64_to_string((uint64_t)ci.l3_kb, tmp); str_concat(buf, tmp);
-                str_concat(buf, "KB");
+                str_concat(buf, " KB");
             }
         }
-        print_str64("          ", VGA_WHITE);
+        print_str64("         ", VGA_WHITE);
         println64(buf, VGA_GREEN);
     }
 
-    // ── Özellikler ───────────────────────────────────────────────────────
+    // ── Features ──────────────────────────────────────────────────────────
     uint32_t feat = cpu_get_features();
-    print_str64("Features: ", VGA_WHITE);
+    print_str64("Features : ", VGA_WHITE);
     if (feat & CPU_FEAT_FPU)    print_str64("FPU ",    VGA_YELLOW);
     if (feat & CPU_FEAT_TSC)    print_str64("TSC ",    VGA_YELLOW);
     if (feat & CPU_FEAT_PAE)    print_str64("PAE ",    VGA_YELLOW);
@@ -1196,7 +1146,7 @@ void cmd_cpuinfo(void) {
     if (feat & CPU_FEAT_RDRAND) print_str64("RDRAND ", VGA_GREEN);
     println64("", VGA_WHITE);
 
-    // ── Long Mode ────────────────────────────────────────────────────────
+    // ── Long Mode ─────────────────────────────────────────────────────────
     if (feat & CPU_FEAT_LONG)
         println64("Long Mode: Supported (64-bit)", VGA_GREEN);
     else
@@ -1303,7 +1253,7 @@ void cmd_pwd(const char* args, CommandOutput* output) {
 }
 
 // ===========================================
-// PMM COMMAND
+// PMM
 // ===========================================
 
 void cmd_pmm(const char* args, CommandOutput* output) {
@@ -1323,7 +1273,7 @@ void cmd_pmm(const char* args, CommandOutput* output) {
 }
 
 // ===========================================
-// VMM TEST COMMAND
+// VMM
 // ===========================================
 
 void cmd_vmm(const char* args, CommandOutput* output) {
@@ -1730,7 +1680,7 @@ void cmd_createtask(const char* args, CommandOutput* output) {
 }
 
 void cmd_usertask(const char* args, CommandOutput* output) {
-    output_add_line(output, "=== Ring-3 User Task Olusturuluyor ===", VGA_CYAN);
+    output_add_line(output, "=== Creating ring 3 task ===", VGA_CYAN);
     output_add_empty_line(output);
 
     const char* task_name = "UserTest";
@@ -1745,7 +1695,7 @@ void cmd_usertask(const char* args, CommandOutput* output) {
     char info[128];
     char num[32];
 
-    str_cpy(info, "Task adi : ");
+    str_cpy(info, "Task Name : ");
     str_concat(info, task_name);
     output_add_line(output, info, VGA_WHITE);
     output_add_line(output, "Privilege: Ring-3 (DPL=3)", VGA_WHITE);
@@ -1754,12 +1704,11 @@ void cmd_usertask(const char* args, CommandOutput* output) {
 
     task_t* utask = task_create_user(task_name, entry, TASK_PRIORITY_NORMAL);
     if (!utask) {
-        output_add_line(output, "[HATA] task_create_user() basarisiz!", VGA_RED);
-        output_add_line(output, "  -> task_init() cagirildi mi?", VGA_YELLOW);
+        output_add_line(output, "[Error] task_create_user() Failed!", VGA_RED);
         return;
     }
 
-    str_cpy(info, "Olusturuldu -> PID=");
+    str_cpy(info, "Created -> PID=");
     int_to_str(utask->pid, num);
     str_concat(info, num);
     output_add_line(output, info, VGA_GREEN);
@@ -1775,16 +1724,16 @@ void cmd_usertask(const char* args, CommandOutput* output) {
     output_add_line(output, info, VGA_WHITE);
 
     if (task_start(utask) != 0) {
-        output_add_line(output, "[HATA] task_start() basarisiz!", VGA_RED);
+        output_add_line(output, "[Error] task_start() Failed!", VGA_RED);
         task_terminate(utask);
         return;
     }
 
     output_add_empty_line(output);
-    output_add_line(output, "Zamanlayici kuyruguna eklendi.", VGA_GREEN);
-    output_add_line(output, "Sonraki timer interrupt -> IRETQ -> Ring-3 gecisi.", VGA_YELLOW);
-    output_add_line(output, "Serial logda '[USER TASK] Hello from Ring-3' gormeli.", VGA_YELLOW);
-    output_add_line(output, "Gorev SYS_EXIT(0) ile kendini sonlandiriyor.", VGA_WHITE);
+    output_add_line(output, "Scheduled into the timer queue.", VGA_GREEN);
+    output_add_line(output, "Next timer interrupt → IRETQ → switch to Ring-3.", VGA_YELLOW);
+    output_add_line(output, "Expect to see '[USER TASK] Hello from Ring-3' in the serial console/log.", VGA_YELLOW);
+    output_add_line(output, "Task will exit by calling SYS_EXIT(0).", VGA_WHITE);
 }
 
 void cmd_schedinfo(const char* args, CommandOutput* output) {
@@ -1846,14 +1795,15 @@ void cmd_offihito(const char* args, CommandOutput* output) {
 void cmd_elfinfo(const char* args, CommandOutput* output) {
     if (!args || str_len(args) == 0) {
         output_add_line(output, "Usage: elfinfo <FILE.ELF>", VGA_YELLOW);
-        output_add_line(output, "  Shows ELF header info without loading.", VGA_DARK_GRAY);
-        output_add_line(output, "  Tam yol veya sadece isim verilebilir.", VGA_DARK_GRAY);
-        output_add_line(output, "  Ornek: elfinfo hello.elf", VGA_DARK_GRAY);
-        output_add_line(output, "  Ornek: elfinfo /bin/hello.elf", VGA_DARK_GRAY);
+        output_add_line(output, "  Displays ELF header information without loading the file.", VGA_DARK_GRAY);
+        output_add_line(output, "  Full path or just filename can be provided.", VGA_DARK_GRAY);
+        output_add_line(output, "  Examples:", VGA_DARK_GRAY);
+        output_add_line(output, "    elfinfo hello.elf", VGA_DARK_GRAY);
+        output_add_line(output, "    elfinfo /bin/hello.elf", VGA_DARK_GRAY);
         return;
     }
 
-    // Tam yol oluştur: eğer '/' ile başlamıyorsa /bin/ ekle
+    // Build full path: prepend /bin/ if it doesn't start with '/'
     char path[128];
     if (args[0] == '/') {
         str_cpy(path, args);
@@ -1874,7 +1824,7 @@ void cmd_elfinfo(const char* args, CommandOutput* output) {
     static uint8_t hdr_buf[512];
     int n = ext2_read_file(path, hdr_buf, 512);
     if (n < 64) {
-        output_add_line(output, "Read failed or file too small for ELF header", VGA_RED);
+        output_add_line(output, "Failed to read file or file too small for ELF header", VGA_RED);
         return;
     }
 
@@ -1896,10 +1846,10 @@ void cmd_elfinfo(const char* args, CommandOutput* output) {
 void cmd_exec(const char* args, CommandOutput* output) {
     if (!args || str_len(args) == 0) {
         output_add_line(output, "Usage: exec <FILE.ELF> [base_hex]", VGA_YELLOW);
-        output_add_line(output, "  ELF64 binary'yi ext2'den yukler, Ring-3 task olusturur.", VGA_DARK_GRAY);
-        output_add_line(output, "  base_hex: PIE (ET_DYN) icin opsiyonel load tabanı.", VGA_DARK_GRAY);
-        output_add_line(output, "  Ornek: exec hello.elf", VGA_DARK_GRAY);
-        output_add_line(output, "  Ornek: exec /bin/hello.elf 0x500000", VGA_DARK_GRAY);
+        output_add_line(output, "  Loads an ELF64 binary from ext2 and creates a Ring-3 task.", VGA_DARK_GRAY);
+        output_add_line(output, "  base_hex: Optional load base address for PIE (ET_DYN) binaries.", VGA_DARK_GRAY);
+        output_add_line(output, "  Example: exec hello.elf", VGA_DARK_GRAY);
+        output_add_line(output, "  Example: exec /bin/hello.elf 0x500000", VGA_DARK_GRAY);
         return;
     }
 
@@ -1953,7 +1903,7 @@ void cmd_exec(const char* args, CommandOutput* output) {
         str_concat(filepath, filename);
     }
 
-    str_cpy(line, "Dosya     : "); str_concat(line, filepath);
+    str_cpy(line, "File     : "); str_concat(line, filepath);
     output_add_line(output, line, VGA_WHITE);
     FMT_HEX64(load_base);
     str_cpy(line, "Load base : "); str_concat(line, tmp);
@@ -1961,22 +1911,21 @@ void cmd_exec(const char* args, CommandOutput* output) {
     output_add_empty_line(output);
 
     if (!syscall_is_enabled()) {
-        output_add_line(output, "[HATA] SYSCALL altyapisi baslatilmamis!", VGA_RED);
-        output_add_line(output, "  kernel'de syscall_init() cagirildi mi?", VGA_YELLOW);
+        output_add_line(output, "[Error] SYSCALL infrastructure not initialized!", VGA_RED);
         return;
     }
 
-    output_add_line(output, "[1/3] ELF ext2'den yukleniyor...", VGA_WHITE);
+   output_add_line(output, "[1/3] Loading ELF from ext2...", VGA_WHITE);
     ElfImage image;
     int rc = elf64_exec_from_ext2(filepath, load_base, &image, output);
     if (rc != ELF_OK) {
-        str_cpy(line, "[HATA] ELF yuklenemedi: ");
+        str_cpy(line, "[Error] ELF Couldnt load: ");
         str_concat(line, elf64_strerror(rc));
         output_add_line(output, line, VGA_RED);
         return;
     }
 
-    output_add_line(output, "[2/3] Ring-3 task olusturuluyor...", VGA_WHITE);
+    output_add_line(output, "[2/3] Creating Ring-3 task...", VGA_WHITE);
 
     static char argv_storage[8][128];
     const char* argv_ptrs[8];
@@ -2031,8 +1980,8 @@ void cmd_exec(const char* args, CommandOutput* output) {
     task_t* utask = task_create_from_elf(filepath, &image, TASK_PRIORITY_NORMAL,
                                           exec_argc, argv_ptrs);
     if (!utask) {
-        output_add_line(output, "[HATA] task_create_from_elf() basarisiz!", VGA_RED);
-        output_add_line(output, "  task_init() cagirildi mi? Heap yeterli mi?", VGA_YELLOW);
+       output_add_line(output, "[ERROR] task_create_from_elf() failed!", VGA_RED);
+       output_add_line(output, "  Has task_init() been called? Is the heap memory sufficient?", VGA_YELLOW);
         return;
     }
 
@@ -2061,9 +2010,9 @@ void cmd_exec(const char* args, CommandOutput* output) {
     str_cpy(line, "  User stack top  : "); str_concat(line, tmp);
     output_add_line(output, line, VGA_WHITE);
 
-    output_add_line(output, "[3/3] Zamanlayici kuyruguna ekleniyor...", VGA_WHITE);
+    output_add_line(output, "[3/3] Adding to scheduler queue...", VGA_WHITE);
     if (task_start(utask) != 0) {
-        output_add_line(output, "[HATA] task_start() basarisiz!", VGA_RED);
+        output_add_line(output, "[ERROR] task_start() failed!", VGA_RED);
         task_terminate(utask);
         return;
     }
@@ -2093,18 +2042,18 @@ void cmd_exec(const char* args, CommandOutput* output) {
     output_add_empty_line(output);
     output_add_line(output, "================================================", VGA_GREEN);
     str_cpy(line, "  Task '"); str_concat(line, filename);
-    str_concat(line, "' Ring-3'te basladi!");
+    str_concat(line, "' started in Ring-3!");
     output_add_line(output, line, VGA_GREEN);
     output_add_line(output, "================================================", VGA_GREEN);
     output_add_empty_line(output);
-    output_add_line(output, "Sonraki timer tick -> iretq -> Ring-3 (CS=0x23)", VGA_YELLOW);
-    output_add_line(output, "Program syscall yaptiginda:", VGA_WHITE);
+    output_add_line(output, "Next timer tick -> iretq -> Ring-3 (CS=0x23)", VGA_YELLOW);
+    output_add_line(output, "When the program makes a syscall:", VGA_WHITE);
     output_add_line(output, "  Ring-3 syscall -> kernel_tss.rsp0 -> Ring-0", VGA_DARK_GRAY);
     output_add_line(output, "  syscall_dispatch() -> handler -> SYSRET", VGA_DARK_GRAY);
-    output_add_line(output, "  SYSRET -> Ring-3 (program devam eder)", VGA_DARK_GRAY);
+    output_add_line(output, "  SYSRET -> Ring-3 (program continues)", VGA_DARK_GRAY);
     output_add_line(output, "  SYS_EXIT(0) -> task_exit() -> TERMINATED", VGA_DARK_GRAY);
     output_add_empty_line(output);
-    output_add_line(output, "Serial logda programin ciktisini izleyin.", VGA_CYAN);
+    output_add_line(output, "Watch the program output in the serial log.", VGA_CYAN);
 
     #undef FMT_HEX64
 }
@@ -2113,7 +2062,6 @@ void cmd_exec(const char* args, CommandOutput* output) {
 // ADVANCED FILE SYSTEM COMMANDS
 // ===========================================
 
-// Yardımcı: ext2 üzerinde rekürsif tree
 static void ext2_tree_recursive(const char* path, int depth, CommandOutput* output) {
     static dirent64_t dents[128];
     int total = ext2_getdents(path, dents, (int)sizeof(dents));
@@ -2128,10 +2076,8 @@ static void ext2_tree_recursive(const char* path, int depth, CommandOutput* outp
               (de->d_name[1] == '\0' ||
               (de->d_name[1] == '.' && de->d_name[2] == '\0')))) {
             char line[MAX_LINE_LENGTH];
-            // Girinti
             for (int d = 0; d < depth && d < 8; d++) str_concat(line, "  ");
             line[depth * 2 < MAX_LINE_LENGTH ? depth * 2 : MAX_LINE_LENGTH - 1] = '\0';
-            // Sıfırlama gerek: line init edilmedi
             int dsp = depth * 2; if (dsp >= MAX_LINE_LENGTH) dsp = MAX_LINE_LENGTH - 1;
             for (int k = 0; k < dsp; k++) line[k] = ' ';
             line[dsp] = '\0';
@@ -2140,7 +2086,7 @@ static void ext2_tree_recursive(const char* path, int depth, CommandOutput* outp
                 str_concat(line, "[+] ");
                 str_concat(line, de->d_name);
                 output_add_line(output, line, VGA_YELLOW);
-                // Rekürsif
+
                 char subpath[256];
                 str_cpy(subpath, path);
                 int plen = str_len(subpath);
@@ -2170,9 +2116,8 @@ void cmd_find(const char* args, CommandOutput* output) {
         output_add_line(output, "Example: find txt", VGA_DARK_GRAY);
         return;
     }
-    // ext2 üzerinde rekürsif arama
     static dirent64_t find_dents[128];
-    // Basit: sadece /bin, /usr, /etc, /home, /tmp içinde ara
+
     const char* search_dirs[] = {"/", "/bin", "/usr", "/etc", "/home", "/tmp", NULL};
     int found = 0;
     for (int di = 0; search_dirs[di]; di++) {
@@ -2182,11 +2127,11 @@ void cmd_find(const char* args, CommandOutput* output) {
         while (off < tot) {
             dirent64_t* de = (dirent64_t*)((char*)find_dents + off);
             if (de->d_reclen == 0) break;
-            // args pattern içeriyor mu?
+            // it has args pattern?
             const char* nm = de->d_name;
             const char* pat = args;
             int match = 0;
-            // basit substring arama
+            // basic substring search
             int nlen = str_len(nm), plen = str_len(pat);
             for (int si = 0; si <= nlen - plen && !match; si++) {
                 match = 1;
@@ -2208,7 +2153,6 @@ void cmd_find(const char* args, CommandOutput* output) {
 }
 
 void cmd_du(const char* args, CommandOutput* output) {
-    const char* path = (args && str_len(args) > 0) ? args : NULL;
     const char* du_path = (args && str_len(args) > 0) ? args : ext2_getcwd();
     static dirent64_t du_dents[256];
     int tot = ext2_getdents(du_path, du_dents, (int)sizeof(du_dents));
@@ -2250,8 +2194,8 @@ void cmd_rmr(const char* args, CommandOutput* output) {
     }
     char rmr_path[256];
     if (args[0] == '/') { str_cpy(rmr_path, args); }
-    else { str_cpy(rmr_path, ext2_getcwd()); int pl=str_len(rmr_path); if(pl>1){rmr_path[pl]='/';rmr_path[pl+1]=' ';} str_concat(rmr_path, args); }
-    // ext2_rmdir sadece boş dizini siler; recursive için önce içini temizle
+    else { str_cpy(rmr_path, ext2_getcwd()); int pl=str_len(rmr_path); if(pl>1){rmr_path[pl]='/';rmr_path[pl+1]='\0';} str_concat(rmr_path, args); }
+    // ext2 rmdir only deletes empty folders
     static dirent64_t rmr_dents[128];
     int tot = ext2_getdents(rmr_path, rmr_dents, (int)sizeof(rmr_dents));
     if (tot > 0) {
@@ -2261,7 +2205,7 @@ void cmd_rmr(const char* args, CommandOutput* output) {
             if (de->d_reclen == 0) break;
             if (de->d_name[0] != '.') {
                 char child[256]; str_cpy(child, rmr_path);
-                int pl=str_len(child); if(pl>1){child[pl]='/';child[pl+1]=' ';}
+                int pl=str_len(child); if(pl>1){child[pl]='/';child[pl+1]='\0';}
                 str_concat(child, de->d_name);
                 if (de->d_type == DT_REG) ext2_unlink(child);
                 else if (de->d_type == DT_DIR) ext2_rmdir(child);
@@ -2278,45 +2222,45 @@ void cmd_rmr(const char* args, CommandOutput* output) {
 }
 
 // ===========================================
-// SYSCALL COMMANDS — syscalltest64.c icinde tanimli
+// SYSCALL COMMANDS 
 // ===========================================
 void cmd_syscalltest(const char* args, CommandOutput* output);
 
 // ============================================================================
-// SPINLOCK TEST KOMUTU
+// SPINLOCK TEST 
 // ============================================================================
 static void cmd_spinlock(const char* args, CommandOutput* output) {
     (void)args;
-    output_add_line(output, "=== Spinlock / RWLock Testi ===", VGA_CYAN);
+    output_add_line(output, "=== Spinlock / RWLock Test ===", VGA_CYAN);
     output_add_empty_line(output);
-    output_add_line(output, "Testler calistiriliyor...", VGA_WHITE);
+    output_add_line(output, "Running tests...", VGA_WHITE);
     output_add_empty_line(output);
     spinlock_test();
-    // spinlock_test() dogrudan println64 ile ekrana yaziyor
+    // spinlock_test() writes directly to the screen using println64
     output_add_empty_line(output);
-    output_add_line(output, "Detayli log: serial porta yazildi (COM1).", VGA_DARK_GRAY);
+    output_add_line(output, "Detailed log: written to serial port (COM1).", VGA_DARK_GRAY);
 }
 
 
-// Kullanım: perf          → tüm testleri çalıştır
-//           perf memcpy   → memcpy hız testi
-//           perf memset   → memset hız testi
-//           perf loop     → basit döngü testi
+// Usage: perf          -> run all tests
+//        perf memcpy   -> memcpy benchmark
+//        perf memset   -> memset benchmark
+//        perf loop     -> simple loop benchmark
 // ============================================================================
 static void cmd_perf(const char* args, CommandOutput* output) {
     (void)args;
 
-    output_add_line(output, "=== RDTSC Performans Olcumu ===", VGA_CYAN);
+    output_add_line(output, "=== RDTSC Performance Measurement ===", VGA_CYAN);
     output_add_empty_line(output);
-    output_add_line(output, "Sonuclar ayni zamanda serial porta yaziliyor.", VGA_DARK_GRAY);
+    output_add_line(output, "Results are also written to the serial port.", VGA_DARK_GRAY);
     output_add_empty_line(output);
 
     PerfCounter pc;
     char line[MAX_LINE_LENGTH];
     char tmp[24];
 
-    // ── Test 1: Basit döngü (1M iterasyon) ───────────────────────────────
-    output_add_line(output, "[1] Bos dongu  x1.000.000:", VGA_YELLOW);
+    // ── Test 1: Simple loop (1M iterations) ───────────────────────────────
+    output_add_line(output, "[1] Empty loop x1,000,000:", VGA_YELLOW);
     perf_start(&pc);
     for (volatile int i = 0; i < 1000000; i++);
     perf_stop(&pc);
@@ -2324,13 +2268,13 @@ static void cmd_perf(const char* args, CommandOutput* output) {
 
     str_cpy(line, "    Cycles : "); uint64_to_string(perf_cycles(&pc), tmp); str_concat(line, tmp);
     output_add_line(output, line, VGA_WHITE);
-    str_cpy(line, "    Sure   : ~"); uint64_to_string(perf_us(&pc), tmp); str_concat(line, tmp);
+    str_cpy(line, "    Time   : ~"); uint64_to_string(perf_us(&pc), tmp); str_concat(line, tmp);
     str_concat(line, " us  (~"); uint64_to_string(perf_ns(&pc) / 1000000, tmp); str_concat(line, tmp);
     str_concat(line, " ms)");
     output_add_line(output, line, VGA_GREEN);
     output_add_empty_line(output);
 
-    // ── Test 2: memset — 64KB sıfırlama ──────────────────────────────────
+    // ── Test 2: memset — zero/fill 64KB ──────────────────────────────────
     output_add_line(output, "[2] memset64  64KB:", VGA_YELLOW);
     static uint8_t perf_buf[65536];
     perf_start(&pc);
@@ -2341,21 +2285,21 @@ static void cmd_perf(const char* args, CommandOutput* output) {
 
     str_cpy(line, "    Cycles : "); uint64_to_string(perf_cycles(&pc), tmp); str_concat(line, tmp);
     output_add_line(output, line, VGA_WHITE);
-    str_cpy(line, "    Sure   : ~"); uint64_to_string(perf_us(&pc), tmp); str_concat(line, tmp);
+    str_cpy(line, "    Time   : ~"); uint64_to_string(perf_us(&pc), tmp); str_concat(line, tmp);
     str_concat(line, " us");
     output_add_line(output, line, VGA_GREEN);
 
-    // Bant genişliği: 64KB / us → MB/s
+    // Bandwidth: 64KB / us -> MB/s
     uint32_t us = perf_us(&pc);
     if (us > 0) {
         uint64_t mbps = 65536ULL / (uint64_t)us;
-        str_cpy(line, "    Bant   : ~"); uint64_to_string(mbps, tmp); str_concat(line, tmp);
+        str_cpy(line, "    Bandwidth: ~"); uint64_to_string(mbps, tmp); str_concat(line, tmp);
         str_concat(line, " MB/s");
         output_add_line(output, line, VGA_CYAN);
     }
     output_add_empty_line(output);
 
-    // ── Test 3: memcpy — 64KB kopyalama ──────────────────────────────────
+    // ── Test 3: memcpy — copy 64KB ──────────────────────────────────
     output_add_line(output, "[3] memcpy64  64KB:", VGA_YELLOW);
     static uint8_t perf_src[65536];
     extern void* memcpy64(void*, const void*, size_t);
@@ -2366,36 +2310,36 @@ static void cmd_perf(const char* args, CommandOutput* output) {
 
     str_cpy(line, "    Cycles : "); uint64_to_string(perf_cycles(&pc), tmp); str_concat(line, tmp);
     output_add_line(output, line, VGA_WHITE);
-    str_cpy(line, "    Sure   : ~"); uint64_to_string(perf_us(&pc), tmp); str_concat(line, tmp);
+    str_cpy(line, "    Time   : ~"); uint64_to_string(perf_us(&pc), tmp); str_concat(line, tmp);
     str_concat(line, " us");
     output_add_line(output, line, VGA_GREEN);
 
     us = perf_us(&pc);
     if (us > 0) {
         uint64_t mbps = 65536ULL / (uint64_t)us;
-        str_cpy(line, "    Bant   : ~"); uint64_to_string(mbps, tmp); str_concat(line, tmp);
+        str_cpy(line, "    Bandwidth: ~"); uint64_to_string(mbps, tmp); str_concat(line, tmp);
         str_concat(line, " MB/s");
         output_add_line(output, line, VGA_CYAN);
     }
     output_add_empty_line(output);
 
-    // ── Test 4: RDTSC overhead (kendini ölçüyor) ─────────────────────────
+    // ── Test 4: RDTSC overhead (measuring itself) ─────────────────────────
     output_add_line(output, "[4] RDTSC overhead:", VGA_YELLOW);
     perf_start(&pc);
     perf_stop(&pc);
     perf_print(&pc, "rdtsc_overhead");
 
     str_cpy(line, "    Cycles : "); uint64_to_string(perf_cycles(&pc), tmp); str_concat(line, tmp);
-    str_concat(line, "  (rdtscp cift okuma maliyeti)");
+    str_concat(line, "  (rdtscp double-read cost)");
     output_add_line(output, line, VGA_WHITE);
     output_add_empty_line(output);
 
-    // ── CPU frekansı ──────────────────────────────────────────────────────
-    str_cpy(line, "CPU Frekans: ");
+    // ── CPU frequency ──────────────────────────────────────────────────────
+    str_cpy(line, "CPU Frequency: ");
     uint64_to_string((uint64_t)pc.cpu_mhz, tmp); str_concat(line, tmp);
-    str_concat(line, " MHz  (PIT olcumu)");
+    str_concat(line, " MHz  (PIT measurement)");
     output_add_line(output, line, VGA_CYAN);
-    output_add_line(output, "Detayli log: serial porta yazildi (COM1).", VGA_DARK_GRAY);
+    output_add_line(output, "Detailed log: written to serial port (COM1).", VGA_DARK_GRAY);
 }
 
 
@@ -2415,7 +2359,7 @@ static void panic_do_stack_overflow(int depth) {
 
 static void cmd_panic(const char* args, CommandOutput* output) {
     if (!args || str_len(args) == 0) {
-        output_add_line(output, "Kernel Panic Test - Mevcut exception tipleri:", VGA_CYAN);
+        output_add_line(output, "Kernel Panic Test - Avaible Exception Types", VGA_CYAN);
         output_add_empty_line(output);
         output_add_line(output, "  panic df    - #DF Double Fault  (int 0x08)", VGA_RED);
         output_add_line(output, "  panic gp    - #GP Gen Protection (int 0x0D)", VGA_RED);
@@ -2424,24 +2368,24 @@ static void cmd_panic(const char* args, CommandOutput* output) {
         output_add_line(output, "  panic de    - #DE Divide by Zero", VGA_YELLOW);
         output_add_line(output, "  panic stack - Stack overflow (#SS / #DF)", VGA_YELLOW);
         output_add_empty_line(output);
-        output_add_line(output, "UYARI: Sistem DONDURULUR. QEMU/serial logdan dump al.", VGA_RED);
+        output_add_line(output, "WARNING: SYSTEM GETS HALTED GET DUMP FROM QEMU OR SERIAL LOG", VGA_RED);
         return;
     }
 
     if (str_cmp(args, "df") == 0) {
-        output_add_line(output, "[PANIC TEST] #DF Double Fault tetikleniyor...", VGA_RED);
+        output_add_line(output, "[PANIC TEST] #DF Double Fault triggering...", VGA_RED);
         output_add_line(output, "  int 0x08 -> exception_frame -> kernel_panic_handler", VGA_DARK_GRAY);
         for (volatile int i = 0; i < 5000000; i++);
         __asm__ volatile("int $0x08");
 
     } else if (str_cmp(args, "gp") == 0) {
-        output_add_line(output, "[PANIC TEST] #GP General Protection Fault tetikleniyor...", VGA_RED);
+        output_add_line(output, "[PANIC TEST] #GP General Protection Fault triggering...", VGA_RED);
         output_add_line(output, "  int 0x0D -> err_code -> kernel_panic_handler", VGA_DARK_GRAY);
         for (volatile int i = 0; i < 5000000; i++);
         __asm__ volatile("int $0x0D");
 
     } else if (str_cmp(args, "pf") == 0) {
-        output_add_line(output, "[PANIC TEST] #PF Page Fault tetikleniyor...", VGA_RED);
+        output_add_line(output, "[PANIC TEST] #PF Page Fault triggering...", VGA_RED);
         output_add_line(output, "  NULL pointer deref -> CR2=0x0 -> kernel_panic_handler", VGA_DARK_GRAY);
         for (volatile int i = 0; i < 5000000; i++);
         volatile uint64_t* null_ptr = (volatile uint64_t*)0x0;
@@ -2449,33 +2393,33 @@ static void cmd_panic(const char* args, CommandOutput* output) {
         (void)val;
 
     } else if (str_cmp(args, "ud") == 0) {
-        output_add_line(output, "[PANIC TEST] #UD Invalid Opcode tetikleniyor...", VGA_RED);
+        output_add_line(output, "[PANIC TEST] #UD Invalid Opcode triggering...", VGA_RED);
         output_add_line(output, "  ud2 instruction -> kernel_panic_handler", VGA_DARK_GRAY);
         for (volatile int i = 0; i < 5000000; i++);
         __asm__ volatile("ud2");
 
     } else if (str_cmp(args, "de") == 0) {
-        output_add_line(output, "[PANIC TEST] #DE Divide by Zero tetikleniyor...", VGA_RED);
+        output_add_line(output, "[PANIC TEST] Triggering #DE Divide by Zero...", VGA_RED);
         output_add_line(output, "  idiv 0 -> kernel_panic_handler", VGA_DARK_GRAY);
         for (volatile int i = 0; i < 5000000; i++);
         panic_do_div0();
 
     } else if (str_cmp(args, "stack") == 0) {
-        output_add_line(output, "[PANIC TEST] Stack overflow tetikleniyor...", VGA_RED);
-        output_add_line(output, "  Sonsuz rekursiyon -> #SS veya #DF", VGA_DARK_GRAY);
+        output_add_line(output, "[PANIC TEST] Triggering stack overflow...", VGA_RED);
+        output_add_line(output, "  Infinite recursion -> #SS or #DF", VGA_DARK_GRAY);
         for (volatile int i = 0; i < 5000000; i++);
         panic_do_stack_overflow(0);
 
     } else {
-        output_add_line(output, "Bilinmeyen panic tipi. 'panic' yazarak listeleri gor.", VGA_YELLOW);
+        output_add_line(output, "Unknown panic type. Type 'panic' to see the list.", VGA_YELLOW);
     }
 }
 
 // ============================================================================
-// AĞ KOMUTLARI — Yardımcı fonksiyonlar
+// Network Commands — Helper Functions
 // ============================================================================
 
-// Hex bayt yardımcısı (serial değil, ekrana)
+// Hex byte helper 
 static void byte_to_hex_str(uint8_t v, char* out) {
     const char* h = "0123456789ABCDEF";
     out[0] = h[(v >> 4) & 0xF];
@@ -2494,7 +2438,7 @@ static void uint16_to_hex_str(uint16_t v, char* out) {
 }
 
 // ============================================================================
-// AĞ KOMUTLARI — RTL8139
+// Network Commands — RTL8139
 // ============================================================================
 
 // ── netinit ──────────────────────────────────────────────────────────────────
@@ -4452,109 +4396,152 @@ static void cmd_tcptest(const char* args, CommandOutput* output) {
         output_add_line(output, "  SYN+ACK gelmesi katmanin calistigini kanıtlar.", 0x07);
     }
 
-    // Temiz kapat
     if (!g_tcp_closed) tcp_close(cid);
 
-    char sum[64]; str_cpy(sum, "  Sonuc: ");
+    char sum[64]; str_cpy(sum, "  Result: ");
     if (g_tcp_connected) str_concat(sum, "3-way-handshake OK  ");
     if (g_tcp_data_recvd) str_concat(sum, "DATA OK  ");
     str_concat(sum, "conn_id="); char ns[8]; int_to_str(cid, ns); str_concat(sum, ns);
     output_add_line(output, sum, g_tcp_data_recvd ? 0x0A : (g_tcp_connected ? 0x0E : 0x0C));
 }
 
-// PC SPEAKER TEST COMMAND
+// PC SPEAKER / SB16 SOUND COMMANDS
 
+// "beep"         -> sistem beep (440 Hz, 100ms) [pcspk]
+// "beep 440"     -> 440 Hz, 300ms [pcspk]
+// "beep 440 500" -> 440 Hz, 500ms [pcspk]
+// "beep boot"    -> boot melodisi
+// "beep stop"    -> hem pcspk hem sb16 sustur
 void cmd_beep(const char* args, CommandOutput* output) {
-    // Argümansız: sistem beep
-    // "beep 440"      → 440 Hz, 300ms
-    // "beep 440 500"  → 440 Hz, 500ms
-    // "beep boot"     → boot melodisi
-    // "beep stop"     → sustur
-
     if (!args || args[0] == '\0') {
-        // Varsayılan sistem beep
         pcspk_system_beep();
-        output_add_line(output, "Beep! (440 Hz, 100ms)", VGA_CYAN);
+        output_add_line(output, "Beep! (440 Hz, 100ms) [pcspk]", VGA_CYAN);
         return;
     }
-
-    // "stop" komutu
     if (str_cmp(args, "stop") == 0) {
         pcspk_stop();
+        if (g_sb16.initialized) sb16_stop();
         output_add_line(output, "Speaker stopped.", VGA_CYAN);
         return;
     }
-
-    // "boot" melodisi
     if (str_cmp(args, "boot") == 0) {
         pcspk_boot_melody();
-        output_add_line(output, "Boot melody played!", VGA_CYAN);
+        output_add_line(output, "Boot melody played! [pcspk]", VGA_CYAN);
         return;
     }
-
-    // Sayısal argüman: frekans [ms]
-    uint32_t freq = 0;
-    uint32_t dur  = 300;   // varsayılan süre: 300ms
-
+    uint32_t freq = 0, dur = 300;
     const char* p = args;
-
-    // Frekansı parse et
-    while (*p >= '0' && *p <= '9') {
-        freq = freq * 10 + (*p - '0');
-        p++;
-    }
-
-    // İkinci argüman (süre) varsa parse et
+    while (*p >= '0' && *p <= '9') { freq = freq * 10 + (*p - '0'); p++; }
     while (*p == ' ') p++;
     if (*p >= '0' && *p <= '9') {
         dur = 0;
-        while (*p >= '0' && *p <= '9') {
-            dur = dur * 10 + (*p - '0');
-            p++;
-        }
+        while (*p >= '0' && *p <= '9') { dur = dur * 10 + (*p - '0'); p++; }
     }
-
-    // Sınır kontrol
     if (freq < 20)    freq = 20;
     if (freq > 20000) freq = 20000;
     if (dur  < 10)    dur  = 10;
     if (dur  > 5000)  dur  = 5000;
-
     pcspk_beep(freq, dur);
-
-    // Çıktı: "Beep: 440 Hz, 300 ms"
-    char buf[64];
-    // Basit sayı→string (kernel'deki int_to_str'i kullan)
     extern void int_to_str(int num, char* str);
-    char fstr[16], dstr[16];
-    int_to_str((int)freq, fstr);
-    int_to_str((int)dur,  dstr);
-
-    // buf = "Beep: " + freq + " Hz, " + dur + " ms"
+    char buf[64]; char fstr[16]; char dstr[16];
+    int_to_str((int)freq, fstr); int_to_str((int)dur, dstr);
     char* bp = buf;
-    const char* prefix = "Beep: ";
-    for (const char* s = prefix; *s; s++) *bp++ = *s;
-    for (const char* s = fstr;   *s; s++) *bp++ = *s;
-    const char* mid = " Hz, ";
-    for (const char* s = mid; *s; s++) *bp++ = *s;
-    for (const char* s = dstr; *s; s++) *bp++ = *s;
-    const char* suf = " ms";
-    for (const char* s = suf; *s; s++) *bp++ = *s;
+    for (const char* s = "Beep: ";      *s; s++) *bp++ = *s;
+    for (const char* s = fstr;           *s; s++) *bp++ = *s;
+    for (const char* s = " Hz, ";        *s; s++) *bp++ = *s;
+    for (const char* s = dstr;           *s; s++) *bp++ = *s;
+    for (const char* s = " ms [pcspk]"; *s; s++) *bp++ = *s;
     *bp = '\0';
-
     output_add_line(output, buf, VGA_CYAN);
 }
 
-// ============================================================================
-// GFX KOMUTU — GUI moduna geç
-// ============================================================================
+
+// ------------------------------------------------------------
+// cmd_sb16: Sound Blaster 16 komutlari
+// "sb16"          -> durum goster
+// "sb16 tone"     -> 440 Hz test tonu (SB16 DAC)
+// "sb16 ding"     -> 1 kHz zayiflayan efekt
+// "sb16 vol N"    -> master ses seviyesi 0-255
+// "sb16 stop"     -> DMA durdur
+// ------------------------------------------------------------
+void cmd_sb16(const char* args, CommandOutput* output) {
+    if (!g_sb16.initialized) {
+        output_add_line(output, "SB16: Cihaz bulunamadi. QEMU: -device sb16", VGA_YELLOW);
+        output_add_line(output, "  Fallback: pcspk aktif.", VGA_DARK_GRAY);
+        return;
+    }
+    if (!args || args[0] == '\0') {
+        extern void int_to_str(int num, char* str);
+        char buf[80]; char tmp[16];
+        output_add_line(output, "Sound Blaster 16 -- Durum:", VGA_CYAN);
+        char* bp = buf;
+        for (const char* s = "  DSP: "; *s; s++) *bp++ = *s;
+        int_to_str((int)g_sb16.dsp_major, tmp);
+        for (const char* s = tmp; *s; s++) *bp++ = *s;
+        *bp++ = '.';
+        int_to_str((int)g_sb16.dsp_minor, tmp);
+        for (const char* s = tmp; *s; s++) *bp++ = *s;
+        *bp = '\0'; output_add_line(output, buf, VGA_WHITE);
+
+        bp = buf;
+        for (const char* s = "  IRQ: "; *s; s++) *bp++ = *s;
+        int_to_str((int)g_sb16.irq, tmp);
+        for (const char* s = tmp; *s; s++) *bp++ = *s;
+        *bp = '\0'; output_add_line(output, buf, VGA_WHITE);
+
+        bp = buf;
+        for (const char* s = "  DMA: 8-bit=ch"; *s; s++) *bp++ = *s;
+        int_to_str((int)g_sb16.dma8, tmp);
+        for (const char* s = tmp; *s; s++) *bp++ = *s;
+        for (const char* s = "  16-bit=ch"; *s; s++) *bp++ = *s;
+        int_to_str((int)g_sb16.dma16, tmp);
+        for (const char* s = tmp; *s; s++) *bp++ = *s;
+        *bp = '\0'; output_add_line(output, buf, VGA_WHITE);
+
+        output_add_line(output, "  Komutlar: tone | ding | vol N | stop", VGA_DARK_GRAY);
+        return;
+    }
+    if (str_cmp(args, "tone") == 0) {
+        sb16_test_tone();
+        output_add_line(output, "SB16: 440 Hz test tonu (250ms).", VGA_CYAN);
+        return;
+    }
+    if (str_cmp(args, "ding") == 0) {
+        sb16_ding();
+        output_add_line(output, "SB16: Ding! (1 kHz, zayiflayan).", VGA_CYAN);
+        return;
+    }
+    if (str_cmp(args, "stop") == 0) {
+        sb16_stop();
+        output_add_line(output, "SB16: DMA durduruldu.", VGA_CYAN);
+        return;
+    }
+    if (args[0] == 'v' && args[1] == 'o' && args[2] == 'l' && args[3] == ' ') {
+        const char* np = args + 4;
+        uint32_t vol = 0;
+        while (*np >= '0' && *np <= '9') { vol = vol * 10 + (*np - '0'); np++; }
+        if (vol > 255) vol = 255;
+        sb16_set_volume((uint8_t)vol);
+        sb16_set_pcm_volume((uint8_t)vol);
+        extern void int_to_str(int num, char* str);
+        char buf[48]; char tmp[16]; int_to_str((int)vol, tmp);
+        char* bp = buf;
+        for (const char* s = "SB16: Volume = "; *s; s++) *bp++ = *s;
+        for (const char* s = tmp; *s; s++) *bp++ = *s;
+        for (const char* s = "/255"; *s; s++) *bp++ = *s;
+        *bp = '\0'; output_add_line(output, buf, VGA_CYAN);
+        return;
+    }
+    output_add_line(output, "SB16: Bilinmeyen komut.", VGA_YELLOW);
+    output_add_line(output, "  Kullanim: sb16 [tone|ding|vol N|stop]", VGA_DARK_GRAY);
+}
+
 extern volatile int request_gui_start;
 
 static void cmd_gfx(const char* args, CommandOutput* output) {
     (void)args;
-    output_add_line(output, "GUI moduna geciliyor...", 0x0E);
-    output_add_line(output, "  Mouse: sol tik = pencere surukle/tikla", 0x0B);
-    output_add_line(output, "  Klavye: N = yeni pencere ac", 0x0B);
+    output_add_line(output, "Switching to gui mode", 0x0E);
+    output_add_line(output, "Press N for opening new window", 0x0B);
     request_gui_start = 1;
 }
 
@@ -4562,7 +4549,6 @@ static void cmd_gfx(const char* args, CommandOutput* output) {
 // COMMAND TABLE
 // ============================================================================
 static Command command_table[] = {
-    {"hello", "Say hello", cmd_hello},
     {"help", "Show available commands", cmd_help},
     {"clear", "Clear the screen", cmd_clear},
     {"echo", "Echo text back", cmd_echo},
@@ -4576,7 +4562,7 @@ static Command command_table[] = {
     {"ps", "List all tasks", cmd_ps},
     {"taskinfo", "Show task information", cmd_taskinfo},
     {"createtask", "Create test tasks (Ring-0)", cmd_createtask},
-    {"usertask", "Create Ring-3 user-mode task [isim]", cmd_usertask},
+    {"usertask", "Create Ring-3 user-mode task [name]", cmd_usertask},
     {"schedinfo", "Scheduler information", cmd_schedinfo},
     {"offihito", "Start Offihito demo task", cmd_offihito},
     
@@ -4587,85 +4573,81 @@ static Command command_table[] = {
     {"mkdir", "Create directory", cmd_mkdir},
     {"rmdir", "Remove directory", cmd_rmdir},
     {"rmr", "Remove directory recursively", cmd_rmr},
-    {"cat", "Show file content", cmd_cat},
+    {"cat", "Show file contents", cmd_cat},
     {"touch", "Create new file", cmd_touch},
     {"write", "Write to file", cmd_write},
     {"rm", "Delete file", cmd_rm},
-    // Advanced file system commands
     {"tree", "Show directory tree", cmd_tree},
     {"find", "Find files by pattern", cmd_find},
     {"du", "Show disk usage", cmd_du},
 
     // ELF loader commands
     {"exec",    "Load and execute ELF64 binary from ext2", cmd_exec},
-    {"elfinfo", "Show ELF64 header info (no load)",         cmd_elfinfo},
+    {"elfinfo", "Show ELF64 header info (no load)",        cmd_elfinfo},
 
     // SYSCALL/SYSRET commands
     {"syscalltest", "Run SYSCALL test suite (116 tests)", cmd_syscalltest},
 
-    // GUI modu
-    {"gfx",  "GUI moduna gec (pencere yoneticisi + mouse)", cmd_gfx},
+    {"gfx", "Deprecated GUI mode", cmd_gfx},
 
-    // Ağ komutları — RTL8139 Aşama 1
-    {"netinit",  "RTL8139 ag surucusunu baslat",            cmd_netinit},
-    {"netstat",  "Ag karti durumu + paket sayaclari",       cmd_netstat},
-    {"netregs",  "Kart donanim yazimaclarini serial doku",  cmd_netregs},
-    {"netsend",  "Test paketi gonder [adet]",               cmd_netsend},
-    {"netmon",   "Alinan paketleri izle",                   cmd_netmon},
+    // Network commands
+    {"netinit",  "Initialize RTL8139 network driver",           cmd_netinit},
+    {"netstat",  "Show NIC status and packet counters",         cmd_netstat},
+    {"netregs",  "Dump NIC hardware registers to serial",       cmd_netregs},
+    {"netsend",  "Send test packets [count]",                   cmd_netsend},
+    {"netmon",   "Monitor incoming packets",                    cmd_netmon},
 
-    // ARP komutları — Aşama 2
-    {"ipconfig",  "IP ata / goster  ornek: ipconfig 10.0.2.15",   cmd_ipconfig},
-    {"arping",    "ARP request gonder  ornek: arping 10.0.2.2",   cmd_arping},
-    {"arpcache",  "ARP cache tablosunu goster",                    cmd_arpcache},
-    {"arpflush",  "ARP cache temizle",                             cmd_arpflush},
-    {"arptest",   "QEMU NAT ARP sinirlamasini acikla + TX test",  cmd_arptest},
-    {"arpstatic", "Statik ARP ekle  ornek: arpstatic <IP> <MAC>", cmd_arpstatic},
+    // ARP commands
+    {"ipconfig",  "Assign/show IP address  e.g.: ipconfig 10.0.2.15",        cmd_ipconfig},
+    {"arping",    "Send ARP request        e.g.: arping 10.0.2.2",            cmd_arping},
+    {"arpcache",  "Show ARP cache table",                                        cmd_arpcache},
+    {"arpflush",  "Clear ARP cache",                                             cmd_arpflush},
+    {"arptest",   "Explain QEMU NAT ARP limitation + TX test",                  cmd_arptest},
+    {"arpstatic", "Add static ARP entry  e.g.: arpstatic <IP> <MAC>",           cmd_arpstatic},
 
-    // IPv4 + ICMP komutları — Aşama 3
-    {"ipv4info", "IPv4 katman durumu ve sayaclari",               cmd_ipv4info},
-    {"ping",     "ICMP Echo (ping) gonder  ornek: ping 10.0.2.2", cmd_ping},
+    // IPv4 + ICMP commands
+    {"ipv4info", "Show IPv4 layer status and counters",                     cmd_ipv4info},
+    {"ping",     "Send ICMP Echo (ping)  e.g.: ping 10.0.2.2",             cmd_ping},
 
-    // UDP komutları — Aşama 4
-    {"udpinit",   "UDP katmanini baslat (ipconfig sonrasi)",          cmd_udpinit},
-    {"udplisten", "Porta UDP echo sunucusu bagla  ornek: udplisten 5000", cmd_udplisten},
-    {"udpsend",   "UDP mesaji gonder  ornek: udpsend 10.0.2.2 5000 merhaba", cmd_udpsend},
-    {"udpclose",  "Port dinleyicisini kaldir  ornek: udpclose 5000",  cmd_udpclose},
-    {"udpstat",   "UDP soket tablosu ve sayaclar",                    cmd_udpstat},
+    // UDP commands
+    {"udpinit",   "Initialize UDP layer (after ipconfig)",                          cmd_udpinit},
+    {"udplisten", "Bind UDP echo server to port  e.g.: udplisten 5000",             cmd_udplisten},
+    {"udpsend",   "Send UDP message  e.g.: udpsend 10.0.2.2 5000 hello",            cmd_udpsend},
+    {"udpclose",  "Close port listener  e.g.: udpclose 5000",                       cmd_udpclose},
+    {"udpstat",   "Show UDP socket table and counters",                             cmd_udpstat},
 
-    // DHCP komutları — Aşama 5
-    {"dhcp",     "DHCP ile otomatik IP al",                          cmd_dhcp},
-    {"dhcpstat", "DHCP durum + atanan IP/GW/DNS goster",             cmd_dhcpstat},
-    {"dhcprel",  "DHCP Release — IP iade et",                        cmd_dhcprel},
-    {"netrxtest","RX yolu testi (ARP probe 10.0.2.2)",                cmd_netrxtest},
+    // DHCP commands
+    {"dhcp",      "Obtain IP automatically via DHCP",                    cmd_dhcp},
+    {"dhcpstat",  "Show DHCP status and assigned IP/GW/DNS",             cmd_dhcpstat},
+    {"dhcprel",   "Release DHCP lease (return IP)",                      cmd_dhcprel},
+    {"netrxtest", "RX path test (ARP probe to 10.0.2.2)",                cmd_netrxtest},
 
-    // TCP komutları — Aşama 6
-    {"tcpstat",    "TCP baglanti tablosu ve sayaclar",                    cmd_tcpstat},
-    {"tcpconnect", "TCP baglantisi kur  ornek: tcpconnect 10.0.2.2 80",  cmd_tcpconnect},
-    {"tcpsend",    "TCP veri gonder     ornek: tcpsend 0 merhaba",        cmd_tcpsend},
-    {"tcpclose",   "TCP baglantiyi kapat ornek: tcpclose 0",              cmd_tcpclose},
-    {"tcplisten",  "TCP sunucu baslat   ornek: tcplisten 8080",           cmd_tcplisten},
-    {"tcptest",    "TCP tam dongü testi  ornek: tcptest 10.0.2.2 80",     cmd_tcptest},
-    {"wget",       "HTTP GET + diske kaydet: wget 10.0.2.2:9999/index.html", cmd_wget},
-    {"httppost",   "HTTP POST gonder: httppost 10.0.2.2:9999/api key=val",   cmd_httppost},
+    // TCP commands
+    {"tcpstat",    "Show TCP connection table and counters",                     cmd_tcpstat},
+    {"tcpconnect", "Open TCP connection  e.g.: tcpconnect 10.0.2.2 80",         cmd_tcpconnect},
+    {"tcpsend",    "Send TCP data        e.g.: tcpsend 0 hello",                 cmd_tcpsend},
+    {"tcpclose",   "Close TCP connection e.g.: tcpclose 0",                      cmd_tcpclose},
+    {"tcplisten",  "Start TCP server     e.g.: tcplisten 8080",                  cmd_tcplisten},
+    {"tcptest",    "Run full TCP loopback test  e.g.: tcptest 10.0.2.2 80",      cmd_tcptest},
+    {"wget",       "HTTP GET and save to disk: wget 10.0.2.2:9999/index.html",   cmd_wget},
+    {"httppost",   "Send HTTP POST: httppost 10.0.2.2:9999/api key=val",          cmd_httppost},
 
     // Panic test
-    {"panic", "Kernel panic ekranini test et [df|gp|pf|ud|de|stack]", cmd_panic},
+    {"panic", "Test kernel panic screen [df|gp|pf|ud|de|stack]", cmd_panic},
 
-    // Performans ölçümü
-    {"perf",     "RDTSC performans olcumu [memcpy|memset|loop]", cmd_perf},
+    // Performance measurement
+    {"perf", "RDTSC performance measurement [memcpy|memset|loop]", cmd_perf},
 
-    // Spinlock testi
+    // Spinlock test
     {"spinlock", "Spinlock / RWLock test suite", cmd_spinlock},
 
     // PC Speaker test
-    {"beep", "PC Speaker ile ses cikar  ornek: beep 440 300", cmd_beep},
+    {"beep", "Play sound with PC Speaker  e.g.: beep 440 300", cmd_beep},
+    {"sb16", "Sound Blaster 16 driver  [tone|ding|vol N|stop]", cmd_sb16},
 };
 static int command_count = sizeof(command_table) / sizeof(Command);
 
-// ============================================================================
-// net_register_packet_handler
-// kernel64.c'den rtl8139_init() başarılı olduğunda çağrılır.
-// ============================================================================
+
 void net_register_packet_handler(void) {
     rtl8139_set_packet_handler(net_packet_callback);
     g_net_initialized = 1;
@@ -4721,7 +4703,6 @@ int execute_command64(const char* input, CommandOutput* output) {
         }
     }
     
-    // ── Evrensel ELF fallback ────────────────────────────────────────────────
     {
         int dot_pos = -1;
         for (int _k = 0; command[_k]; _k++) {
@@ -4736,12 +4717,12 @@ int execute_command64(const char* input, CommandOutput* output) {
             if (is_elf) {
                 char try_name[32];
                 str_cpy(try_name, command);
-                // ext2'de /bin/ altında ara
+        
                 char try_path[64];
                 str_cpy(try_path, "/bin/");
                 str_concat(try_path, try_name);
                 if (ext2_file_size(try_path) == 0) {
-                    // lowercase dene
+                
                     for (int _k = 0; try_name[_k]; _k++) {
                         char c = try_name[_k];
                         if (c >= 'A' && c <= 'Z') try_name[_k] = c - 'A' + 'a';
@@ -4761,7 +4742,7 @@ int execute_command64(const char* input, CommandOutput* output) {
         char elf_filename[32];
         int cmd_len = str_len(command);
         if (cmd_len == 0 || cmd_len > 8) {
-            output_add_line(output, "Komut bulunamadi.", VGA_RED);
+            output_add_line(output, "No command found", VGA_RED);
             return 0;
         }
 
@@ -4773,7 +4754,6 @@ int execute_command64(const char* input, CommandOutput* output) {
         elf_filename[cmd_len] = '\0';
         str_concat(elf_filename, ".ELF");
 
-        // ELF'i /bin/ altında ara (HELLO → /bin/HELLO.ELF → /bin/hello.elf)
         char elf_path[64];
         str_cpy(elf_path, "/bin/");
         str_concat(elf_path, elf_filename);
@@ -4798,7 +4778,7 @@ int execute_command64(const char* input, CommandOutput* output) {
                 str_cpy(elf_filename, elf_lower);
             } else {
                 char msg[MAX_LINE_LENGTH];
-                str_cpy(msg, "Bilinmeyen komut: ");
+                str_cpy(msg, "Unknown Command: ");
                 str_concat(msg, command);
                 output_add_line(output, msg, VGA_RED);
                 return 0;

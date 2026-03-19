@@ -135,6 +135,8 @@ static Ext2State state;
 
 const Ext2State* ext2_get_state(void) { return &state; }
 
+
+
 // ============================================================
 //  Temel disk I/O — block <-> sektör dönüşümü
 // ============================================================
@@ -598,6 +600,38 @@ static uint32_t path_resolve(const char* path, int want_parent, char* leaf_out) 
 }
 
 // ============================================================
+//  Inode cache — path_resolve sonucunu saklar
+//  Sadece tek bir path için (son kullanılan dosya).
+//  WAV oynatmada aynı dosya sürekli okunur: %100 hit rate.
+// ============================================================
+static char     _ino_cache_path[256] = {0};
+static uint32_t _ino_cache_val       = 0;
+
+static uint32_t cached_path_resolve(const char* path) {
+    if (!path) return 0;
+    int i = 0;
+    while (path[i] && _ino_cache_path[i] && path[i] == _ino_cache_path[i]) i++;
+    if (path[i] == 0 && _ino_cache_path[i] == 0 && _ino_cache_val != 0)
+        return _ino_cache_val;
+    uint32_t ino = path_resolve(path, 0, NULL);
+    if (ino) {
+        int j = 0;
+        while (path[j] && j < 255) { _ino_cache_path[j] = path[j]; j++; }
+        _ino_cache_path[j] = 0;
+        _ino_cache_val = ino;
+    }
+    return ino;
+}
+
+static void invalidate_ino_cache(const char* path) {
+    if (!path) return;
+    int i = 0;
+    while (path[i] && _ino_cache_path[i] && path[i] == _ino_cache_path[i]) i++;
+    if (path[i] == 0 && _ino_cache_path[i] == 0)
+        _ino_cache_val = 0;
+}
+
+// ============================================================
 //  Dizin entry okuma yardımcıları
 // ============================================================
 
@@ -1029,7 +1063,7 @@ int ext2_path_is_dir(const char* path) {
 // ============================================================
 uint32_t ext2_file_size(const char* path) {
     if (!state.mounted || !path) return 0;
-    uint32_t ino = path_resolve(path, 0, NULL);
+    uint32_t ino = cached_path_resolve(path);
     if (!ino) return 0;
     Ext2Inode inode;
     if (!read_inode(ino, &inode)) return 0;
@@ -1084,6 +1118,7 @@ int ext2_write_file(const char* path, uint64_t offset,
                      const uint8_t* data, uint32_t len) {
     if (!state.mounted || !path || !data || len == 0) return -1;
 
+    invalidate_ino_cache(path);
     uint32_t ino = path_resolve(path, 0, NULL);
     if (!ino) return -1;
 
@@ -1644,7 +1679,7 @@ int ext2_read_file_at(const char* path, uint32_t offset,
     if (!state.mounted || !path || !buf) return -1;
     if (max_len == 0) return 0;
 
-    uint32_t ino = path_resolve(path, 0, NULL);
+    uint32_t ino = cached_path_resolve(path);
     if (!ino) return -1;
 
     Ext2Inode inode;
