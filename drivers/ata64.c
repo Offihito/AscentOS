@@ -1,14 +1,3 @@
-// ata64.c — AscentOS 64-bit ATA PIO Disk Sürücüsü (LBA48)
-//
-// Ext2 filesystem katmanı (ext2.c) için ham sektör okuma/yazma sağlar.
-// Tüm I/O LBA48 protokolü ile yapılır: 2^48 sektör = 128 PiB adreslenebilir.
-//
-// Dışa açık API:
-//   disk_read_sector64     (uint32_t lba)  — Ext2 / genel kullanım
-//   disk_write_sector64    (uint32_t lba)  — Ext2 / genel kullanım
-//   disk_read_sector64_ext (uint64_t lba)  — >137 GB diskler için
-//   disk_write_sector64_ext(uint64_t lba)  — >137 GB diskler için
-
 #include "ata64.h"
 #include <stdint.h>
 #include <stddef.h>
@@ -18,21 +7,21 @@
 // ============================================================
 #define ATA_DATA        0x1F0
 #define ATA_ERROR       0x1F1
-#define ATA_SECTOR_CNT  0x1F2   // also SECTOR_CNT_HI (HOB)
-#define ATA_LBA_LO      0x1F3   // also LBA_LO_HI  (HOB)
-#define ATA_LBA_MID     0x1F4   // also LBA_MID_HI (HOB)
-#define ATA_LBA_HI      0x1F5   // also LBA_HI_HI  (HOB)
+#define ATA_SECTOR_CNT  0x1F2   
+#define ATA_LBA_LO      0x1F3   
+#define ATA_LBA_MID     0x1F4   
+#define ATA_LBA_HI      0x1F5   
 #define ATA_DEVICE      0x1F6
 #define ATA_STATUS      0x1F7
 #define ATA_COMMAND     0x1F7
-#define ATA_DEV_CTRL    0x3F6   // Device Control / Alt Status
+#define ATA_DEV_CTRL    0x3F6   
 
-// LBA48 komutları
-#define ATA_CMD_READ_EXT    0x24  // READ SECTORS EXT  (LBA48)
-#define ATA_CMD_WRITE_EXT   0x34  // WRITE SECTORS EXT (LBA48)
-#define ATA_CMD_FLUSH_EXT   0xEA  // FLUSH CACHE EXT
+// LBA48 Commands
+#define ATA_CMD_READ_EXT    0x24  
+#define ATA_CMD_WRITE_EXT   0x34  
+#define ATA_CMD_FLUSH_EXT   0xEA  
 
-// LBA28 (referans için — kullanılmıyor)
+// LBA28 Reference Deprecated
 #define ATA_CMD_READ    0x20
 #define ATA_CMD_WRITE   0x30
 #define ATA_CMD_FLUSH   0xE7
@@ -42,7 +31,7 @@
 #define ATA_SR_ERR      0x01
 
 // ============================================================
-//  I/O yardımcıları
+//  I/O Helpers
 // ============================================================
 static inline uint8_t inb_p(uint16_t port) {
     uint8_t v;
@@ -61,7 +50,6 @@ static inline void outw_p(uint16_t port, uint16_t v) {
     __asm__ volatile ("outw %0, %1" : : "a"(v), "Nd"(port));
 }
 
-// Timeout: ~500ms (döngü başına ~1 ns varsayımıyla)
 #define ATA_TIMEOUT 500000000u
 
 static int ata_wait_bsy_timeout(void) {
@@ -79,15 +67,7 @@ static int ata_wait_drq_timeout(void) {
     return 0;
 }
 
-// ============================================================
-//  LBA48 ile TEK sektör oku / yaz
-//
-//  Protokol:
-//   1. Device register: 0x40 (LBA modu, master)
-//   2. HOB pass: sector count HIGH + LBA[47:24]
-//   3. LOB pass: sector count LOW  + LBA[23:0]
-//   4. Komut gönder, DRQ bekle, 256 word transfer et
-// ============================================================
+
 static int ata_read_lba48(uint64_t lba, uint8_t* buf) {
     if (!ata_wait_bsy_timeout()) return 0;
 
@@ -146,10 +126,9 @@ static int ata_write_lba48(uint64_t lba, const uint8_t* buf) {
 }
 
 // ============================================================
-//  Dışa açık API
+//  Public API
 // ============================================================
 
-// uint32_t LBA wrapper — Ext2 ve genel kullanım için
 int disk_read_sector64(uint32_t lba, uint8_t* buf) {
     return ata_read_lba48((uint64_t)lba, buf);
 }
@@ -157,7 +136,7 @@ int disk_write_sector64(uint32_t lba, const uint8_t* buf) {
     return ata_write_lba48((uint64_t)lba, buf);
 }
 
-// uint64_t LBA wrapper — >137 GB (2 TiB üstü) diskler için
+
 int disk_read_sector64_ext(uint64_t lba, uint8_t* buf) {
     return ata_read_lba48(lba, buf);
 }

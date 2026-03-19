@@ -1,8 +1,7 @@
-// vmm64.c - Virtual Memory Manager Implementation
 #include "vmm64.h"
 #include "pmm.h"
 #include "heap.h"
-#include "cpu64.h"   // cpu_invlpg, cpu_disable_interrupts, cpu_enable_interrupts
+#include "cpu64.h"  
 #include <stdint.h>
 #include <stddef.h>
 
@@ -41,7 +40,7 @@ static inline void vmm_write_cr3(uint64_t cr3) {
 
 // Invalidate TLB for single page
 void vmm_flush_tlb_single(uint64_t virtual_addr) {
-    cpu_invlpg(virtual_addr);   // cpu64.h — tek sayfa TLB invalidation
+    cpu_invlpg(virtual_addr);   
     vmm_stats.tlb_flushes++;
 }
 
@@ -91,14 +90,9 @@ static pte_t* vmm_get_pte(page_table_t* pml4, uint64_t virtual_addr, int create)
         *pml4e = pdpt_phys | PAGE_PRESENT | PAGE_WRITE | (pml4_idx < 256 ? PAGE_USER : 0);
     } else {
         uint64_t pdpt_phys = PTE_GET_ADDR(*pml4e);
-        // Güvenlik: lower-half (PML4[0..255]) entry'lerin PDPT adresi
-        // GRUB'dan kalmış olabilir. phys + offset → non-canonical → #GP.
-        // Sanal adresin canonical aralıkta olup olmadığını kontrol et.
         uint64_t pdpt_virt = pdpt_phys + KERNEL_VMA - KERNEL_PHYS;
         uint64_t top_bits  = pdpt_virt >> 48;
         if (top_bits != 0x0000 && top_bits != 0xFFFF) {
-            // Non-canonical PDPT → bu GRUB'un bıraktığı bozuk entry.
-            // Temizle ve sıfırdan yeni bir PDPT oluştur.
             if (!create) return NULL;
             pdpt = vmm_alloc_page_table();
             if (!pdpt) return NULL;
@@ -165,15 +159,6 @@ void vmm_init(void) {
     
     serial_print("VMM: Using existing page tables\n");
 
-    // GRUB/bootloader lower-half PML4 girdilerini temizle.
-    //
-    // GRUB yüklenirken identity-map için PML4[0..255] bazı entry'leri kurar.
-    // Bu entry'lerin içerdiği PDPT fiziksel adresleri, kernel'ın kullandığı
-    // "phys + KERNEL_VMA - KERNEL_PHYS" formülüyle non-canonical sanal adrese
-    // dönüşür → vmm_get_pte içinde #GP.
-    //
-    // Kernel sadece PML4[256..511] (higher-half) kullandığından
-    // [0..255] aralığını sıfırlamak güvenli; kernel kodu buraya erişmez.
     page_table_t* pml4 = kernel_address_space.pml4;
     for (int i = 0; i < 256; i++) {
         pml4->entries[i] = 0;
@@ -276,7 +261,7 @@ int vmm_unmap_page(uint64_t virtual_addr) {
 uint64_t vmm_get_physical_address(uint64_t virtual_addr) {
     pte_t* pte = vmm_get_pte(kernel_address_space.pml4, virtual_addr, 0);
     if (!pte || !(*pte & PAGE_PRESENT)) {
-        return 0; // Page not mapped
+        return 0; 
     }
     
     uint64_t page_addr = PTE_GET_ADDR(*pte);
@@ -467,9 +452,6 @@ int vmm_allocate_on_demand(uint64_t virtual_addr, uint64_t flags) {
     if (!pte) {
         return -1;
     }
-    
-    // Mark page as reserved for demand allocation
-    // Store flags but don't set PRESENT bit
     *pte = (flags & 0xFFF) | PAGE_RESERVED | PAGE_ON_DEMAND;
     
     vmm_stats.reserved_pages++;
@@ -519,7 +501,6 @@ int vmm_commit_page(uint64_t virtual_addr) {
         return -1; // Out of memory
     }
     
-    // Map the page
     *pte = ((uint64_t)phys_frame & 0x000FFFFFFFFFF000ULL) | flags | PAGE_PRESENT;
     
     vmm_flush_tlb_single(virtual_addr);
@@ -529,7 +510,6 @@ int vmm_commit_page(uint64_t virtual_addr) {
     return 0;
 }
 
-// Commit a range of reserved pages
 int vmm_commit_range(uint64_t virtual_start, uint64_t count) {
     if (!VMM_IS_PAGE_ALIGNED(virtual_start)) {
         return -1;

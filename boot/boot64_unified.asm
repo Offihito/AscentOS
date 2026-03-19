@@ -55,9 +55,7 @@ multiboot_header:
     dd 8
 multiboot_header_end:
 
-; ============================================================================
-; BSS
-; ============================================================================
+
 section .bss
 align 4096
 p4_table:       resb 4096
@@ -67,9 +65,7 @@ p2_table:       resb 16384
 boot_stack_bottom: resb 65536
 boot_stack_top:
 
-; ============================================================================
-; DATA
-; ============================================================================
+
 section .data
 global framebuffer_addr
 global framebuffer_pitch
@@ -91,29 +87,7 @@ multiboot_mmap_addr:       dq 0   ; physical address of memory map entry array
 multiboot_mmap_entry_size: dd 0   ; size of each entry in bytes
 multiboot_mmap_total_size: dd 0   ; total size of entry data in bytes
 
-; ============================================================================
-; GDT - 64-bit  (Ring-0 + Ring-3 + TSS)
-;
-; Slot  Offset  Description
-;   0    0x00   Null descriptor
-;   1    0x08   Kernel Code  (Ring 0, 64-bit, L=1, DPL=0)
-;   2    0x10   Kernel Data  (Ring 0, DPL=0)
-;   3    0x18   User Data    (Ring 3, DPL=3)   <- SYSRET SS = 0x1B
-;   4    0x20   User Code    (Ring 3, 64-bit, L=1, DPL=3)  <- SYSRET CS = 0x23
-;   5    0x28   TSS Low      (16-byte system descriptor, low 8 bytes)
-;   6    0x30   TSS High     (16-byte system descriptor, high 8 bytes)
-;
-; SYSRET 64-bit (Intel SDM Vol.2):
-;   CS = STAR[63:48] + 16 | 3
-;   SS = STAR[63:48] + 8  | 3
-;
-; STAR[63:48] = 0x10 (USER_CS_BASE=0x10 in syscall.h):
-;   SS = 0x1B -> User Data  (DPL=3)
-;   CS = 0x23 -> User Code  (DPL=3)
-;
-; STAR[47:32] = 0x08 (Kernel CS):
-;   SYSCALL: CS=0x08, SS=0x10 -> Kernel Data
-; ============================================================================
+
 align 16
 global gdt64
 global gdt64_pointer
@@ -153,11 +127,7 @@ gdt64_pointer:
     dw gdt64.end - gdt64 - 1    ; limit = 0x37
     dq gdt64
 
-; ============================================================================
-; TSS
-; Accessed as "extern tss_t kernel_tss" from C.
-; tss_init() zeroes this region and fills the GDT descriptor.
-; ============================================================================
+
 align 16
 global kernel_tss
 kernel_tss:
@@ -170,9 +140,7 @@ msg_fb_addr:        db "[BOOT] Framebuffer at: 0x", 0
 msg_fb_size:        db "[BOOT] Resolution: ", 0
 msg_entering_long:  db "[BOOT] Entering long mode (Higher Half)...", 0x0A, 0
 
-; ============================================================================
-; TEXT - 32-bit entry point
-; ============================================================================
+
 section .text
 bits 32
 _start:
@@ -348,12 +316,7 @@ parse_multiboot_info:
     pop eax
     ret
 
-; Maps 4GB identity + higher half using 2MB pages.
-; P4/P3 entries: Present + RW + User (U=1 required; child tables
-; are inaccessible if any ancestor has U=0).
-; P2 flags 0x87: Present | RW | User | PS(2MB)
-; NOTE: flat model used for now; production kernels should manage
-;       user/kernel mappings with separate page tables.
+
 setup_page_tables:
     mov edi, p4_table
     mov ecx, 4096
@@ -418,9 +381,7 @@ enable_paging:
     call serial_print_32
     ret
 
-; ============================================================================
-; 64-BIT LONG MODE
-; ============================================================================
+
 bits 64
 long_mode_start:
     mov ax, gdt64.data
@@ -442,9 +403,7 @@ long_mode_start:
     hlt
     jmp .halt
 
-; ============================================================================
-; KERNEL STACK
-; ============================================================================
+
 section .bss
 align 4096
 kernel_stack_bottom:

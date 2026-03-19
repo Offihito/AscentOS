@@ -275,8 +275,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         SCPRINT("[18] SYS_MUNMAP  SKIP (mmap failed)", VGA_YELLOW);
     }
 
-    // ── [19] SYS_EXECVE: /bin/sh VFS/FAT32'de yoksa ENOENT, varsa 0 ──
-    // v12: artik stub degil; dosya bulunamazsa ENOENT doner.
+    // ── [19] SYS_EXECVE
     static const char exec_path[] = "/bin/sh";
     _SC3(SYS_EXECVE, exec_path, 0, 0);
     {
@@ -301,7 +300,7 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         ok ? pass++ : fail++;
     }
 
-    // ── [21] PIPE write + read yuvarlak trip ──────────────────
+    // ── [21] PIPE write + read  ──────────────────
     if (pipe_fds[0] >= 3 && pipe_fds[1] >= 3) {
         static const char pmsg[] = "PIPE_DATA_OK";
         uint64_t pmsg_len = 12;
@@ -363,9 +362,6 @@ void cmd_syscalltest(const char* args, CommandOutput* output) {
         }
     }
 
-    // ================================================================
-    // v4 YENİ TESTLER: SYS_LSEEK, SYS_FSTAT, SYS_IOCTL
-    // ================================================================
     SCPRINT("", VGA_WHITE);
     SCPRINT("── v4 New Tests (lseek / fstat / ioctl) ─", VGA_YELLOW);
 

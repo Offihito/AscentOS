@@ -1,6 +1,3 @@
-; interrupts64.asm - Interrupt & Syscall Handlers (Ring-3 SYSRET support)
-; CPU exceptions are forwarded to kernel_panic_handler.
-
 global load_idt64
 global isr_keyboard
 global isr_timer
@@ -30,9 +27,7 @@ extern kernel_panic_handler
 section .text
 bits 64
 
-; ============================================================================
-; Load IDT
-; ============================================================================
+
 load_idt64:
     lidt [rdi]
     ret
@@ -291,35 +286,15 @@ isr_timer:
 
     iretq
 
-; ============================================================================
-; CONTEXT SWITCH FUNCTIONS
-; ============================================================================
-;
-; cpu_context_t offset map (must match task.h):
-;   +0    rax    +8    rbx    +16   rcx    +24   rdx
-;   +32   rsi    +40   rdi    +48   rbp    +56   rsp
-;   +64   r8     +72   r9     +80   r10    +88   r11
-;   +96   r12    +104  r13    +112  r14    +120  r15
-;   +128  rip    +136  rflags
-;   +144  cs     +152  ss     +160  ds     +168  es
-;   +176  fs     +184  gs
-;   +192  cr3
-
 global task_switch_context
 task_switch_context:
     ; RDI = old_ctx, RSI = new_ctx
     test rdi, rdi
     jz .load_new
 
-    ; Save current context.
-    ; BUG FIX: rdi is both the pointer (old_ctx) and a register to be saved.
-    ; Writing "mov [rdi+40], rdi" would store the pointer address, not the
-    ; original register value. Fix: push rdi first so the real value is on stack.
+
     push rdi                 ; save real rdi on stack
-    ; RSP is now shifted by 8 bytes. Offsets accounted for:
-    ;   - rdi: read back from [rsp+0]
-    ;   - rsp: pre-push value = rsp+8
-    ;   - rip: [rsp+8] (return address, above the pushed rdi)
+
     mov [rdi + 0],   rax
     mov [rdi + 8],   rbx
     mov [rdi + 16],  rcx
@@ -415,26 +390,6 @@ task_save_current_context:
 
 global task_load_and_jump_context
 task_load_and_jump_context:
-    ; RDI = cpu_context_t*
-    ;
-    ; Works for both privilege levels (Ring-0 and Ring-3):
-    ;   context.rsp -> kernel stack top
-    ;     [low  addr]  15 x registers  (popped)
-    ;     [high addr]  iretq frame: RIP / CS / RFLAGS / RSP* / SS*
-    ;                  (* only present for Ring-3; CPU ignores them for Ring-0)
-    ;
-    ; Steps:
-    ;   1. Set DS/ES/FS/GS to the correct segment
-    ;   2. RSP = context.rsp
-    ;   3. 15 pops
-    ;   4. iretq
-    ;
-    ; Ring-0 iretq: CS.DPL=0 == CPL=0 -> no privilege change, RSP/SS not read.
-    ;   Stack must have 3 words: RIP / CS / RFLAGS.
-    ; Ring-3 iretq: CS.DPL=3 != CPL=0 -> privilege change, RSP/SS are read.
-    ;   Stack must have 5 words: RIP / CS / RFLAGS / RSP / SS.
-    ;
-    ; Both cases share the same stack layout (prepared by task_create / task_create_user).
 
     ; Determine ring from context.cs
     mov r10, [rdi + 144]    ; context.cs
@@ -479,54 +434,9 @@ task_load_and_jump_context:
     pop rbx
     pop rax
 
-    ; iretq frame now at stack top:
-    ;   Ring-0: [RSP+0]=RIP  [RSP+8]=CS(0x08)  [RSP+16]=RFLAGS
-    ;   Ring-3: [RSP+0]=RIP  [RSP+8]=CS(0x23)  [RSP+16]=RFLAGS  [RSP+24]=RSP  [RSP+32]=SS
+
     iretq
 
-; ============================================================================
-; CPU EXCEPTION HANDLERS â PANIC SUPPORT
-;
-; Stack layout on entry to isr_panic_common:
-;
-;   ISR_NOERRCODE â CPU push order:
-;     [RSP+0]  = isr_num    (pushed by macro)
-;     [RSP+8]  = 0          (pseudo err_code, pushed by macro)
-;     [RSP+16] = RIP        \
-;     [RSP+24] = CS          | CPU iretq frame
-;     [RSP+32] = RFLAGS     /
-;     [RSP+40] = RSP*        \ (only pushed on privilege change)
-;     [RSP+48] = SS*         /
-;
-;   ISR_ERRCODE â CPU pushes err_code first, then macro pushes isr_num.
-;   Layout is otherwise identical.
-;
-;   After isr_panic_common pushes all GPRs:
-;     [RSP+0]   r15  \
-;     [RSP+8]   r14   |
-;     [RSP+16]  r13   |
-;     [RSP+24]  r12   |  exception_frame_t*  (rdi = rsp)
-;     [RSP+32]  r11   |
-;     [RSP+40]  r10   |
-;     [RSP+48]  r9    |
-;     [RSP+56]  r8    |
-;     [RSP+64]  rbp   |
-;     [RSP+72]  rdi   |
-;     [RSP+80]  rsi   |
-;     [RSP+88]  rdx   |
-;     [RSP+96]  rcx   |
-;     [RSP+104] rbx   |
-;     [RSP+112] rax  /
-;     [RSP+120] err_code
-;     [RSP+128] isr_num
-;     [RSP+136] RIP    \
-;     [RSP+144] CS      | CPU iretq frame
-;     [RSP+152] RFLAGS  |
-;     [RSP+160] RSP*    |
-;     [RSP+168] SS*    /
-;
-;   This layout must match exception_frame_t in panic64.c exactly.
-; ============================================================================
 
 %macro ISR_NOERRCODE 1
 global isr%1
@@ -563,7 +473,7 @@ isr_panic_common:
     push r15
 
     mov  rdi, rsp
-    call kernel_panic_handler   ; kernel_panic_handler(exception_frame_t*) â does not return
+    call kernel_panic_handler   
 
     cli
 .hang:
@@ -620,51 +530,6 @@ ISR_NOERRCODE 29
 ISR_ERRCODE   30   ; #SX Security Exception
 ISR_NOERRCODE 31
 
-; ============================================================================
-; SYSCALL ENTRY POINT
-; ============================================================================
-;
-; Supports both kernel-mode (CPL=0) and user-mode (CPL=3) syscalls.
-;
-; Hardware SYSCALL actions (via MSR configuration):
-;   RCX    <- RIP        (return address â instruction after syscall)
-;   R11    <- RFLAGS     (caller's RFLAGS)
-;   RIP    <- LSTAR      (this function)
-;   CS     <- STAR[47:32]       = 0x08 (Kernel Code)
-;   SS     <- STAR[47:32]+8     = 0x10 (Kernel Data)
-;   RFLAGS &= ~FMASK            (IF and DF cleared)
-;   RSP    -> UNCHANGED         (caller's RSP is still active!)
-;
-; When a Ring-3 task issues SYSCALL, RSP still points to the user stack.
-; The first thing to do is switch to the kernel stack.
-; TSS RSP0 is always up-to-date (updated by tss_set_kernel_stack() on task_switch).
-;
-; CPL DETECTION: the RPL field of SS (bits[1:0]) holds the CPL at the
-; time of the SYSCALL:
-;   SS = 0x10 -> RPL=0 -> came from Ring-0 -> kernel path
-;   SS = 0x1B -> RPL=3 -> came from Ring-3 -> user path
-;
-; KERNEL-MODE PATH (CPL=0):
-;   RSP is already on the kernel stack â use it directly.
-;   Return: restore RFLAGS from R11 via pushfq, then jmp rcx.
-;   Do NOT use iretq â kernel-mode SYSCALL has no RSP/SS on the stack;
-;   a partial iretq frame causes #GP -> #DF -> triple fault.
-;
-; USER-MODE PATH (CPL=3):
-;   RSP = user stack -> switch to kernel stack (TSS RSP0).
-;   Dispatch -> return to Ring-3 with o64 sysret.
-;
-; syscall_frame_t layout (must match syscall.h):
-;   +0:  rax  syscall number / return value
-;   +8:  rdi  arg1
-;   +16: rsi  arg2
-;   +24: rdx  arg3
-;   +32: r10  arg4
-;   +40: r8   arg5
-;   +48: r9   arg6
-;   +56: rcx  saved RIP   (saved by SYSCALL hardware, needed for SYSRET)
-;   +64: r11  saved RFLAGS (needed for SYSRET)
-
 extern kernel_tss
 
 syscall_entry:
@@ -679,18 +544,7 @@ syscall_entry:
     pop rax             ; restore RAX (flags preserved, test result intact)
     jnz .user_syscall
 
-; ============================================================
-; KERNEL-MODE SYSCALL PATH (CPL=0 -> CPL=0)
-;
-; Return mechanism: manual RFLAGS/RIP restore, NOT iretq.
-; iretq expects a full 5-word frame (RIP/CS/RFLAGS/RSP/SS) on the stack.
-; This path has no RSP/SS pushed, so iretq would fault.
-;
-; Correct approach:
-;   1. Restore callee-saved registers and frame.
-;   2. push r11 / popfq -> restore RFLAGS (including IF).
-;   3. jmp rcx          -> RCX = return RIP saved by SYSCALL.
-; ============================================================
+
 .kernel_syscall:
     ; Save callee-saved registers (System V ABI)
     push rbx
@@ -739,9 +593,7 @@ syscall_entry:
     popfq
     jmp rcx                      ; RIP = saved return address (no iretq)
 
-; ============================================================
-; USER-MODE SYSCALL PATH (CPL=3 -> CPL=3, return via SYSRET)
-; ============================================================
+
 .user_syscall:
     ; RSP = user stack -> switch to kernel stack
     mov r15, rsp            ; r15 = user RSP (callee-saved, not yet clobbered)
@@ -820,9 +672,7 @@ syscall_entry:
     ; CS = STAR[63:48]+16|3 = 0x23, SS = STAR[63:48]+8|3 = 0x1B
     o64 sysret
 
-; ============================================================================
-; IST1 stack for #DF â 16 KB, must be set in TSS.IST1
-; ============================================================================
+
 section .bss
 align 16
 df_stack_bottom:

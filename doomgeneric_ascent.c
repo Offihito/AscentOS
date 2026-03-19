@@ -244,6 +244,167 @@ void I_Error(const char *e, ...) {
     __builtin_unreachable();
 }
 
+
+// ═══════════════════════════════════════════════════════════════
+// SES SİSTEMİ — SB16 Software Mixer
+// i_sound.h imzalarına tam uyumlu (doomgeneric repo versiyonu)
+// ═══════════════════════════════════════════════════════════════
+
+#include "i_sound.h"
+#include "sounds.h"
+
+#define SYS_SB16_PLAY    411
+#define SYS_SB16_PLAYING 412
+#define SB16_FMT_8BIT_MONO 0
+#define SFX_RATE     11025
+#define MIX_CHANNELS 8
+#define MIX_BUF_SIZE 2048
+
+static inline long _sb16_play(const void* buf, long len, long rate, long fmt) {
+    long r;
+    register long r10 __asm__("r10") = fmt;
+    __asm__ volatile("syscall"
+        : "=a"(r)
+        : "0"((long)SYS_SB16_PLAY), "D"((long)buf), "S"(len), "d"(rate), "r"(r10)
+        : "rcx","r11","memory");
+    return r;
+}
+static inline long _sb16_playing(void) {
+    long r;
+    __asm__ volatile("movq $412,%%rax; syscall"
+        : "=a"(r) :: "rcx","r11","memory");
+    return r;
+}
+
+typedef struct {
+    const unsigned char* data;
+    int pos, len, vol, active, handle;
+} mix_chan_t;
+
+static mix_chan_t g_chan[MIX_CHANNELS];
+static unsigned char g_mix_buf[MIX_BUF_SIZE];
+static int g_snd_init = 0;
+static int g_handle_seq = 1;
+
+static void snd_mix_and_send(int n) {
+    if (!n) return;
+    if (n > MIX_BUF_SIZE) n = MIX_BUF_SIZE;
+    for (int i = 0; i < n; i++) g_mix_buf[i] = 128;
+    for (int ch = 0; ch < MIX_CHANNELS; ch++) {
+        mix_chan_t *c = &g_chan[ch];
+        if (!c->active) continue;
+        for (int i = 0; i < n && c->pos < c->len; i++, c->pos++) {
+            int s = ((int)c->data[c->pos] - 128) * c->vol >> 7;
+            int o = (int)g_mix_buf[i] - 128 + s;
+            if (o >  127) o =  127;
+            if (o < -128) o = -128;
+            g_mix_buf[i] = (unsigned char)(o + 128);
+        }
+        if (c->pos >= c->len) c->active = 0;
+    }
+    while (_sb16_playing() > 0) {}
+    _sb16_play(g_mix_buf, n, SFX_RATE, SB16_FMT_8BIT_MONO);
+}
+
+/* void I_InitSound(boolean use_sfx_prefix) */
+void I_InitSound(boolean use_sfx_prefix) {
+    (void)use_sfx_prefix;
+    for (int i = 0; i < MIX_CHANNELS; i++) g_chan[i].active = 0;
+    g_snd_init = 1;
+    _puts("[SND] I_InitSound ok\n");
+}
+
+void I_ShutdownSound(void) { g_snd_init = 0; }
+
+void I_UpdateSound(void) {
+    if (!g_snd_init) return;
+    snd_mix_and_send(315); /* ~35Hz tick @ 11025Hz = 315 sample */
+}
+
+/* int I_StartSound(sfxinfo_t *sfxinfo, int channel, int vol, int sep) */
+int I_StartSound(sfxinfo_t *sfxinfo, int channel, int vol, int sep) {
+    (void)sep;
+    if (!g_snd_init || !sfxinfo) return -1;
+
+    /* W_CacheLumpName ile SFX lump'ını yükle.
+     * Doom SFX isimleri "ds" prefix'li: "dspistol", "dsshotgn" vs.
+     * PU_CACHE=1: lump cache'e alınır, sonra serbest bırakılır. */
+    extern int   W_GetNumForName(const char *name);
+    extern void* W_CacheLumpNum(int lump, int tag);
+
+    /* sfxinfo->name: "pistol", "shotgn" gibi — "ds" prefix ekle */
+    char lumpname[16];
+    lumpname[0]='d'; lumpname[1]='s';
+    int i = 0;
+    while (sfxinfo->name[i] && i < 13) {
+        lumpname[2+i] = sfxinfo->name[i]; i++;
+    }
+    lumpname[2+i] = 0;
+
+    int lumpnum = W_GetNumForName(lumpname);
+    if (lumpnum < 0) return -1;
+
+    unsigned char *p = (unsigned char*)W_CacheLumpNum(lumpnum, 1 /*PU_CACHE*/);
+    if (!p) return -1;
+
+    /* Doom SFX lump formatı: 8 byte header + PCM
+     * [0-1]=0x0003 (type), [2-3]=rate (LE u16), [4-7]=length (LE u32) */
+    int len = (int)(p[4] | (p[5]<<8) | (p[6]<<16) | (p[7]<<24));
+    if (len <= 0 || len > 65536) return -1;
+    const unsigned char *pcm = p + 8;
+
+    int ch = channel % MIX_CHANNELS;
+    g_chan[ch].data   = pcm;
+    g_chan[ch].pos    = 0;
+    g_chan[ch].len    = len;
+    g_chan[ch].vol    = vol; /* 0-127 */
+    g_chan[ch].active = 1;
+    g_chan[ch].handle = g_handle_seq;
+    return g_handle_seq++;
+}
+
+void I_StopSound(int handle) {
+    for (int i = 0; i < MIX_CHANNELS; i++)
+        if (g_chan[i].handle == handle) { g_chan[i].active = 0; break; }
+}
+
+/* boolean I_SoundIsPlaying(int channel) */
+boolean I_SoundIsPlaying(int channel) {
+    int ch = channel % MIX_CHANNELS;
+    return g_chan[ch].active ? true : false;
+}
+
+/* void I_UpdateSoundParams(int channel, int vol, int sep) */
+void I_UpdateSoundParams(int channel, int vol, int sep) {
+    (void)sep;
+    int ch = channel % MIX_CHANNELS;
+    if (g_chan[ch].active)
+        g_chan[ch].vol = (vol * 127) / 127;
+}
+
+/* Müzik stub'ları — i_sound.h imzalarına uygun */
+void  I_InitMusic(void)                        {}
+void  I_ShutdownMusic(void)                    {}
+void  I_SetMusicVolume(int vol)                { (void)vol; }
+void  I_PauseSong(void)                        {}
+void  I_ResumeSong(void)                       {}
+void *I_RegisterSong(void *data, int len)      { (void)data; (void)len; return data; }
+void  I_PlaySong(void *handle, boolean loop)   { (void)handle; (void)loop; }
+void  I_StopSong(void)                         {}
+void  I_UnRegisterSong(void *handle)           { (void)handle; }
+
+
+/* ── Eksik sembol stub'ları ─────────────────────────────────────
+ * Linker'ın istediği ama kullanmadığımız fonksiyonlar.        */
+void     I_BindSoundVariables(void)                        {}
+void     I_PrecacheSounds(sfxinfo_t *sounds, int num)      { (void)sounds; (void)num; }
+int      I_GetSfxLumpNum(sfxinfo_t *sfxinfo)               { (void)sfxinfo; return -1; }
+boolean  I_MusicIsPlaying(void)                            { return false; }
+int      snd_musicdevice = 0;
+int      snd_sfxdevice   = 3;
+void     StatCopy(void *ep)                                { (void)ep; }
+void     StatDump(void)                                    {}
+
 int main(int argc, char **argv) {
     _puts("[DOOM v12] main\n");
     doomgeneric_Create(argc, argv);

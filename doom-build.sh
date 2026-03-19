@@ -187,6 +187,9 @@ DOOM_SOURCES=$(find "${DOOM_SRC_SUBDIR}" -name "*.c" \
     ! -name "i_sdlmusic.c" \
     ! -name "i_sdlsound.c" \
     ! -name "i_cdmus.c" \
+    ! -name "i_sound.c" \
+    ! -name "i_music.c" \
+    ! -name "statdump.c" \
     | sort)
 # Bizim port katmanımızı ekle
 DOOM_SOURCES="${DOOM_SOURCES} ${DOOM_SRC_SUBDIR}/doomgeneric_ascent.c"
@@ -201,7 +204,7 @@ COMMON_CFLAGS="\
     -std=gnu99 \
     -D_GNU_SOURCE \
     -DNORMALUNIX -DLINUX \
-    -UFEATURE_SOUND \
+    -DFEATURE_SOUND \
     -UFEATURE_MULTIPLAYER \
     -DPACKAGEVERSION='\"AscentOS-Doom\"' \
     -I${DOOM_SRC_SUBDIR} \

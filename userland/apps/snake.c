@@ -1,18 +1,3 @@
-// ═══════════════════════════════════════════════════════════════════════════
-//  AscentOS — snake.c  (Yılan Oyunu v1.1)
-//
-//  v1.0 → v1.1 düzeltmeleri:
-//    - nb_getchar(): her frame'de fcntl çağırmak yerine başlangıçta
-//      stdin'i kalıcı O_NONBLOCK yap. ESC dizi okuma artık güvenli.
-//    - game_delay(): yield sayma yerine SYS_GETTICKS ile gerçek
-//      tick-tabanlı bekleme. Scheduler hızından bağımsız, sabit frame süresi.
-//    - draw_board(): tek büyük write buffer'ı — her karakter için ayrı
-//      write() yok, performans çok daha iyi.
-//    - VMIN=0 VTIME=0: raw mode non-blocking read için doğru ayar.
-//
-//  Syscall bağımlılıkları: read, write, fcntl, ioctl, exit, yield, getticks
-// ═══════════════════════════════════════════════════════════════════════════
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,7 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 
-// ── Inline syscall'lar ────────────────────────────────────────────────────
+// ── Inline syscalls ────────────────────────────────────────────────────
 
 static inline void yield_cpu(void) {
     __asm__ volatile (
@@ -30,7 +15,6 @@ static inline void yield_cpu(void) {
     );
 }
 
-// SYS_GETTICKS = 404
 static inline long get_ticks(void) {
     long ret;
     __asm__ volatile (
@@ -42,7 +26,6 @@ static inline long get_ticks(void) {
     return ret;
 }
 
-// SYS_FCNTL = 72
 static inline long _fcntl(int fd, int cmd, long arg) {
     long ret;
     __asm__ volatile (
@@ -55,7 +38,6 @@ static inline long _fcntl(int fd, int cmd, long arg) {
     return ret;
 }
 
-// SYS_IOCTL = 16
 static inline long _ioctl(int fd, unsigned long req, void* arg) {
     long ret;
     __asm__ volatile (
@@ -123,7 +105,6 @@ static void clrscr(void)      { write(1, "\033[2J\033[H", 7); }
 static void cursor_hide(void) { write(1, "\033[?25l", 6); }
 static void cursor_show(void) { write(1, "\033[?25h", 6); }
 
-// ── Cizim buffer — tum frame tek write() ─────────────────────────────────
 #define DBUF_SIZE (16 * 1024)
 static char dbuf[DBUF_SIZE];
 static int  dbuf_pos;
@@ -144,7 +125,6 @@ static void db_move(int row, int col) {
     if (dbuf_pos + n < DBUF_SIZE) { memcpy(dbuf + dbuf_pos, tmp, n); dbuf_pos += n; }
 }
 
-// ── Oyun sabitleri ────────────────────────────────────────────────────────
 #define BOARD_W      40
 #define BOARD_H      20
 #define MAX_SNAKE    (BOARD_W * BOARD_H)
@@ -192,20 +172,16 @@ static void game_init(void) {
     place_food();
 }
 
-// ── Cizim ────────────────────────────────────────────────────────────────
 static void draw_board(void) {
     db_reset();
-    // Baslik
     db_move(1, BOARD_COL);
     db_puts(CLR_BOLD CLR_CYAN "  AscentOS Snake v1.1" CLR_RESET "   " CLR_YELLOW);
-    char tmp[32]; snprintf(tmp, sizeof(tmp), "Skor: %d   ", score);
+    char tmp[32]; snprintf(tmp, sizeof(tmp), "Score: %d   ", score);
     db_puts(tmp); db_puts(CLR_RESET);
-    // Ust duvar
     db_move(BOARD_ROW, BOARD_COL);
     db_puts(CLR_WHITE "+");
     for (int x = 0; x < BOARD_W; x++) db_putc('-');
     db_puts("+" CLR_RESET);
-    // Satirlar
     for (int y = 0; y < BOARD_H; y++) {
         db_move(BOARD_ROW + 1 + y, BOARD_COL);
         db_puts(CLR_WHITE "|" CLR_RESET);
@@ -223,25 +199,23 @@ static void draw_board(void) {
         }
         db_puts(CLR_WHITE "|" CLR_RESET);
     }
-    // Alt duvar
     db_move(BOARD_ROW + BOARD_H + 1, BOARD_COL);
     db_puts(CLR_WHITE "+");
     for (int x = 0; x < BOARD_W; x++) db_putc('-');
     db_puts("+" CLR_RESET);
-    // Yardim
     db_move(BOARD_ROW + BOARD_H + 2, BOARD_COL);
-    db_puts(CLR_CYAN "  WASD / ok tuslari: yon  |  q: cikis  " CLR_RESET);
+    db_puts(CLR_CYAN "  WASD / Arrow keys: direction  |  q: quit  " CLR_RESET);
     db_flush();
 }
 
 static void draw_gameover(void) {
     int mr = BOARD_ROW + BOARD_H / 2, mc = BOARD_COL + BOARD_W / 2 - 12;
     db_reset();
-    db_move(mr - 1, mc); db_puts(CLR_BOLD CLR_RED "  *** OYUN BITTI ***  " CLR_RESET "          ");
+    db_move(mr - 1, mc); db_puts(CLR_BOLD CLR_RED "  *** Game Over ***  " CLR_RESET "          ");
     db_move(mr,     mc);
-    char tmp[48]; snprintf(tmp, sizeof(tmp), CLR_YELLOW "  Skor: %-5d" CLR_RESET "              ", score);
+    char tmp[48]; snprintf(tmp, sizeof(tmp), CLR_YELLOW "  Score: %-5d" CLR_RESET "              ", score);
     db_puts(tmp);
-    db_move(mr + 1, mc); db_puts(CLR_CYAN "  [r] Tekrar  [q] Cikis  " CLR_RESET "       ");
+    db_move(mr + 1, mc); db_puts(CLR_CYAN "  [r] Retry  [q] Quit  " CLR_RESET "       ");
     db_flush();
 }
 
@@ -251,9 +225,6 @@ static int nb_getchar(void) {
     return (read(STDIN_FILENO, &c, 1) == 1) ? (int)c : -1;
 }
 
-// handle_input: main loop icine tasindi
-
-// ── Oyun adimi ────────────────────────────────────────────────────────────
 static void game_step(void) {
     Point h = snake[0];
     switch (dir) {
@@ -280,21 +251,17 @@ int main(void) {
     clrscr();
     game_init();
 
-    // getticks sagligi kontrolu
     long t0 = get_ticks();
     int ticks_ok = (t0 > 0);
 
-    long next_step = t0;   // bir sonraki game_step zamani
+    long next_step = t0;   
 
     while (1) {
-        // ── Frame suresi hesapla ──────────────────────────────────────────
         int fms = FRAME_MS_BASE - (score / 50) * 10;
         if (fms < FRAME_MS_MIN) fms = FRAME_MS_MIN;
 
-        // ── Frame suresi boyunca input oku, adim zamanini bekle ───────────
         if (ticks_ok) {
             while (get_ticks() < next_step) {
-                // Input: yön degistir veya q/r yakala
                 int c = nb_getchar();
                 if (c == 'q' || c == 'Q') goto quit;
                 if (c == 'r' || c == 'R') { game_init(); clrscr(); next_step = get_ticks(); break; }
@@ -318,7 +285,6 @@ int main(void) {
             }
             next_step = get_ticks() + (long)fms;
         } else {
-            // getticks yok — yield fallback ile bekle, input oku
             int iters = fms * 8;
             for (int i = 0; i < iters; i++) {
                 int c = nb_getchar();
@@ -344,7 +310,6 @@ int main(void) {
             }
         }
 
-        // ── Adim at ve ciz ────────────────────────────────────────────────
         if (game_over) {
             draw_board();
             draw_gameover();
@@ -383,8 +348,8 @@ quit:
     cursor_show();
     disable_raw_mode();
     clrscr();
-    printf(CLR_CYAN "AscentOS Snake - Final Skor: %d\n" CLR_RESET, score);
-    printf("Iyi gunler!\n");
+    printf(CLR_CYAN "AscentOS Snake - Finale Score: %d\n" CLR_RESET, score);
+    printf("Have a Great Day!\n");
     fflush(stdout);
     exit(0);
     return 0;

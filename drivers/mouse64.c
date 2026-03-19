@@ -1,4 +1,3 @@
-// mouse64.c - PS/2 Mouse Driver (Completely Rewritten)
 #include <stdint.h>
 #include <stdbool.h>
 #include "mouse64.h"
@@ -15,7 +14,7 @@ static inline uint8_t inb(uint16_t port) {
     return ret;
 }
 
-// PS/2 portları
+// PS/2 ports
 #define PS2_DATA    0x60
 #define PS2_STATUS  0x64
 #define PS2_COMMAND 0x64
@@ -26,7 +25,6 @@ static uint8_t mouse_cycle = 0;
 static uint8_t mouse_packet[4];
 static bool mouse_packet_ready = false;
 
-// Serial debug
 extern void serial_write(char c);
 extern void serial_print(const char* str);
 
@@ -240,11 +238,9 @@ static void process_mouse_packet(void) {
     x_movement = (x_movement * 2);  // 2x hız - daha smooth
     y_movement = (y_movement * 2);
     
-    // Yeni pozisyon
     mouse_state.x += x_movement;
     mouse_state.y += y_movement;
     
-    // Sınırları kontrol et
     int max_x = gui_get_width() - 1;
     int max_y = gui_get_height() - 1;
     
@@ -254,7 +250,6 @@ static void process_mouse_packet(void) {
     if (mouse_state.y > max_y) mouse_state.y = max_y;
 }
 
-// Mouse durumunu al
 void mouse_get_state(MouseState* state) {
     state->x = mouse_state.x;
     state->y = mouse_state.y;

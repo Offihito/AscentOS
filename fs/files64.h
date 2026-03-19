@@ -23,7 +23,7 @@
 //  Raise this constant if you need larger in-memory files.
 // ----------------------------------------------------------
 #ifndef MAX_FILE_SIZE
-#define MAX_FILE_SIZE (1u * 1024u * 1024u)   /* 1 MiB */
+#define MAX_FILE_SIZE (1u * 1024u * 1024u)  
 #endif
 
 // File structure
@@ -32,16 +32,16 @@ typedef struct {
     const char* content;
     uint32_t    size;
     uint8_t     is_dynamic;
-    const char* directory;   // Parent directory path
+    const char* directory;   
 } EmbeddedFile64;
 
 // Directory structure with metadata
 typedef struct {
     char     path[MAX_PATH_LENGTH];
     uint8_t  is_dynamic;
-    uint8_t  is_system;       // System directory (can't delete)
-    uint16_t permissions;     // Basic permission bits
-    uint32_t created_time;    // Creation timestamp
+    uint8_t  is_system;       
+    uint16_t permissions;     
+    uint32_t created_time;    
 } Directory64;
 
 // ---- File system function declarations ----
@@ -62,31 +62,28 @@ int         fs_chdir64(const char* dirname);
 const char* fs_getcwd64(void);
 int         fs_list_dirs64(void* output_ptr);
 
-// ---- Advanced directory operations ----
+
 int fs_tree64(void* output_ptr);
 int fs_find64(const char* pattern, void* output_ptr);
 int fs_du64(const char* path, void* output_ptr);
 int fs_count_subdirs(const char* path);
 int fs_count_files_in_tree(const char* path);
 
-// ---- Syscall yardımcıları (SYS_STAT / SYS_ACCESS için) ----
-// Verilen path bir dosya mı? 1=evet, 0=hayır
+
 int      fs_path_is_file(const char* path);
-// Verilen path bir dizin mi? 1=evet, 0=hayır
+
 int      fs_path_is_dir(const char* path);
-// Path'in dosya boyutunu döndür (dosya yoksa 0)
+
 uint32_t fs_path_filesize(const char* path);
 
-// ---- Syscall yazma işlemleri (SYS_UNLINK / SYS_RENAME için) (v14) ----
-// Dosyayı siler (dizinse -1 döner)
+
+
 int fs_unlink64(const char* path);
-// Dosya veya dizini yeniden adlandırır/taşır
+
 int fs_rename64(const char* oldpath, const char* newpath);
-// Dosyayı length byte'a kırpar/genişletir (v18)
+
 int fs_truncate64(const char* path, uint64_t length);
 
-// ---- SYS_GETDENTS için (v9) ----
-// d_type sabitleri
 #ifndef DIRENT64_T_DEFINED
 #define DIRENT64_T_DEFINED
 
@@ -94,24 +91,21 @@ int fs_truncate64(const char* path, uint64_t length);
 #define DT_REG      8   // regular file
 #define DT_DIR      4   // directory
 
-// Linux getdents64 dirent yapısı
+// Linux getdents64 dirent structure
 typedef struct {
-    uint64_t d_ino;      // inode numarası (stub)
-    uint64_t d_off;      // bir sonraki entry'nin ofseti
-    uint16_t d_reclen;   // bu struct'ın toplam boyutu (hizalanmış)
-    uint8_t  d_type;     // DT_REG | DT_DIR | DT_UNKNOWN
-    char     d_name[256]; // null-terminated dosya/dizin adı
+    uint64_t d_ino;      
+    uint64_t d_off;      
+    uint16_t d_reclen;  
+    uint8_t  d_type;     
+    char     d_name[256]; 
 } __attribute__((packed)) dirent64_t;
 
-#endif /* DIRENT64_T_DEFINED */
+#endif 
 
-// path altındaki entry'leri buf'a yazar.
-// Döndürür: yazılan toplam byte sayısı | -1 (hata)
+// Required For LS
 int fs_getdents64(const char* path, dirent64_t* buf, int buf_size);
 
-#endif // FILES64_H
-// ---- Syscall write bridge (SYS_WRITE FD_TYPE_FILE için) ----
-// path: tam dosya yolu, offset: yazma başlangıcı, data/len: yazılacak veri
-// Döndürür: yazılan byte sayısı | -1 (hata)
+#endif 
+
 int fs_vfs_write(const char* path, uint64_t offset,
                  const char* data, uint32_t len);

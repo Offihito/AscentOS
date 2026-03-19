@@ -1,4 +1,3 @@
-// task64.h - AscentOS Timer System
 #ifndef TASK64_H
 #define TASK64_H
 

@@ -1,4 +1,3 @@
-// vmm64.h - Virtual Memory Manager for Higher Half Kernel
 #ifndef VMM64_H
 #define VMM64_H
 
@@ -19,9 +18,8 @@
 #define PAGE_GLOBAL     (1ULL << 8)
 #define PAGE_NX         (1ULL << 63)
 
-// Custom flags for demand paging (use available bits 9-11)
-#define PAGE_RESERVED   (1ULL << 9)   // Page is reserved but not allocated
-#define PAGE_ON_DEMAND  (1ULL << 10)  // Allocate on first access
+#define PAGE_RESERVED   (1ULL << 9)   
+#define PAGE_ON_DEMAND  (1ULL << 10)  
 
 // Page sizes
 #define PAGE_SIZE_4K    4096
@@ -34,10 +32,8 @@
 #define PD_INDEX(addr)   (((addr) >> 21) & 0x1FF)
 #define PT_INDEX(addr)   (((addr) >> 12) & 0x1FF)
 
-// Page table entry
 typedef uint64_t pte_t;
 
-// Page directory structures
 typedef struct {
     pte_t entries[512];
 } __attribute__((aligned(4096))) page_table_t;
@@ -65,7 +61,6 @@ void vmm_destroy_address_space(address_space_t* space);
 void vmm_switch_address_space(address_space_t* space);
 address_space_t* vmm_get_kernel_space(void);
 
-// Memory region mapping
 int vmm_map_range(uint64_t virtual_start, uint64_t physical_start, 
                   uint64_t size, uint64_t flags);
 int vmm_unmap_range(uint64_t virtual_start, uint64_t size);
@@ -91,7 +86,6 @@ int vmm_reserve_pages(uint64_t virtual_start, uint64_t count, uint64_t flags);
 int vmm_commit_page(uint64_t virtual_addr);
 int vmm_commit_range(uint64_t virtual_start, uint64_t count);
 
-// TLB management
 void vmm_flush_tlb_single(uint64_t virtual_addr);
 void vmm_flush_tlb_all(void);
 
@@ -112,16 +106,13 @@ uint64_t vmm_get_tlb_flushes(void);
 uint64_t vmm_get_demand_allocations(void);
 uint64_t vmm_get_reserved_pages(void);
 
-// Page table allocation
 page_table_t* vmm_alloc_page_table(void);
 void vmm_free_page_table(page_table_t* table);
 
-// Helper macros
 #define VMM_PAGE_ALIGN_DOWN(addr) ((addr) & ~(PAGE_SIZE_4K - 1))
 #define VMM_PAGE_ALIGN_UP(addr)   (((addr) + PAGE_SIZE_4K - 1) & ~(PAGE_SIZE_4K - 1))
 #define VMM_IS_PAGE_ALIGNED(addr) (((addr) & (PAGE_SIZE_4K - 1)) == 0)
 
-// Extract physical address from PTE
 #define PTE_GET_ADDR(pte) ((pte) & 0x000FFFFFFFFFF000ULL)
 
-#endif // VMM64_H
+#endif

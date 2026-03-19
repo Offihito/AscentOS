@@ -144,7 +144,7 @@ void shell_restore_prompt(void) {
     // Ekranı temizlemek yerine sadece yeni satır + prompt: kilo çıktıktan sonra
     // terminal durumunu bozmamak için sade tutalım.
     println64("", VGA_WHITE);
-    println64("[Shell] Program sonlandi.", VGA_YELLOW);
+    println64("Program Ended", VGA_YELLOW);
     show_prompt64();
 }
 
@@ -292,7 +292,6 @@ void keyboard_handler64(void) {
     if (sc & 0x80) {
         if (kb_userland_mode && kb_raw_mode) {
             uint8_t press_sc = sc & 0x7F;
-            // Modifier tuşlar yukarıda zaten işlendi
             if (press_sc != 0x1D && press_sc != 0x2A && press_sc != 0x36) {
                 char c = sc_to_char(press_sc);
                 if (c) { kb_ring_push((char)0x80); kb_ring_push(c); }
@@ -301,10 +300,9 @@ void keyboard_handler64(void) {
         outb(0x20, 0x20); return;
     }
 
-    // Ctrl+L: temizle (sadece kernel shell)
     if (ctrl_pressed && sc == 0x26 && !kb_userland_mode) { clear_screen64(); show_prompt64(); outb(0x20, 0x20); return; }
 
-    // Ctrl kombinasyonları — Doom raw modunda Ctrl zaten yukarıda işlendi
+    // Ctrl Combinations
     if (ctrl_pressed) {
         if (kb_userland_mode && !kb_raw_mode) {
             if (sc == 0x2E) { kb_ring_push(3);  outb(0x20, 0x20); return; } // Ctrl+C
@@ -349,7 +347,7 @@ void keyboard_handler64(void) {
         } else if (buffer_pos > 0) { buffer_pos--; putchar64('\b', VGA_WHITE); }
         outb(0x20, 0x20); return;
     }
-    // Normal karakter
+    // Normal Character
     char c = sc_to_char(sc);
     if (c) {
         if (kb_userland_mode) {
@@ -362,9 +360,6 @@ void keyboard_handler64(void) {
     outb(0x20, 0x20);
 }
 
-// ============================================================================
-// init_keyboard64
-// ============================================================================
 void init_keyboard64(void) {
     buffer_pos = 0; ctrl_pressed = 0; extended_key = 0;
     shift_pressed = 0; caps_lock = 0;

@@ -211,12 +211,12 @@ static int play_file(const char* path) {
             if ((sb16_fmt == 2 || sb16_fmt == 3) && (chunk_size & 1))
                 chunk_size--;
 
-            printf("  Kanal     : %s\n", fmt.channels == 1 ? "Mono" : "Stereo");
-            printf("  Bit derinlik: %d-bit\n", fmt.bits_per_sample);
-            printf("  Hız       : %ld Hz\n", rate);
-            printf("  Süre      : ~%ld ms\n",
+            printf("  Channel     : %s\n", fmt.channels == 1 ? "Mono" : "Stereo");
+            printf("  Byte Depth: %d-bit\n", fmt.bits_per_sample);
+            printf("  Speed       : %ld Hz\n", rate);
+            printf("  Duration      : ~%ld ms\n",
                    (long)remaining * 1000L / byte_rate);
-            printf("  Çalıyor");
+            printf("  is being played.");
             fflush(stdout);
 
             // ── İlk chunk: buf_a'yı doldur ve çalmaya başla ──────────────────
@@ -248,7 +248,7 @@ static int play_file(const char* path) {
                 poll_until_done();
                 rc = sb16_play(buf_b, got_b, rate, sb16_fmt);
                 if (rc < 0) {
-                    printf("\nHata: SB16 syscall başarısız (%ld).\n", rc);
+                    printf("\nError: SB16 syscall failed (%ld).\n", rc);
                     result = 1; goto done;
                 }
 
@@ -263,7 +263,7 @@ static int play_file(const char* path) {
                     poll_until_done();
                     rc = sb16_play(buf_a, got_a, rate, sb16_fmt);
                     if (rc < 0) {
-                        printf("\nHata: SB16 syscall başarısız (%ld).\n", rc);
+                        printf("\nError: SB16 syscall failed (%ld).\n", rc);
                         result = 1; goto done;
                     }
                 }
@@ -273,7 +273,7 @@ static int play_file(const char* path) {
 
             /* Son chunk bitmesini bekle */
             poll_until_done();
-            printf("\n  Tamamlandı.\n");
+            printf("\n  Finished.\n");
             goto done;
         }
 
@@ -282,7 +282,7 @@ static int play_file(const char* path) {
         if (hdr.size & 1) lseek(fd, 1, 1);
     }
 
-    printf("Hata: data chunk bulunamadı.\n");
+    printf("Error: Couldnt find data chunk\n");
     result = 1;
 
 done:
@@ -297,7 +297,7 @@ static void play_demo(void) {
         128, 84, 46, 19,  5,  5, 19, 46, 84
     };
 
-    printf("Demo: 440 Hz sinüs tonu, 1 saniye (8000 Hz, 8-bit mono)\n");
+    printf("Demo: 440 Hz sinus tone, 1 second (8000 Hz, 8-bit mono)\n");
 
     int total = 8000;
     int sent  = 0;
@@ -309,15 +309,15 @@ static void play_demo(void) {
     int n = total < CHUNK ? total : CHUNK;
     long rc = sb16_play(buf_a, n, 8000, 0);
     if (rc < 0) {
-        printf("Hata: SB16 syscall başarısız (%ld).\n"
-               "  -> QEMU'da -device sb16 var mı?\n", rc);
+        printf("Error: SB16 syscall failed (%ld).\n"
+               "  -> does qemu has -sb16 device?\n", rc);
         return;
     }
 
     // 8000 byte @ 8000Hz = 1000ms
     long deadline = get_ticks() + 1000L;
     wait_until(deadline);
-    printf("Tamamlandı.\n");
+    printf("Finished.\n");
     (void)sent;
 }
 
@@ -325,16 +325,15 @@ static void play_demo(void) {
 int main(int argc, char* argv[]) {
     printf("╔══════════════════════════════════════════╗\n");
     printf("║  AscentOS WAV Player v5.1                ║\n");
-    printf("║  IRQ polling · cızırtısız ║\n");
     printf("╚══════════════════════════════════════════╝\n\n");
     fflush(stdout);
 
     if (argc < 2) {
-        printf("Kullanım : wav_player <dosya.wav>\n");
-        printf("Demo modu: demo tonu çalınıyor...\n\n");
+        printf("Usage : wav_player.elf <file.wav>\n");
+        printf("Demo mode: demo tone is being played...\n\n");
         play_demo();
     } else {
-        printf("Dosya: %s\n", argv[1]);
+        printf("File: %s\n", argv[1]);
         fflush(stdout);
         int r = play_file(argv[1]);
         fflush(stdout);

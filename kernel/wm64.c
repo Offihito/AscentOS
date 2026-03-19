@@ -27,7 +27,6 @@ static WMWindow* wm_find(WindowManager* wm, int window_id) {
     }
     return NULL;
 }
-// Draw 3D raised bevel (classic Windows 95/SerenityOS style)
 static void draw_raised_box(Layer* layer, int x, int y, int w, int h) {
     // Top and left highlights
     layer_fill_rect(layer, x, y, w, 1, COLOR_BUTTON_HILIGHT);           // Top
