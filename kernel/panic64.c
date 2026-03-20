@@ -307,6 +307,89 @@ static void serial_dump(const exception_frame_t* f) {
     SD("R10   ", f->r10);   SD("R11   ", f->r11);
     SD("R12   ", f->r12);   SD("R13   ", f->r13);
     SD("R14   ", f->r14);   SD("R15   ", f->r15);
+
+    /* ── GENIŞLETILMIŞ DEBUG BİLGİSİ ─────────────────────────────────────
+     * Asıl soru: 0x42B7B8 hangi fonksiyon?
+     * 1. FS_BASE MSR'ının anlık değeri (musl TLS sorunu mu?)
+     * 2. Kernel stack'teki return adresleri (call chain)
+     * 3. CS analizi: Ring-0 mı Ring-3 mü?
+     * ------------------------------------------------------------------ */
+    serial_print("  --- EXTENDED DEBUG ---\r\n");
+
+    /* FS_BASE (MSR 0xC0000100) — sıfırsa musl TLS bug'ı */
+    {
+        uint32_t _lo = 0, _hi = 0;
+        __asm__ volatile("rdmsr" : "=a"(_lo),"=d"(_hi) : "c"(0xC0000100u));
+        uint64_t fs_base = ((uint64_t)_hi << 32) | _lo;
+        SD("FS_BASE", fs_base);
+        if (fs_base == 0)
+            serial_print("  *** FS_BASE=0: musl __pthread_self() -> BIOS IVT -> #GP! ***\r\n");
+        else if (fs_base < 0x1000ULL)
+            serial_print("  *** FS_BASE<0x1000: likely zeroed/invalid TLS ***\r\n");
+    }
+
+    /* Ring level analizi */
+    {
+        int ring = (int)(f->cs & 3);
+        serial_print("  CPL     = Ring-");
+        buf[0] = '0' + ring; buf[1] = '\r'; buf[2] = '\n'; buf[3] = 0;
+        serial_print(buf);
+        if (ring == 0)
+            serial_print("  *** Panic in Ring-0 (kernel/IRQ context) ***\r\n");
+    }
+
+    /* Panic önceki RSP → stack frame walk
+     * isr_panic_common push dizisi:
+     *   rax,rbx,rcx,rdx,rsi,rdi,rbp,r8-r15 = 15 reg × 8 = 120 byte
+     *   err_code(8) + isr_num(8) + rip(8) + cs(8) + rflags(8) + rsp(8) + ss(8)
+     * exception handler'a girerken kernel_stack'teki return adresleri: */
+    serial_print("  --- STACK TRACE (kernel RSP walk) ---\r\n");
+    {
+        /* panic anındaki kernel RSP'den itibaren 16 adres bas */
+        uint64_t* sp = (uint64_t*)(uintptr_t)f->rsp;
+        /* RSP'nin makul kernel aralığında olup olmadığını kontrol et */
+        if ((uint64_t)(uintptr_t)sp >= 0x100000ULL &&
+            (uint64_t)(uintptr_t)sp <  0x200000000ULL) {
+            for (int i = 0; i < 16; i++) {
+                serial_print("  [RSP+");
+                /* offset */
+                buf[0] = '0' + (char)((i * 8) / 100 % 10);
+                buf[1] = '0' + (char)((i * 8) /  10 % 10);
+                buf[2] = '0' + (char)((i * 8)       % 10);
+                buf[3] = ']'; buf[4] = ' '; buf[5] = 0;
+                serial_print(buf);
+                hex64(sp[i], buf);
+                serial_print(buf);
+                serial_print("\r\n");
+            }
+        } else {
+            serial_print("  RSP out of expected range — no walk\r\n");
+        }
+    }
+
+    /* isr_panic_common'a gelirken interrupt frame'inden bir önceki RIP:
+     * f->rip = exception anındaki gerçek RIP (patlayan adres).
+     * f->rbp ile frame pointer walk yap (GCC -fno-omit-frame-pointer ise çalışır) */
+    serial_print("  --- FRAME POINTER CHAIN ---\r\n");
+    {
+        uint64_t rbp = f->rbp;
+        for (int depth = 0; depth < 8 && rbp != 0; depth++) {
+            if (rbp < 0x100000ULL || rbp >= 0x200000000ULL) break;
+            if (rbp & 7) break;  /* hizasız — geçersiz */
+            uint64_t saved_rbp = ((uint64_t*)(uintptr_t)rbp)[0];
+            uint64_t ret_addr  = ((uint64_t*)(uintptr_t)rbp)[1];
+            serial_print("  #");
+            buf[0] = '0' + depth; buf[1] = ' '; buf[2] = 0;
+            serial_print(buf);
+            serial_print("ret=");
+            hex64(ret_addr, buf); serial_print(buf);
+            serial_print("  rbp=");
+            hex64(saved_rbp, buf); serial_print(buf);
+            serial_print("\r\n");
+            rbp = saved_rbp;
+        }
+    }
+
     serial_print("============================================================\r\n");
     serial_print("  System HALTED.\r\n");
 #undef SD

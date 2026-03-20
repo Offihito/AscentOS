@@ -56,14 +56,16 @@ multiboot_header:
 multiboot_header_end:
 
 
+; Stack sembolleri linker64.ld tarafından yönetilir
+extern _kernel_stack_top
+extern _boot_stack_top
+
 section .bss
 align 4096
 p4_table:       resb 4096
 p3_table_low:   resb 4096
 p3_table_high:  resb 4096
 p2_table:       resb 16384
-boot_stack_bottom: resb 65536
-boot_stack_top:
 
 
 section .data
@@ -144,7 +146,7 @@ msg_entering_long:  db "[BOOT] Entering long mode (Higher Half)...", 0x0A, 0
 section .text
 bits 32
 _start:
-    mov esp, boot_stack_top
+    mov esp, _boot_stack_top
     mov edi, ebx                  ; save multiboot info pointer
     call check_multiboot
     call init_serial
@@ -391,7 +393,7 @@ long_mode_start:
     mov fs, ax
     mov gs, ax
 
-    mov rsp, kernel_stack_top
+    mov rsp, _kernel_stack_top
 
     mov rdi, rbx                ; pass multiboot info to kernel_main
 
@@ -404,8 +406,5 @@ long_mode_start:
     jmp .halt
 
 
-section .bss
-align 4096
-kernel_stack_bottom:
-    resb 65536
-kernel_stack_top:
+; kernel_stack_bottom / kernel_stack_top sembolleri artık
+; linker64.ld içindeki .stack section'ında tanımlanır.

@@ -53,13 +53,22 @@ SECTIONS
         *(.bss)
         *(.bss.*)
     }
-    
-    /* Stack (64KB) */
-    . = ALIGN(4K);
-    .stack : {
-        *(.stack)
+
+    /* ── Linker tarafından yönetilen stack'ler (NOLOAD) ────────────────────────
+     * ELF dosyasına yazılmaz; sadece adres alanı rezerve edilir.
+     * Boyutu değiştirmek için yalnızca bu dosyayı düzenlemek yeterlidir. */
+    .stack ALIGN(4K) (NOLOAD) : {
+        /* 64-bit kernel stack */
+        _kernel_stack_bottom = .;
+        . += 64K;
+        _kernel_stack_top = .;
+
+        /* 32-bit boot stack (long mode'a geçince terkedilir) */
+        _boot_stack_bottom = .;
+        . += 64K;
+        _boot_stack_top = .;
     }
-    
+
     /* Kernel sonu işareti */
     . = ALIGN(4K);
     _kernel_end = .;
@@ -67,9 +76,12 @@ SECTIONS
 
 /* Semboller */
 _kernel_start = 1M;
-_text_start = ADDR(.text);
-_text_end = ADDR(.text) + SIZEOF(.text);
-_data_start = ADDR(.data);
-_data_end = ADDR(.data) + SIZEOF(.data);
-_bss_start = ADDR(.bss);
-_bss_end = ADDR(.bss) + SIZEOF(.bss);
+_text_start   = ADDR(.text);
+_text_end     = ADDR(.text)   + SIZEOF(.text);
+_data_start   = ADDR(.data);
+_data_end     = ADDR(.data)   + SIZEOF(.data);
+_bss_start    = ADDR(.bss);
+_bss_end      = ADDR(.bss)    + SIZEOF(.bss);
+/* Stack sembolleri .stack section içinde tanımlıdır:
+ *   _kernel_stack_bottom, _kernel_stack_top
+ *   _boot_stack_bottom,   _boot_stack_top   */

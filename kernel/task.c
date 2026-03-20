@@ -868,12 +868,18 @@ void task_exit(void) {
     // ── ZOMBIE yap: parent waitpid() toplayana kadar TCB'yi koru ─
     // TERMINATED yerine ZOMBIE kullanıyoruz. task_find_by_pid()
     // zombie listesine de baktığından sys_waitpid() görebilir.
-    current_task->state = TASK_STATE_ZOMBIE;
-    zombie_list_add(current_task);
+    task_t* dying = current_task;
+    dying->state = TASK_STATE_ZOMBIE;
+    zombie_list_add(dying);
+
+    // scheduler_tick()'in orphan zombie temizliği yapabilmesi için
+    // scheduler'ın previous_task'ını da güncelle.
+    extern task_t* previous_task;
+    previous_task = dying;
 
     task_t* next = task_get_next();
     if (!next) next = idle_task;
-    task_exit_previous = current_task;
+    task_exit_previous = dying;
     current_task  = next;
     next->state   = TASK_STATE_RUNNING;
     next->last_run_time = get_system_ticks();

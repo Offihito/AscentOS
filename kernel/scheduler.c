@@ -179,40 +179,24 @@ void scheduler_tick(void) {
 
     stats.total_ticks++;
 
+    // Uyku süresi dolan task'ları READY'e al
+    task_wakeup_check();
+
     task_t* current = task_get_current();
 
-    // Sonlanan task'ı temizle
-    if (previous_task && previous_task->state == TASK_STATE_TERMINATED) {
-        SCHED_LOG("[SCHEDULER] Cleaning up terminated task\n");
-
-        if (previous_task->kernel_stack_base) {
-            extern void pmm_free_pages(void* base, uint64_t count);
-            extern uint8_t* heap_start;
-            extern uint8_t* heap_current;
-            uint8_t* ks = (uint8_t*)previous_task->kernel_stack_base;
-            if (ks < heap_start || ks >= heap_current) {
-                uint64_t page_count = previous_task->kernel_stack_size / 4096;
-                pmm_free_pages((void*)previous_task->kernel_stack_base, page_count);
-            } else {
-                extern void kfree(void* ptr);
-                kfree((void*)previous_task->kernel_stack_base);
-            }
+    // Orphan zombie temizle:
+    // task_exit() task'ı ZOMBIE yapıp zombie_list'e ekler.
+    // Eğer parent_pid == 0 veya parent artık yoksa (init/idle gibi)
+    // waitpid() hiç gelmeyecektir; bir sonraki tick'te hemen reap et.
+    // task_reap_zombie() doğru allocator'ı (pmm_free_pages + kfree) kullanır.
+    if (previous_task && previous_task->state == TASK_STATE_ZOMBIE) {
+        task_t* parent = task_find_by_pid(previous_task->parent_pid);
+        int orphan = (parent == NULL || previous_task->parent_pid == 0);
+        if (orphan) {
+            SCHED_LOG("[SCHEDULER] Reaping orphan zombie task\n");
+            task_reap_zombie(previous_task);
         }
-        if (previous_task->user_stack_base) {
-            extern void pmm_free_pages(void* base, uint64_t count);
-            extern uint8_t* heap_start;
-            extern uint8_t* heap_current;
-            uint8_t* us = (uint8_t*)previous_task->user_stack_base;
-            if (us < heap_start || us >= heap_current) {
-                uint64_t page_count = previous_task->user_stack_size / 4096;
-                pmm_free_pages((void*)previous_task->user_stack_base, page_count);
-            } else {
-                extern void kfree(void* ptr);
-                kfree((void*)previous_task->user_stack_base);
-            }
-        }
-        extern void kfree(void* ptr);
-        kfree(previous_task);
+        // parent varsa waitpid() toplayacak — dokunma
         previous_task = NULL;
     }
 
