@@ -276,7 +276,10 @@ void tss_init(void)
     serial_print("[TSS] TR loaded with selector 0x28\n");
 
     {
-        char num[8];
+        // uint64_t VMA adresi ondalıkta 20 hane olabilir (0xFFFFFFFF80... = ~1.84e19).
+        // Eski char num[8] höher-half'te 20 byte yazarak stack frame'i bozuyordu
+        // → tss_init() return'ünde corrupt RIP → triple fault.
+        char num[32];
         serial_print("[TSS] kernel_tss @ 0x");
         uint64_to_string((uint64_t)&kernel_tss, num);
         serial_print(num);

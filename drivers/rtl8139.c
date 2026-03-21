@@ -13,6 +13,14 @@
 
 #include "rtl8139.h"
 
+/* Higher-half dönüşüm: g_rtl .bss'de → VMA'da.
+ * DMA için kartın fiziksel adrese ihtiyacı var. */
+#define KERNEL_VMA 0xFFFFFFFF80000000ULL
+static inline uint32_t virt_to_phys32(uint64_t v) {
+    uint64_t p = (v >= KERNEL_VMA) ? (v - KERNEL_VMA) : v;
+    return (uint32_t)p;   /* RTL8139 32-bit DMA */
+}
+
 // ============================================================================
 // Kernel yardımcıları (kernel64.c'de tanımlı)
 // ============================================================================
@@ -326,17 +334,14 @@ bool rtl8139_init(void){
     rtl_w8(RTL_CR, 0x00);
     io_delay();
 
-    // RX tamponu başlangıç adresini bildir (fiziksel adres = sanal adres, no paging)
-    uint64_t rx_phys = (uint64_t)(uintptr_t)g_rtl.rx_buf;
-    if(rx_phys >> 32){
-        serial_print("[RTL8139] HATA: rx_buf 4GB ustunde, DMA calismaz!\n");
-        return false;
-    }
-    rtl_w32(RTL_RBSTART, (uint32_t)rx_phys);
+    // RX tamponu: g_rtl .bss'de → higher-half VMA'da.
+    // DMA için fiziksel adres = VMA - KERNEL_VMA.
+    uint32_t rx_phys = virt_to_phys32((uint64_t)(uintptr_t)g_rtl.rx_buf);
+    rtl_w32(RTL_RBSTART, rx_phys);
 
-    // TX tamponlarının adreslerini kaydet (4 slot)
+    // TX tamponları: higher-half VMA → fiziksel adres dönüşümü
     for(int i=0; i<RTL_TX_SLOTS; i++){
-        uint32_t tx_phys = (uint32_t)(uintptr_t)g_rtl.tx_buf[i];
+        uint32_t tx_phys = virt_to_phys32((uint64_t)(uintptr_t)g_rtl.tx_buf[i]);
         rtl_w32(RTL_TSAD0 + i*4, tx_phys);
     }
 

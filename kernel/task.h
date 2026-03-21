@@ -221,6 +221,14 @@ typedef struct task {
     // ELF yükleme aralığı — mmap pool reset'te çakışma tespiti için
     uint64_t elf_load_min;      // elf64_load'ın yazdığı en düşük VA
     uint64_t elf_load_max;      // elf64_load'ın yazdığı en yüksek VA
+
+    // ── Per-process user heap (brk) ───────────────────────────────
+    // sys_brk her task için bağımsız brk tutar.
+    // task_create_from_elf: elf_load_max'tan hemen sonra başlatılır.
+    // task_create_user    : 0 (brk kullanılmaz).
+    // Boot identity map 0..4GB PAGE_USER ile kaplı olduğundan
+    // ek vmm_map_page gerekmez.
+    uint64_t user_brk;
 } task_t;
 
 typedef struct {

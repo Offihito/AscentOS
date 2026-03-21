@@ -1023,17 +1023,20 @@ static void sys_getppid(syscall_frame_t* frame) {
 
 // ── SYS_SBRK (12) ───────────────────────────────────────────────
 static void sys_sbrk(syscall_frame_t* frame) {
-    int64_t increment = (int64_t)frame->rdi;
-    uint64_t old_brk  = kmalloc_get_brk();
+    task_t* cur = task_get_current();
+    if (!cur) { frame->rax = SYSCALL_ERR_FAULT; return; }
+
+    int64_t  increment = (int64_t)frame->rdi;
+    uint64_t old_brk   = cur->user_brk;
 
     if (increment == 0) { frame->rax = old_brk; return; }
     if (increment < 0)  { frame->rax = SYSCALL_ERR_INVAL; return; }
-    if ((uint64_t)increment > (1024 * 1024)) { frame->rax = SYSCALL_ERR_INVAL; return; }
 
-    uint64_t new_brk = kmalloc_set_brk(old_brk + (uint64_t)increment);
-    if (new_brk == (uint64_t)-1) { frame->rax = SYSCALL_ERR_NOMEM; return; }
+    uint64_t new_brk = old_brk + (uint64_t)increment;
+    if (new_brk > 0x80000000ULL) { frame->rax = SYSCALL_ERR_NOMEM; return; }
 
-    frame->rax = old_brk;
+    cur->user_brk = new_brk;
+    frame->rax    = old_brk;
 }
 
 // ── SYS_GETPRIORITY (13) ────────────────────────────────────────
@@ -1079,6 +1082,14 @@ static void sys_getticks(syscall_frame_t* frame) {
 // .bss'te yer ayırır, fiziksel belleği program yüklenene kadar
 // tüketmez (BSS zero-init = demand-paged).
 #define MMAP_POOL_SIZE   (64ULL * 1024ULL * 1024ULL)   // 64 MB
+/* mmap_pool .bss'de → VMA'da. User-space'e fiziksel adres dön.
+ * virt_to_user: VMA ise fiziksel (identity-map), değilse olduğu gibi. */
+#ifndef KERNEL_VMA
+#define KERNEL_VMA 0xFFFFFFFF80000000ULL
+#endif
+static inline uint64_t mmap_virt_to_user(uint64_t v) {
+    return (v >= KERNEL_VMA) ? (v - KERNEL_VMA) : v;
+}
 #define MMAP_TABLE_SIZE  512
 #define MMAP_CACHE_SIZE  512
 #define PAGE_SIZE_SC     4096ULL
@@ -1270,9 +1281,9 @@ static void sys_mmap(syscall_frame_t* frame) {
             }
             pool_off  = mmap_pool_bump;
             mmap_pool_bump += aligned_len;
-            user_addr = (uint64_t)(mmap_pool + pool_off);
-            // Her zaman sıfırla: pool reset sonrası eski task verisi kalabilir
-            kmemset((void*)user_addr, 0, aligned_len);
+            /* mmap_pool VMA'da; user-space fiziksel (identity-mapped) adres almalı */
+            user_addr = mmap_virt_to_user((uint64_t)(mmap_pool + pool_off));
+            kmemset((void*)(mmap_pool + pool_off), 0, aligned_len);
         }
 
         mmap_table_insert(user_addr, pool_off, aligned_len);
@@ -1332,9 +1343,10 @@ static void sys_mmap(syscall_frame_t* frame) {
     }
     uint64_t pool_off2 = mmap_pool_bump;
     mmap_pool_bump += aligned_len;
-    uint64_t aligned2_addr = (uint64_t)(mmap_pool + pool_off2);
+    uint64_t aligned2_vma  = (uint64_t)(mmap_pool + pool_off2);
+    uint64_t aligned2_addr = mmap_virt_to_user(aligned2_vma);
     mmap_table_insert(aligned2_addr, pool_off2, aligned_len);
-    void* mem = (void*)aligned2_addr;
+    void* mem = (void*)aligned2_vma;   /* kernel VMA ile erişir */
     kmemset(mem, 0, aligned_len);  // pool reused sonrası temiz başla
 
     // Dosyadan oku: static VFS (gömülü) veya ext2
@@ -1403,38 +1415,19 @@ static void sys_munmap(syscall_frame_t* frame) {
 // sbrk()'den farkı: artış miktarı değil, hedef adres alınır.
 // ---------------------------------------------------------------
 static void sys_brk(syscall_frame_t* frame) {
+    // Per-task user brk — kernel heap'ten bağımsız
+    task_t* cur = task_get_current();
+    if (!cur) { frame->rax = SYSCALL_ERR_FAULT; return; }
+
     uint64_t new_addr = frame->rdi;
-    uint64_t cur_brk  = kmalloc_get_brk();
+    uint64_t cur_brk  = cur->user_brk;
 
-    // addr=0: sadece sorgula
-    if (new_addr == 0) {
-        frame->rax = cur_brk;
-        return;
-    }
+    if (new_addr == 0)            { frame->rax = cur_brk; return; }
+    if (new_addr < cur_brk)       { frame->rax = cur_brk; return; }
+    if (new_addr > 0x80000000ULL) { frame->rax = SYSCALL_ERR_NOMEM; return; }
 
-    // Küçültme: mevcut brk'yi döndür (desteklenmiyor)
-    if (new_addr < cur_brk) {
-        frame->rax = cur_brk;
-        return;
-    }
-
-    // Maksimum 64 MB artış
-    if (new_addr - cur_brk > (64 * 1024 * 1024ULL)) {
-        frame->rax = SYSCALL_ERR_NOMEM;
-        return;
-    }
-
-    uint64_t result = kmalloc_set_brk(new_addr);
-    if (result == (uint64_t)-1) {
-        frame->rax = SYSCALL_ERR_NOMEM;
-        return;
-    }
-
-    serial_print("[SYSCALL] brk -> 0x");
-    print_hex64(result);
-    serial_print("\n");
-
-    frame->rax = result;
+    cur->user_brk = new_addr;
+    frame->rax    = new_addr;
 }
 
 // ── SYS_FORK (19) ───────────────────────────────────────────────
