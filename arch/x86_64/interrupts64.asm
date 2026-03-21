@@ -5,10 +5,8 @@ global syscall_entry
 global isr_net
 global isr_sb16
 
-%ifndef TEXT_MODE_BUILD
 global isr_mouse
 extern mouse_handler64
-%endif
 
 extern keyboard_handler64
 extern rtl8139_irq_handler
@@ -76,9 +74,9 @@ isr_keyboard:
     iretq
 
 ; ============================================================================
-; MOUSE INTERRUPT (IRQ12) - GUI mode only
+; MOUSE INTERRUPT (IRQ12 → INT 0x2C) — PS/2 Mouse, text-mode overlay
+; IRQ12 slave PIC üzerinde; EOI sırası: slave (0xA0) → master (0x20)
 ; ============================================================================
-%ifndef TEXT_MODE_BUILD
 isr_mouse:
     push rax
     push rbx
@@ -119,7 +117,6 @@ isr_mouse:
     pop rax
 
     iretq
-%endif
 
 ; ============================================================================
 ; NETWORK INTERRUPT (IRQ11 â INT 0x2B) â RTL8139

@@ -117,12 +117,6 @@ boot64.o: boot/boot64_unified.asm
 interrupts64.o: arch/x86_64/interrupts64.asm
 	$(AS) $(BOOT_ASFLAGS) arch/x86_64/interrupts64.asm -o interrupts64.o
 
-gui64.o: kernel/gui64.c kernel/gui64.h
-	$(CC) $(CFLAGS) -c kernel/gui64.c -o gui64.o
-
-compositor64.o: kernel/compositor64.c kernel/compositor64.h kernel/gui64.h
-	$(CC) $(CFLAGS) -c kernel/compositor64.c -o compositor64.o
-
 mouse64.o: drivers/mouse64.c drivers/mouse64.h
 	$(CC) $(CFLAGS) -c drivers/mouse64.c -o mouse64.o
 
@@ -131,12 +125,6 @@ idt64.o: kernel/idt64.c kernel/idt64.h kernel/task.h
 
 keyboard.o: drivers/keyboard_unified.c kernel/idt64.h
 	$(CC) $(CFLAGS) -c drivers/keyboard_unified.c -o keyboard.o
-
-taskbar.o: kernel/taskbar64.c kernel/taskbar64.h
-	$(CC) $(CFLAGS) -c kernel/taskbar64.c -o taskbar.o
-
-wm64.o: kernel/wm64.c kernel/wm64.h kernel/compositor64.h kernel/taskbar64.h
-	$(CC) $(CFLAGS) -c kernel/wm64.c -o wm64.o
 
 commands64.o: commands/commands64.c commands/commands64.h \
               drivers/sb16.h drivers/pcspk.h
@@ -175,8 +163,8 @@ spinlock64.o: kernel/spinlock64.c kernel/spinlock64.h kernel/cpu64.h
 	$(CC) $(CFLAGS) -c kernel/spinlock64.c -o spinlock64.o
 
 KERNEL_OBJS = boot64.o interrupts64.o idt64.o \
-              font8x16.o vesa64.o gui64.o compositor64.o wm64.o mouse64.o \
-              keyboard.o kernel64.o taskbar.o cpu64.o spinlock64.o \
+              font8x16.o vesa64.o mouse64.o \
+              keyboard.o kernel64.o cpu64.o spinlock64.o \
               commands64.o syscalltest64.o files64.o ata64.o ext2.o elf64.o \
               pmm.o heap.o vmm64.o timer.o pcspk.o sb16.o task.o scheduler.o \
               page_fault.o syscall.o signal64.o \

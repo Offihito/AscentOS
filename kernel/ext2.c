@@ -64,7 +64,26 @@ static void e2_strcat(char* dst, const char* src) {
 //  Boot anını 2025-01-01 00:00:00 (unix=1735689600) olarak sabitleriz,
 //  sonrasını tick sayacıyla ilerletiriz.
 // ============================================================
-extern void gui_get_rtc_time(uint8_t* h, uint8_t* m, uint8_t* s);
+// CMOS RTC — doğrudan I/O portları üzerinden okur (gui bağımlılığı yok)
+static inline uint8_t cmos_read(uint8_t reg) {
+    __asm__ volatile ("outb %0, $0x70" : : "a"(reg));
+    uint8_t val;
+    __asm__ volatile ("inb $0x71, %0" : "=a"(val));
+    return val;
+}
+static inline uint8_t bcd_to_bin(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
+
+static void rtc_get_time(uint8_t* h, uint8_t* m, uint8_t* s) {
+    uint8_t status_b = cmos_read(0x0B);
+    *s = cmos_read(0x00);
+    *m = cmos_read(0x02);
+    *h = cmos_read(0x04);
+    if (!(status_b & 0x04)) {
+        *s = bcd_to_bin(*s);
+        *m = bcd_to_bin(*m);
+        *h = bcd_to_bin(*h & 0x7F);
+    }
+}
 
 #define EXT2_EPOCH_BASE 1735689600u  // 2025-01-01 00:00:00 UTC
 
@@ -74,7 +93,7 @@ static uint32_t ext2_boot_unix        = 0;   // boot anındaki unix timestamp
 // Boot sırasında bir kez çağrılır (ext2_mount içinde)
 static void ext2_init_clock(void) {
     uint8_t h = 0, m = 0, s = 0;
-    gui_get_rtc_time(&h, &m, &s);
+    rtc_get_time(&h, &m, &s);
     ext2_boot_rtc_seconds = (uint32_t)h * 3600u + (uint32_t)m * 60u + (uint32_t)s;
     ext2_boot_unix        = EXT2_EPOCH_BASE + ext2_boot_rtc_seconds;
 }
@@ -82,7 +101,7 @@ static void ext2_init_clock(void) {
 // Mevcut unix timestamp'i döndürür
 static uint32_t ext2_now(void) {
     uint8_t h = 0, m = 0, s = 0;
-    gui_get_rtc_time(&h, &m, &s);
+    rtc_get_time(&h, &m, &s);
     uint32_t cur = (uint32_t)h * 3600u + (uint32_t)m * 60u + (uint32_t)s;
     // Gün geçişi — saniyeler geriye giderse +86400 ekle
     uint32_t delta = (cur >= ext2_boot_rtc_seconds)

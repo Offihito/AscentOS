@@ -11,14 +11,13 @@ Current Features (as of March 2026)
 - **64-bit x86_64 architecture** — designed for modern hardware
 - **EXT2 filesystem** — read/write support fully working
 - **Simple text-based shell**
-- **Basic graphics mode** (switch by typing `gfx` in the shell)
 - **Modular memory management** (stabilized in recent updates)
 - **Musl libc** integration
 - **First userland application:** [kilo](https://github.com/antirez/kilo) text editor successfully ported
 - **GRUB2 multiboot booting**
 - **Full Network Stack**
 
-The OS currently **successfully boots on its own**, can read/write files on EXT2, and switches to a basic graphical mode.
+The OS currently **successfully boots on its own**, can read/write files on EXT2,
 
  🛠️ Building & Running from Source
 

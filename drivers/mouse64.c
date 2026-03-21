@@ -1,7 +1,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "mouse64.h"
-#include "../kernel/gui64.h"
 
 // Port I/O
 static inline void outb(uint16_t port, uint8_t val) {
@@ -76,80 +75,111 @@ void init_mouse64(void) {
     serial_print("[MOUSE] Initializing PS/2 Mouse...\n");
 
     // Başlangıç pozisyonu
-    mouse_state.x = gui_get_width() / 2;
-    mouse_state.y = gui_get_height() / 2;
-    mouse_state.left_button  = false;
-    mouse_state.right_button = false;
+    mouse_state.x = 400;
+    mouse_state.y = 300;
+    mouse_state.left_button   = false;
+    mouse_state.right_button  = false;
     mouse_state.middle_button = false;
     mouse_cycle = 0;
     mouse_packet_ready = false;
 
-    // 1) PS/2 controller'ı sıfırla — önce her iki porta gelen veriyi temizle
-    for (int i = 0; i < 16; i++) {
-        if (inb(PS2_STATUS) & 0x01)
-            inb(PS2_DATA);  // gelen veriyi at
-    }
-    io_wait();
-
-    // 2) Auxiliary device (mouse portu) etkinleştir
+    // ── ADIM 1: IRQ12'yi geçici olarak KAPAT (init sırasında IRQ veri çalmasın)
     mouse_wait_input();
-    outb(PS2_COMMAND, 0xA8);
-    io_wait();
-
-    // 3) Controller Configuration Byte oku
-    mouse_wait_input();
-    outb(PS2_COMMAND, 0x20);
+    outb(PS2_COMMAND, 0x20);          // CCB oku
     mouse_wait_output();
     uint8_t config = inb(PS2_DATA);
+
     serial_print("[MOUSE] PS/2 config before: ");
-    // basit hex print (serial_print_hex yoksa manuel)
     char hbuf[4];
     hbuf[0] = "0123456789ABCDEF"[(config >> 4) & 0xF];
     hbuf[1] = "0123456789ABCDEF"[config & 0xF];
     hbuf[2] = '\n'; hbuf[3] = '\0';
     serial_print(hbuf);
 
-    // bit1 = IRQ12 enable, bit4 = keyboard clock, bit5 = mouse clock disable → temizle
-    config |= 0x02;    // IRQ12 interrupt enable
-    config &= ~0x20;   // mouse clock disable bit'ini temizle (= clock AÇIK)
+    // IRQ12'yi KAPAT, mouse clock'u AÇ
+    config &= ~0x02;   // bit1 = IRQ12 disable (init süresince)
+    config &= ~0x20;   // bit5 = mouse clock disable → temizle (clock AÇIK)
 
-    // 4) Güncel config'i geri yaz
     mouse_wait_input();
     outb(PS2_COMMAND, 0x60);
     mouse_wait_input();
     outb(PS2_DATA, config);
     io_wait();
 
-    // 5) Mouse reset
-    mouse_write(0xFF);
-    uint8_t ack = mouse_read();
-    serial_print("[MOUSE] Reset ACK: ");
-    hbuf[0] = "0123456789ABCDEF"[(ack >> 4) & 0xF]; hbuf[1] = "0123456789ABCDEF"[ack & 0xF];
-    hbuf[2] = '\n'; hbuf[3] = '\0';
-    serial_print(hbuf);
-    // Reset sonrası 0xAA (self-test OK) + device ID (0x00) gelir
-    if (ack == 0xFA) {
-        mouse_read(); // 0xAA
-        mouse_read(); // 0x00 device ID
+    // ── ADIM 2: Auxiliary device (mouse portu) etkinleştir
+    mouse_wait_input();
+    outb(PS2_COMMAND, 0xA8);
+    io_wait();
+
+    // ── ADIM 3: Buffer temizle (önceki artık veri)
+    for (int i = 0; i < 16; i++) {
+        if (inb(PS2_STATUS) & 0x01) inb(PS2_DATA);
     }
     io_wait();
 
-    // 6) Default ayarlar
+    // ── ADIM 4: Mouse reset (0xFF) — polling ile oku, IRQ yok
+    mouse_write(0xFF);
+    uint8_t ack = mouse_read();   // 0xFA beklenir
+    serial_print("[MOUSE] Reset ACK: ");
+    hbuf[0] = "0123456789ABCDEF"[(ack >> 4) & 0xF];
+    hbuf[1] = "0123456789ABCDEF"[ack & 0xF];
+    hbuf[2] = '\n'; hbuf[3] = '\0';
+    serial_print(hbuf);
+
+    if (ack == 0xFA) {
+        uint8_t self_test = mouse_read();  // 0xAA — self-test OK
+        uint8_t dev_id    = mouse_read();  // 0x00 — standard mouse
+        serial_print("[MOUSE] Self-test: ");
+        hbuf[0] = "0123456789ABCDEF"[(self_test >> 4) & 0xF];
+        hbuf[1] = "0123456789ABCDEF"[self_test & 0xF];
+        hbuf[2] = ' '; hbuf[3] = '\0'; serial_print(hbuf);
+        serial_print("DevID: ");
+        hbuf[0] = "0123456789ABCDEF"[(dev_id >> 4) & 0xF];
+        hbuf[1] = "0123456789ABCDEF"[dev_id & 0xF];
+        hbuf[2] = '\n'; hbuf[3] = '\0'; serial_print(hbuf);
+    } else {
+        serial_print("[MOUSE] WARN: Reset ACK != 0xFA, devam ediliyor\n");
+    }
+    io_wait();
+
+    // ── ADIM 5: Default ayarlar
     mouse_write(0xF6);
-    mouse_read();  // ACK
+    mouse_read();   // ACK (0xFA)
     io_wait();
 
-    // 7) Sample rate 80 — daha responsive
+    // ── ADIM 6: Sample rate 80
     mouse_write(0xF3);
-    mouse_read();  // ACK
+    mouse_read();   // ACK
     mouse_write(80);
-    mouse_read();  // ACK
+    mouse_read();   // ACK
     io_wait();
 
-    // 8) Data reporting etkinleştir
+    // ── ADIM 7: Data reporting etkinleştir
     mouse_write(0xF4);
-    mouse_read();  // ACK
+    mouse_read();   // ACK
     io_wait();
+
+    // ── ADIM 8: Buffer'ı bir kez daha temizle (init komutlarının artıkları)
+    for (int i = 0; i < 16; i++) {
+        if (inb(PS2_STATUS) & 0x01) inb(PS2_DATA);
+    }
+    io_wait();
+
+    // ── ADIM 9: IRQ12'yi AÇ — artık interrupt-driven çalışabiliriz
+    mouse_wait_input();
+    outb(PS2_COMMAND, 0x20);
+    mouse_wait_output();
+    config = inb(PS2_DATA);
+    config |= 0x02;    // bit1 = IRQ12 enable
+    config &= ~0x20;   // mouse clock açık kalsın
+    mouse_wait_input();
+    outb(PS2_COMMAND, 0x60);
+    mouse_wait_input();
+    outb(PS2_DATA, config);
+    io_wait();
+
+    // cycle'ı sıfırla — init sonrası temiz başlangıç
+    mouse_cycle = 0;
 
     serial_print("[MOUSE] PS/2 Mouse initialized OK!\n");
 }
@@ -241,8 +271,8 @@ static void process_mouse_packet(void) {
     mouse_state.x += x_movement;
     mouse_state.y += y_movement;
     
-    int max_x = gui_get_width() - 1;
-    int max_y = gui_get_height() - 1;
+    int max_x = 799;   // GUI kaldırıldı — mouse sınırları sabit
+    int max_y = 599;
     
     if (mouse_state.x < 0) mouse_state.x = 0;
     if (mouse_state.x > max_x) mouse_state.x = max_x;

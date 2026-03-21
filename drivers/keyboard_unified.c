@@ -1,6 +1,5 @@
 // keyboard_unified.c — Unified Keyboard Driver
 // kernel_mode == 0  →  TEXT terminal handler
-// kernel_mode == 1  →  GUI handler
 // Runtime'da kernel_mode değişkeni yönlendirir, derleme flag'i yok.
 
 #include <stdint.h>
@@ -37,7 +36,6 @@ static inline void outb(uint16_t port, uint8_t val) {
 // Kernel mod (kernel64.c'de tanımlı)
 // ============================================================================
 extern volatile int kernel_mode;
-extern volatile int gui_request_new_window;
 // syscall.c'de tanımlı — Doom raw mod aktifken 1, normal modda 0
 extern int kb_raw_mode;
 
@@ -166,16 +164,6 @@ void process_command64(const char* cmd) {
         __asm__ volatile("int $0x00");
         while (1) __asm__ volatile("hlt");
     }
-    // gfx
-    if (cmd[0]=='g'&&cmd[1]=='f'&&cmd[2]=='x'&&cmd[3]=='\0') {
-        extern volatile int request_gui_start;
-        println64("GUI moduna geciliyor...", VGA_YELLOW);
-        println64("  Mouse: sol tik surukle/tikla", VGA_CYAN);
-        println64("  Klavye: N = yeni pencere", VGA_CYAN);
-        request_gui_start = 1;
-        return;
-    }
-
     CommandOutput output;
     if (execute_command64(cmd, &output)) {
         for (int i = 0; i < output.line_count; i++)
@@ -190,28 +178,6 @@ void process_command64(const char* cmd) {
 // ============================================================================
 void keyboard_handler64(void) {
     uint8_t sc = inb(0x60);
-
-    // ----------------------------------------------------------------
-    // GUI MODU
-    // ----------------------------------------------------------------
-    if (kernel_mode == 1) {
-        // E0 extended prefix — GUI modunda da takip et
-        if (sc == 0xE0) { extended_key = 1; outb(0x20, 0x20); return; }
-        // Shift
-        if (sc == 0x2A || sc == 0x36) { shift_pressed = 1; outb(0x20, 0x20); return; }
-        if (sc == 0xAA || sc == 0xB6) { shift_pressed = 0; outb(0x20, 0x20); return; }
-        // Ctrl
-        if (sc == 0x1D) { ctrl_pressed = 1; outb(0x20, 0x20); return; }
-        if (sc == 0x9D) { ctrl_pressed = 0; outb(0x20, 0x20); return; }
-        // Release — modifier'lar yukarıda zaten işlendi, geri kalanları yoksay
-        if (sc & 0x80) { extended_key = 0; outb(0x20, 0x20); return; }
-        // Extended key tüketildi
-        if (extended_key) { extended_key = 0; outb(0x20, 0x20); return; }
-        // O tusu (0x18) — yeni pencere isteği
-        if (sc == 0x18) gui_request_new_window = 1;
-        outb(0x20, 0x20);
-        return;
-    }
 
     // ----------------------------------------------------------------
     // TEXT MODU

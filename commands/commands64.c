@@ -528,6 +528,7 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_line(output, " find      - Find files by pattern", VGA_WHITE);
     output_add_line(output, " du        - Show disk usage", VGA_WHITE);
     output_add_empty_line(output);
+    output_add_empty_line(output);
     output_add_line(output, "System Commands:", VGA_YELLOW);
     output_add_line(output, " sysinfo   - System information", VGA_WHITE);
     output_add_line(output, " cpuinfo   - CPU information", VGA_WHITE);
@@ -4538,20 +4539,12 @@ void cmd_sb16(const char* args, CommandOutput* output) {
     output_add_line(output, "  Usage: sb16 [tone|ding|vol N|stop]", VGA_DARK_GRAY);
 }
 
-extern volatile int request_gui_start;
 
-static void cmd_gfx(const char* args, CommandOutput* output) {
-    (void)args;
-    output_add_line(output, "Switching to gui mode", 0x0E);
-    output_add_line(output, "Press N for opening new window", 0x0B);
-    request_gui_start = 1;
-}
 
 // ============================================================================
-// LSPCI — PCI Bus Tarayıcı
+// LSPCI — PCI Bus 
 // ============================================================================
 
-// PCI config space'e erişim için I/O portları
 #define PCI_CONFIG_ADDRESS  0xCF8
 #define PCI_CONFIG_DATA     0xCFC
 
@@ -4574,7 +4567,7 @@ static uint32_t pci_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offse
     return inl64(PCI_CONFIG_DATA);
 }
 
-// Bilinen PCI Vendor ID'leri
+// Known PCI Vendor ID's
 static const char* pci_vendor_name(uint16_t vid) {
     switch (vid) {
         case 0x8086: return "Intel";
@@ -4593,7 +4586,6 @@ static const char* pci_vendor_name(uint16_t vid) {
     }
 }
 
-// Bilinen PCI Class/Subclass açıklamaları
 static const char* pci_class_name(uint8_t class, uint8_t subclass) {
     if (class == 0x00) return "Unclassified";
     if (class == 0x01) {
@@ -4665,7 +4657,6 @@ static void uint8_to_hex(uint8_t v, char out[3]) {
     out[2] = '\0';
 }
 
-// "XX:XX.X" formatında BDF adresi
 static void bdf_to_str(uint8_t bus, uint8_t dev, uint8_t func, char out[8]) {
     char hbus[3], hdev[3];
     uint8_to_hex(bus, hbus);
@@ -4821,7 +4812,6 @@ static Command command_table[] = {
     // SYSCALL/SYSRET commands
     {"syscalltest", "Run SYSCALL test suite (116 tests)", cmd_syscalltest},
 
-    {"gfx", "Deprecated GUI mode", cmd_gfx},
 
     // Network commands
     {"netinit",  "Initialize RTL8139 network driver",           cmd_netinit},
@@ -4887,7 +4877,7 @@ static int command_count = sizeof(command_table) / sizeof(Command);
 void net_register_packet_handler(void) {
     rtl8139_set_packet_handler(net_packet_callback);
     g_net_initialized = 1;
-    serial_print("[NET] Paket handler kaydedildi.\n");
+    serial_print("[NET] Package handler saved.\n");
 }
 
 void init_commands64(void) {

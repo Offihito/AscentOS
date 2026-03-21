@@ -15,4 +15,4 @@ void init_mouse64(void);
 void mouse_handler64(void);
 void mouse_get_state(MouseState* state);
 
-#endif 
+#endif
