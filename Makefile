@@ -151,7 +151,7 @@ http.o: network/http.c network/http.h network/tcp.h network/arp.h network/ipv4.h
 syscalltest64.o: commands/syscalltest64.c commands/commands64.h kernel/syscall.h kernel/signal64.h kernel/task.h
 	$(CC) $(CFLAGS) -c commands/syscalltest64.c -o syscalltest64.o
 
-kernel64.o: kernel/kernel64.c kernel/gui64.h drivers/mouse64.h kernel/wm64.h \
+kernel64.o: kernel/kernel64.c drivers/mouse64.h \
             drivers/ata64.h kernel/ext2.h fs/files64.h kernel/cpu64.h \
             drivers/sb16.h
 	$(CC) $(CFLAGS) -c kernel/kernel64.c -o kernel64.o
