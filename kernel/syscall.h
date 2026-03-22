@@ -884,7 +884,8 @@ typedef struct pipe_buf {
     uint32_t ref_count;      // Kaç fd bu tampona bağlı (max 2)
     uint8_t  write_closed;   // Yazma ucu kapalıysa 1 (EOF sinyali)
     uint8_t  read_closed;    // Okuma ucu kapalıysa 1
-    uint8_t  _pad[2];
+    uint8_t  write_ref_count; // Kaç YAZMA ucu açık (tüm tasklar dahil)
+    uint8_t  _pad[1];
 } pipe_buf_t;
 
 typedef struct {
@@ -893,7 +894,10 @@ typedef struct {
     uint16_t    flags;       // O_RDONLY, O_WRONLY vb. — uint16_t: O_TRUNC(0x200) sigmaz!
     uint8_t     is_open;     // 1 = acik
     uint8_t     _pad[3];
-    uint64_t    offset;      // dosya okuma/yazma ofseti
+    uint64_t    offset;      // dosya okuma/yazma ofseti (shared_off != NULL ise bu kullanılmaz)
+    uint64_t*   shared_off;  // dup/dup2 paylaşımlı offset pointer (NULL = bağımsız)
+    uint8_t     shared_off_ref; // bu slot'u kaç fd paylaşıyor (0 = sadece bu fd)
+    uint8_t     _pad2[3];
     char        path[52];    // açık dosyanın yolu (debug / gelecek VFS)
     pipe_buf_t* pipe;        // FD_TYPE_PIPE ise tampon; diğer türler için NULL
     uint32_t    cached_ino;  // ext2 inode no — open()'da resolve edilir, read()'da path_resolve atlar

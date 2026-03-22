@@ -744,13 +744,14 @@ pid_t getppid(void) {
 }
 
 pid_t fork(void) {
-    register long _rax __asm__("rax") = SYS_FORK;
     long ret;
     __asm__ volatile (
+        "mov %%rsp, %%rdi\n\t"
+        "mov %1,    %%rax\n\t"
         "syscall"
         : "=a"(ret)
-        : "r"(_rax)
-        : "rcx", "r11", "memory"
+        : "i"((long)SYS_FORK)
+        : "rcx", "r11", "rdi", "memory"
     );
     SET_ERRNO(ret);
     return (pid_t)ret;

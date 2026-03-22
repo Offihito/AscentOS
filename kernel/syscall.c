@@ -14,7 +14,7 @@ extern int  sb16_play_pcm_raw(const void* buf, unsigned short len,
 #include "task.h"
 #include "scheduler.h"
 #include "timer.h"
-
+#include <stddef.h>
 // ============================================================
 // External declarations
 // ============================================================
@@ -103,6 +103,7 @@ void sys_fb_info(syscall_frame_t* frame) {
 // Aksi hâlde sys_read ICANON=1/VMIN=1 ile blocking okuma yapmaya devam eder
 // ve Doom game loop'u DG_DrawFrame'e hiç ulaşamaz.
 void sys_kb_raw(syscall_frame_t* frame) {
+    serial_print("[SYS_KB_RAW] called\n");
     kb_raw_mode = (int)frame->rdi;
     if (kb_raw_mode) {
         // Raw/game mod: satır bazlı okuma, echo ve sinyal üretimi kapat.
@@ -318,6 +319,49 @@ extern void task_exit(void);
 // ============================================================
 #define USER_SPACE_MAX  0x00007FFFFFFFFFFFull
 
+// ── Linux x86-64 struct stat (144 byte, ABI-uyumlu) ─────────────────────
+// Kernel stat_t (syscall.h) uint32_t alanlar kullanır — offset'ler Linux
+// ABI ile uyumsuz. sys_stat / sys_fstat bu struct'ı doldurarak user-space'e
+// Linux-native layout iletir; musl/glibc doğrudan bu struct'ı okur.
+//
+// Doğrulanan layout (x86-64):
+//   st_dev    @ 0   (uint64)
+//   st_ino    @ 8   (uint64)
+//   st_nlink  @ 16  (uint64)
+//   st_mode   @ 24  (uint32)
+//   st_uid    @ 28  (uint32)
+//   st_gid    @ 32  (uint32)
+//   __pad0    @ 36  (uint32)
+//   st_rdev   @ 40  (uint64)
+//   st_size   @ 48  (int64)
+//   st_blksz  @ 56  (int64)
+//   st_blocks @ 64  (int64)
+//   st_atim   @ 72  (int64 sec + int64 nsec)
+//   st_mtim   @ 88  (int64 sec + int64 nsec)
+//   st_ctim   @ 104 (int64 sec + int64 nsec)
+//   __unused  @ 120 (3 × int64 = 24 byte)
+//   toplam: 144 byte
+typedef struct {
+    uint64_t st_dev;
+    uint64_t st_ino;
+    uint64_t st_nlink;
+    uint32_t st_mode;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    uint32_t __pad0;
+    uint64_t st_rdev;
+    int64_t  st_size;
+    int64_t  st_blksize;
+    int64_t  st_blocks;
+    int64_t  st_atime_sec;
+    int64_t  st_atime_nsec;
+    int64_t  st_mtime_sec;
+    int64_t  st_mtime_nsec;
+    int64_t  st_ctime_sec;
+    int64_t  st_ctime_nsec;
+    int64_t  __unused[3];
+} linux_stat_t;
+
 static int is_valid_user_ptr(const void* ptr, uint64_t len) {
     if (!ptr) return 0;
     uint64_t addr = (uint64_t)ptr;
@@ -385,14 +429,79 @@ static int syscall_enabled = 0;
 // FD TABLOSU IMPLEMENTASYONU
 // ============================================================
 
+// ============================================================
+// SHARED OFFSET POOL
+//
+// Linux dup()/dup2() semantics: duplicated fds share the same
+// underlying open file description, meaning they share one offset.
+// Advancing the offset on fd also advances it on any fd dup'd from it.
+//
+// Implementation: small static pool of uint64_t slots. open() allocates
+// a fresh slot; dup/dup2/fcntl(F_DUPFD) copy the pointer and bump the
+// ref count. fd_free() decrements the ref count; when it hits 1 the
+// last holder keeps using it as a plain local offset; at 0 slot is freed.
+//
+// FD_OFF(ent) macro: always reads/writes the correct offset regardless
+// of whether the fd is standalone or sharing.
+// ============================================================
+#define SHARED_OFF_SLOTS  64   // enough for MAX_FDS * 2 simultaneous dup chains
+
+typedef struct {
+    uint64_t value;
+    uint8_t  ref_count;  // 0 = free slot
+} shared_off_t;
+
+static shared_off_t _shared_off_pool[SHARED_OFF_SLOTS];
+
+// Allocate a fresh slot and set initial offset
+static uint64_t* shared_off_alloc(uint64_t initial) {
+    for (int i = 0; i < SHARED_OFF_SLOTS; i++) {
+        if (_shared_off_pool[i].ref_count == 0) {
+            _shared_off_pool[i].value     = initial;
+            _shared_off_pool[i].ref_count = 1;
+            return &_shared_off_pool[i].value;
+        }
+    }
+    return (void*)0;  // pool full — caller falls back to fd.offset
+}
+
+// Bump ref count when a dup shares the slot
+static void shared_off_grab(uint64_t* ptr) {
+    if (!ptr) return;
+    // ptr points to the .value field; ref_count is the byte after it
+    shared_off_t* slot = (shared_off_t*)((uint8_t*)ptr - offsetof(shared_off_t, value));
+    if (slot->ref_count < 255) slot->ref_count++;
+}
+
+// Release one reference; returns 1 if the slot was freed (last user gone)
+static int shared_off_release(uint64_t* ptr) {
+    if (!ptr) return 0;
+    shared_off_t* slot = (shared_off_t*)((uint8_t*)ptr - offsetof(shared_off_t, value));
+    if (slot->ref_count == 0) return 0;
+    slot->ref_count--;
+    return (slot->ref_count == 0);
+}
+
+// Convenience macro: get/set offset through shared pointer if present,
+// otherwise use the fd_entry_t's own .offset field.
+#define FD_OFF(ent)  ((ent)->shared_off ? *(ent)->shared_off : (ent)->offset)
+#define FD_OFF_SET(ent, val) \
+    do { if ((ent)->shared_off) *(ent)->shared_off = (val); \
+         else (ent)->offset = (val); } while(0)
+#define FD_OFF_ADD(ent, n) \
+    do { if ((ent)->shared_off) *(ent)->shared_off += (uint64_t)(n); \
+         else (ent)->offset += (uint64_t)(n); } while(0)
+
 void fd_table_init(fd_entry_t* table) {
     for (int i = 0; i < MAX_FDS; i++) {
-        table[i].type    = FD_TYPE_NONE;
-        table[i].flags   = 0;
-        table[i].is_open = 0;
-        table[i].offset  = 0;
-        table[i].path[0] = '\0';
-        table[i].pipe    = 0;
+        table[i].type           = FD_TYPE_NONE;
+        table[i].flags          = 0;
+        table[i].is_open        = 0;
+        table[i].offset         = 0;
+        table[i].shared_off     = 0;
+        table[i].shared_off_ref = 0;
+        table[i].path[0]        = '\0';
+        table[i].pipe           = 0;
     }
     // stdin  (fd 0) – okuma
     table[0].type     = FD_TYPE_SERIAL;
@@ -419,12 +528,16 @@ void fd_table_init(fd_entry_t* table) {
 int fd_alloc(fd_entry_t* table, uint8_t type, uint16_t flags, const char* path) {
     for (int i = 3; i < MAX_FDS; i++) {
         if (!table[i].is_open) {
-            table[i].type     = type;
-            table[i].flags    = flags;
-            table[i].fd_flags = 0;
-            table[i].is_open  = 1;
-            table[i].offset   = 0;
-            table[i].pipe     = 0;
+            table[i].type           = type;
+            table[i].flags          = flags;
+            table[i].fd_flags       = 0;
+            table[i].is_open        = 1;
+            table[i].offset         = 0;
+            table[i].pipe           = 0;
+            // Each fresh open() gets its own shared offset slot so that
+            // any later dup() can share it without extra bookkeeping.
+            table[i].shared_off     = shared_off_alloc(0);
+            table[i].shared_off_ref = table[i].shared_off ? 1 : 0;
             if (path)
                 my_strncpy(table[i].path, path, 127);
             else
@@ -439,12 +552,14 @@ int fd_alloc(fd_entry_t* table, uint8_t type, uint16_t flags, const char* path) 
 int fd_alloc_pipe(fd_entry_t* table, uint8_t rw_flags, pipe_buf_t* pbuf) {
     for (int i = 3; i < MAX_FDS; i++) {
         if (!table[i].is_open) {
-            table[i].type     = FD_TYPE_PIPE;
-            table[i].flags    = rw_flags;
-            table[i].fd_flags = 0;
-            table[i].is_open  = 1;
-            table[i].offset   = 0;
-            table[i].pipe     = pbuf;
+            table[i].type           = FD_TYPE_PIPE;
+            table[i].flags          = rw_flags;
+            table[i].fd_flags       = 0;
+            table[i].is_open        = 1;
+            table[i].offset         = 0;
+            table[i].shared_off     = 0;   // pipes use bytes_avail, not file offset
+            table[i].shared_off_ref = 0;
+            table[i].pipe           = pbuf;
             my_strncpy(table[i].path, "[pipe]", 52);
             return i;
         }
@@ -456,10 +571,27 @@ int fd_free(fd_entry_t* table, int fd) {
     if (fd < 0 || fd >= MAX_FDS) return -1;
     if (!table[fd].is_open)      return -1;
 
-    // Pipe tamponu referans sayacını düşür
+    // Pipe tamponu referans sayacını düşür.
+    // write_ref_count: tüm tasklar dahil kaç yazma ucu açık.
+    // Sıfıra düşünce write_closed=1 yap; sys_read EOF döndürebilsin.
     if (table[fd].type == FD_TYPE_PIPE && table[fd].pipe) {
-        pipe_buf_release(table[fd].pipe);
+        pipe_buf_t* pb = table[fd].pipe;
+
+        if ((table[fd].flags & O_WRONLY) && pb->write_ref_count > 0) {
+            pb->write_ref_count--;
+            if (pb->write_ref_count == 0)
+                pb->write_closed = 1;
+        }
+
+        pipe_buf_release(pb);
         table[fd].pipe = 0;
+    }
+
+    // Shared offset slot referans sayacını düşür
+    if (table[fd].shared_off) {
+        shared_off_release(table[fd].shared_off);
+        table[fd].shared_off     = 0;
+        table[fd].shared_off_ref = 0;
     }
 
     table[fd].is_open = 0;
@@ -511,6 +643,8 @@ void pipe_buf_release(pipe_buf_t* pb) {
         }
     }
 }
+
+// (shared offset pool moved above fd_table_init)
 
 // ============================================================
 // SYSCALL_INIT
@@ -570,6 +704,7 @@ int syscall_is_enabled(void) { return syscall_enabled; }
 // ============================================================
 // ── SYS_WRITE (1) ──────────────────────────────────────────────
 static void sys_write(syscall_frame_t* frame) {
+    { static int sys_write_logged = 0; if (!sys_write_logged) { sys_write_logged = 1; serial_print("[SYS_WRITE] called\n"); } }
     int         fd  = (int)frame->rdi;
     const char* buf = (const char*)frame->rsi;
     uint64_t    len = frame->rdx;
@@ -618,18 +753,28 @@ static void sys_write(syscall_frame_t* frame) {
     }
 
     if (ent->type == FD_TYPE_FILE) {
+        // O_APPEND: her write öncesi offset'i dosya sonuna taşı
+        if (ent->flags & O_APPEND) {
+            uint32_t fsize = ext2_file_size(ent->path);
+            if (fsize == 0) {
+                const EmbeddedFile64* _vf = fs_get_file64(ent->path);
+                if (_vf) fsize = (uint32_t)_vf->size;
+            }
+            FD_OFF_SET(ent, (uint64_t)fsize);
+        }
+
         // Ext2'ye yaz; dosya ext2'de yoksa (statik gömülü dosya) VFS'e yaz.
         int n;
         if (ext2_path_is_file(ent->path)) {
-            n = ext2_write_file(ent->path, ent->offset,
+            n = ext2_write_file(ent->path, FD_OFF(ent),
                                 (const uint8_t*)buf, (uint32_t)len);
         } else {
             extern int fs_vfs_write(const char* path, uint64_t offset,
                                     const char* data, uint32_t len);
-            n = fs_vfs_write(ent->path, ent->offset, buf, (uint32_t)len);
+            n = fs_vfs_write(ent->path, FD_OFF(ent), buf, (uint32_t)len);
         }
         if (n < 0) n = 0;
-        ent->offset += (uint64_t)n;
+        FD_OFF_ADD(ent, n);
         frame->rax = (uint64_t)n;
         serial_print("[SYSCALL] file write: ");
         { char b[12]; int_to_str(n, b); serial_print(b); }
@@ -648,6 +793,7 @@ static void sys_write(syscall_frame_t* frame) {
 extern termios_t kernel_termios;
 
 static void sys_read(syscall_frame_t* frame) {
+    { static int sys_read_logged = 0; if (!sys_read_logged) { sys_read_logged = 1; serial_print("[SYS_READ] called\n"); } }
     int      fd  = (int)frame->rdi;
     char*    buf = (char*)frame->rsi;
     uint64_t len = frame->rdx;
@@ -800,9 +946,40 @@ static void sys_read(syscall_frame_t* frame) {
     if (!ent)  { frame->rax = SYSCALL_ERR_BADF; return; }
     if ((ent->flags & (O_WRONLY | O_RDWR)) == O_WRONLY) { frame->rax = SYSCALL_ERR_BADF; return; }
 
-    if (ent->type == FD_TYPE_PIPE) {
-        pipe_buf_t* pb = ent->pipe;
-        if (!pb) { frame->rax = SYSCALL_ERR_BADF; return; }
+   if (ent->type == FD_TYPE_PIPE) {
+    pipe_buf_t* pb = ent->pipe;
+    if (!pb) { frame->rax = SYSCALL_ERR_BADF; return; }
+    // Block until data arrives or write end is closed
+    if (pb->bytes_avail == 0 && !pb->write_closed) {
+        task_t* _pt = task_get_current();
+        if (_pt) {
+            while (pb->bytes_avail == 0 && !pb->write_closed) {
+                __asm__ volatile ("sti; hlt" ::: "memory");
+                if (_pt->state == TASK_STATE_TERMINATED) break;
+            }
+        }
+    }
+    if (pb->bytes_avail == 0) {
+        frame->rax = pb->write_closed ? 0 : SYSCALL_ERR_AGAIN;
+        return;
+    }
+
+        // Block until data arrives or write end is closed.
+        // Use sti;hlt to yield the CPU so the writer (child) gets a time slice.
+        // Without this, read() returns EAGAIN immediately and the parent never
+        // sees data written by a child that hasn't run yet.
+        if (pb->bytes_avail == 0 && !pb->write_closed) {
+            // Check if caller is in a context where blocking is safe
+            task_t* _pipe_cur = task_get_current();
+            if (_pipe_cur) {
+                // Block: enable interrupts, halt until timer tick switches to writer
+                while (pb->bytes_avail == 0 && !pb->write_closed) {
+                    __asm__ volatile ("sti; hlt" ::: "memory");
+                    if (_pipe_cur->state == TASK_STATE_TERMINATED) break;
+                }
+            }
+        }
+
         if (pb->bytes_avail == 0) {
             frame->rax = pb->write_closed ? 0 : SYSCALL_ERR_AGAIN;
             return;
@@ -834,16 +1011,16 @@ static void sys_read(syscall_frame_t* frame) {
         // Ext2'den oku — ext2_read_file_at ile offset-aware, kmalloc YOK.
         uint32_t ext2_fsize = ext2_file_size(ent->path);
         if (ext2_fsize > 0) {
-            if (ent->offset >= (uint64_t)ext2_fsize) {
+            if (FD_OFF(ent) >= (uint64_t)ext2_fsize) {
                 frame->rax = 0;   // EOF
                 return;
             }
             int rd = ext2_read_file_at(ent->path,
-                                       (uint32_t)ent->offset,
+                                       (uint32_t)FD_OFF(ent),
                                        (uint8_t*)buf,
                                        (uint32_t)len);
             if (rd > 0) {
-                ent->offset += (uint64_t)rd;
+                FD_OFF_ADD(ent, rd);
                 frame->rax = (uint64_t)rd;
             } else {
                 frame->rax = 0;
@@ -854,11 +1031,11 @@ static void sys_read(syscall_frame_t* frame) {
         const EmbeddedFile64* vf = fs_get_file64(ent->path);
         if (vf && vf->content) {
             uint64_t fsize = (uint64_t)vf->size;
-            if (ent->offset >= fsize) { frame->rax = 0; return; }
-            uint64_t avail = fsize - ent->offset;
+            if (FD_OFF(ent) >= fsize) { frame->rax = 0; return; }
+            uint64_t avail = fsize - FD_OFF(ent);
             uint64_t copy  = (avail < len) ? avail : len;
-            kmemcpy(buf, vf->content + ent->offset, (uint32_t)copy);
-            ent->offset += copy;
+            kmemcpy(buf, vf->content + FD_OFF(ent), (uint32_t)copy);
+            FD_OFF_ADD(ent, copy);
             frame->rax = copy;
             return;
         }
@@ -894,6 +1071,7 @@ static void sys_exit(syscall_frame_t* frame) {
 static void pg_update_current_pid(uint32_t pid);
 
 static void sys_getpid(syscall_frame_t* frame) {
+    { static int sys_getpid_logged = 0; if (!sys_getpid_logged) { sys_getpid_logged = 1; serial_print("[SYS_GETPID] called\n"); } }
     task_t* cur = task_get_current();
     uint64_t pid = cur ? (uint64_t)cur->pid : 0;
     if (pid != 0) pg_update_current_pid((uint32_t)pid);
@@ -906,11 +1084,13 @@ static void sys_getpid(syscall_frame_t* frame) {
 // Doom single-task calistigi icin yield gercekte gereksiz;
 // SYSCALL_OK dondurerek Doom'un game loop'unun devam etmesini sagla.
 static void sys_yield(syscall_frame_t* frame) {
+    { static int sys_yield_logged = 0; if (!sys_yield_logged) { sys_yield_logged = 1; serial_print("[SYS_YIELD] called\n"); } }
     frame->rax = SYSCALL_OK;
 }
 
 // ── SYS_SLEEP (6) ───────────────────────────────────────────────
 static void sys_sleep(syscall_frame_t* frame) {
+    serial_print("[SYS_SLEEP] called\n");
     uint64_t ticks = frame->rdi;
     if (ticks == 0)     { frame->rax = SYSCALL_OK;        return; }
     if (ticks > 60000)  { frame->rax = SYSCALL_ERR_INVAL; return; }
@@ -924,6 +1104,7 @@ static void sys_sleep(syscall_frame_t* frame) {
 
 // ── SYS_UPTIME (7) ──────────────────────────────────────────────
 static void sys_uptime(syscall_frame_t* frame) {
+    { static int sys_uptime_logged = 0; if (!sys_uptime_logged) { sys_uptime_logged = 1; serial_print("[SYS_UPTIME] called\n"); } }
     frame->rax = get_system_ticks();
 }
 
@@ -938,6 +1119,7 @@ static void sys_debug(syscall_frame_t* frame) {
 }
 // ── SYS_OPEN (9) ────────────────────────────────────────────────
 static void sys_open(syscall_frame_t* frame) {
+    serial_print("[SYS_OPEN] called\n");
     const char* path  = (const char*)frame->rdi;
     uint64_t    flags = frame->rsi;
 
@@ -998,6 +1180,7 @@ static void sys_open(syscall_frame_t* frame) {
 
 // ── SYS_CLOSE (10) ──────────────────────────────────────────────
 static void sys_close(syscall_frame_t* frame) {
+    serial_print("[SYS_CLOSE] called\n");
     int fd = (int)frame->rdi;
 
     // 0-2 arası standart stream'leri kapatmayı engelle
@@ -1012,6 +1195,7 @@ static void sys_close(syscall_frame_t* frame) {
 
 // ── SYS_GETPPID (11) ────────────────────────────────────────────
 static void sys_getppid(syscall_frame_t* frame) {
+    { static int sys_getppid_logged = 0; if (!sys_getppid_logged) { sys_getppid_logged = 1; serial_print("[SYS_GETPPID] called\n"); } }
     task_t* cur = task_get_current();
     if (!cur) { frame->rax = 0; return; }
 #ifdef TASK_HAS_PARENT_PID
@@ -1023,6 +1207,7 @@ static void sys_getppid(syscall_frame_t* frame) {
 
 // ── SYS_SBRK (12) ───────────────────────────────────────────────
 static void sys_sbrk(syscall_frame_t* frame) {
+    serial_print("[SYS_SBRK] called\n");
     task_t* cur = task_get_current();
     if (!cur) { frame->rax = SYSCALL_ERR_FAULT; return; }
 
@@ -1041,12 +1226,14 @@ static void sys_sbrk(syscall_frame_t* frame) {
 
 // ── SYS_GETPRIORITY (13) ────────────────────────────────────────
 static void sys_getpriority(syscall_frame_t* frame) {
+    serial_print("[SYS_GETPRIORITY] called\n");
     task_t* cur = task_get_current();
     frame->rax  = cur ? (uint64_t)cur->priority : 0;
 }
 
 // ── SYS_SETPRIORITY (14) ────────────────────────────────────────
 static void sys_setpriority(syscall_frame_t* frame) {
+    serial_print("[SYS_SETPRIORITY] called\n");
     uint64_t prio = frame->rdi;
     if (prio > 255) { frame->rax = SYSCALL_ERR_INVAL; return; }
 
@@ -1059,6 +1246,7 @@ static void sys_setpriority(syscall_frame_t* frame) {
 
 // ── SYS_GETTICKS (15) ───────────────────────────────────────────
 static void sys_getticks(syscall_frame_t* frame) {
+    { static int sys_getticks_logged = 0; if (!sys_getticks_logged) { sys_getticks_logged = 1; serial_print("[SYS_GETTICKS] called\n"); } }
     frame->rax = get_system_ticks();
 }
 
@@ -1231,6 +1419,7 @@ static void mmap_table_remove_full(uint64_t user_addr, uint64_t* out_pool_off,
 // Dönüş: haritalanan adres (uint64_t) veya (uint64_t)MAP_FAILED
 // ---------------------------------------------------------------
 static void sys_mmap(syscall_frame_t* frame) {
+    { static int sys_mmap_logged = 0; if (!sys_mmap_logged) { sys_mmap_logged = 1; serial_print("[SYS_MMAP] called\n"); } }
     uint64_t len    = frame->rsi;
     uint64_t prot   = frame->rdx;   (void)prot;  // gelecekte NX için
     uint64_t flags  = frame->r10;
@@ -1362,7 +1551,7 @@ static void sys_mmap(syscall_frame_t* frame) {
     }
 
     // fd offset'ini güncelle (haritalamadan sonra)
-    ent->offset = offset + map_bytes;
+    FD_OFF_SET(ent, offset + map_bytes);
 
 
     frame->rax = (uint64_t)mem;
@@ -1377,6 +1566,7 @@ static void sys_mmap(syscall_frame_t* frame) {
 // Gerçek VM alt yapısı eklendiğinde bölge takibi gereklidir.
 // ---------------------------------------------------------------
 static void sys_munmap(syscall_frame_t* frame) {
+    { static int sys_munmap_logged = 0; if (!sys_munmap_logged) { sys_munmap_logged = 1; serial_print("[SYS_MUNMAP] called\n"); } }
     uint64_t addr = frame->rdi;
     uint64_t len  = frame->rsi;
 
@@ -1391,17 +1581,39 @@ static void sys_munmap(syscall_frame_t* frame) {
     mmap_table_remove_full(addr, &pool_off, &cached_alen);
 
     if (pool_off || cached_alen) {
-        // Pool bloğunu freelist'e ekle (tekrar kullanım için).
-        // Cache doludan cache'e almayız ama pool belleği asla kfree edilmez —
-        // bump pointer geri gitmez. Sadece küçük/orta blokları cache'leriz.
         uint64_t alen = cached_alen ? cached_alen : aligned_len;
-        if (!mmap_cache_push(pool_off, addr, alen)) {
-            // Cache dolu: en eski girişi at, yenisini ekle
-            // (slot 0 en eski — basit FIFO eject)
-            for (int _i = 0; _i < MMAP_CACHE_SIZE - 1; _i++)
-                mmap_cache[_i] = mmap_cache[_i + 1];
-            mmap_cache_count = MMAP_CACHE_SIZE - 1;
-            mmap_cache_push(pool_off, addr, alen);
+
+        // Bump-pointer retraction: if this block sits at the top of the pool,
+        // walk mmap_pool_bump back instead of caching it. Then cascade: keep
+        // retracting as long as the new top matches a cached block's end.
+        // This recovers pool space after every munmap of a top-of-pool block,
+        // which is exactly what musl does after each fork() helper allocation.
+        if (pool_off + alen == mmap_pool_bump) {
+            mmap_pool_bump = pool_off;
+            // Cascade: scan cache for blocks that now sit at the new top
+            int found_cascade = 1;
+            while (found_cascade) {
+                found_cascade = 0;
+                for (int _i = 0; _i < mmap_cache_count; _i++) {
+                    if (mmap_cache[_i].pool_off + mmap_cache[_i].aligned_len
+                            == mmap_pool_bump) {
+                        mmap_pool_bump = mmap_cache[_i].pool_off;
+                        // Remove this entry from cache
+                        mmap_cache[_i] = mmap_cache[--mmap_cache_count];
+                        found_cascade = 1;
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Not at top — add to freelist for exact-size reuse
+            if (!mmap_cache_push(pool_off, addr, alen)) {
+                // Cache full: evict oldest entry, add new one
+                for (int _i = 0; _i < MMAP_CACHE_SIZE - 1; _i++)
+                    mmap_cache[_i] = mmap_cache[_i + 1];
+                mmap_cache_count = MMAP_CACHE_SIZE - 1;
+                mmap_cache_push(pool_off, addr, alen);
+            }
         }
     }
 
@@ -1415,6 +1627,7 @@ static void sys_munmap(syscall_frame_t* frame) {
 // sbrk()'den farkı: artış miktarı değil, hedef adres alınır.
 // ---------------------------------------------------------------
 static void sys_brk(syscall_frame_t* frame) {
+    { static int sys_brk_logged = 0; if (!sys_brk_logged) { sys_brk_logged = 1; serial_print("[SYS_BRK] called\n"); } }
     // Per-task user brk — kernel heap'ten bağımsız
     task_t* cur = task_get_current();
     if (!cur) { frame->rax = SYSCALL_ERR_FAULT; return; }
@@ -1495,11 +1708,14 @@ static void fork_child_ring3_trampoline(void)
 //   frame+96  = r12
 //   frame+104 = rbp
 //   frame+112 = rbx
-#define FORK_CALLEE_R14_OFF 80
-#define FORK_CALLEE_R13_OFF 88
-#define FORK_CALLEE_R12_OFF 96
+//   frame+120 = r15 slot = user RSP (assembly stub saves user RSP here before
+//               switching to kernel stack — this is the real user RSP at fork time)
+#define FORK_CALLEE_R14_OFF  80
+#define FORK_CALLEE_R13_OFF  88
+#define FORK_CALLEE_R12_OFF  96
 #define FORK_CALLEE_RBP_OFF 104
 #define FORK_CALLEE_RBX_OFF 112
+#define FORK_CALLEE_URSP_OFF 120  // r15 slot = saved user RSP
 
 static void sys_fork(syscall_frame_t* frame)
 {
@@ -1557,6 +1773,10 @@ static void sys_fork(syscall_frame_t* frame)
             parent->fd_table[i].type == FD_TYPE_PIPE &&
             parent->fd_table[i].pipe) {
             parent->fd_table[i].pipe->ref_count++;
+            // Track write-end count across tasks so fd_free knows when
+            // ALL writers are gone and can safely signal EOF to readers.
+            if (parent->fd_table[i].flags & O_WRONLY)
+                parent->fd_table[i].pipe->write_ref_count++;
         }
     }
 
@@ -1566,22 +1786,37 @@ static void sys_fork(syscall_frame_t* frame)
         extern void* pmm_alloc_pages(uint64_t);
         uint64_t pages = KERNEL_STACK_SIZE / 4096;
         void* ks = pmm_alloc_pages(pages);
-        if (!ks) ks = kmalloc(KERNEL_STACK_SIZE);
         if (!ks) { kfree(child); frame->rax = SYSCALL_ERR_NOMEM; return; }
-        child->kernel_stack_base = (uint64_t)ks;
+        // Sanity: kernel stack must be in kernel address space (>= 1MB)
+        // and not in the text/rodata segment (0x400000 area).
+        // If pmm returns a bad address, bail now rather than panic later.
+        uint64_t ks_addr = (uint64_t)ks;
+        if (ks_addr < 0x100000ULL || (ks_addr >= 0x400000ULL && ks_addr < 0x800000ULL)) {
+            serial_print("[FORK] ERROR: bad kernel stack addr from pmm, ENOMEM\n");
+            kfree(child);
+            frame->rax = SYSCALL_ERR_NOMEM;
+            return;
+        }
+        child->kernel_stack_base = ks_addr;
         kmemset(ks, 0, KERNEL_STACK_SIZE);
     }
     child->kernel_stack_top = child->kernel_stack_base + KERNEL_STACK_SIZE;
 
     // 6. User stack (byte kopya)
-    child->user_stack_size = parent->user_stack_size;
+    // Cap fork child stack at 256KB — enough for any child that just calls
+    // _exit() or does simple work. Full 8MB per child exhausts pmm after ~10 forks.
+    // If the child calls execve, it gets a fresh full-size stack anyway.
+    {
+    uint64_t fork_stack_size = parent->user_stack_size;
+    if (fork_stack_size > 256 * 1024) fork_stack_size = 256 * 1024;
+    child->user_stack_size = fork_stack_size;
+    }
     {
         extern void* pmm_alloc_pages_flags(uint64_t, uint64_t);
         extern void  pmm_free_pages(void*, uint64_t);
-        uint64_t pages = parent->user_stack_size / 4096;
+        uint64_t pages = child->user_stack_size / 4096;
         if (pages == 0) pages = 1;
         void* us = pmm_alloc_pages_flags(pages, 0x7);
-        if (!us) us = kmalloc(parent->user_stack_size);
         if (!us) {
             pmm_free_pages((void*)child->kernel_stack_base,
                            KERNEL_STACK_SIZE / 4096);
@@ -1589,21 +1824,94 @@ static void sys_fork(syscall_frame_t* frame)
             frame->rax = SYSCALL_ERR_NOMEM;
             return;
         }
+        // Sanity: user stack must be a valid userspace address (>= 1MB)
+        // and not inside the kernel text/ELF area.
+        {
+            uint64_t us_addr = (uint64_t)us;
+            int us_bad = (us_addr < 0x100000ULL) ||
+                         (us_addr >= 0x400000ULL && us_addr < 0x800000ULL);
+            // Also reject kernel-high addresses for user stack
+            if (us_addr >= 0xFFFF000000000000ULL) us_bad = 1;
+            if (us_bad) {
+                serial_print("[FORK] ERROR: bad user stack addr from pmm, ENOMEM\n");
+                pmm_free_pages((void*)child->kernel_stack_base,
+                               KERNEL_STACK_SIZE / 4096);
+                kfree(child);
+                frame->rax = SYSCALL_ERR_NOMEM;
+                return;
+            }
+        }
         child->user_stack_base = (uint64_t)us;
-        kmemcpy(us, (void*)parent->user_stack_base, parent->user_stack_size);
+        // Copy the TOP portion of parent stack — that's where active frames live.
+        // Parent stack grows DOWN from user_stack_top; copy child->user_stack_size
+        // bytes from parent's top. If parent stack is larger, skip the unused bottom.
+        {
+            uint64_t copy_size = child->user_stack_size;
+            uint64_t parent_top_offset = parent->user_stack_size - copy_size;
+            void* parent_src = (void*)(parent->user_stack_base + parent_top_offset);
+            // If parent stack is smaller than child alloc, just copy all of parent
+            if (parent->user_stack_size <= copy_size) {
+                parent_src = (void*)parent->user_stack_base;
+                copy_size  = parent->user_stack_size;
+            }
+            kmemcpy(us, parent_src, copy_size);
+        }
     }
     child->user_stack_top = child->user_stack_base + child->user_stack_size;
 
     // 7. Delta ve child RSP
-    uint64_t stack_delta = child->user_stack_base - parent->user_stack_base;
+    // Get the real user RSP. Three sources tried in order of reliability:
+    const uint8_t* fb0 = (const uint8_t*)frame;
+    uint64_t parent_user_rsp = 0;
 
-    uint64_t parent_user_rsp = frame->user_rsp;
-    if (parent_user_rsp < parent->user_stack_base ||
-        parent_user_rsp > parent->user_stack_top) {
-        serial_print("[FORK] WARN: user_rsp kapsam disi, fallback\n");
+    // Source 1: explicit RDI argument from userland fork() stub
+    if (frame->rdi >= parent->user_stack_base &&
+        frame->rdi <= parent->user_stack_top) {
+        parent_user_rsp = frame->rdi;
+        serial_print("[FORK] user_rsp from rdi\n");
+    }
+
+    // Source 2: r15 callee slot at frame+120
+    if (!parent_user_rsp) {
+        uint64_t from_r15 = *(const uint64_t*)(fb0 + FORK_CALLEE_URSP_OFF);
+        if (from_r15 >= parent->user_stack_base &&
+            from_r15 <= parent->user_stack_top) {
+            parent_user_rsp = from_r15;
+            serial_print("[FORK] user_rsp from r15 slot\n");
+        }
+    }
+
+    // Source 3: frame->user_rsp (execve override, usually 0)
+    if (!parent_user_rsp && frame->user_rsp >= parent->user_stack_base &&
+        frame->user_rsp <= parent->user_stack_top) {
+        parent_user_rsp = frame->user_rsp;
+        serial_print("[FORK] user_rsp from frame->user_rsp\n");
+    }
+
+    // Source 4: fallback — red zone below stack top
+    if (!parent_user_rsp) {
+        serial_print("[FORK] WARN: user_rsp not found, using stack_top-128\n");
         parent_user_rsp = parent->user_stack_top - 128;
     }
-    uint64_t child_user_rsp = parent_user_rsp + stack_delta;
+
+    // Compute child RSP relative to TOP of each stack.
+    // Child stack may be smaller than parent (capped at 256KB for memory efficiency).
+    // Both stacks grow DOWN from their respective tops, so the offset from top is preserved.
+    // parent_offset_from_top = parent_top - parent_rsp  (how deep into the stack we are)
+    // child_rsp = child_top - parent_offset_from_top
+    uint64_t parent_offset_from_top = parent->user_stack_top - parent_user_rsp;
+    uint64_t child_user_rsp;
+    if (parent_offset_from_top <= child->user_stack_size) {
+        child_user_rsp = child->user_stack_top - parent_offset_from_top;
+    } else {
+        // Parent stack depth exceeds child stack size — use child stack top
+        serial_print("[FORK] WARN: parent stack depth > child stack, clamping RSP\n");
+        child_user_rsp = child->user_stack_top - 128;
+    }
+
+    // RBP delta: if parent rbp points into parent stack, adjust to child stack.
+    // Use top-relative adjustment, same as RSP.
+    uint64_t stack_delta = child->user_stack_top - parent->user_stack_top;
 
     // 8. Callee-saved register'lari oku
     const uint8_t* fb = (const uint8_t*)frame;
@@ -1613,11 +1921,14 @@ static void sys_fork(syscall_frame_t* frame)
     uint64_t sv_rbp = *(const uint64_t*)(fb + FORK_CALLEE_RBP_OFF);
     uint64_t sv_rbx = *(const uint64_t*)(fb + FORK_CALLEE_RBX_OFF);
 
-    // RBP DELTA: rbp parent stack'ini gosteriyorsa child stack'ine cevir.
-    // Boylece child rbp-relative yerel degisken erisimlerinde kendi
-    // stack'ini kullanir; child_pid = 0 gorur (parent'in fork sonucu degil).
+    // RBP DELTA: if rbp points into parent stack, relocate to child stack.
+    // Use same top-relative calculation as RSP.
     if (sv_rbp >= parent->user_stack_base && sv_rbp <= parent->user_stack_top) {
-        sv_rbp += stack_delta;
+        uint64_t rbp_offset_from_top = parent->user_stack_top - sv_rbp;
+        if (rbp_offset_from_top <= child->user_stack_size)
+            sv_rbp = child->user_stack_top - rbp_offset_from_top;
+        else
+            sv_rbp = child->user_stack_top - 128;
     }
 
     // 9. Child kernel stack'ini insa et
@@ -1640,7 +1951,7 @@ static void sys_fork(syscall_frame_t* frame)
     *(--stk) = 0ULL;                   // rcx (SYSCALL clobbers)
     *(--stk) = frame->rdx;             // rdx
     *(--stk) = frame->rsi;             // rsi
-    *(--stk) = frame->rdi;             // rdi
+    *(--stk) = 0ULL;                   // rdi = 0 (was used to carry user RSP; child doesn't need it)
     *(--stk) = sv_rbp;                 // rbp (delta duzeltilmis)
     *(--stk) = frame->r8;              // r8
     *(--stk) = frame->r9;              // r9
@@ -1670,7 +1981,7 @@ static void sys_fork(syscall_frame_t* frame)
     child->context.rcx    = 0;
     child->context.rdx    = frame->rdx;
     child->context.rsi    = frame->rsi;
-    child->context.rdi    = frame->rdi;
+    child->context.rdi    = 0;             // was used to carry user RSP; child sees 0
     child->context.rbp    = sv_rbp;    // delta duzeltilmis
     child->context.r8     = frame->r8;
     child->context.r9     = frame->r9;
@@ -1680,6 +1991,21 @@ static void sys_fork(syscall_frame_t* frame)
     child->context.r13    = sv_r13;
     child->context.r14    = sv_r14;
     child->context.r15    = 0;
+
+    // 10b. Fix shared offset pool ownership for child fd table.
+    // sys_fork copied parent's fd_table with kmemcpy — every child fd now
+    // points into the PARENT's _shared_off_pool slots. If parent closes an fd
+    // the slot ref count drops to 0 and gets reused while child still has a
+    // dangling pointer. Fix: give each child fd its own independent slot with
+    // the current offset value (fork COW semantics — offsets are copied, not shared).
+    for (int _fi = 0; _fi < MAX_FDS; _fi++) {
+        fd_entry_t* ce = &child->fd_table[_fi];
+        if (ce->is_open && ce->shared_off) {
+            uint64_t cur_val = *ce->shared_off;
+            ce->shared_off     = shared_off_alloc(cur_val);
+            ce->shared_off_ref = ce->shared_off ? 1 : 0;
+        }
+    }
 
     // 11. Kuyruga ekle
     child->state = TASK_STATE_READY;
@@ -1692,6 +2018,10 @@ static void sys_fork(syscall_frame_t* frame)
     { char b[12]; int_to_str((int)child->pid, b); serial_print(b); }
     serial_print(" ursp=0x");
     print_hex64(child_user_rsp);
+    serial_print(" rip=0x");
+    print_hex64(frame->rcx);
+    serial_print(" dri=0x");
+    print_hex64(frame->rdi);
     serial_print(" kstk=0x");
     print_hex64((uint64_t)stk);
     serial_print("\n");
@@ -1704,6 +2034,7 @@ static void sys_fork(syscall_frame_t* frame)
 #undef FORK_CALLEE_R12_OFF
 #undef FORK_CALLEE_RBP_OFF
 #undef FORK_CALLEE_RBX_OFF
+#undef FORK_CALLEE_URSP_OFF
 
 
 // ── SYS_EXECVE (20) ─────────────────────────────────────────────
@@ -1844,6 +2175,7 @@ static void __attribute__((unused)) path_to_fat83(const char* path, char* out83)
 }
 
 static void sys_execve(syscall_frame_t* frame) {
+    serial_print("[SYS_EXECVE] called\n");
     const char*  path = (const char*)frame->rdi;
     const char** argv = (const char**)frame->rsi;
     const char** envp = (const char**)frame->rdx;
@@ -2153,6 +2485,7 @@ static void sys_execve(syscall_frame_t* frame) {
 // ---------------------------------------------------------------
 static void sys_waitpid(syscall_frame_t* frame)
 {
+    serial_print("[SYS_WAITPID] called\n");
     int64_t  pid_arg = (int64_t)frame->rdi;
     int*     statusp = (int*)frame->rsi;
     uint64_t options = frame->rdx;
@@ -2184,7 +2517,7 @@ static void sys_waitpid(syscall_frame_t* frame)
     // yapabilir. Child'in task_exit'i → task_load_and_jump_context(parent)
     // → parent hlt'ten döner → sonraki iterasyonda zombie bulunur.
     // MAX_WAIT_ITERS: guvenlik siniri (~100 sn, 10000 × 10ms varsayimiyla).
-    #define WAITPID_MAX_ITER 10000
+    #define WAITPID_MAX_ITER 300  // 300 timer ticks @ ~10ms = ~3 seconds max wait
     for (int iter = 0; iter < WAITPID_MAX_ITER; iter++) {
 
         // Zombie/stopped tarama
@@ -2246,12 +2579,17 @@ static void sys_waitpid(syscall_frame_t* frame)
             if (!still_alive) { frame->rax = SYSCALL_ERR_CHILD; return; }
         }
 
-        // Kesmeler ac, timer bekle, child calissin
-        __asm__ volatile ("pause" ::: "memory");
+        // Enable interrupts and halt — lets timer IRQ fire, child gets CPU.
+        // Without sti, RFLAGS.IF=0 (masked by SYSCALL entry) so timer never
+        // fires and child never runs. sti;hlt is the same mechanism as sys_read.
+        __asm__ volatile ("sti; hlt" ::: "memory");
+
+        // If we were terminated while waiting, stop
+        if (cur->state == TASK_STATE_TERMINATED) break;
     }
     #undef WAITPID_MAX_ITER
 
-    serial_print("[WAITPID] WARN: max iter asildi, EAGAIN\n");
+    serial_print("[WAITPID] WARN: max iter exceeded, EAGAIN\n");
     frame->rax = SYSCALL_ERR_AGAIN;
 }
 
@@ -2263,6 +2601,7 @@ static void sys_waitpid(syscall_frame_t* frame)
 // size=0 ise sadece grup sayısını döner (list'e yazmaz).
 // ---------------------------------------------------------------
 static void sys_getgroups(syscall_frame_t* frame) {
+    { static int sys_getgroups_logged = 0; if (!sys_getgroups_logged) { sys_getgroups_logged = 1; serial_print("[SYS_GETGROUPS] called\n"); } }
     int      size = (int)(int64_t)frame->rdi;
     uint32_t* list = (uint32_t*)frame->rsi;
 
@@ -2304,6 +2643,7 @@ static void sys_getgroups(syscall_frame_t* frame) {
 // Her iki fd de aynı tampona işaret eder; ref_count = 2.
 // ---------------------------------------------------------------
 static void sys_pipe(syscall_frame_t* frame) {
+    serial_print("[SYS_PIPE] called\n");
     int* fd_arr = (int*)frame->rdi;
 
     if (!is_valid_user_ptr(fd_arr, 2 * sizeof(int))) {
@@ -2317,7 +2657,8 @@ static void sys_pipe(syscall_frame_t* frame) {
     // Tampon ayır
     pipe_buf_t* pb = pipe_buf_alloc();
     if (!pb) { frame->rax = SYSCALL_ERR_NOMEM; return; }
-    pb->ref_count = 2;   // okuma + yazma ucu
+    pb->ref_count       = 2;   // okuma + yazma ucu
+    pb->write_ref_count = 1;   // tek yazma ucu
 
     // Okuma fd (fd[0])
     int rfd = fd_alloc_pipe(cur->fd_table, O_RDONLY, pb);
@@ -2359,6 +2700,7 @@ static void sys_pipe(syscall_frame_t* frame) {
 //     üzerine yazma izni verilir (shell yönlendirme için gerekli).
 // ---------------------------------------------------------------
 static void sys_dup2(syscall_frame_t* frame) {
+    serial_print("[SYS_DUP2] called\n");
     int oldfd = (int)frame->rdi;
     int newfd = (int)frame->rsi;
 
@@ -2371,19 +2713,28 @@ static void sys_dup2(syscall_frame_t* frame) {
     fd_entry_t* src = fd_get(cur->fd_table, oldfd);
     if (!src) { frame->rax = SYSCALL_ERR_BADF; return; }
 
-    // oldfd == newfd: hiçbir şey yapma
+    // oldfd == newfd: no-op
     if (oldfd == newfd) { frame->rax = (uint64_t)newfd; return; }
 
-    // newfd açıksa kapat (pipe referansını düşürür)
+    // Close newfd if open (releases its pipe ref + shared offset ref)
     if (cur->fd_table[newfd].is_open)
         fd_free(cur->fd_table, newfd);
 
-    // Tam kopya
+    // Struct copy — newfd now points to src's shared_off slot
     cur->fd_table[newfd] = *src;
 
-    // Pipe tamponu referansını artır
-    if (src->type == FD_TYPE_PIPE && src->pipe)
+    // Grab a reference on the shared offset slot
+    shared_off_grab(src->shared_off);
+
+    // Pipe buffer ref++; also track write-end count
+    if (src->type == FD_TYPE_PIPE && src->pipe) {
         src->pipe->ref_count++;
+        if (src->flags & O_WRONLY)
+            src->pipe->write_ref_count++;
+    }
+
+    // dup2 does NOT clear FD_CLOEXEC per POSIX (only dup does)
+    // fd_flags is already copied from src
 
     serial_print("[SYSCALL] dup2 oldfd=");
     print_uint64((uint64_t)oldfd);
@@ -2401,21 +2752,35 @@ static void sys_dup2(syscall_frame_t* frame) {
 
 // ── SYS_DUP (67) ────────────────────────────────────────────────
 static void sys_dup(syscall_frame_t* frame) {
+    serial_print("[SYS_DUP] called\n");
     int oldfd = (int)frame->rdi;
     if (oldfd < 0 || oldfd >= MAX_FDS) { frame->rax = SYSCALL_ERR_BADF; return; }
     task_t* cur = task_get_current();
     if (!cur) { frame->rax = SYSCALL_ERR_PERM; return; }
     fd_entry_t* src = fd_get(cur->fd_table, oldfd);
     if (!src) { frame->rax = SYSCALL_ERR_BADF; return; }
-    // En kucuk bos fd bul
+
+    // Find lowest available fd
     int newfd = -1;
     for (int i = 0; i < MAX_FDS; i++) {
         if (!cur->fd_table[i].is_open) { newfd = i; break; }
     }
     if (newfd < 0) { frame->rax = SYSCALL_ERR_MFILE; return; }
+
+    // Struct copy — newfd inherits src's shared_off pointer
     cur->fd_table[newfd] = *src;
-    cur->fd_table[newfd].fd_flags = 0;  // dup() FD_CLOEXEC temizler
-    if (src->type == FD_TYPE_PIPE && src->pipe) src->pipe->ref_count++;
+    cur->fd_table[newfd].fd_flags = 0;  // dup() clears FD_CLOEXEC (POSIX)
+
+    // Grab a reference on the shared offset slot
+    shared_off_grab(src->shared_off);
+
+    // Pipe buffer ref++; also track write-end count
+    if (src->type == FD_TYPE_PIPE && src->pipe) {
+        src->pipe->ref_count++;
+        if (src->flags & O_WRONLY)
+            src->pipe->write_ref_count++;
+    }
+
     serial_print("[SYSCALL] dup fd=");
     { char b[8]; int_to_str(oldfd, b); serial_print(b); }
     serial_print(" -> newfd=");
@@ -2426,6 +2791,7 @@ static void sys_dup(syscall_frame_t* frame) {
 
 // ── SYS_FCNTL (66) ──────────────────────────────────────────────
 static void sys_fcntl(syscall_frame_t* frame) {
+    serial_print("[SYS_FCNTL] called\n");
     int      fd  = (int)frame->rdi;
     int      cmd = (int)frame->rsi;
     uint64_t arg = frame->rdx;
@@ -2448,7 +2814,12 @@ static void sys_fcntl(syscall_frame_t* frame) {
         if (newfd < 0) { frame->rax = SYSCALL_ERR_MFILE; return; }
         cur->fd_table[newfd] = *ent;
         cur->fd_table[newfd].fd_flags = (cmd == F_DUPFD_CLOEXEC) ? FD_CLOEXEC : 0;
-        if (ent->type == FD_TYPE_PIPE && ent->pipe) ent->pipe->ref_count++;
+        // Share the offset slot with the original fd
+        shared_off_grab(ent->shared_off);
+        if (ent->type == FD_TYPE_PIPE && ent->pipe) {
+            ent->pipe->ref_count++;
+            if (ent->flags & O_WRONLY) ent->pipe->write_ref_count++;
+        }
         serial_print("[SYSCALL] fcntl F_DUPFD -> ");
         { char b[8]; int_to_str(newfd, b); serial_print(b); }
         serial_print("\n");
@@ -2499,6 +2870,7 @@ static void sys_fcntl(syscall_frame_t* frame) {
 //     SEEK_SET ve SEEK_CUR desteklenir.
 // ---------------------------------------------------------------
 static void sys_lseek(syscall_frame_t* frame) {
+    serial_print("[SYS_LSEEK] called\n");
     int      fd     = (int)frame->rdi;
     int64_t  offset = (int64_t)frame->rsi;
     int      whence = (int)frame->rdx;
@@ -2521,7 +2893,7 @@ static void sys_lseek(syscall_frame_t* frame) {
         return;
     }
 
-    uint64_t cur_offset = ent->offset;
+    uint64_t cur_offset = FD_OFF(ent);
     uint64_t file_size  = 0;
 
     // SEEK_END için dosya boyutunu al
@@ -2552,7 +2924,7 @@ static void sys_lseek(syscall_frame_t* frame) {
 
     if (new_offset < 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
 
-    ent->offset = (uint64_t)new_offset;
+    FD_OFF_SET(ent, (uint64_t)new_offset);
     frame->rax = (uint64_t)new_offset;
 }
 
@@ -2561,10 +2933,11 @@ static void sys_stat(syscall_frame_t* frame);
 
 // ── SYS_FSTAT (5) ───────────────────────────────────────────────
 static void sys_fstat(syscall_frame_t* frame) {
-    int     fd  = (int)frame->rdi;
-    stat_t* buf = (stat_t*)frame->rsi;
+    serial_print("[SYS_FSTAT] called\n");
+    int           fd  = (int)frame->rdi;
+    linux_stat_t* buf = (linux_stat_t*)frame->rsi;
 
-    if (!buf || !is_valid_user_ptr(buf, sizeof(stat_t))) {
+    if (!buf || !is_valid_user_ptr(buf, sizeof(linux_stat_t))) {
         frame->rax = SYSCALL_ERR_FAULT;
         return;
     }
@@ -2573,14 +2946,18 @@ static void sys_fstat(syscall_frame_t* frame) {
     { char b[8]; int_to_str(fd, b); serial_print(b); }
     serial_print(")\n");
 
+    int64_t now_sec = (int64_t)(get_system_ticks() / 1000ULL);
+
     if (fd == 0 || fd == 1 || fd == 2) {
-        kmemset(buf, 0, sizeof(stat_t));
-        buf->st_dev   = 1;
-        buf->st_ino   = (uint32_t)(fd + 1);
-        buf->st_mode  = S_IFCHR | 0666;
-        buf->st_nlink = 1;
-        buf->st_size  = 0;
-        frame->rax    = SYSCALL_OK;
+        kmemset(buf, 0, sizeof(linux_stat_t));
+        buf->st_dev          = 1;
+        buf->st_ino          = (uint64_t)(fd + 1);
+        buf->st_nlink        = 1;
+        buf->st_mode         = 0020666;   // S_IFCHR | 0666
+        buf->st_atime_sec    = now_sec;
+        buf->st_mtime_sec    = now_sec;
+        buf->st_ctime_sec    = now_sec;
+        frame->rax           = SYSCALL_OK;
         return;
     }
 
@@ -2592,37 +2969,38 @@ static void sys_fstat(syscall_frame_t* frame) {
     fd_entry_t* ent = fd_get(cur->fd_table, fd);
     if (!ent) { frame->rax = SYSCALL_ERR_BADF; return; }
 
-    kmemset(buf, 0, sizeof(stat_t));
-    uint32_t now    = (uint32_t)get_system_ticks();
-    buf->st_dev     = 1;
-    buf->st_blksize = 512;
-    buf->st_atime   = now;
-    buf->st_mtime   = now;
-    buf->st_ctime   = now;
-    buf->st_nlink   = 1;
+    kmemset(buf, 0, sizeof(linux_stat_t));
+    buf->st_dev          = 1;
+    buf->st_nlink        = 1;
+    buf->st_blksize      = 512;
+    buf->st_atime_sec    = now_sec;
+    buf->st_mtime_sec    = now_sec;
+    buf->st_ctime_sec    = now_sec;
 
     if (ent->type == FD_TYPE_SPECIAL) {
-        buf->st_ino  = 2;
-        buf->st_mode = S_IFDIR | 0755;
-        buf->st_size = 0;
-        frame->rax   = SYSCALL_OK;
+        buf->st_ino    = 2;
+        buf->st_mode   = 0040755;   // S_IFDIR | 0755
+        buf->st_size   = 0;
+        frame->rax     = SYSCALL_OK;
     } else if (ent->type == FD_TYPE_PIPE) {
-        buf->st_ino  = 10;
-        buf->st_mode = S_IFIFO | 0600;
-        buf->st_size = 0;
-        frame->rax   = SYSCALL_OK;
+        buf->st_ino    = 10;
+        buf->st_mode   = 0010600;   // S_IFIFO | 0600
+        buf->st_size   = 0;
+        frame->rax     = SYSCALL_OK;
     } else if (ent->type == FD_TYPE_FILE && ent->path[0] != '\0') {
+        // sys_stat'ı çağır: frame->rsi zaten buf adresini tutuyor,
+        // frame->rdi'yi geçici olarak path'e yönlendir.
         uint64_t save_rdi = frame->rdi;
         frame->rdi = (uint64_t)(uintptr_t)ent->path;
         sys_stat(frame);
         if (frame->rax == SYSCALL_OK)
-            buf->st_ino = (uint32_t)(fd + 100);
+            buf->st_ino = (uint64_t)(fd + 100);
         frame->rdi = save_rdi;
     } else {
-        buf->st_ino  = 1;
-        buf->st_mode = S_IFREG | 0644;
-        buf->st_size = 0;
-        frame->rax   = SYSCALL_OK;
+        buf->st_ino    = 1;
+        buf->st_mode   = 0100644;   // S_IFREG | 0644
+        buf->st_size   = 0;
+        frame->rax     = SYSCALL_OK;
     }
 }
 
@@ -2687,6 +3065,7 @@ static winsize_t kernel_winsize = {
 static uint32_t kernel_tty_pgrp = 1;
 
 static void sys_ioctl(syscall_frame_t* frame) {
+    serial_print("[SYS_IOCTL] called\n");
     int      fd      = (int)frame->rdi;
     uint64_t request = frame->rsi;
     void*    arg     = (void*)frame->rdx;
@@ -2895,6 +3274,7 @@ static void sys_ioctl(syscall_frame_t* frame) {
 
 // ── SYS_SELECT (27) ─────────────────────────────────────────────
 static void sys_select(syscall_frame_t* frame) {
+    { static int sys_select_logged = 0; if (!sys_select_logged) { sys_select_logged = 1; serial_print("[SYS_SELECT] called\n"); } }
     int        nfds      = (int)frame->rdi;
     fd_set_t*  readfds   = (fd_set_t*)frame->rsi;
     fd_set_t*  writefds  = (fd_set_t*)frame->rdx;
@@ -2991,6 +3371,7 @@ static void sys_select(syscall_frame_t* frame) {
 
 // ── SYS_POLL (28) ───────────────────────────────────────────────
 static void sys_poll(syscall_frame_t* frame) {
+    { static int sys_poll_logged = 0; if (!sys_poll_logged) { sys_poll_logged = 1; serial_print("[SYS_POLL] called\n"); } }
     pollfd_t* fds        = (pollfd_t*)frame->rdi;
     uint64_t  nfds       = frame->rsi;
     int       timeout_ms = (int)(int64_t)frame->rdx;
@@ -3197,6 +3578,7 @@ static void sys_kill(syscall_frame_t* frame) {
 //   • newlib'in time(), clock() fonksiyonları bu syscall'a bağımlıdır.
 // ---------------------------------------------------------------
 static void sys_gettimeofday(syscall_frame_t* frame) {
+    { static int sys_gettimeofday_logged = 0; if (!sys_gettimeofday_logged) { sys_gettimeofday_logged = 1; serial_print("[SYS_GETTIMEOFDAY] called\n"); } }
     timeval_t* tv = (timeval_t*)frame->rdi;
     // tz (frame->rsi) yoksayılır
 
@@ -3313,11 +3695,12 @@ static void sys_chdir(syscall_frame_t* frame) {
 
 // ── SYS_STAT (4) ────────────────────────────────────────────────
 static void sys_stat(syscall_frame_t* frame) {
-    const char* path = (const char*)frame->rdi;
-    stat_t*     buf  = (stat_t*)frame->rsi;
+    serial_print("[SYS_STAT] called\n");
+    const char*   path = (const char*)frame->rdi;
+    linux_stat_t* buf  = (linux_stat_t*)frame->rsi;
 
     if (!path || !is_valid_user_ptr(path, 1)) { frame->rax = SYSCALL_ERR_FAULT; return; }
-    if (!buf  || !is_valid_user_ptr(buf, sizeof(stat_t))) { frame->rax = SYSCALL_ERR_FAULT; return; }
+    if (!buf  || !is_valid_user_ptr(buf, sizeof(linux_stat_t))) { frame->rax = SYSCALL_ERR_FAULT; return; }
 
     { int n = 0; while (n < 256 && path[n]) n++;
       if (n == 0 || n == 256) { frame->rax = SYSCALL_ERR_NOENT; return; } }
@@ -3345,18 +3728,22 @@ static void sys_stat(syscall_frame_t* frame) {
         return;
     }
 
-    kmemset(buf, 0, sizeof(stat_t));
-    uint32_t now    = (uint32_t)get_system_ticks();
-    buf->st_dev     = 1;
-    buf->st_ino     = is_dir ? 2u : 3u;
-    buf->st_nlink   = 1;
-    buf->st_uid     = 0; buf->st_gid = 0; buf->st_rdev = 0;
-    buf->st_blksize = 512;
-    buf->st_atime   = now; buf->st_mtime = now; buf->st_ctime = now;
-    buf->_pad       = 0;
+    kmemset(buf, 0, sizeof(linux_stat_t));
+    int64_t now_sec = (int64_t)(get_system_ticks() / 1000ULL);
+
+    buf->st_dev      = 1;
+    buf->st_ino      = is_dir ? 2ULL : 3ULL;
+    buf->st_nlink    = 1;
+    buf->st_uid      = 0;
+    buf->st_gid      = 0;
+    buf->st_rdev     = 0;
+    buf->st_blksize  = 512;
+    buf->st_atime_sec = now_sec;
+    buf->st_mtime_sec = now_sec;
+    buf->st_ctime_sec = now_sec;
 
     if (is_dir) {
-        buf->st_mode   = S_IFDIR | 0755;
+        buf->st_mode   = 0040755;   // S_IFDIR | 0755
         buf->st_size   = 0;
         buf->st_blocks = 0;
     } else {
@@ -3370,9 +3757,9 @@ static void sys_stat(syscall_frame_t* frame) {
         } else {
             fsz = ext2_file_size(path);
         }
-        buf->st_mode   = S_IFREG | 0644;
-        buf->st_size   = fsz;
-        buf->st_blocks = (fsz + 511) / 512;
+        buf->st_mode   = 0100644;   // S_IFREG | 0644
+        buf->st_size   = (int64_t)fsz;
+        buf->st_blocks = (int64_t)((fsz + 511) / 512);
     }
 
     serial_print("[SYSCALL] stat: ok\n");
@@ -3397,6 +3784,7 @@ static void sys_stat(syscall_frame_t* frame) {
 //   • mode==0 (F_OK) hızlı path: W_OK/X_OK kontrolleri yapılmaz.
 // ---------------------------------------------------------------
 static void sys_access(syscall_frame_t* frame) {
+    serial_print("[SYS_ACCESS] called\n");
     const char* path = (const char*)frame->rdi;
     int         mode = (int)(int64_t)frame->rsi;
 
@@ -3512,6 +3900,7 @@ static void sys_access(syscall_frame_t* frame) {
 // Başarıda dizine bağlı bir fd döndürür; getdents ile okunur.
 // ---------------------------------------------------------------
 static void sys_opendir(syscall_frame_t* frame) {
+    serial_print("[SYS_OPENDIR] called\n");
     const char* path = (const char*)frame->rdi;
 
     if (!is_valid_user_ptr(path, 1)) {   // NULL dahil → EFAULT
@@ -3540,8 +3929,11 @@ static void sys_opendir(syscall_frame_t* frame) {
         return;
     }
 
-    // offset = 0: getdents henüz hiçbir şey okumadı
-    cur->fd_table[fd].offset = 0;
+    // offset = 0: getdents has not read anything yet
+    {
+        fd_entry_t* _de = fd_get(cur->fd_table, fd);
+        if (_de) FD_OFF_SET(_de, 0);
+    }
 
     serial_print("[SYSCALL] opendir: dirfd=");
     { char b[8]; int_to_str(fd, b); serial_print(b); }
@@ -3563,6 +3955,7 @@ static void sys_opendir(syscall_frame_t* frame) {
 // İkinci çağrıda offset != 0 kontrolü ile 0 (EOF) döner.
 // ---------------------------------------------------------------
 static void sys_getdents(syscall_frame_t* frame) {
+    serial_print("[SYS_GETDENTS] called\n");
     int         dirfd = (int)(int64_t)frame->rdi;
     dirent64_t* buf   = (dirent64_t*)frame->rsi;
     int         count = (int)(int64_t)frame->rdx;
@@ -3589,7 +3982,7 @@ static void sys_getdents(syscall_frame_t* frame) {
     }
 
     // EOF kontrolü: offset > 0 → daha önce okundu, dizin sonu
-    if (ent->offset > 0) {
+    if (FD_OFF(ent) > 0) {
         frame->rax = 0;   // 0 = no more entries
         return;
     }
@@ -3612,7 +4005,7 @@ static void sys_getdents(syscall_frame_t* frame) {
     }
 
     // offset > 0 olarak işaretle → bir sonraki çağrı EOF döner
-    ent->offset = (uint64_t)(written > 0 ? written : 1);
+    FD_OFF_SET(ent, (uint64_t)(written > 0 ? written : 1));
 
     serial_print("[SYSCALL] getdents: wrote ");
     { char b[12]; int_to_str(written, b); serial_print(b); }
@@ -3625,6 +4018,7 @@ static void sys_getdents(syscall_frame_t* frame) {
 // closedir(int dirfd) -> 0 | err
 // ---------------------------------------------------------------
 static void sys_closedir(syscall_frame_t* frame) {
+    serial_print("[SYS_CLOSEDIR] called\n");
     int dirfd = (int)(int64_t)frame->rdi;
 
     task_t* cur = task_get_current();
@@ -3778,6 +4172,7 @@ static uint32_t pg_effective_sid(uint32_t pid) {
 // setpgid(pid_t pid, pid_t pgid) -> 0 | err
 // ---------------------------------------------------------------
 static void sys_setpgid(syscall_frame_t* frame) {
+    serial_print("[SYS_SETPGID] called\n");
     int arg_pid  = (int)(int64_t)frame->rdi;
     int arg_pgid = (int)(int64_t)frame->rsi;
 
@@ -3846,6 +4241,7 @@ static void sys_setpgid(syscall_frame_t* frame) {
 // getpgid(pid_t pid) -> pgid | err
 // ---------------------------------------------------------------
 static void sys_getpgid(syscall_frame_t* frame) {
+    { static int sys_getpgid_logged = 0; if (!sys_getpgid_logged) { sys_getpgid_logged = 1; serial_print("[SYS_GETPGID] called\n"); } }
     int arg_pid = (int)(int64_t)frame->rdi;
 
     uint32_t caller_pid = pg_current_pid();
@@ -3871,6 +4267,7 @@ static void sys_getpgid(syscall_frame_t* frame) {
 // setsid() -> new_sid | err
 // ---------------------------------------------------------------
 static void sys_setsid(syscall_frame_t* frame) {
+    serial_print("[SYS_SETSID] called\n");
     uint32_t cur_pid = pg_current_pid();
 
     // Zaten grup lideri ise EPERM
@@ -3901,6 +4298,7 @@ static void sys_setsid(syscall_frame_t* frame) {
 static uint32_t g_terminal_foreground_pgid = 0;
 
 static void sys_tcsetpgrp(syscall_frame_t* frame) {
+    serial_print("[SYS_TCSETPGRP] called\n");
     int fd   = (int)(int64_t)frame->rdi;
     int pgrp = (int)(int64_t)frame->rsi;
 
@@ -3940,6 +4338,7 @@ static void sys_tcsetpgrp(syscall_frame_t* frame) {
 }
 
 static void sys_tcgetpgrp(syscall_frame_t* frame) {
+    { static int sys_tcgetpgrp_logged = 0; if (!sys_tcgetpgrp_logged) { sys_tcgetpgrp_logged = 1; serial_print("[SYS_TCGETPGRP] called\n"); } }
     int fd = (int)(int64_t)frame->rdi;
 
     if (fd < 0 || fd >= MAX_FDS) {
@@ -3978,21 +4377,25 @@ static void sys_tcgetpgrp(syscall_frame_t* frame) {
 
 // ── SYS_GETUID (84) ──────────────────────────────────────────────
 static void sys_getuid(syscall_frame_t* frame) {
+    { static int sys_getuid_logged = 0; if (!sys_getuid_logged) { sys_getuid_logged = 1; serial_print("[SYS_GETUID] called\n"); } }
     frame->rax = ASCENT_UID;
 }
 
 // ── SYS_GETEUID (85) ─────────────────────────────────────────────
 static void sys_geteuid(syscall_frame_t* frame) {
+    { static int sys_geteuid_logged = 0; if (!sys_geteuid_logged) { sys_geteuid_logged = 1; serial_print("[SYS_GETEUID] called\n"); } }
     frame->rax = ASCENT_UID;
 }
 
 // ── SYS_GETGID (86) ──────────────────────────────────────────────
 static void sys_getgid(syscall_frame_t* frame) {
+    { static int sys_getgid_logged = 0; if (!sys_getgid_logged) { sys_getgid_logged = 1; serial_print("[SYS_GETGID] called\n"); } }
     frame->rax = ASCENT_GID;
 }
 
 // ── SYS_GETEGID (87) ─────────────────────────────────────────────
 static void sys_getegid(syscall_frame_t* frame) {
+    { static int sys_getegid_logged = 0; if (!sys_getegid_logged) { sys_getegid_logged = 1; serial_print("[SYS_GETEGID] called\n"); } }
     frame->rax = ASCENT_GID;
 }
 
@@ -4009,6 +4412,7 @@ static void sys_getegid(syscall_frame_t* frame) {
 //   - Gerçek uyku gerekiyorsa tick sayar, her iterasyonda pause kullanır
 // ---------------------------------------------------------------
 static void sys_nanosleep(syscall_frame_t* frame) {
+    serial_print("[SYS_NANOSLEEP] called\n");
     timespec_t* req = (timespec_t*)frame->rdi;
     timespec_t* rem = (timespec_t*)frame->rsi;  // NULL olabilir
 
@@ -4060,6 +4464,7 @@ static void sys_nanosleep(syscall_frame_t* frame) {
 static stack_t g_altstack = { .ss_sp = (void*)0, .ss_flags = SS_DISABLE, .ss_size = 0 };
 
 static void sys_sigaltstack(syscall_frame_t* frame) {
+    serial_print("[SYS_SIGALTSTACK] called\n");
     const stack_t* ss     = (const stack_t*)frame->rdi;
     stack_t*       old_ss = (stack_t*)frame->rsi;
 
@@ -4121,6 +4526,7 @@ static void sys_sigaltstack(syscall_frame_t* frame) {
 // tv_nsec = (ticks % 100) * 10_000_000
 // ---------------------------------------------------------------
 static void sys_clock_gettime(syscall_frame_t* frame) {
+    { static int sys_clock_gettime_logged = 0; if (!sys_clock_gettime_logged) { sys_clock_gettime_logged = 1; serial_print("[SYS_CLOCK_GETTIME] called\n"); } }
     uint32_t    clockid = (uint32_t)frame->rdi;
     timespec_t* tp      = (timespec_t*)frame->rsi;
 
@@ -4160,6 +4566,7 @@ static void sys_clock_gettime(syscall_frame_t* frame) {
 // res NULL ise sadece clockid geçerliliği kontrol edilir.
 // ---------------------------------------------------------------
 static void sys_clock_getres(syscall_frame_t* frame) {
+    { static int sys_clock_getres_logged = 0; if (!sys_clock_getres_logged) { sys_clock_getres_logged = 1; serial_print("[SYS_CLOCK_GETRES] called\n"); } }
     uint32_t    clockid = (uint32_t)frame->rdi;
     timespec_t* res     = (timespec_t*)frame->rsi;  // NULL olabilir
 
@@ -4208,6 +4615,7 @@ static uint64_t g_alarm_deadline = 0;   // 0 = alarm yok
 static uint8_t  g_alarm_active   = 0;
 
 static void sys_alarm(syscall_frame_t* frame) {
+    serial_print("[SYS_ALARM] called\n");
     uint32_t seconds = (uint32_t)frame->rdi;
 
     uint64_t now   = get_system_ticks();
@@ -4272,6 +4680,7 @@ void     alarm_clear(void)       { g_alarm_active = 0; g_alarm_deadline = 0; }
 // length < mevcut boyut → kırpılır.
 // ---------------------------------------------------------------
 static void sys_ftruncate(syscall_frame_t* frame) {
+    serial_print("[SYS_FTRUNCATE] called\n");
     int      fd     = (int)frame->rdi;
     uint64_t length = frame->rsi;
 
@@ -4297,8 +4706,8 @@ static void sys_ftruncate(syscall_frame_t* frame) {
     if (r < 0) { frame->rax = SYSCALL_ERR_INVAL; return; }
 
     // fd offset'i length'i aşıyorsa sona çek
-    if (entry->offset > length)
-        entry->offset = length;
+    if (FD_OFF(entry) > length)
+        FD_OFF_SET(entry, length);
 
     serial_print("[SYSCALL] ftruncate ok\n");
     frame->rax = SYSCALL_OK;
@@ -4310,6 +4719,7 @@ static void sys_ftruncate(syscall_frame_t* frame) {
 // ftruncate ile aynı işlev, fd yerine path alır.
 // ---------------------------------------------------------------
 static void sys_truncate(syscall_frame_t* frame) {
+    serial_print("[SYS_TRUNCATE] called\n");
     const char* path   = (const char*)frame->rdi;
     uint64_t    length = frame->rsi;
 
@@ -4334,6 +4744,7 @@ static void sys_truncate(syscall_frame_t* frame) {
 }
 // ── SYS_MKDIR (83) ──────────────────────────────────────────────
 static void sys_mkdir(syscall_frame_t* frame) {
+    serial_print("[SYS_MKDIR] called\n");
     const char* path = (const char*)frame->rdi;
     uint32_t    mode = (uint32_t)frame->rsi;
     (void)mode;
@@ -4388,6 +4799,7 @@ static void sys_unlink(syscall_frame_t* frame) {
 // Dosya veya dizini yeniden adlandırır / taşır.
 // ---------------------------------------------------------------
 static void sys_rename(syscall_frame_t* frame) {
+    serial_print("[SYS_RENAME] called\n");
     const char* oldpath = (const char*)frame->rdi;
     const char* newpath = (const char*)frame->rsi;
 
@@ -4434,6 +4846,7 @@ static void sys_rename(syscall_frame_t* frame) {
 //   PS1 \s (shell adı) / \v (versiyon) escape'leri → sysname/release
 // ---------------------------------------------------------------
 static void sys_uname(syscall_frame_t* frame) {
+    serial_print("[SYS_UNAME] called\n");
     utsname_t* buf = (utsname_t*)frame->rdi;
 
     if (!is_valid_user_ptr(buf, sizeof(utsname_t))) {
@@ -4488,6 +4901,7 @@ static rlimit_t kernel_rlimits[RLIMIT_NLIMITS] = {
 };
 
 static void sys_getrlimit(syscall_frame_t* frame) {
+    serial_print("[SYS_GETRLIMIT] called\n");
     int       resource = (int)frame->rdi;
     rlimit_t* rl       = (rlimit_t*)frame->rsi;
 
@@ -4514,6 +4928,7 @@ static void sys_getrlimit(syscall_frame_t* frame) {
 }
 
 static void sys_setrlimit(syscall_frame_t* frame) {
+    serial_print("[SYS_SETRLIMIT] called\n");
     int             resource = (int)frame->rdi;
     const rlimit_t* rl       = (const rlimit_t*)frame->rsi;
 
@@ -4554,6 +4969,7 @@ static void sys_setrlimit(syscall_frame_t* frame) {
 // ── SYS_LSTAT (6) ───────────────────────────────────────────────
 // AscentOS symlink desteklemiyor; lstat == stat
 static void sys_lstat(syscall_frame_t* frame) {
+    serial_print("[SYS_LSTAT] called\n");
     sys_stat(frame);
 }
 
@@ -4563,6 +4979,7 @@ static void sys_lstat(syscall_frame_t* frame) {
 // ── SYS_LINK (86) ───────────────────────────────────────────────
 // ext2 hard link yok; icerigi kopyalar. st_nlink==2 testi SKIP olur.
 static void sys_link(syscall_frame_t* frame) {
+    serial_print("[SYS_LINK] called\n");
     const char* oldpath = (const char*)frame->rdi;
     const char* newpath = (const char*)frame->rsi;
 
@@ -4615,6 +5032,7 @@ static void sys_link(syscall_frame_t* frame) {
 // utime=0 dönen gerçek implementasyonlar mevcuttur (QEMU minimal kernel vb).
 // -----------------------------------------------------------------------
 static void sys_times(syscall_frame_t* frame) {
+    serial_print("[SYS_TIMES] called\n");
     tms_t* buf = (tms_t*)frame->rdi;
 
     if (buf != 0) {   // NULL geçmek geçerli (sadece elapsed tick isteniyor)
@@ -4709,6 +5127,7 @@ static void symlink_table_init(void) {
 }
 
 static void sys_symlink(syscall_frame_t* frame) {
+    serial_print("[SYS_SYMLINK] called\n");
     const char* target   = (const char*)frame->rdi;
     const char* linkpath = (const char*)frame->rsi;
 
@@ -4776,6 +5195,7 @@ static void sys_symlink(syscall_frame_t* frame) {
 //   Bulunamazsa EINVAL (POSIX: path bir symlink değil).
 // -----------------------------------------------------------------------
 static void sys_readlink(syscall_frame_t* frame) {
+    serial_print("[SYS_READLINK] called\n");
     const char* path   = (const char*)frame->rdi;
     char*       buf    = (char*)frame->rsi;
     uint64_t    bufsiz = frame->rdx;
@@ -4951,6 +5371,7 @@ static void sys_chmod(syscall_frame_t* frame) {
 #define PROT_EXEC_SC   4
 
 static void sys_mprotect(syscall_frame_t* frame) {
+    serial_print("[SYS_MPROTECT] called\n");
     uint64_t addr = frame->rdi;
     uint64_t len  = frame->rsi;
     int      prot = (int)(int64_t)frame->rdx;
@@ -5052,7 +5473,8 @@ static void sys_pipe2(syscall_frame_t* frame) {
         frame->rax = SYSCALL_ERR_NOMEM;
         return;
     }
-    pb->ref_count = 2;   // okuma + yazma ucu
+    pb->ref_count       = 2;   // okuma + yazma ucu
+    pb->write_ref_count = 1;   // tek yazma ucu
 
     // Okuma fd (fd[0]) — fd_alloc_pipe doğru API
     int rfd = fd_alloc_pipe(cur->fd_table, O_RDONLY, pb);
@@ -5117,6 +5539,7 @@ static void sys_pipe2(syscall_frame_t* frame) {
 //   RDI = uaddr   RSI = op   RDX = val   R10 = timeout   R8 = uaddr2   R9 = val3
 // ============================================================
 static void sys_futex(syscall_frame_t* frame) {
+    serial_print("[SYS_FUTEX] called\n");
     uint32_t* uaddr   = (uint32_t*)(uintptr_t)frame->rdi;
     int       op      = (int)(int64_t)frame->rsi;
     uint32_t  val     = (uint32_t)frame->rdx;
@@ -5529,6 +5952,7 @@ static void sys_clone(syscall_frame_t* frame) {
 // Dönüş: toplam okunan byte | err
 // ============================================================
 static void sys_readv(syscall_frame_t* frame) {
+    serial_print("[SYS_READV] called\n");
     int       fd     = (int)(int64_t)frame->rdi;
     iovec_t*  iov    = (iovec_t*)(uintptr_t)frame->rsi;
     int       iovcnt = (int)(int64_t)frame->rdx;
@@ -5576,6 +6000,7 @@ static void sys_readv(syscall_frame_t* frame) {
 // Her iovec için sys_write mantığını tekrar kullanır.
 // sys_writev — scatter/gather write  (SYS_WRITEV = 20)
 static void sys_writev(syscall_frame_t* frame) {
+    serial_print("[SYS_WRITEV] called\n");
     int      fd     = (int)(int64_t)frame->rdi;
     iovec_t* iov    = (iovec_t*)(uintptr_t)frame->rsi;
     int      iovcnt = (int)(int64_t)frame->rdx;
@@ -5639,15 +6064,15 @@ static void sys_writev(syscall_frame_t* frame) {
         } else if (fde->type == FD_TYPE_FILE) {
             int nw;
             if (ext2_path_is_file(fde->path)) {
-                nw = ext2_write_file(fde->path, fde->offset,
+                nw = ext2_write_file(fde->path, FD_OFF(fde),
                                      (const uint8_t*)p, (uint32_t)len);
             } else {
                 extern int fs_vfs_write(const char* path, uint64_t offset,
                                         const char* data, uint32_t len);
-                nw = fs_vfs_write(fde->path, fde->offset, p, (uint32_t)len);
+                nw = fs_vfs_write(fde->path, FD_OFF(fde), p, (uint32_t)len);
             }
             if (nw < 0) nw = 0;
-            fde->offset += (uint64_t)nw;
+            FD_OFF_ADD(fde, nw);
             total += (int64_t)nw;
         }
     }
@@ -5873,6 +6298,7 @@ static void sys_prlimit64(syscall_frame_t* frame) {
 //   Dönüş: yeni fd | EINVAL | EAFNOSUPPORT | EMFILE
 // ============================================================
 static void sys_socket(syscall_frame_t* frame) {
+    serial_print("[SYS_SOCKET] called\n");
     int domain   = (int)frame->rdi;
     int type     = (int)frame->rsi;
     // int protocol = (int)frame->rdx;   // şimdilik kullanılmıyor
@@ -5939,6 +6365,7 @@ static void sys_socket(syscall_frame_t* frame) {
 //   Gerçek IPC/VFS bağlantısı gelecekte eklenecek.
 // ============================================================
 static void sys_connect(syscall_frame_t* frame) {
+    serial_print("[SYS_CONNECT] called\n");
     int      sockfd  = (int)frame->rdi;
     void*    addr    = (void*)frame->rsi;
     uint32_t addrlen = (uint32_t)frame->rdx;

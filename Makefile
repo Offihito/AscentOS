@@ -301,7 +301,7 @@ USERLAND_LDFLAGS := \
 
 USERLAND_CRT0   := userland/libc/crt0.o
 SYSCALLS_OBJ    := userland/out/syscalls.o
-USERLAND_APPS   := hello calculator shell snake wav_player
+USERLAND_APPS   := hello calculator shell snake wav_player syscall_test
 USERLAND_ELFS   := $(addprefix userland/out/, $(addsuffix .elf, $(USERLAND_APPS)))
 
 .PRECIOUS: userland/out/%.o userland/out/%.elf userland/libc/crt0.o $(SYSCALLS_OBJ)
@@ -345,6 +345,9 @@ calculator: userland/out/calculator.elf
 snake: userland/out/snake.elf
 	@echo "  ✓ snake.elf hazir"
 
+syscall_test: userland/out/syscall_test.elf
+	@echo "  ✓ syscall_test hazir"
+
 shell: userland/out/shell.elf
 	@echo "  ✓ shell.elf hazir"
 
@@ -363,6 +366,7 @@ install-userland: userland disk.img
 	    debugfs -w disk.img -R "write userland/out/snake.elf      bin/snake.elf"       2>/dev/null; \
 	    debugfs -w disk.img -R "write userland/out/shell.elf      bin/shell.elf"       2>/dev/null; \
 	    debugfs -w disk.img -R "write userland/out/wav_player.elf bin/wav_player.elf"  2>/dev/null; \
+		 debugfs -w disk.img -R "write userland/out/syscall_test.elf bin/syscall_test.elf"  2>/dev/null; \
 	    echo "✓ ELF'ler /bin/'e yazildi (debugfs)"; \
 	elif command -v e2cp >/dev/null 2>&1; then \
 	    echo "  → e2cp kullaniliyor"; \
@@ -371,6 +375,7 @@ install-userland: userland disk.img
 	    e2cp userland/out/snake.elf      disk.img:/bin/snake.elf; \
 	    e2cp userland/out/shell.elf      disk.img:/bin/shell.elf; \
 	    e2cp userland/out/wav_player.elf disk.img:/bin/wav_player.elf; \
+		e2cp userland/out/syscall_test.elf disk.img:/bin/syscall_test.elf; \
 	    echo "✓ ELF'ler /bin/'e yazildi (e2cp)"; \
 	else \
 	    echo "  → loop mount deneniyor (sudo gerekebilir)"; \
@@ -388,6 +393,7 @@ install-userland-mount: userland disk.img
 	sudo cp userland/out/snake.elf      /tmp/ascentos_mnt/bin/snake.elf
 	sudo cp userland/out/shell.elf      /tmp/ascentos_mnt/bin/shell.elf
 	sudo cp userland/out/wav_player.elf /tmp/ascentos_mnt/bin/wav_player.elf
+	sudo cp userland/out/wav_player.elf /tmp/ascentos_mnt/bin/syscall_test.elf
 	sudo umount /tmp/ascentos_mnt
 	rmdir /tmp/ascentos_mnt
 	@echo "✓ ELF'ler kopyalandi"

@@ -234,45 +234,91 @@ void* pmm_alloc_pages(uint64_t count) {
     return pmm_alloc_pages_flags(count, PMM_FLAGS_KERNEL);
 }
 
+// ---------------------------------------------------------------------------
+// Explicit VA free list for each pool.
+//
+// vmm_get_physical_address() returns 0 for BOTH unmapped pages AND pages
+// covered by boot-time large-page mappings (because vmm_get_pte returns NULL
+// for 2MB/1GB PDE entries).  Any approach that uses vmm_get_physical_address
+// to probe "is this VA slot free?" is therefore unreliable.
+//
+// Correct approach: track freed VA ranges explicitly.  pmm_free_pages()
+// records the VA base it unmapped.  pmm_alloc_pages_flags() pops a matching
+// entry from this list before advancing the cursor.  The cursor is used only
+// for fresh (never-allocated) slots; freed slots are recycled via the list.
+// ---------------------------------------------------------------------------
+#define VA_FREELIST_CAP 64
+
+typedef struct { uint64_t virt_base; uint64_t count; } va_slot_t;
+
+static va_slot_t kstack_free[VA_FREELIST_CAP];
+static va_slot_t ustack_free[VA_FREELIST_CAP];
+static int kstack_free_n = 0;
+static int ustack_free_n = 0;
+
+static void va_free_push(va_slot_t* list, int* n, uint64_t base, uint64_t cnt) {
+    if (*n < VA_FREELIST_CAP) {
+        list[*n].virt_base = base;
+        list[(*n)++].count = cnt;
+        return;
+    }
+    // Full: evict slot 0, shift down, add at end.
+    for (int i = 0; i < VA_FREELIST_CAP - 1; i++) list[i] = list[i+1];
+    list[VA_FREELIST_CAP-1].virt_base = base;
+    list[VA_FREELIST_CAP-1].count     = cnt;
+    // *n stays at VA_FREELIST_CAP
+}
+
+static int va_free_pop(va_slot_t* list, int* n, uint64_t need, uint64_t* out) {
+    for (int i = 0; i < *n; i++) {
+        if (list[i].count >= need) {
+            *out = list[i].virt_base;
+            list[i] = list[--(*n)]; // replace with last entry
+            return 1;
+        }
+    }
+    return 0;
+}
+
 void* pmm_alloc_pages_flags(uint64_t count, uint64_t map_flags) {
     if (!pmm_enabled || count == 0 || count > 4096) return NULL;
     if (free_frames < count) return NULL;
 
-    // map_flags & PAGE_USER (0x4) varsa → user havuzu, yoksa → kernel havuzu
     int is_user = (map_flags & 0x4) != 0;
 
     uint64_t pool_base = is_user ? USTACK_POOL_BASE : KSTACK_POOL_BASE;
     uint64_t pool_max  = is_user ? USTACK_POOL_MAX  : KSTACK_POOL_MAX;
     uint64_t* cursor   = is_user ? &ustack_pool_cursor : &kstack_pool_cursor;
+    va_slot_t* flist   = is_user ? ustack_free : kstack_free;
+    int*       fn      = is_user ? &ustack_free_n : &kstack_free_n;
 
-    uint64_t virt_base = *cursor;
-    uint64_t virt_end  = virt_base + count * PAGE_SIZE_PMM;
-
-    if (virt_end > pool_max) {
-        *cursor    = pool_base;
-        virt_base  = pool_base;
-        virt_end   = virt_base + count * PAGE_SIZE_PMM;
-        if (virt_end > pool_max) return NULL;
+    // 1. Reuse a freed VA slot if one is available.
+    uint64_t virt_base = 0;
+    if (!va_free_pop(flist, fn, count, &virt_base)) {
+        // 2. Advance cursor for a fresh slot.
+        virt_base = *cursor;
+        if (virt_base + count * PAGE_SIZE_PMM > pool_max) {
+            // Wrap cursor — only valid if pool has room from the start.
+            virt_base = pool_base;
+        }
+        if (virt_base + count * PAGE_SIZE_PMM > pool_max) return NULL;
+        *cursor = virt_base + count * PAGE_SIZE_PMM;
     }
-    *cursor = virt_end;
 
     for (uint64_t i = 0; i < count; i++) {
         void* phys = pmm_alloc_frame();
         if (!phys) {
-            // rollback
             for (uint64_t j = 0; j < i; j++) {
                 uint64_t vp = virt_base + j * PAGE_SIZE_PMM;
                 uint64_t pp = vmm_get_physical_address(vp);
                 vmm_unmap_page(vp);
                 if (pp) pmm_free_frame((void*)pp);
             }
+            va_free_push(flist, fn, virt_base, count);
             return NULL;
         }
-
         uint64_t vp = virt_base + i * PAGE_SIZE_PMM;
         vmm_map_page(vp, (uint64_t)phys, map_flags);
-
-        // zero page
         unsigned char* p = (unsigned char*)vp;
         for (uint64_t b = 0; b < PAGE_SIZE_PMM; b++) p[b] = 0;
     }
@@ -283,6 +329,11 @@ void* pmm_alloc_pages_flags(uint64_t count, uint64_t map_flags) {
 void pmm_free_pages(void* base, uint64_t count) {
     if (!pmm_enabled || !base || count == 0) return;
     uint64_t virt = (uint64_t)base;
+
+    // Determine which pool this VA belongs to and push to that free list.
+    int is_user = (virt >= USTACK_POOL_BASE && virt < USTACK_POOL_MAX);
+    int is_kern = (virt >= KSTACK_POOL_BASE && virt < KSTACK_POOL_MAX);
+
     for (uint64_t j = 0; j < count; j++) {
         uint64_t vp = virt + j * PAGE_SIZE_PMM;
         uint64_t pp = vmm_get_physical_address(vp);
@@ -291,6 +342,12 @@ void pmm_free_pages(void* base, uint64_t count) {
             pmm_free_frame((void*)pp);
         }
     }
+
+    // Record the VA range so pmm_alloc_pages_flags can reuse it.
+    if (is_user)
+        va_free_push(ustack_free, &ustack_free_n, virt, count);
+    else if (is_kern)
+        va_free_push(kstack_free, &kstack_free_n, virt, count);
 }
 
 // ============================================================================
