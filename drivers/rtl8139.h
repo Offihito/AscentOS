@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "pci.h"
 
 // ============================================================================
 // RTL8139 Register offsets
@@ -80,9 +81,6 @@
 #define RTL_VENDOR_ID   0x10EC
 #define RTL_DEVICE_ID   0x8139
 
-// PCI config adresi
-#define PCI_CONFIG_ADDR 0xCF8
-#define PCI_CONFIG_DATA 0xCFC
 
 #define ETH_ALEN        6
 #define ETH_HLEN        14
@@ -140,4 +138,4 @@ void rtl8139_set_packet_handler(packet_handler_t handler);
 
 void rtl8139_dump_regs(void);
 
-#endif 
+#endif

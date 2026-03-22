@@ -13,7 +13,8 @@
 #include "../drivers/pcspk.h"
 #include "../drivers/sb16.h"
 #include "../kernel/cpu64.h"
-#include "../kernel/spinlock64.h"   
+#include "../kernel/spinlock64.h"
+#include "../drivers/pci.h"
 #include <stdbool.h>
 
 extern void spinlock_test(void); 
@@ -4542,101 +4543,8 @@ void cmd_sb16(const char* args, CommandOutput* output) {
 
 
 // ============================================================================
-// LSPCI — PCI Bus 
+// LSPCI — PCI Bus
 // ============================================================================
-
-#define PCI_CONFIG_ADDRESS  0xCF8
-#define PCI_CONFIG_DATA     0xCFC
-
-static inline void outl64(uint16_t port, uint32_t val) {
-    __asm__ volatile ("outl %0, %1" : : "a"(val), "Nd"(port));
-}
-static inline uint32_t inl64(uint16_t port) {
-    uint32_t ret;
-    __asm__ volatile ("inl %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
-
-static uint32_t pci_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset) {
-    uint32_t addr = (1u << 31)
-                  | ((uint32_t)bus  << 16)
-                  | ((uint32_t)dev  << 11)
-                  | ((uint32_t)func <<  8)
-                  | (offset & 0xFC);
-    outl64(PCI_CONFIG_ADDRESS, addr);
-    return inl64(PCI_CONFIG_DATA);
-}
-
-// Known PCI Vendor ID's
-static const char* pci_vendor_name(uint16_t vid) {
-    switch (vid) {
-        case 0x8086: return "Intel";
-        case 0x1022: return "AMD";
-        case 0x10DE: return "NVIDIA";
-        case 0x1234: return "QEMU/Bochs";
-        case 0x10EC: return "Realtek";
-        case 0x1AF4: return "VirtIO/Red Hat";
-        case 0x14E4: return "Broadcom";
-        case 0x168C: return "Qualcomm Atheros";
-        case 0x1B36: return "QEMU";
-        case 0x1AE0: return "Google";
-        case 0x15AD: return "VMware";
-        case 0x80EE: return "VirtualBox";
-        default:     return "Unknown";
-    }
-}
-
-static const char* pci_class_name(uint8_t class, uint8_t subclass) {
-    if (class == 0x00) return "Unclassified";
-    if (class == 0x01) {
-        if (subclass == 0x01) return "IDE Controller";
-        if (subclass == 0x06) return "SATA Controller (AHCI)";
-        if (subclass == 0x80) return "Storage Controller";
-        return "Mass Storage";
-    }
-    if (class == 0x02) {
-        if (subclass == 0x00) return "Ethernet Controller";
-        if (subclass == 0x80) return "Network Controller";
-        return "Network";
-    }
-    if (class == 0x03) {
-        if (subclass == 0x00) return "VGA Controller";
-        if (subclass == 0x01) return "XGA Controller";
-        if (subclass == 0x02) return "3D Controller";
-        return "Display";
-    }
-    if (class == 0x04) return "Multimedia";
-    if (class == 0x05) return "Memory Controller";
-    if (class == 0x06) {
-        if (subclass == 0x00) return "Host Bridge";
-        if (subclass == 0x01) return "ISA Bridge";
-        if (subclass == 0x04) return "PCI-PCI Bridge";
-        if (subclass == 0x80) return "Bridge";
-        return "Bridge";
-    }
-    if (class == 0x07) return "Communication";
-    if (class == 0x08) {
-        if (subclass == 0x00) return "PIC";
-        if (subclass == 0x01) return "DMA Controller";
-        if (subclass == 0x02) return "Timer";
-        if (subclass == 0x03) return "RTC";
-        return "System Peripheral";
-    }
-    if (class == 0x09) return "Input Device";
-    if (class == 0x0A) return "Docking Station";
-    if (class == 0x0B) return "Processor";
-    if (class == 0x0C) {
-        if (subclass == 0x03) return "USB Controller";
-        if (subclass == 0x05) return "SMBus";
-        return "Serial Bus";
-    }
-    if (class == 0x0D) return "Wireless";
-    if (class == 0x0F) return "Satellite Communication";
-    if (class == 0x10) return "Encryption";
-    if (class == 0x11) return "Signal Processing";
-    if (class == 0xFF) return "Unassigned";
-    return "Other";
-}
 
 // hex nibble helper
 static char hex_nibble(uint8_t v) {
@@ -4667,22 +4575,114 @@ static void bdf_to_str(uint8_t bus, uint8_t dev, uint8_t func, char out[8]) {
     out[7] = '\0';
 }
 
+// uint32'yi hex string'e çevirir: "0x0000C000" formatında
+static void uint32_to_hex_str(uint32_t v, char* out) {
+    out[0] = '0'; out[1] = 'x';
+    for (int i = 0; i < 8; i++)
+        out[2 + i] = hex_nibble((v >> (28 - i * 4)) & 0xF);
+    out[10] = '\0';
+}
+
+// uint32'yi ondalık string'e çevirir
+static void uint32_to_dec_str(uint32_t v, char* out) {
+    if (!v) { out[0] = '0'; out[1] = '\0'; return; }
+    char tmp[12]; int i = 0;
+    while (v) { tmp[i++] = '0' + (v % 10); v /= 10; }
+    int j = 0;
+    while (i--) out[j++] = tmp[i + 1];
+    out[j] = '\0';
+}
+
+// Bir cihazın tüm geçerli BAR'larını output'a ekler
+static void lspci_print_bars(uint8_t bus, uint8_t dev, uint8_t fn,
+                              CommandOutput* output) {
+    PCIDevice tmp;
+    tmp.bus = bus;
+    tmp.dev = dev;
+    tmp.fn  = fn;
+
+    for (uint8_t i = 0; i < 6; i++) {
+        PCIBAR bar = pci_read_bar(&tmp, i);
+        if (bar.type == PCI_BAR_TYPE_INVALID) continue;
+
+        char line[MAX_LINE_LENGTH];
+        char* p = line;
+
+        // indent
+        *p++ = ' '; *p++ = ' '; *p++ = ' '; *p++ = ' ';
+
+        // BAR index
+        *p++ = 'B'; *p++ = 'A'; *p++ = 'R'; *p++ = '0' + i; *p++ = ' ';
+
+        // Tip
+        if (bar.type == PCI_BAR_TYPE_IO) {
+            for (const char* s = "I/O   "; *s; s++) *p++ = *s;
+        } else if (bar.type == PCI_BAR_TYPE_MEM32) {
+            for (const char* s = "MEM32 "; *s; s++) *p++ = *s;
+            if (bar.prefetchable)
+                for (const char* s = "[pref] "; *s; s++) *p++ = *s;
+        } else {
+            for (const char* s = "MEM64 "; *s; s++) *p++ = *s;
+            if (bar.prefetchable)
+                for (const char* s = "[pref] "; *s; s++) *p++ = *s;
+        }
+
+        // Adres
+        for (const char* s = "addr="; *s; s++) *p++ = *s;
+        char addr_str[11];
+        uint32_to_hex_str((uint32_t)(bar.address & 0xFFFFFFFF), addr_str);
+        for (int k = 0; addr_str[k]; k++) *p++ = addr_str[k];
+
+        // Boyut
+        if (bar.size) {
+            for (const char* s = "  size="; *s; s++) *p++ = *s;
+            char sz_str[12];
+            uint32_to_dec_str(bar.size, sz_str);
+            for (int k = 0; sz_str[k]; k++) *p++ = sz_str[k];
+            // İnsan okunabilir birim
+            if (bar.size >= 1024 * 1024) {
+                for (const char* s = " MB"; *s; s++) *p++ = *s;
+            } else if (bar.size >= 1024) {
+                for (const char* s = " KB"; *s; s++) *p++ = *s;
+            } else {
+                for (const char* s = " B"; *s; s++) *p++ = *s;
+            }
+        }
+
+        // MEM64 ise üst 32 bit de var mı?
+        if (bar.type == PCI_BAR_TYPE_MEM64 && (bar.address >> 32)) {
+            for (const char* s = " (hi="; *s; s++) *p++ = *s;
+            char hi_str[11];
+            uint32_to_hex_str((uint32_t)(bar.address >> 32), hi_str);
+            for (int k = 0; hi_str[k]; k++) *p++ = hi_str[k];
+            *p++ = ')';
+            // MEM64: i+1 BAR kullanıldı, onu atla
+            i++;
+        }
+
+        *p = '\0';
+        output_add_line(output, line, VGA_DARK_GRAY);
+    }
+}
+
 static void cmd_lspci(const char* args, CommandOutput* output) {
-    (void)args;
+    // "lspci -v" → BAR detayları göster
+    int verbose = (args && args[0] == '-' && args[1] == 'v');
 
     output_add_line(output, "PCI Bus Scan:", VGA_CYAN);
-    output_add_line(output, "BDF      VendorID DevID  Class  Description", VGA_DARK_GRAY);
+    if (verbose)
+        output_add_line(output, "BDF      VendorID DevID  Class  Description  [-v: BAR detaylari]", VGA_DARK_GRAY);
+    else
+        output_add_line(output, "BDF      VendorID DevID  Class  Description  (lspci -v: BAR goster)", VGA_DARK_GRAY);
     output_add_line(output, "-------- -------- ------ ------ ----------------------------", VGA_DARK_GRAY);
 
     int found = 0;
 
     for (uint16_t bus = 0; bus < 256; bus++) {
         for (uint8_t dev = 0; dev < 32; dev++) {
-            // Önce function 0'a bak
             uint32_t id = pci_read32((uint8_t)bus, dev, 0, 0x00);
-            if ((id & 0xFFFF) == 0xFFFF) continue;  // cihaz yok
+            if ((id & 0xFFFF) == 0xFFFF) continue;
 
-            // Header type'ı oku (multi-function kontrolü)
             uint32_t hdr = pci_read32((uint8_t)bus, dev, 0, 0x0C);
             uint8_t  header_type = (hdr >> 16) & 0xFF;
             uint8_t  max_func = (header_type & 0x80) ? 8 : 1;
@@ -4698,53 +4698,50 @@ static void cmd_lspci(const char* args, CommandOutput* output) {
                 uint8_t  class_code = (class_reg >> 24) & 0xFF;
                 uint8_t  subclass   = (class_reg >> 16) & 0xFF;
 
-                // Satır oluştur
+                // Ana satır
                 char line[MAX_LINE_LENGTH];
                 char* p = line;
 
-                // BDF
                 char bdf[8];
                 bdf_to_str((uint8_t)bus, dev, func, bdf);
                 for (int i = 0; bdf[i]; i++) *p++ = bdf[i];
                 *p++ = ' '; *p++ = ' ';
 
-                // Vendor
                 char vid_hex[5]; uint16_to_hex(vendor_id, vid_hex);
                 *p++ = '0'; *p++ = 'x';
                 for (int i = 0; vid_hex[i]; i++) *p++ = vid_hex[i];
                 *p++ = ' ';
 
-                // Device
                 char did_hex[5]; uint16_to_hex(device_id, did_hex);
                 *p++ = '0'; *p++ = 'x';
                 for (int i = 0; did_hex[i]; i++) *p++ = did_hex[i];
                 *p++ = ' ';
 
-                // Class
                 char cls_hex[3]; uint8_to_hex(class_code, cls_hex);
                 *p++ = '0'; *p++ = 'x';
                 *p++ = cls_hex[0]; *p++ = cls_hex[1];
                 *p++ = ' '; *p++ = ' ';
 
-                // Vendor adı
                 const char* vname = pci_vendor_name(vendor_id);
                 for (int i = 0; vname[i]; i++) *p++ = vname[i];
                 *p++ = ' ';
 
-                // Class adı
                 const char* cname = pci_class_name(class_code, subclass);
                 for (int i = 0; cname[i]; i++) *p++ = cname[i];
                 *p = '\0';
 
-                // Renk: class'a göre
                 uint8_t color = VGA_WHITE;
-                if (class_code == 0x02) color = VGA_GREEN;        // Ağ
-                else if (class_code == 0x03) color = VGA_CYAN;    // GPU
-                else if (class_code == 0x01) color = VGA_YELLOW;  // Disk
-                else if (class_code == 0x06) color = VGA_DARK_GRAY; // Bridge
+                if      (class_code == 0x02) color = VGA_GREEN;
+                else if (class_code == 0x03) color = VGA_CYAN;
+                else if (class_code == 0x01) color = VGA_YELLOW;
+                else if (class_code == 0x06) color = VGA_DARK_GRAY;
 
                 output_add_line(output, line, color);
                 found++;
+
+                // -v bayrağı varsa BAR satırlarını ekle
+                if (verbose)
+                    lspci_print_bars((uint8_t)bus, dev, func, output);
             }
         }
     }
@@ -4755,7 +4752,6 @@ static void cmd_lspci(const char* args, CommandOutput* output) {
         char summary[48];
         char* sp = summary;
         for (const char* s = "Total: "; *s; s++) *sp++ = *s;
-        // found sayısını yaz
         {
             int n = found; char tmp[8]; int ti = 0;
             if (!n) { tmp[ti++] = '0'; }

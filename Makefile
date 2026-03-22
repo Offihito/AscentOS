@@ -102,7 +102,10 @@ signal64.o: kernel/signal64.c kernel/signal64.h kernel/syscall.h kernel/task.h
 panic64.o: kernel/panic64.c
 	$(CC) $(CFLAGS) -c kernel/panic64.c -o panic64.o
 
-rtl8139.o: drivers/rtl8139.c drivers/rtl8139.h
+pci.o: drivers/pci.c drivers/pci.h
+	$(CC) $(CFLAGS) -c drivers/pci.c -o pci.o
+
+rtl8139.o: drivers/rtl8139.c drivers/rtl8139.h drivers/pci.h
 	$(CC) $(CFLAGS) -c drivers/rtl8139.c -o rtl8139.o
 
 arp.o: network/arp.c network/arp.h drivers/rtl8139.h
@@ -130,7 +133,7 @@ keyboard.o: drivers/keyboard_unified.c kernel/idt64.h
 	$(CC) $(CFLAGS) -c drivers/keyboard_unified.c -o keyboard.o
 
 commands64.o: commands/commands64.c commands/commands64.h \
-              drivers/sb16.h drivers/pcspk.h
+              drivers/sb16.h drivers/pcspk.h drivers/pci.h
 	$(CC) $(CFLAGS) -c commands/commands64.c -o commands64.o
 
 ipv4.o: network/ipv4.c network/ipv4.h network/arp.h drivers/rtl8139.h
@@ -171,7 +174,7 @@ KERNEL_OBJS = boot64.o interrupts64.o idt64.o \
               commands64.o syscalltest64.o files64.o ata64.o ext3.o elf64.o \
               pmm.o heap.o vmm64.o timer.o pcspk.o sb16.o task.o scheduler.o \
               page_fault.o syscall.o signal64.o \
-              panic64.o rtl8139.o arp.o ipv4.o icmp.o udp.o dhcp.o tcp.o http.o
+              panic64.o rtl8139.o pci.o arp.o ipv4.o icmp.o udp.o dhcp.o tcp.o http.o
 
 kernel64.elf: $(KERNEL_OBJS)
 	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o kernel64.elf

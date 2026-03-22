@@ -12,6 +12,7 @@
 //            PIC EOI: slave (0xA0) + master (0x20) gönderir (IRQ11 = slave).
 
 #include "rtl8139.h"
+#include "pci.h"
 
 /* Higher-half dönüşüm: g_rtl .bss'de → VMA'da.
  * DMA için kartın fiziksel adrese ihtiyacı var. */
@@ -73,65 +74,7 @@ static void serial_dec(uint32_t v){
 // ============================================================================
 static RTL8139 g_rtl;
 
-// ============================================================================
-// PCI yardımcıları
-// ============================================================================
 
-// PCI konfig alanı okuma (32-bit)
-static uint32_t pci_read32(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg){
-    uint32_t addr = (1u<<31)
-                  | ((uint32_t)bus  << 16)
-                  | ((uint32_t)dev  << 11)
-                  | ((uint32_t)fn   <<  8)
-                  | (reg & 0xFC);
-    outl(PCI_CONFIG_ADDR, addr);
-    return inl(PCI_CONFIG_DATA);
-}
-
-// PCI konfig alanı yazma (32-bit)
-static void pci_write32(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg, uint32_t val){
-    uint32_t addr = (1u<<31)
-                  | ((uint32_t)bus  << 16)
-                  | ((uint32_t)dev  << 11)
-                  | ((uint32_t)fn   <<  8)
-                  | (reg & 0xFC);
-    outl(PCI_CONFIG_ADDR, addr);
-    outl(PCI_CONFIG_DATA, val);
-}
-
-// PCI Bus Master + I/O Space enable
-static void pci_enable_busmaster(uint8_t bus, uint8_t dev, uint8_t fn){
-    uint32_t cmd = pci_read32(bus, dev, fn, 0x04);
-    cmd |= (1<<0) | (1<<2); // I/O Space | Bus Master
-    pci_write32(bus, dev, fn, 0x04, cmd);
-}
-
-// RTL8139'u PCI bus'ta ara: 0..255 bus, 0..31 cihaz
-// Bulunursa bus/dev/fn doldurulur, true döner.
-static bool pci_find_rtl8139(uint8_t* out_bus, uint8_t* out_dev, uint8_t* out_fn,
-                               uint16_t* out_iobase, uint8_t* out_irq){
-    for(uint16_t bus=0; bus<256; bus++){
-        for(uint8_t dev=0; dev<32; dev++){
-            uint32_t id = pci_read32((uint8_t)bus, dev, 0, 0x00);
-            if(id == 0xFFFFFFFF) continue;           // Cihaz yok
-            uint16_t vid = id & 0xFFFF;
-            uint16_t did = (id >> 16) & 0xFFFF;
-            if(vid == RTL_VENDOR_ID && did == RTL_DEVICE_ID){
-                *out_bus = (uint8_t)bus;
-                *out_dev = dev;
-                *out_fn  = 0;
-                // BAR0 = I/O port tabanı (bit0=1 → I/O space)
-                uint32_t bar0 = pci_read32((uint8_t)bus, dev, 0, 0x10);
-                *out_iobase = (uint16_t)(bar0 & 0xFFFC);
-                // IRQ
-                uint32_t irq_line = pci_read32((uint8_t)bus, dev, 0, 0x3C);
-                *out_irq = (uint8_t)(irq_line & 0xFF);
-                return true;
-            }
-        }
-    }
-    return false;
-}
 
 // ============================================================================
 // Küçük gecikme (I/O port üzerinden, PIT gerektirmez)
@@ -280,13 +223,16 @@ void rtl8139_poll(void){
 bool rtl8139_init(void){
     serial_print("[RTL8139] PCI taranıyor...\n");
 
-    uint8_t  bus, dev, fn, irq;
-    uint16_t iobase;
-
-    if(!pci_find_rtl8139(&bus, &dev, &fn, &iobase, &irq)){
+    PCIDevice pci_dev;
+    if(!pci_find_device(RTL_VENDOR_ID, RTL_DEVICE_ID, &pci_dev)){
         serial_print("[RTL8139] Kart bulunamadı!\n");
         return false;
     }
+    uint8_t  bus    = pci_dev.bus;
+    uint8_t  dev    = pci_dev.dev;
+    uint8_t  fn     = pci_dev.fn;
+    uint16_t iobase = pci_dev.io_base;
+    uint8_t  irq    = pci_dev.irq;
 
     serial_print("[RTL8139] Bulundu — bus=");
     serial_dec(bus);
