@@ -1,4 +1,4 @@
-// syscall_test.c — AscentOS Syscall Test v8
+// syscall_test.c — AscentOS Syscall Test v10
 // Changes:
 //   - v3: File I/O (lseek, fstat, O_APPEND, double-close, pipe, large write)
 //   - v4: Advanced I/O (dup, dup2, fcntl, truncate, ftruncate, error fd modes)
@@ -9,6 +9,10 @@
 //          waitpid WNOHANG, double fork/zombie reap)
 //   - v8: Process extended (deep fork chain, pipe echo 256B, waitpid(-1) any-child,
 //          fork name stability 4-levels, pipe EOF on close, WNOHANG poll loop)
+//   - v9: mmap/munmap (anon rw, zero-init, munmap, re-mmap, large, file-backed,
+//          MAP_SHARED writeback, offset map, PROT_READ, mprotect upgrade)
+//  - v10: Advanced FD (pipe2 O_CLOEXEC, pipe2 O_NONBLOCK, writev scatter,
+//          writev byte count, getdents entry count, getdents find known file)
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,7 +22,59 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
+#include <sys/uio.h>
 #include <time.h>
+
+// Linux x86-64 dirent64 layout for raw getdents64 syscall
+struct linux_dirent64 {
+    unsigned long long d_ino;
+    long long          d_off;
+    unsigned short     d_reclen;
+    unsigned char      d_type;
+    char               d_name[1];
+};
+
+#define SYS_GETDENTS64  78
+#define SYS_PIPE2      293
+#define SYS_OPENDIR    402   // AscentOS custom: open a dir fd for getdents
+
+#ifndef O_CLOEXEC
+#define O_CLOEXEC  0x80000
+#endif
+#ifndef O_NONBLOCK
+#define O_NONBLOCK 0x800
+#endif
+
+// pipe2(pfd[2], flags)
+static inline long _pipe2(int pfd[2], int flags) {
+    long r;
+    __asm__ volatile("syscall"
+        : "=a"(r)
+        : "0"((long)SYS_PIPE2), "D"((long)pfd), "S"((long)flags)
+        : "rcx", "r11", "memory");
+    return r;
+}
+
+// opendir(path) -> dirfd  (AscentOS syscall 402)
+static inline long _opendir(const char* path) {
+    long r;
+    __asm__ volatile("syscall"
+        : "=a"(r)
+        : "0"((long)SYS_OPENDIR), "D"((long)path)
+        : "rcx", "r11", "memory");
+    return r;
+}
+
+// getdents64(fd, buf, count)
+static inline long _getdents64(int fd, void* buf, int count) {
+    long r;
+    __asm__ volatile("syscall"
+        : "=a"(r)
+        : "0"((long)SYS_GETDENTS64), "D"((long)fd), "S"((long)buf), "d"((long)count)
+        : "rcx", "r11", "memory");
+    return r;
+}
 
 // struct stat from sys/stat.h uses the Linux x86-64 ABI layout (144 bytes):
 //   st_dev @ 0 (u64), st_ino @ 8 (u64), st_nlink @ 16 (u64),
@@ -1523,6 +1579,312 @@ int main(void) {
         else
             ng("WNOHANG poll loop", WEXITSTATUS(status));
     p17_end:;
+    }
+
+    // ── SECTION 7: mmap / munmap tests ─────────────────────────────────────
+    printf("\n--- mmap / munmap Tests ---\n");
+
+    // M1. Basic anonymous mmap — pointer must not be MAP_FAILED
+    {
+        void* p = mmap(NULL, 4096, PROT_READ|PROT_WRITE,
+                       MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        if (p != MAP_FAILED) ok("mmap anon -> valid pointer");
+        else ng("mmap anon basic", -1);
+        if (p != MAP_FAILED) munmap(p, 4096);
+    }
+
+    // M2. Anonymous map — zero-initialised
+    {
+        void* p = mmap(NULL, 4096, PROT_READ|PROT_WRITE,
+                       MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) { ng("mmap anon(zero)/map", -1); goto m2_end; }
+        unsigned char* b = (unsigned char*)p;
+        int allzero = 1;
+        for (int i = 0; i < 4096; i++) if (b[i] != 0) { allzero = 0; break; }
+        if (allzero) ok("mmap anon -> zero-initialised");
+        else         ng("mmap anon not zero", (long)b[0]);
+        munmap(p, 4096);
+    m2_end:;
+    }
+
+    // M3. Anonymous map — write/read full page
+    {
+        void* p = mmap(NULL, 4096, PROT_READ|PROT_WRITE,
+                       MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) { ng("mmap anon(rw)/map", -1); goto m3_end; }
+        unsigned char* b = (unsigned char*)p;
+        for (int i = 0; i < 4096; i++) b[i] = (unsigned char)(i & 0xFF);
+        int ok_flag = 1;
+        for (int i = 0; i < 4096; i++)
+            if (b[i] != (unsigned char)(i & 0xFF)) { ok_flag = 0; break; }
+        if (ok_flag) ok("mmap anon -> write/read full page correct");
+        else         ng("mmap anon rw mismatch", -1);
+        munmap(p, 4096);
+    m3_end:;
+    }
+
+    // M4. munmap returns 0
+    {
+        void* p = mmap(NULL, 4096, PROT_READ|PROT_WRITE,
+                       MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) { ng("munmap(ret)/map", -1); goto m4_end; }
+        int r = munmap(p, 4096);
+        if (r == 0) ok("munmap -> returns 0");
+        else        ng("munmap return value", r);
+    m4_end:;
+    }
+
+    // M5. munmap + re-mmap usable
+    {
+        void* p1 = mmap(NULL, 4096, PROT_READ|PROT_WRITE,
+                        MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        if (p1 == MAP_FAILED) { ng("munmap(reuse)/map1", -1); goto m5_end; }
+        munmap(p1, 4096);
+        void* p2 = mmap(NULL, 4096, PROT_READ|PROT_WRITE,
+                        MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        if (p2 == MAP_FAILED) { ng("munmap(reuse)/map2", -1); goto m5_end; }
+        ((char*)p2)[0] = 0x42;
+        if (((char*)p2)[0] == 0x42) ok("munmap + re-mmap -> new mapping usable");
+        else ng("munmap re-mmap content", -1);
+        munmap(p2, 4096);
+    m5_end:;
+    }
+
+    // M6. Large 16-page map — sentinel bytes + munmap
+    {
+        size_t sz = 16 * 4096;
+        void* p = mmap(NULL, sz, PROT_READ|PROT_WRITE,
+                       MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) { ng("munmap(large)/map", -1); goto m6_end; }
+        unsigned char* b = (unsigned char*)p;
+        b[0] = 0xAA; b[sz/2] = 0xBB; b[sz-1] = 0xCC;
+        if (b[0] == 0xAA && b[sz/2] == 0xBB && b[sz-1] == 0xCC)
+            ok("mmap 16-page -> sentinels at start/mid/end correct");
+        else ng("mmap large sentinels", -1);
+        int r = munmap(p, sz);
+        if (r == 0) ok("munmap 16-page -> returns 0");
+        else        ng("munmap large return", r);
+    m6_end:;
+    }
+
+    const char* MMAP_FILE = "/tmp/sc_mmap_test.bin";
+
+    // M7. File-backed MAP_PRIVATE read
+    {
+        cleanup(MMAP_FILE);
+        int fd = open(MMAP_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("mmap(file)/open", fd); goto m7_end; }
+        const char* payload = "FILEMMAP_OK";
+        write(fd, payload, 11);
+        void* p = mmap(NULL, 11, PROT_READ, MAP_PRIVATE, fd, 0);
+        close(fd);
+        if (p == MAP_FAILED) { ng("mmap(file)/map", -1); goto m7_end; }
+        if (memcmp(p, payload, 11) == 0)
+            ok("mmap file-backed -> content matches written data");
+        else ng("mmap file content mismatch", -1);
+        munmap(p, 11);
+    m7_end:
+        cleanup(MMAP_FILE);
+    }
+
+    // M8. MAP_SHARED write — visible via read() after munmap
+    {
+        cleanup(MMAP_FILE);
+        int fd = open(MMAP_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("mmap(shared-write)/open", fd); goto m8_end; }
+        char zero[4096] = {0}; write(fd, zero, 4096);
+        void* p = mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+        if (p == MAP_FAILED) { close(fd); ng("mmap(shared-write)/map", -1); goto m8_end; }
+        memcpy(p, "SHARED_WR", 9);
+        munmap(p, 4096);
+        lseek(fd, 0, SEEK_SET);
+        char buf[16] = {0}; read(fd, buf, 9);
+        close(fd);
+        if (memcmp(buf, "SHARED_WR", 9) == 0)
+            ok("mmap MAP_SHARED write -> visible via read() after munmap");
+        else ng("mmap shared write not persisted", (long)buf[0]);
+    m8_end:
+        cleanup(MMAP_FILE);
+    }
+
+    // M9. File offset=4096 — maps second page
+    {
+        cleanup(MMAP_FILE);
+        int fd = open(MMAP_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("mmap(offset)/open", fd); goto m9_end; }
+        char page[4096];
+        memset(page, 'A', 4096); write(fd, page, 4096);
+        memset(page, 'B', 4096); write(fd, page, 4096);
+        void* p = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 4096);
+        close(fd);
+        if (p == MAP_FAILED) { ng("mmap(offset)/map", -1); goto m9_end; }
+        unsigned char* b = (unsigned char*)p;
+        int all_B = 1;
+        for (int i = 0; i < 4096; i++) if (b[i] != 'B') { all_B = 0; break; }
+        if (all_B) ok("mmap file offset=4096 -> maps second page correctly");
+        else       ng("mmap offset page content", (long)b[0]);
+        munmap(p, 4096);
+    m9_end:
+        cleanup(MMAP_FILE);
+    }
+
+    // M10. PROT_READ map — content readable
+    {
+        cleanup(MMAP_FILE);
+        int fd = open(MMAP_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("prot_read/open", fd); goto m10_end; }
+        write(fd, "READONLY", 8);
+        void* p = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
+        close(fd);
+        if (p == MAP_FAILED) { ng("prot_read/map", -1); goto m10_end; }
+        if (memcmp(p, "READONLY", 8) == 0) ok("PROT_READ map -> content readable");
+        else ng("PROT_READ content wrong", -1);
+        munmap(p, 4096);
+    m10_end:
+        cleanup(MMAP_FILE);
+    }
+
+    // M11. mprotect PROT_READ -> PROT_READ|PROT_WRITE
+    {
+        void* p = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) { ng("mprotect(upgrade)/map", -1); goto m11_end; }
+        int r = mprotect(p, 4096, PROT_READ|PROT_WRITE);
+        if (r != 0) { ng("mprotect upgrade -> returned error", r); munmap(p, 4096); goto m11_end; }
+        ((char*)p)[0] = 0x55;
+        if (((unsigned char*)p)[0] == 0x55)
+            ok("mprotect PROT_READ -> PROT_READ|PROT_WRITE -> write ok");
+        else ng("mprotect upgrade write failed", -1);
+        munmap(p, 4096);
+    m11_end:;
+    }
+
+    // ── SECTION 8: Advanced FD — pipe2, writev, getdents ───────────────────
+    printf("\n--- Advanced FD Tests ---\n");
+
+    // F1. pipe2 O_CLOEXEC — FD_CLOEXEC set on both ends
+    {
+        int pfd[2] = {-1, -1};
+        long r = _pipe2(pfd, O_CLOEXEC);
+        if (r != 0) { ng("pipe2(O_CLOEXEC)/call", r); goto f1_end; }
+        int fl_r = fcntl(pfd[0], F_GETFD, 0);
+        int fl_w = fcntl(pfd[1], F_GETFD, 0);
+        close(pfd[0]); close(pfd[1]);
+        if ((fl_r & FD_CLOEXEC) && (fl_w & FD_CLOEXEC))
+            ok("pipe2(O_CLOEXEC) -> FD_CLOEXEC set on both ends");
+        else ng("pipe2(O_CLOEXEC) flag missing", fl_r | fl_w);
+    f1_end:;
+    }
+
+    // F2. pipe2 O_NONBLOCK — read on empty pipe returns error (EAGAIN)
+    {
+        int pfd[2] = {-1, -1};
+        long r = _pipe2(pfd, O_NONBLOCK);
+        if (r != 0) { ng("pipe2(O_NONBLOCK)/call", r); goto f2_end; }
+        char buf[4];
+        long n = read(pfd[0], buf, sizeof(buf));
+        close(pfd[0]); close(pfd[1]);
+        if (n < 0) ok("pipe2(O_NONBLOCK) -> read on empty pipe returns error (EAGAIN)");
+        else ng("pipe2(O_NONBLOCK) read should have failed", n);
+    f2_end:;
+    }
+
+    // F3. writev scatter — FOO+BAR+BAZ written in order
+    {
+        const char* WV_FILE = "/tmp/sc_writev_test.txt";
+        cleanup(WV_FILE);
+        int fd = open(WV_FILE, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("writev(scatter)/open", fd); goto f3_end; }
+        struct iovec iov[3];
+        iov[0].iov_base = (void*)"FOO"; iov[0].iov_len = 3;
+        iov[1].iov_base = (void*)"BAR"; iov[1].iov_len = 3;
+        iov[2].iov_base = (void*)"BAZ"; iov[2].iov_len = 3;
+        long w = writev(fd, iov, 3);
+        close(fd);
+        if (w != 9) { ng("writev scatter byte count", w); goto f3_end; }
+        fd = open(WV_FILE, O_RDONLY, 0);
+        if (fd < 0) { ng("writev(scatter)/reopen", fd); goto f3_end; }
+        char buf[16] = {0}; read(fd, buf, 15); close(fd);
+        if (memcmp(buf, "FOOBARBAZ", 9) == 0)
+            ok("writev scatter -> FOO+BAR+BAZ written in order");
+        else ng("writev scatter content wrong", (long)buf[0]);
+    f3_end:
+        cleanup(WV_FILE);
+    }
+
+    // F4. writev byte count — returns sum of iov_len (14)
+    {
+        const char* WV_FILE = "/tmp/sc_writev_test.txt";
+        cleanup(WV_FILE);
+        int fd = open(WV_FILE, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("writev(bytecount)/open", fd); goto f4_end; }
+        struct iovec iov[4];
+        iov[0].iov_base = (void*)"A";       iov[0].iov_len = 1;
+        iov[1].iov_base = (void*)"BCDE";    iov[1].iov_len = 4;
+        iov[2].iov_base = (void*)"FG";      iov[2].iov_len = 2;
+        iov[3].iov_base = (void*)"HIJKLMN"; iov[3].iov_len = 7;
+        long w = writev(fd, iov, 4);
+        close(fd);
+        if (w == 14) ok("writev byte count -> returns sum of iov_len (14)");
+        else ng("writev byte count wrong", w);
+    f4_end:
+        cleanup(WV_FILE);
+    }
+
+    // F5. getdents entry count — /tmp must yield at least . and .. (always present)
+    // Uses SYS_OPENDIR (402) — kernel requires this for dir fds, not plain open()
+    {
+        long dfd = _opendir("/tmp");
+        if (dfd < 0) { ng("getdents(count)/opendir", dfd); goto f5_end; }
+        char buf[2048];
+        long n = _getdents64((int)dfd, buf, sizeof(buf));
+        close((int)dfd);
+        if (n <= 0) { ng("getdents(count) returned <= 0", n); goto f5_end; }
+
+        // Count ALL entries (including . and ..) — both must always be present
+        int count = 0;
+        long pos = 0;
+        while (pos < n) {
+            struct linux_dirent64* d = (struct linux_dirent64*)(buf + pos);
+            if (d->d_reclen == 0) break;
+            count++;
+            pos += d->d_reclen;
+        }
+
+        if (count >= 2)
+            ok("getdents -> /tmp yields at least . and .. entries");
+        else
+            ng("getdents count < 2", count);
+    f5_end:;
+    }
+
+    // F6. getdents find known file — create file then find it in /tmp entries
+    {
+        const char* KNOWN     = "/tmp/sc_getdents_known.txt";
+        const char* KNOWN_NAME = "sc_getdents_known.txt";
+        cleanup(KNOWN);
+        int kfd = open(KNOWN, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        if (kfd < 0) { ng("getdents(find)/create", kfd); goto f6_end; }
+        write(kfd, "x", 1); close(kfd);
+
+        long dfd = _opendir("/tmp");
+        if (dfd < 0) { ng("getdents(find)/opendir", dfd); goto f6_end; }
+        char buf[4096];
+        long n = _getdents64((int)dfd, buf, sizeof(buf));
+        close((int)dfd);
+        if (n <= 0) { ng("getdents(find) no entries", n); goto f6_end; }
+
+        int found = 0;
+        long pos = 0;
+        while (pos < n) {
+            struct linux_dirent64* d = (struct linux_dirent64*)(buf + pos);
+            if (d->d_reclen == 0) break;
+            if (strcmp(d->d_name, KNOWN_NAME) == 0) { found = 1; break; }
+            pos += d->d_reclen;
+        }
+        if (found) ok("getdents -> known file found in /tmp entries");
+        else ng("getdents known file not found", 0);
+        cleanup(KNOWN);
+    f6_end:;
     }
 
     printf("\n--- Result: %d OK, %d NG ---\n", pass, fail);

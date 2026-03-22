@@ -949,41 +949,26 @@ static void sys_read(syscall_frame_t* frame) {
    if (ent->type == FD_TYPE_PIPE) {
     pipe_buf_t* pb = ent->pipe;
     if (!pb) { frame->rax = SYSCALL_ERR_BADF; return; }
-    // Block until data arrives or write end is closed
-    if (pb->bytes_avail == 0 && !pb->write_closed) {
-        task_t* _pt = task_get_current();
-        if (_pt) {
+
+    // O_NONBLOCK: skip blocking hlt loop — return EAGAIN immediately
+    int _pipe_nonblock = (ent->flags & O_NONBLOCK) ? 1 : 0;
+
+    // Block until data arrives or write end is closed.
+    // sti;hlt yields the CPU so the writer (child) gets a time slice.
+    if (pb->bytes_avail == 0 && !pb->write_closed && !_pipe_nonblock) {
+        task_t* _pipe_cur = task_get_current();
+        if (_pipe_cur) {
             while (pb->bytes_avail == 0 && !pb->write_closed) {
                 __asm__ volatile ("sti; hlt" ::: "memory");
-                if (_pt->state == TASK_STATE_TERMINATED) break;
+                if (_pipe_cur->state == TASK_STATE_TERMINATED) break;
             }
         }
     }
+
     if (pb->bytes_avail == 0) {
         frame->rax = pb->write_closed ? 0 : SYSCALL_ERR_AGAIN;
         return;
     }
-
-        // Block until data arrives or write end is closed.
-        // Use sti;hlt to yield the CPU so the writer (child) gets a time slice.
-        // Without this, read() returns EAGAIN immediately and the parent never
-        // sees data written by a child that hasn't run yet.
-        if (pb->bytes_avail == 0 && !pb->write_closed) {
-            // Check if caller is in a context where blocking is safe
-            task_t* _pipe_cur = task_get_current();
-            if (_pipe_cur) {
-                // Block: enable interrupts, halt until timer tick switches to writer
-                while (pb->bytes_avail == 0 && !pb->write_closed) {
-                    __asm__ volatile ("sti; hlt" ::: "memory");
-                    if (_pipe_cur->state == TASK_STATE_TERMINATED) break;
-                }
-            }
-        }
-
-        if (pb->bytes_avail == 0) {
-            frame->rax = pb->write_closed ? 0 : SYSCALL_ERR_AGAIN;
-            return;
-        }
         uint64_t count = 0;
         while (count < len && pb->bytes_avail > 0) {
             buf[count] = (char)pb->data[pb->read_pos];
@@ -1287,9 +1272,14 @@ static uint64_t mmap_pool_bump = 0;   // sonraki tahsis ofseti
 static int      mmap_last_pid  = -1;  // pool hangi task'a ait
 
 typedef struct {
-    uint64_t user_addr;   // kullanıcıya döndürülen adres (0 = boş slot)
-    uint64_t pool_off;    // mmap_pool içindeki başlangıç ofseti
-    uint64_t aligned_len; // sayfaya hizalanmış boyut
+    uint64_t user_addr;     // kullanıcıya döndürülen adres (0 = boş slot)
+    uint64_t pool_off;      // mmap_pool içindeki başlangıç ofseti
+    uint64_t aligned_len;   // sayfaya hizalanmış boyut
+    // MAP_SHARED file writeback metadata (0 = anonymous/private)
+    uint8_t  is_shared;     // 1 = MAP_SHARED file mapping; munmap'te geri yaz
+    uint64_t file_offset;   // orijinal mmap offset
+    uint64_t map_bytes;     // haritalanan gerçek byte sayısı
+    char     file_path[64]; // ext2 yaz için yol; boş = flush yok
 } mmap_entry_t;
 
 static mmap_entry_t mmap_table[MMAP_TABLE_SIZE];
@@ -1308,9 +1298,13 @@ static int mmap_cache_count = 0;
 
 static void mmap_table_clear(void) {
     for (int i = 0; i < MMAP_TABLE_SIZE; i++) {
-        mmap_table[i].user_addr   = 0;
-        mmap_table[i].pool_off    = 0;
-        mmap_table[i].aligned_len = 0;
+        mmap_table[i].user_addr    = 0;
+        mmap_table[i].pool_off     = 0;
+        mmap_table[i].aligned_len  = 0;
+        mmap_table[i].is_shared    = 0;
+        mmap_table[i].file_offset  = 0;
+        mmap_table[i].map_bytes    = 0;
+        mmap_table[i].file_path[0] = '\0';
     }
     for (int i = 0; i < MMAP_CACHE_SIZE; i++) {
         mmap_cache[i].pool_off    = 0;
@@ -1326,17 +1320,47 @@ static void mmap_table_insert(uint64_t user_addr, uint64_t pool_off,
     if (!mmap_table_init) mmap_table_clear();
     for (int i = 0; i < MMAP_TABLE_SIZE; i++) {
         if (mmap_table[i].user_addr == 0) {
-            mmap_table[i].user_addr   = user_addr;
-            mmap_table[i].pool_off    = pool_off;
-            mmap_table[i].aligned_len = aligned_len;
+            mmap_table[i].user_addr    = user_addr;
+            mmap_table[i].pool_off     = pool_off;
+            mmap_table[i].aligned_len  = aligned_len;
+            mmap_table[i].is_shared    = 0;
+            mmap_table[i].file_path[0] = '\0';
             return;
         }
     }
-    // Tablo dolu — en eski girişi ez (nadiren olur)
     serial_print("[MMAP] WARNING: table full, evicting slot 0\n");
-    mmap_table[0].user_addr   = user_addr;
-    mmap_table[0].pool_off    = pool_off;
-    mmap_table[0].aligned_len = aligned_len;
+    mmap_table[0].user_addr    = user_addr;
+    mmap_table[0].pool_off     = pool_off;
+    mmap_table[0].aligned_len  = aligned_len;
+    mmap_table[0].is_shared    = 0;
+    mmap_table[0].file_path[0] = '\0';
+}
+
+// File mappings: store path + offset for MAP_SHARED writeback on munmap
+static void mmap_table_insert_file(uint64_t user_addr, uint64_t pool_off,
+                                    uint64_t aligned_len, uint64_t file_offset,
+                                    uint64_t map_bytes, const char* path,
+                                    uint8_t is_shared) {
+    if (!mmap_table_init) mmap_table_clear();
+    int slot = -1;
+    for (int i = 0; i < MMAP_TABLE_SIZE; i++) {
+        if (mmap_table[i].user_addr == 0) { slot = i; break; }
+    }
+    if (slot < 0) {
+        serial_print("[MMAP] WARNING: table full (file), evicting slot 0\n");
+        slot = 0;
+    }
+    mmap_table[slot].user_addr   = user_addr;
+    mmap_table[slot].pool_off    = pool_off;
+    mmap_table[slot].aligned_len = aligned_len;
+    mmap_table[slot].is_shared   = is_shared;
+    mmap_table[slot].file_offset = file_offset;
+    mmap_table[slot].map_bytes   = map_bytes;
+    int pi = 0;
+    while (pi < 63 && path && path[pi]) {
+        mmap_table[slot].file_path[pi] = path[pi]; pi++;
+    }
+    mmap_table[slot].file_path[pi] = '\0';
 }
 
 // munmap: blok freelist'e alınır (tekrar kullanım için).
@@ -1383,19 +1407,43 @@ static inline uint64_t mmap_table_remove(uint64_t user_addr) {
 }
 
 static void mmap_table_remove_full(uint64_t user_addr, uint64_t* out_pool_off,
-                                    uint64_t* out_alen) {
-    if (!mmap_table_init) { *out_pool_off = 0; return; }
+                                    uint64_t* out_alen,
+                                    uint8_t*  out_is_shared,
+                                    uint64_t* out_file_off,
+                                    uint64_t* out_map_bytes,
+                                    char*     out_path,   // caller supplies char[64]
+                                    uint64_t* out_vma) {
+    *out_pool_off  = 0;
+    *out_is_shared = 0;
+    *out_file_off  = 0;
+    *out_map_bytes = 0;
+    if (out_path) out_path[0] = '\0';
+    if (out_vma)  *out_vma   = 0;
+    if (!mmap_table_init) return;
     for (int i = 0; i < MMAP_TABLE_SIZE; i++) {
         if (mmap_table[i].user_addr == user_addr) {
-            *out_pool_off = mmap_table[i].pool_off;
-            *out_alen     = mmap_table[i].aligned_len;
-            mmap_table[i].user_addr   = 0;
-            mmap_table[i].pool_off    = 0;
-            mmap_table[i].aligned_len = 0;
+            *out_pool_off  = mmap_table[i].pool_off;
+            *out_alen      = mmap_table[i].aligned_len;
+            *out_is_shared = mmap_table[i].is_shared;
+            *out_file_off  = mmap_table[i].file_offset;
+            *out_map_bytes = mmap_table[i].map_bytes;
+            if (out_path) {
+                int pi = 0;
+                while (pi < 63 && mmap_table[i].file_path[pi]) {
+                    out_path[pi] = mmap_table[i].file_path[pi]; pi++;
+                }
+                out_path[pi] = '\0';
+            }
+            if (out_vma)
+                *out_vma = (uint64_t)(mmap_pool + mmap_table[i].pool_off);
+            mmap_table[i].user_addr    = 0;
+            mmap_table[i].pool_off     = 0;
+            mmap_table[i].aligned_len  = 0;
+            mmap_table[i].is_shared    = 0;
+            mmap_table[i].file_path[0] = '\0';
             return;
         }
     }
-    *out_pool_off = 0;
 }
 
 // ── SYS_MMAP (16) ───────────────────────────────────────────────
@@ -1530,13 +1578,18 @@ static void sys_mmap(syscall_frame_t* frame) {
         frame->rax = (uint64_t)MAP_FAILED;
         return;
     }
-    uint64_t pool_off2 = mmap_pool_bump;
-    mmap_pool_bump += aligned_len;
+    uint64_t pool_off2     = mmap_pool_bump;
+    mmap_pool_bump        += aligned_len;
     uint64_t aligned2_vma  = (uint64_t)(mmap_pool + pool_off2);
     uint64_t aligned2_addr = mmap_virt_to_user(aligned2_vma);
-    mmap_table_insert(aligned2_addr, pool_off2, aligned_len);
+
+    // Track MAP_SHARED for writeback on munmap
+    uint8_t do_writeback = (flags & MAP_SHARED) ? 1 : 0;
+    mmap_table_insert_file(aligned2_addr, pool_off2, aligned_len,
+                           offset, map_bytes, ent->path, do_writeback);
+
     void* mem = (void*)aligned2_vma;   /* kernel VMA ile erişir */
-    kmemset(mem, 0, aligned_len);  // pool reused sonrası temiz başla
+    kmemset(mem, 0, aligned_len);      // pool reused sonrası temiz başla
 
     // Dosyadan oku: static VFS (gömülü) veya ext2
     {
@@ -1544,17 +1597,17 @@ static void sys_mmap(syscall_frame_t* frame) {
         if (vf && vf->content && map_bytes > 0) {
             kmemcpy(mem, (const void*)(vf->content + offset), map_bytes);
         } else if (map_bytes > 0) {
-            // ext2_read_file_at: offset-aware, kmalloc yok
             ext2_read_file_at(ent->path, (uint32_t)offset,
                               (uint8_t*)mem, (uint32_t)map_bytes);
         }
     }
 
-    // fd offset'ini güncelle (haritalamadan sonra)
-    FD_OFF_SET(ent, offset + map_bytes);
+    // fd offset güncelle (private only; shared fd pos stays fixed until munmap)
+    if (!do_writeback)
+        FD_OFF_SET(ent, offset + map_bytes);
 
-
-    frame->rax = (uint64_t)mem;
+    // BUG FIX: aligned2_addr (user physical) döndür, mem (kernel VMA) DEĞİL.
+    frame->rax = aligned2_addr;
 }
 
 // ── SYS_MUNMAP (17) ─────────────────────────────────────────────
@@ -1575,22 +1628,32 @@ static void sys_munmap(syscall_frame_t* frame) {
 
     uint64_t aligned_len = (len + 0xFFF) & ~0xFFFULL;
 
-    // Tablo'dan pool_off + boyut al
     uint64_t pool_off    = 0;
     uint64_t cached_alen = 0;
-    mmap_table_remove_full(addr, &pool_off, &cached_alen);
+    uint8_t  is_shared   = 0;
+    uint64_t file_off    = 0;
+    uint64_t map_bytes   = 0;
+    char     file_path[64];
+    uint64_t vma_addr    = 0;
+
+    mmap_table_remove_full(addr, &pool_off, &cached_alen,
+                           &is_shared, &file_off, &map_bytes,
+                           file_path, &vma_addr);
+
+    // MAP_SHARED writeback: flush pool buffer to ext2 file at munmap time
+    if (is_shared && file_path[0] != '\0' && vma_addr && map_bytes > 0) {
+        serial_print("[MMAP] MAP_SHARED writeback -> ");
+        serial_print(file_path);
+        serial_print("\n");
+        ext2_write_file(file_path, file_off,
+                        (const uint8_t*)vma_addr, (uint32_t)map_bytes);
+    }
 
     if (pool_off || cached_alen) {
         uint64_t alen = cached_alen ? cached_alen : aligned_len;
 
-        // Bump-pointer retraction: if this block sits at the top of the pool,
-        // walk mmap_pool_bump back instead of caching it. Then cascade: keep
-        // retracting as long as the new top matches a cached block's end.
-        // This recovers pool space after every munmap of a top-of-pool block,
-        // which is exactly what musl does after each fork() helper allocation.
         if (pool_off + alen == mmap_pool_bump) {
             mmap_pool_bump = pool_off;
-            // Cascade: scan cache for blocks that now sit at the new top
             int found_cascade = 1;
             while (found_cascade) {
                 found_cascade = 0;
@@ -1598,7 +1661,6 @@ static void sys_munmap(syscall_frame_t* frame) {
                     if (mmap_cache[_i].pool_off + mmap_cache[_i].aligned_len
                             == mmap_pool_bump) {
                         mmap_pool_bump = mmap_cache[_i].pool_off;
-                        // Remove this entry from cache
                         mmap_cache[_i] = mmap_cache[--mmap_cache_count];
                         found_cascade = 1;
                         break;
@@ -1606,9 +1668,7 @@ static void sys_munmap(syscall_frame_t* frame) {
                 }
             }
         } else {
-            // Not at top — add to freelist for exact-size reuse
             if (!mmap_cache_push(pool_off, addr, alen)) {
-                // Cache full: evict oldest entry, add new one
                 for (int _i = 0; _i < MMAP_CACHE_SIZE - 1; _i++)
                     mmap_cache[_i] = mmap_cache[_i + 1];
                 mmap_cache_count = MMAP_CACHE_SIZE - 1;
@@ -5502,8 +5562,8 @@ static void sys_pipe2(syscall_frame_t* frame) {
 
     // ── O_NONBLOCK: flags alanına yaz ────────────────────────
     if (flags & O_NONBLOCK_SC) {
-        cur->fd_table[rfd].flags |= (uint8_t)(O_NONBLOCK_SC & 0xFF);
-        cur->fd_table[wfd].flags |= (uint8_t)(O_NONBLOCK_SC & 0xFF);
+        cur->fd_table[rfd].flags |= (uint16_t)(O_NONBLOCK_SC);
+        cur->fd_table[wfd].flags |= (uint16_t)(O_NONBLOCK_SC);
         serial_print("[SYSCALL] pipe2: O_NONBLOCK set on both fds\n");
     }
 
