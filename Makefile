@@ -1,5 +1,5 @@
 # AscentOS 64-bit Makefile — UNIFIED (tek kernel, gfx ile GUI)
-# Ext2 filesystem backend (FAT32'den geçiş yapıldı)
+# Ext3 filesystem backend (FAT32'den geçiş yapıldı)
 
 CC = gcc
 AS = nasm
@@ -27,7 +27,7 @@ LDFLAGS  = -n -T kernel/linker64.ld -nostdlib
 all: AscentOS.iso userland install-userland
 	@echo "╔═══════════════════════════════════════════════════╗"
 	@echo "║  AscentOS Unified Kernel hazir                   ║"
-	@echo "║  Filesystem: Ext2                                ║"
+	@echo "║  Filesystem: Ext3                                ║"
 	@echo "║  Baslangic: TEXT terminali                       ║"
 	@echo "║  'dhcp'     → Otomatik IP al (10.0.2.15)         ║"
 	@echo "║  'tcptest 10.0.2.2 80' → TCP test               ║"
@@ -41,15 +41,18 @@ all: AscentOS.iso userland install-userland
 # SHARED KERNEL COMPONENTS
 # ============================================================================
 
-files64.o: fs/files64.c fs/files64.h kernel/ext2.h drivers/ata64.h
+files64.o: fs/files64.c fs/files64.h kernel/ext3.h drivers/ata64.h
 	$(CC) $(CFLAGS) -c fs/files64.c -o files64.o
 
 ata64.o: drivers/ata64.c drivers/ata64.h
 	$(CC) $(CFLAGS) -c drivers/ata64.c -o ata64.o
 
-# Ext2 filesystem driver (FAT32'nin yerini aldı)
-ext2.o: kernel/ext2.c kernel/ext2.h drivers/ata64.h fs/files64.h
-	$(CC) $(CFLAGS) -c kernel/ext2.c -o ext2.o
+# Ext3 filesystem driver (FAT32'nin yerini aldı)
+ext3.o: kernel/ext3.c kernel/ext3.h drivers/ata64.h fs/files64.h
+	$(CC) $(CFLAGS) -c kernel/ext3.c -o ext3.o
+
+journal.o: kernel/journal.c kernel/journal.h
+	$(CC) $(CFLAGS) -c kernel/journal.c -o journal.o
 
 elf64.o: kernel/elf64.c kernel/elf64.h
 	$(CC) $(CFLAGS) -c kernel/elf64.c -o elf64.o
@@ -152,7 +155,7 @@ syscalltest64.o: commands/syscalltest64.c commands/commands64.h kernel/syscall.h
 	$(CC) $(CFLAGS) -c commands/syscalltest64.c -o syscalltest64.o
 
 kernel64.o: kernel/kernel64.c drivers/mouse64.h \
-            drivers/ata64.h kernel/ext2.h fs/files64.h kernel/cpu64.h \
+            drivers/ata64.h kernel/ext3.h fs/files64.h kernel/cpu64.h \
             drivers/sb16.h
 	$(CC) $(CFLAGS) -c kernel/kernel64.c -o kernel64.o
 
@@ -163,9 +166,9 @@ spinlock64.o: kernel/spinlock64.c kernel/spinlock64.h kernel/cpu64.h
 	$(CC) $(CFLAGS) -c kernel/spinlock64.c -o spinlock64.o
 
 KERNEL_OBJS = boot64.o interrupts64.o idt64.o \
-              font8x16.o vesa64.o mouse64.o \
+              font8x16.o vesa64.o mouse64.o journal.o \
               keyboard.o kernel64.o cpu64.o spinlock64.o \
-              commands64.o syscalltest64.o files64.o ata64.o ext2.o elf64.o \
+              commands64.o syscalltest64.o files64.o ata64.o ext3.o elf64.o \
               pmm.o heap.o vmm64.o timer.o pcspk.o sb16.o task.o scheduler.o \
               page_fault.o syscall.o signal64.o \
               panic64.o rtl8139.o arp.o ipv4.o icmp.o udp.o dhcp.o tcp.o http.o
@@ -174,14 +177,14 @@ kernel64.elf: $(KERNEL_OBJS)
 	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o kernel64.elf
 
 # ============================================================================
-# DISK IMAGE — Ext2 formatında (FAT32'nin yerini aldı)
+# DISK IMAGE — Ext3 formatında (FAT32'nin yerini aldı)
 #
 #  Araç gereksinimi: e2tools veya mke2fs (e2fsprogs paketi)
 #    Ubuntu/Debian: sudo apt install e2fsprogs e2tools
 #
 #  disk.img oluşturma adımları:
 #    1. 64 MB ham disk imajı oluştur
-#    2. ext2 ile formatla (1024-byte block, "AscentOS" etiketi)
+#    2. ext3 ile formatla (1024-byte block, "AscentOS" etiketi)
 #    3. Temel dizin yapısını kur
 #
 #  NOT: İlk oluşturmada root yetkisi gerekmez (loop mount yerine
@@ -189,7 +192,7 @@ kernel64.elf: $(KERNEL_OBJS)
 #       alternatif hedef (disk-mount) kullanılabilir.
 # ============================================================================
 # ── disk.img oluşturma ───────────────────────────────────────────────────────
-# Gereksinim: mkfs.ext2  →  sudo pacman -S e2fsprogs
+# Gereksinim: mkfs.ext3  →  sudo pacman -S e2fsprogs
 # (CachyOS imza sorunu varsa önce: sudo pacman-key --refresh-keys)
 #
 # Dizin yapısı debugfs ile oluşturulur (root gerekmez, e2tools gerekmez).
@@ -198,10 +201,10 @@ kernel64.elf: $(KERNEL_OBJS)
 MNT_TMP := /tmp/ascentos_mnt
 
 disk.img:
-	@echo "📀 Ext2 disk imajı oluşturuluyor (2048MB)..."
-	@if ! command -v mkfs.ext2 >/dev/null 2>&1; then \
+	@echo "📀 Ext3 disk imajı oluşturuluyor (2048MB)..."
+	@if ! command -v mkfs.ext3 >/dev/null 2>&1; then \
 	    echo ""; \
-	    echo "HATA: mkfs.ext2 bulunamadi."; \
+	    echo "HATA: mkfs.ext3 bulunamadi."; \
 	    echo "  CachyOS imza sorunu cozumu:"; \
 	    echo "    sudo pacman-key --populate archlinux cachyos"; \
 	    echo "    sudo pacman -Sy && sudo pacman -S e2fsprogs"; \
@@ -211,11 +214,11 @@ disk.img:
 	@# Eski imaj varsa sil (FAT32 veya bozuk olabilir)
 	@rm -f disk.img
 	dd if=/dev/zero of=disk.img bs=1M count=2048 status=none
-	@# ^metadata_csum: eski kernel (4.x) ext2 uyumluluğu için
-	mkfs.ext2 -b 1024 -L "AscentOS" -m 0 -O ^metadata_csum,^has_journal disk.img
+	@# ^metadata_csum: eski kernel (4.x) ext3 uyumluluğu için
+	mkfs.ext3 -b 1024 -L "AscentOS" -m 0 -O ^metadata_csum,^has_journal disk.img
 	@echo "📁 Temel dizin yapısı oluşturuluyor..."
 	@$(MAKE) --no-print-directory _disk_mkdirs
-	@echo "✓ disk.img hazir (Ext2, 2048MB, block=1024)"
+	@echo "✓ disk.img hazir (Ext3, 2048MB, block=1024)"
 	@echo "  Dogrulama: file disk.img"
 	@file disk.img
 
@@ -228,7 +231,7 @@ _disk_mkdirs:
 	    debugfs -w disk.img -R "mkdir tmp"  2>/dev/null; \
 	    debugfs -w disk.img -R "mkdir home" 2>/dev/null; \
 	else \
-	    echo "⚠ debugfs yok, dizinler ext2_mount sırasında oluşturulacak"; \
+	    echo "⚠ debugfs yok, dizinler ext3_mount sırasında oluşturulacak"; \
 	fi
 
 # Eski/bozuk disk.img'i sil ve yeniden oluştur
@@ -352,13 +355,13 @@ shell: userland/out/shell.elf
 	@echo "  ✓ shell.elf hazir"
 
 # ── install-userland ──────────────────────────────────────────────────────────
-# ELF'leri Ext2 disk.img'e yaz.
+# ELF'leri Ext3 disk.img'e yaz.
 # Öncelik sırası:
 #   1. debugfs  (e2fsprogs ile gelir, ROOT GEREKMEz) ← varsayılan
 #   2. e2cp     (e2tools, AUR)
 #   3. loop mount (sudo gerekir)
 install-userland: userland disk.img
-	@echo "📦 ELF'ler disk.img'e yaziliyor (Ext2 /bin/)..."
+	@echo "📦 ELF'ler disk.img'e yaziliyor (Ext3 /bin/)..."
 	@if command -v debugfs >/dev/null 2>&1; then \
 	    echo "  → debugfs kullaniliyor (root gerekmez)"; \
 	    debugfs -w disk.img -R "write userland/out/hello.elf      bin/hello.elf"      2>/dev/null; \
@@ -414,7 +417,7 @@ disk-ls:
 
 run: AscentOS.iso disk.img install-userland
 	@echo "▶  AscentOS Unified başlatılıyor..."
-	@echo "   Filesystem: Ext2 (disk.img, 64MB)"
+	@echo "   Filesystem: Ext3 (disk.img, 64MB)"
 	@echo "   TEXT modu açılır. 'gfx' yazınca GUI moduna geçer."
 	@echo ""
 	@echo "   ── UDP Port Yönlendirme ──────────────────────────────"
@@ -508,14 +511,14 @@ clean-all: clean musl-clean
 
 info:
 	@echo "╔════════════════════════════════════════════════════════════╗"
-	@echo "║   AscentOS Build Information - Ext2 + musl + SYSCALL    ║"
+	@echo "║   AscentOS Build Information - Ext3 + musl + SYSCALL    ║"
 	@echo "╠════════════════════════════════════════════════════════════╣"
 	@echo "║                                                            ║"
-	@echo "║  💾 Filesystem: Ext2                                      ║"
+	@echo "║  💾 Filesystem: Ext3                                      ║"
 	@echo "║    • Block size: 1024 byte                                 ║"
 	@echo "║    • Disk image: 64 MB (disk.img)                         ║"
 	@echo "║    • Direkt + indirect + çift indirect blok desteği       ║"
-	@echo "║    • Araç: mkfs.ext2 (e2fsprogs) + e2tools (e2cp/e2ls)   ║"
+	@echo "║    • Araç: mkfs.ext3 (e2fsprogs) + e2tools (e2cp/e2ls)   ║"
 	@echo "║                                                            ║"
 	@echo "║  📦 Userland (musl):                                     ║"
 	@echo "║    • malloc, free, realloc                                 ║"
@@ -532,10 +535,10 @@ info:
 	@echo "║  📋 Build Targets:                                         ║"
 	@echo "║    make              Kernel + userland derle              ║"
 	@echo "║    make musl         musl libc'i derle (ilk kurulum)      ║"
-	@echo "║    make disk.img     Ext2 disk imajı oluştur              ║"
+	@echo "║    make disk.img     Ext3 disk imajı oluştur              ║"
 	@echo "║    make userland     Userland ELF'leri derle              ║"
 	@echo "║    make run          QEMU'da çalıştır                     ║"
-	@echo "║    make disk-ls      Ext2 /bin/ içeriğini listele         ║"
+	@echo "║    make disk-ls      Ext3 /bin/ içeriğini listele         ║"
 	@echo "║    make clean        Build temizle (musl korunur)         ║"
 	@echo "║    make clean-all    Her şeyi sıfırla                     ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
@@ -546,7 +549,7 @@ info:
 
 help:
 	@echo "╔════════════════════════════════════════════════════════════╗"
-	@echo "║   AscentOS Makefile — Ext2 + musl + SYSCALL + Bash      ║"
+	@echo "║   AscentOS Makefile — Ext3 + musl + SYSCALL + Bash      ║"
 	@echo "╠════════════════════════════════════════════════════════════╣"
 	@echo "║                                                            ║"
 	@echo "║  İlk kurulum:                                              ║"
@@ -555,7 +558,7 @@ help:
 	@echo "║    make              Her şeyi derle                       ║"
 	@echo "║                                                            ║"
 	@echo "║  Geliştirme:                                               ║"
-	@echo "║    make disk.img     Ext2 disk imajı oluştur (64MB)       ║"
+	@echo "║    make disk.img     Ext3 disk imajı oluştur (64MB)       ║"
 	@echo "║    make userland     Sadece userland ELF'leri derle       ║"
 	@echo "║    make hello        Sadece hello.elf derle               ║"
 	@echo "║    make calculator   Sadece calculator.elf derle          ║"

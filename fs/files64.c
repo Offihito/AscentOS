@@ -1,15 +1,15 @@
 // files64.c  –  AscentOS 64-bit VFS layer
 //
-// Persistence backend: Ext2 (ext2_mount, ext2_read_file, ext2_write_file, ...)
-// Boot-time /bin scan: ext2_getdents("/bin") → ELF'ler VFS'e eklenir
-// fs_list_files64: ext2 getdents fallback (her dizin için)
+// Persistence backend: Ext3 (ext3_mount, ext3_read_file, ext3_write_file, ...)
+// Boot-time /bin scan: ext3_getdents("/bin") → ELF'ler VFS'e eklenir
+// fs_list_files64: ext3 getdents fallback (her dizin için)
 // dynamic_content64 pool-based, MAX_FILE_SIZE'a kadar
 // Path handling, mkdir, rmdir, tree, find, du değişmeden korunur
 
 #include "files64.h"
 #include "../commands/commands64.h"
 #include "../drivers/ata64.h"
-#include "../kernel/ext2.h"
+#include "../kernel/ext3.h"
 #include <stddef.h>
 
 #ifndef MAX_FILES
@@ -25,11 +25,11 @@
 #endif
 
 // ------------------------------------------------------------------
-//  Persistence dosya adları (Ext2 kök dizininde saklanır)
+//  Persistence dosya adları (Ext3 kök dizininde saklanır)
 // ------------------------------------------------------------------
-#define EXT2_DIRTABLE  "/DIRTABLE"   // Saved dynamic dirs
-#define EXT2_FTABLE    "/FTABLE"     // Saved dynamic file metadata
-#define EXT2_CONTENT_PREFIX "FC"     // FC + 6-hex-digit index + ".DAT"
+#define EXT3_DIRTABLE  "/DIRTABLE"   // Saved dynamic dirs
+#define EXT3_FTABLE    "/FTABLE"     // Saved dynamic file metadata
+#define EXT3_CONTENT_PREFIX "FC"     // FC + 6-hex-digit index + ".DAT"
 
 // ------------------------------------------------------------------
 //  Current working directory
@@ -75,8 +75,8 @@ static const char file_hosts[] =
 
 static const char file_fstab[] =
     "# <file system>  <mount point>  <type>  <options>  <dump>  <pass>\n"
-    "/dev/sda1        /              ext2    defaults   0       1\n"
-    "/dev/sda2        /home          ext2    defaults   0       2\n";
+    "/dev/sda1        /              ext3    defaults   0       1\n"
+    "/dev/sda2        /home          ext3    defaults   0       2\n";
 
 static const char file_passwd[] =
     "root:x:0:0:root:/root:/bin/bash\n"
@@ -127,10 +127,10 @@ static const char file_nsswitch[] =
     "shadow: files\n";
 
 static const char file_readme[] =
-    "AscentOS File System (Ext2 backend)\n"
+    "AscentOS File System (Ext3 backend)\n"
     "=====================================\n"
     "\n"
-    "This is a Unix-like VFS backed by an Ext2 partition.\n"
+    "This is a Unix-like VFS backed by an Ext3 partition.\n"
     "Individual files can be up to 2 GB (configurable via\n"
     "MAX_FILE_SIZE in files64.h).\n"
     "\n"
@@ -155,7 +155,7 @@ static const char file_readme[] =
     "  du       - Show disk usage\n"
     "  mkdir -p - Create nested directories\n";
 
-static const char file_version[] = "AscentOS 1.2 (64-bit, Ext2)\n";
+static const char file_version[] = "AscentOS 1.2 (64-bit, Ext3)\n";
 static const char file_null[]    = "";
 static const char file_zero[]    = "";
 static const char file_random[]  = "Random device simulation\n";
@@ -513,7 +513,7 @@ static void auto_save_files64(void) {
     }
 
     uint32_t dir_bytes = (uint32_t)(ptr - meta_buf);
-    // ext2 dir table persistence: deferred (stack safety)
+    // ext3 dir table persistence: deferred (stack safety)
     (void)dir_bytes;
 
     // ---- Save file metadata table ----
@@ -543,14 +543,14 @@ static void auto_save_files64(void) {
 
         *(uint32_t*)ptr = all_files64[i].size; ptr += 4;
 
-        // ---- Save file content to its own ext2 file ----
-        // Deferred: ext2 I/O burada yapılmıyor (stack overflow önleme).
+        // ---- Save file content to its own ext3 file ----
+        // Deferred: ext3 I/O burada yapılmıyor (stack overflow önleme).
         // Disk persistence init_filesystem64 boot-time restore ile sağlanır.
         (void)i; // suppress unused warning if needed
     }
 
     uint32_t ft_bytes = (uint32_t)(ptr - meta_buf);
-    // ext2 file table persistence: deferred (stack safety)
+    // ext3 file table persistence: deferred (stack safety)
     (void)ft_bytes;
 }
 
@@ -592,11 +592,11 @@ void init_filesystem64(void) {
         all_files64[file_count64++] = static_files64[i];
     }
 
-    // ---- Try to mount Ext2 ----
-    if (ext2_mount() != 0) {
+    // ---- Try to mount Ext3 ----
+    if (ext3_mount() != 0) {
         // Disk formatlanmamış ya da bozuk — otomatik format uygula
-        if (ext2_format() == 0) {
-            if (ext2_mount() != 0) {
+        if (ext3_format() == 0) {
+            if (ext3_mount() != 0) {
                 // Format sonrası da mount olmadı — in-memory VFS ile devam et
                 return;
             }
@@ -606,10 +606,10 @@ void init_filesystem64(void) {
         }
     }
 
-    // ---- Boot-time: /bin dizinini ext2'den tara, ELF'leri VFS'e kaydet ----
+    // ---- Boot-time: /bin dizinini ext3'den tara, ELF'leri VFS'e kaydet ----
     {
         static uint8_t gd_buf[4096];
-        int gd_bytes = ext2_getdents("/bin", (dirent64_t*)gd_buf, (int)sizeof(gd_buf));
+        int gd_bytes = ext3_getdents("/bin", (dirent64_t*)gd_buf, (int)sizeof(gd_buf));
         if (gd_bytes > 0) {
             int pos = 0;
             while (pos < gd_bytes) {
@@ -627,11 +627,11 @@ void init_filesystem64(void) {
                         }
                     }
                     if (!already && file_count64 < MAX_FILES) {
-                        // Boyutu ext2'den al
+                        // Boyutu ext3'den al
                         char fpath[MAX_PATH_LENGTH];
                         str_cpy(fpath, "/bin/");
                         str_concat(fpath, de->d_name);
-                        uint32_t fsz = ext2_file_size(fpath);
+                        uint32_t fsz = ext3_file_size(fpath);
 
                         int idx = file_count64;
                         str_cpy(dynamic_names64[idx], de->d_name);
@@ -652,7 +652,7 @@ void init_filesystem64(void) {
     }
 
     // ---- Load directory table ----
-    int dir_bytes = ext2_read_file("/DIRTABLE", (uint8_t*)meta_buf, META_BUF_SIZE);
+    int dir_bytes = ext3_read_file("/DIRTABLE", (uint8_t*)meta_buf, META_BUF_SIZE);
     if (dir_bytes > 4) {
         uint8_t* ptr = meta_buf;
         uint32_t saved_dirs = *(uint32_t*)ptr; ptr += 4;
@@ -669,7 +669,7 @@ void init_filesystem64(void) {
     }
 
     // ---- Load file metadata table ----
-    int ft_bytes = ext2_read_file(EXT2_FTABLE, (uint8_t*)meta_buf, META_BUF_SIZE);
+    int ft_bytes = ext3_read_file(EXT3_FTABLE, (uint8_t*)meta_buf, META_BUF_SIZE);
     if (ft_bytes <= 4) return;
 
     uint8_t* ptr = meta_buf;
@@ -698,14 +698,14 @@ void init_filesystem64(void) {
         if (!cbuf) break;  /* pool exhausted */
         cbuf[0] = '\0';
 
-        // Load content from its ext2 file
+        // Load content from its ext3 file
         if (content_size > 0) {
             char short_fname[13];
             make_content_fname(idx, short_fname);
             char fname[16];
             fname[0] = '/'; fname[1] = '\0';
             str_concat(fname, short_fname);
-            int read = ext2_read_file(fname, (uint8_t*)cbuf, alloc_size - 1);
+            int read = ext3_read_file(fname, (uint8_t*)cbuf, alloc_size - 1);
             if (read > 0) {
                 cbuf[read] = '\0';
                 content_size = (uint32_t)read;
@@ -851,10 +851,10 @@ int fs_delete_file64(const char* name) {
 
     if (file_index == -1 || !all_files64[file_index].is_dynamic) return 0;
 
-    // Remove the ext2 content file
+    // Remove the ext3 content file
     char fname[13];
     make_content_fname(file_index, fname);
-    { char ext2_path[16]; ext2_path[0]='/'; ext2_path[1]='\0'; str_concat(ext2_path, fname); ext2_unlink(ext2_path); }
+    { char ext3_path[16]; ext3_path[0]='/'; ext3_path[1]='\0'; str_concat(ext3_path, fname); ext3_unlink(ext3_path); }
 
     // Shift entries down — her slot kendi buffer'ına işaret etmeli
     for (int i = file_index; i < file_count64 - 1; i++) {
@@ -936,12 +936,12 @@ int fs_list_files64(void* output_ptr) {
         found_files++;
     }
 
-    // ---- Ext2 getdents fallback: mevcut dizini ext2'den tara ----
-    // VFS'te görünmeyen dosyaları ext2'den çekerek göster.
-    int ext2_extra = 0;
+    // ---- Ext3 getdents fallback: mevcut dizini ext3'den tara ----
+    // VFS'te görünmeyen dosyaları ext3'den çekerek göster.
+    int ext3_extra = 0;
     {
         static uint8_t gd_buf[4096];
-        int gd_bytes = ext2_getdents(current_dir, (dirent64_t*)gd_buf, (int)sizeof(gd_buf));
+        int gd_bytes = ext3_getdents(current_dir, (dirent64_t*)gd_buf, (int)sizeof(gd_buf));
         if (gd_bytes > 0) {
             int pos = 0;
             while (pos < gd_bytes) {
@@ -967,10 +967,10 @@ int fs_list_files64(void* output_ptr) {
                         char line[MAX_LINE_LENGTH];
                         str_cpy(line, "  [DIR]  ");
                         str_concat(line, de->d_name);
-                        str_concat(line, " [ext2]");
+                        str_concat(line, " [ext3]");
                         output_add_line(output, line, VGA_CYAN);
                         found_dirs++;
-                        ext2_extra++;
+                        ext3_extra++;
                     }
                 } else if (de->d_type == DT_REG) {
                     // Bu dosya zaten VFS'te var mı?
@@ -986,7 +986,7 @@ int fs_list_files64(void* output_ptr) {
                         str_cpy(fpath, current_dir);
                         if (fpath[str_len(fpath)-1] != '/') str_concat(fpath, "/");
                         str_concat(fpath, de->d_name);
-                        uint32_t fsz = ext2_file_size(fpath);
+                        uint32_t fsz = ext3_file_size(fpath);
 
                         char line[MAX_LINE_LENGTH];
                         char size_str[24];
@@ -998,7 +998,7 @@ int fs_list_files64(void* output_ptr) {
                         str_concat(line, " bytes)");
                         output_add_line(output, line, VGA_GREEN);
                         found_files++;
-                        ext2_extra++;
+                        ext3_extra++;
                     }
                 }
                 pos += de->d_reclen;
@@ -1019,12 +1019,12 @@ int fs_list_files64(void* output_ptr) {
     str_concat(summary, " directories, ");
     str_concat(summary, files_str);
     str_concat(summary, " files");
-    if (ext2_extra > 0) {
+    if (ext3_extra > 0) {
         char ext_str[16];
-        uint64_to_string(ext2_extra, ext_str);
+        uint64_to_string(ext3_extra, ext_str);
         str_concat(summary, " (");
         str_concat(summary, ext_str);
-        str_concat(summary, " from ext2)");
+        str_concat(summary, " from ext3)");
     }
     output_add_line(output, summary, VGA_DARK_GRAY);
     return 1;
@@ -1113,7 +1113,7 @@ int fs_rmdir_recursive64(const char* dirname) {
             all_files64[i].is_dynamic) {
             char fname[13];
             make_content_fname(i, fname);
-            { char ext2_path[16]; ext2_path[0]='/'; ext2_path[1]='\0'; str_concat(ext2_path, fname); ext2_unlink(ext2_path); }
+            { char ext3_path[16]; ext3_path[0]='/'; ext3_path[1]='\0'; str_concat(ext3_path, fname); ext3_unlink(ext3_path); }
             for (int j = i; j < file_count64 - 1; j++) {
                 all_files64[j]          = all_files64[j + 1];
                 dynamic_content_ptr[j]  = dynamic_content_ptr[j + 1];
@@ -1245,10 +1245,10 @@ int fs_unlink64(const char* path) {
     }
     if (file_index < 0 || !all_files64[file_index].is_dynamic) return -1;
 
-    // Ext2'den içerik dosyasını sil
+    // Ext3'den içerik dosyasını sil
     char fname[13];
     make_content_fname(file_index, fname);
-    { char ext2_path[16]; ext2_path[0]='/'; ext2_path[1]='\0'; str_concat(ext2_path, fname); ext2_unlink(ext2_path); }
+    { char ext3_path[16]; ext3_path[0]='/'; ext3_path[1]='\0'; str_concat(ext3_path, fname); ext3_unlink(ext3_path); }
 
     // Diziyi sıkıştır — her slot kendi dynamic buffer'ına işaret etmeli
     for (int i = file_index; i < file_count64 - 1; i++) {
@@ -1704,7 +1704,7 @@ int fs_du64(const char* path, void* output_ptr) {
 }
 // ============================================================
 // fs_vfs_write — sys_write'ın dosya fd'leri için bridge'i
-// Syscall.c bu fonksiyonu çağırır; files64.c VFS + Ext2'ye yazar.
+// Syscall.c bu fonksiyonu çağırır; files64.c VFS + Ext3'ye yazar.
 // offset=0 ve O_TRUNC sonrası çağrılır: sadece append/overwrite.
 // ============================================================
 int fs_vfs_write(const char* path, uint64_t offset,

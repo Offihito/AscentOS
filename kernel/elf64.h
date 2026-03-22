@@ -164,10 +164,10 @@ int elf64_load(const uint8_t* buf, uint32_t buf_size,
                uint64_t load_base, ElfImage* out);
 
 // High-level helper: validate + load + print results to CommandOutput.
-// Reads the file at `path` from the ext2 partition (e.g. "/bin/hello.elf"),
+// Reads the file at `path` from the ext3 partition (e.g. "/bin/hello.elf"),
 // then loads it and reports what it found.
 // Returns ELF_OK on success.
-int elf64_exec_from_ext2(const char* path,
+int elf64_exec_from_ext3(const char* path,
                          uint64_t    load_base,
                          ElfImage*   out,
                          void*       cmd_output);

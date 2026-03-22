@@ -1,4 +1,4 @@
-// ext2.c — AscentOS Ext2 Filesystem Driver
+// ext3.c — AscentOS Ext3 Filesystem Driver
 //
 // ATA PIO katmanı: disk_read_sector64 / disk_write_sector64
 // Block size: 1024 byte varsayımı ile başlar, superblock'tan okunur.
@@ -12,7 +12,8 @@
 //   - Tam CRUD: create, read, write, truncate, unlink, mkdir, rmdir, rename
 //   - getdents64, getcwd, chdir
 
-#include "ext2.h"
+#include "ext3.h"
+#include "journal.h"
 #include "../drivers/ata64.h"   // disk_read_sector64 / disk_write_sector64 (ata64.h)
 #include <stddef.h>
 #include <stdint.h>
@@ -90,7 +91,7 @@ static void rtc_get_time(uint8_t* h, uint8_t* m, uint8_t* s) {
 static uint32_t ext2_boot_rtc_seconds = 0;   // boot anındaki RTC toplam saniye
 static uint32_t ext2_boot_unix        = 0;   // boot anındaki unix timestamp
 
-// Boot sırasında bir kez çağrılır (ext2_mount içinde)
+// Boot sırasında bir kez çağrılır (ext3_mount içinde)
 static void ext2_init_clock(void) {
     uint8_t h = 0, m = 0, s = 0;
     rtc_get_time(&h, &m, &s);
@@ -113,26 +114,26 @@ static uint32_t ext2_now(void) {
 // ============================================================
 //  Superblock I/O
 // ============================================================
-static int read_superblock(Ext2Superblock* out) {
-    static uint8_t sb_buf[EXT2_SECTOR_SIZE * 2];
-    if (!disk_read_sector64(EXT2_SUPERBLOCK_LBA,     sb_buf))       return 0;
-    if (!disk_read_sector64(EXT2_SUPERBLOCK_LBA + 1, sb_buf + 512)) return 0;
-    e2_memcpy(out, sb_buf, sizeof(Ext2Superblock));
+static int read_superblock(Ext3Superblock* out) {
+    static uint8_t sb_buf[EXT3_SECTOR_SIZE * 2];
+    if (!disk_read_sector64(EXT3_SUPERBLOCK_LBA,     sb_buf))       return 0;
+    if (!disk_read_sector64(EXT3_SUPERBLOCK_LBA + 1, sb_buf + 512)) return 0;
+    e2_memcpy(out, sb_buf, sizeof(Ext3Superblock));
     return 1;
 }
 
-static int write_superblock(const Ext2Superblock* in) {
-    static uint8_t sb_buf[EXT2_SECTOR_SIZE * 2];
+static int write_superblock(const Ext3Superblock* in) {
+    static uint8_t sb_buf[EXT3_SECTOR_SIZE * 2];
     e2_memset(sb_buf, 0, sizeof(sb_buf));
-    e2_memcpy(sb_buf, in, sizeof(Ext2Superblock));
-    if (!disk_write_sector64(EXT2_SUPERBLOCK_LBA,     sb_buf))       return 0;
-    if (!disk_write_sector64(EXT2_SUPERBLOCK_LBA + 1, sb_buf + 512)) return 0;
+    e2_memcpy(sb_buf, in, sizeof(Ext3Superblock));
+    if (!disk_write_sector64(EXT3_SUPERBLOCK_LBA,     sb_buf))       return 0;
+    if (!disk_write_sector64(EXT3_SUPERBLOCK_LBA + 1, sb_buf + 512)) return 0;
     return 1;
 }
 
 // Superblock'taki global sayaçları güncelle
 static void sb_update_free_blocks(int delta) {
-    Ext2Superblock sb;
+    Ext3Superblock sb;
     if (!read_superblock(&sb)) return;
     if (delta < 0 && sb.s_free_blocks_count < (uint32_t)(-delta)) return;
     sb.s_free_blocks_count = (uint32_t)((int)sb.s_free_blocks_count + delta);
@@ -140,7 +141,7 @@ static void sb_update_free_blocks(int delta) {
 }
 
 static void sb_update_free_inodes(int delta) {
-    Ext2Superblock sb;
+    Ext3Superblock sb;
     if (!read_superblock(&sb)) return;
     if (delta < 0 && sb.s_free_inodes_count < (uint32_t)(-delta)) return;
     sb.s_free_inodes_count = (uint32_t)((int)sb.s_free_inodes_count + delta);
@@ -150,9 +151,11 @@ static void sb_update_free_inodes(int delta) {
 // ============================================================
 //  Global mount state
 // ============================================================
-static Ext2State state;
+static Ext3State state;
 
-const Ext2State* ext2_get_state(void) { return &state; }
+const Ext3State* ext3_get_state(void) { return &state; }
+
+static JournalState* g_journal = NULL;
 
 
 
@@ -174,7 +177,7 @@ static uint32_t block_to_lba(uint32_t block) {
 static int read_block(uint32_t block, uint8_t* buf) {
     uint32_t lba = block_to_lba(block);
     for (uint32_t s = 0; s < state.sectors_per_block; s++) {
-        if (!disk_read_sector64(lba + s, buf + s * EXT2_SECTOR_SIZE))
+        if (!disk_read_sector64(lba + s, buf + s * EXT3_SECTOR_SIZE))
             return 0;
     }
     return 1;
@@ -183,7 +186,7 @@ static int read_block(uint32_t block, uint8_t* buf) {
 static int write_block(uint32_t block, const uint8_t* buf) {
     uint32_t lba = block_to_lba(block);
     for (uint32_t s = 0; s < state.sectors_per_block; s++) {
-        if (!disk_write_sector64(lba + s, buf + s * EXT2_SECTOR_SIZE))
+        if (!disk_write_sector64(lba + s, buf + s * EXT3_SECTOR_SIZE))
             return 0;
     }
     return 1;
@@ -193,7 +196,7 @@ static int write_block(uint32_t block, const uint8_t* buf) {
 //  Group Descriptor I/O
 //  GDT: superblock'tan hemen sonraki block'ta (first_data_block+1)
 // ============================================================
-static Ext2GroupDesc gdt_cache[64];   // max 64 grup (static)
+static Ext3GroupDesc gdt_cache[64];   // max 64 grup (static)
 static int gdt_loaded = 0;
 
 static int load_gdt(void) {
@@ -205,19 +208,19 @@ static int load_gdt(void) {
 
     uint32_t n = state.num_groups;
     if (n > 64) n = 64;
-    e2_memcpy(gdt_cache, gdt_buf, n * sizeof(Ext2GroupDesc));
+    e2_memcpy(gdt_cache, gdt_buf, n * sizeof(Ext3GroupDesc));
     gdt_loaded = 1;
     return 1;
 }
 
-static int read_group_desc(uint32_t group, Ext2GroupDesc* out) {
+static int read_group_desc(uint32_t group, Ext3GroupDesc* out) {
     if (!load_gdt()) return 0;
     if (group >= state.num_groups) return 0;
     *out = gdt_cache[group];
     return 1;
 }
 
-static int write_group_desc(uint32_t group, const Ext2GroupDesc* in) {
+static int write_group_desc(uint32_t group, const Ext3GroupDesc* in) {
     if (!load_gdt()) return 0;
     if (group >= state.num_groups) return 0;
     gdt_cache[group] = *in;
@@ -226,20 +229,20 @@ static int write_group_desc(uint32_t group, const Ext2GroupDesc* in) {
     uint32_t gdt_block = state.first_data_block + 1;
     static uint8_t gdt_buf[MAX_BLOCK_SIZE];
     if (!read_block(gdt_block, gdt_buf)) return 0;
-    e2_memcpy(gdt_buf + group * sizeof(Ext2GroupDesc), in, sizeof(Ext2GroupDesc));
+    e2_memcpy(gdt_buf + group * sizeof(Ext3GroupDesc), in, sizeof(Ext3GroupDesc));
     return write_block(gdt_block, gdt_buf);
 }
 
 // ============================================================
 //  Inode I/O
 // ============================================================
-static int read_inode(uint32_t ino, Ext2Inode* out) {
+static int read_inode(uint32_t ino, Ext3Inode* out) {
     if (ino == 0 || ino > state.inodes_count) return 0;
 
     uint32_t group    = (ino - 1) / state.inodes_per_group;
     uint32_t local    = (ino - 1) % state.inodes_per_group;
 
-    Ext2GroupDesc gd;
+    Ext3GroupDesc gd;
     if (!read_group_desc(group, &gd)) return 0;
 
     uint32_t inode_table_block = gd.bg_inode_table;
@@ -251,17 +254,17 @@ static int read_inode(uint32_t ino, Ext2Inode* out) {
     static uint8_t inode_buf[MAX_BLOCK_SIZE];
     if (!read_block(inode_table_block + block_off, inode_buf)) return 0;
 
-    e2_memcpy(out, inode_buf + intra_off, sizeof(Ext2Inode));
+    e2_memcpy(out, inode_buf + intra_off, sizeof(Ext3Inode));
     return 1;
 }
 
-static int write_inode(uint32_t ino, const Ext2Inode* in) {
+static int write_inode(uint32_t ino, const Ext3Inode* in) {
     if (ino == 0 || ino > state.inodes_count) return 0;
 
     uint32_t group    = (ino - 1) / state.inodes_per_group;
     uint32_t local    = (ino - 1) % state.inodes_per_group;
 
-    Ext2GroupDesc gd;
+    Ext3GroupDesc gd;
     if (!read_group_desc(group, &gd)) return 0;
 
     uint32_t inode_table_block = gd.bg_inode_table;
@@ -271,7 +274,7 @@ static int write_inode(uint32_t ino, const Ext2Inode* in) {
 
     static uint8_t inode_buf[MAX_BLOCK_SIZE];
     if (!read_block(inode_table_block + block_off, inode_buf)) return 0;
-    e2_memcpy(inode_buf + intra_off, in, sizeof(Ext2Inode));
+    e2_memcpy(inode_buf + intra_off, in, sizeof(Ext3Inode));
     return write_block(inode_table_block + block_off, inode_buf);
 }
 
@@ -280,7 +283,7 @@ static int write_inode(uint32_t ino, const Ext2Inode* in) {
 // ============================================================
 static uint32_t alloc_block(void) {
     for (uint32_t g = 0; g < state.num_groups; g++) {
-        Ext2GroupDesc gd;
+        Ext3GroupDesc gd;
         if (!read_group_desc(g, &gd)) continue;
         if (gd.bg_free_blocks_count == 0) continue;
 
@@ -318,7 +321,7 @@ static int free_block(uint32_t block) {
 
     if (g >= state.num_groups) return 0;
 
-    Ext2GroupDesc gd;
+    Ext3GroupDesc gd;
     if (!read_group_desc(g, &gd)) return 0;
 
     static uint8_t bmap[MAX_BLOCK_SIZE];
@@ -338,7 +341,7 @@ static int free_block(uint32_t block) {
 // ============================================================
 static uint32_t alloc_inode(void) {
     for (uint32_t g = 0; g < state.num_groups; g++) {
-        Ext2GroupDesc gd;
+        Ext3GroupDesc gd;
         if (!read_group_desc(g, &gd)) continue;
         if (gd.bg_free_inodes_count == 0) continue;
 
@@ -366,7 +369,7 @@ static int free_inode(uint32_t ino) {
 
     if (g >= state.num_groups) return 0;
 
-    Ext2GroupDesc gd;
+    Ext3GroupDesc gd;
     if (!read_group_desc(g, &gd)) return 0;
 
     static uint8_t imap[MAX_BLOCK_SIZE];
@@ -386,7 +389,7 @@ static int free_inode(uint32_t ino) {
 //  Inode mantıksal blok indeksinden fiziksel block numarasını döndürür.
 //  Döner: 0 = eşleşme yok / hata
 // ============================================================
-static uint32_t read_file_block(const Ext2Inode* ino, uint32_t blk_idx) {
+static uint32_t read_file_block(const Ext3Inode* ino, uint32_t blk_idx) {
     uint32_t ptrs_per_block = state.block_size / 4;
 
     // Direkt bloklar [0..11]
@@ -429,7 +432,7 @@ static uint32_t read_file_block(const Ext2Inode* ino, uint32_t blk_idx) {
 //  blk_idx: inode'daki mantıksal blok indeksi
 //  Döner: fiziksel block no | 0 (hata)
 // ============================================================
-static uint32_t alloc_file_block(Ext2Inode* ino, uint32_t blk_idx) {
+static uint32_t alloc_file_block(Ext3Inode* ino, uint32_t blk_idx) {
     uint32_t ptrs_per_block = state.block_size / 4;
 
     uint32_t phys = alloc_block();
@@ -505,7 +508,7 @@ static uint32_t alloc_file_block(Ext2Inode* ino, uint32_t blk_idx) {
 // ============================================================
 //  Inode'un tüm veri bloklarını serbest bırak
 // ============================================================
-static void free_inode_blocks(Ext2Inode* ino) {
+static void free_inode_blocks(Ext3Inode* ino) {
     uint32_t ptrs_per_block = state.block_size / 4;
 
     // Direkt
@@ -564,7 +567,7 @@ static uint32_t path_resolve(const char* path, int want_parent, char* leaf_out) 
     if (!path) return 0;
 
     // Göreli yol: CWD ile birleştir
-    char full[EXT2_MAX_PATH];
+    char full[EXT3_MAX_PATH];
     if (path[0] != '/') {
         e2_strcpy(full, state.cwd);
         int cwdlen = e2_strlen(full);
@@ -581,16 +584,16 @@ static uint32_t path_resolve(const char* path, int want_parent, char* leaf_out) 
     if (*p == '\0') {
         // Root dizini
         if (want_parent) return 0;
-        return EXT2_ROOT_INO;
+        return EXT3_ROOT_INO;
     }
 
-    uint32_t cur_ino = EXT2_ROOT_INO;
+    uint32_t cur_ino = EXT3_ROOT_INO;
 
     while (*p) {
         // Bileşeni çıkar
-        char comp[EXT2_MAX_NAME + 1];
+        char comp[EXT3_MAX_NAME + 1];
         int  len = 0;
-        while (*p && *p != '/' && len < (int)EXT2_MAX_NAME)
+        while (*p && *p != '/' && len < (int)EXT3_MAX_NAME)
             comp[len++] = *p++;
         comp[len] = '\0';
         while (*p == '/') p++;  // ardışık slash'ları atla
@@ -656,9 +659,9 @@ static void invalidate_ino_cache(const char* path) {
 
 // dir_lookup: dir_ino'daki name isimli entry'nin inode'unu döndürür. 0=yok
 static uint32_t dir_lookup(uint32_t dir_ino, const char* name) {
-    Ext2Inode dir_inode;
+    Ext3Inode dir_inode;
     if (!read_inode(dir_ino, &dir_inode)) return 0;
-    if (!(dir_inode.i_mode & EXT2_S_IFDIR)) return 0;
+    if (!(dir_inode.i_mode & EXT3_S_IFDIR)) return 0;
 
     uint32_t size    = dir_inode.i_size;
     uint32_t offset  = 0;
@@ -674,7 +677,7 @@ static uint32_t dir_lookup(uint32_t dir_ino, const char* name) {
 
         uint32_t intra = 0;
         while (intra < state.block_size && offset < size) {
-            Ext2DirEntry* de = (Ext2DirEntry*)(dblk + intra);
+            Ext3DirEntry* de = (Ext3DirEntry*)(dblk + intra);
             if (de->rec_len == 0) break;
 
             if (de->inode && de->name_len == (uint8_t)name_len &&
@@ -694,7 +697,7 @@ static uint32_t dir_lookup(uint32_t dir_ino, const char* name) {
 // ============================================================
 static int dir_add_entry(uint32_t dir_ino, const char* name,
                           uint32_t child_ino, uint8_t file_type) {
-    Ext2Inode dir_inode;
+    Ext3Inode dir_inode;
     if (!read_inode(dir_ino, &dir_inode)) return -1;
 
     int    name_len   = e2_strlen(name);
@@ -715,7 +718,7 @@ static int dir_add_entry(uint32_t dir_ino, const char* name,
         int modified = 0;
 
         while (intra < state.block_size && offset < dir_size) {
-            Ext2DirEntry* de = (Ext2DirEntry*)(dblk + intra);
+            Ext3DirEntry* de = (Ext3DirEntry*)(dblk + intra);
             if (de->rec_len == 0) break;
 
             // Bu entry'nin gerçek boyutu
@@ -730,7 +733,7 @@ static int dir_add_entry(uint32_t dir_ino, const char* name,
                     de->rec_len = (uint16_t)real_len;
                     intra += real_len;
                 }
-                Ext2DirEntry* ne = (Ext2DirEntry*)(dblk + intra);
+                Ext3DirEntry* ne = (Ext3DirEntry*)(dblk + intra);
                 ne->inode     = child_ino;
                 ne->rec_len   = (uint16_t)(free_space > 0 ? free_space : need_len);
                 ne->name_len  = (uint8_t)name_len;
@@ -758,7 +761,7 @@ static int dir_add_entry(uint32_t dir_ino, const char* name,
     if (!new_phys) return -1;
 
     e2_memset(dblk, 0, state.block_size);
-    Ext2DirEntry* ne = (Ext2DirEntry*)dblk;
+    Ext3DirEntry* ne = (Ext3DirEntry*)dblk;
     ne->inode     = child_ino;
     ne->rec_len   = (uint16_t)state.block_size;  // tüm block bu entry'ye ait
     ne->name_len  = (uint8_t)name_len;
@@ -777,7 +780,7 @@ static int dir_add_entry(uint32_t dir_ino, const char* name,
 //  Dizin entry silme
 // ============================================================
 static int dir_remove_entry(uint32_t dir_ino, const char* name) {
-    Ext2Inode dir_inode;
+    Ext3Inode dir_inode;
     if (!read_inode(dir_ino, &dir_inode)) return -1;
 
     int    name_len  = e2_strlen(name);
@@ -793,10 +796,10 @@ static int dir_remove_entry(uint32_t dir_ino, const char* name) {
         if (!read_block(phys, dblk)) break;
 
         uint32_t intra = 0;
-        Ext2DirEntry* prev = NULL;
+        Ext3DirEntry* prev = NULL;
 
         while (intra < state.block_size && offset < dir_size) {
-            Ext2DirEntry* de = (Ext2DirEntry*)(dblk + intra);
+            Ext3DirEntry* de = (Ext3DirEntry*)(dblk + intra);
             if (de->rec_len == 0) break;
 
             if (de->inode && de->name_len == (uint8_t)name_len &&
@@ -822,7 +825,7 @@ static int dir_remove_entry(uint32_t dir_ino, const char* name) {
 }
 
 // ============================================================
-//  ext2_format
+//  ext3_format
 //  Boş bir diske minimal ext2 yapısı yazar:
 //    Block 0   : (boot sektörü — dokunulmaz)
 //    Block 1   : Superblock  (byte offset 1024)
@@ -840,16 +843,16 @@ static int dir_remove_entry(uint32_t dir_ino, const char* name) {
 //
 //  Döner: 0 başarı, -1 hata
 // ============================================================
-int ext2_format(void) {
-    serial_print("[EXT2] Formatting disk...\n");
+int ext3_format(void) {
+    serial_print("[EXT3] Formatting disk...\n");
 
     // ── Sabit geometri ───────────────────────────────────────
     const uint32_t BLOCK_SIZE        = 1024u;
-    const uint32_t SECTORS_PER_BLOCK = BLOCK_SIZE / EXT2_SECTOR_SIZE;  // 2
+    const uint32_t SECTORS_PER_BLOCK = BLOCK_SIZE / EXT3_SECTOR_SIZE;  // 2
     const uint32_t TOTAL_BLOCKS      = 65536u;   // 64 MB
     const uint32_t BLOCKS_PER_GROUP  = 8192u;
     const uint32_t INODES_PER_GROUP  = 1024u;
-    const uint32_t INODE_SIZE        = EXT2_INODE_SIZE_REV0;  // 128 byte
+    const uint32_t INODE_SIZE        = EXT3_INODE_SIZE_REV0;  // 128 byte
     const uint32_t FIRST_DATA_BLOCK  = 1u;       // 1024-byte block'larda SB block=1
     const uint32_t INODES_PER_BLOCK  = BLOCK_SIZE / INODE_SIZE;  // 8
     const uint32_t INODE_TABLE_BLOCKS= INODES_PER_GROUP / INODES_PER_BLOCK; // 128
@@ -881,7 +884,7 @@ int ext2_format(void) {
 
     // ── 1. Superblock ─────────────────────────────────────────
     e2_memset(buf, 0, sizeof(buf));
-    Ext2Superblock* sb = (Ext2Superblock*)buf;
+    Ext3Superblock* sb = (Ext3Superblock*)buf;
 
     sb->s_inodes_count      = TOTAL_INODES;
     sb->s_blocks_count      = TOTAL_BLOCKS;
@@ -898,20 +901,20 @@ int ext2_format(void) {
     sb->s_wtime             = 0;
     sb->s_mnt_count         = 0;
     sb->s_max_mnt_count     = 20;
-    sb->s_magic             = EXT2_SUPER_MAGIC;
-    sb->s_state             = 1;   // EXT2_VALID_FS
+    sb->s_magic             = EXT3_SUPER_MAGIC;
+    sb->s_state             = 1;   // EXT3_VALID_FS
     sb->s_errors            = 1;   // EXT2_ERRORS_CONTINUE
     sb->s_rev_level         = 0;   // old revision — basit
     sb->s_first_ino         = 11u;
     sb->s_inode_size        = (uint16_t)INODE_SIZE;
 
     // Superblock LBA 2-3'e yaz (byte offset 1024 = LBA 2)
-    if (!disk_write_sector64(EXT2_SUPERBLOCK_LBA,     buf))         return -1;
-    if (!disk_write_sector64(EXT2_SUPERBLOCK_LBA + 1, buf + 512))   return -1;
+    if (!disk_write_sector64(EXT3_SUPERBLOCK_LBA,     buf))         return -1;
+    if (!disk_write_sector64(EXT3_SUPERBLOCK_LBA + 1, buf + 512))   return -1;
 
     // ── 2. Group Descriptor Table ─────────────────────────────
     e2_memset(buf, 0, sizeof(buf));
-    Ext2GroupDesc* gd = (Ext2GroupDesc*)buf;
+    Ext3GroupDesc* gd = (Ext3GroupDesc*)buf;
 
     gd->bg_block_bitmap     = BLK_BMAP;
     gd->bg_inode_bitmap     = BLK_IMAP;
@@ -957,8 +960,8 @@ int ext2_format(void) {
     // Root inode (inode 2): inode tablosunun başından 1*INODE_SIZE offset
     // (inode 1 = bad blocks inode, inode 2 = root)
     e2_memset(buf, 0, sizeof(buf));
-    Ext2Inode* root_ino = (Ext2Inode*)buf;
-    root_ino->i_mode        = EXT2_S_IFDIR | 0755u;
+    Ext3Inode* root_ino = (Ext3Inode*)buf;
+    root_ino->i_mode        = EXT3_S_IFDIR | 0755u;
     root_ino->i_links_count = 2;          // "." + ".."
     root_ino->i_size        = BLOCK_SIZE; // bir block dolu
     root_ino->i_blocks      = SECTORS_PER_BLOCK;  // 512-byte biriminde
@@ -969,28 +972,28 @@ int ext2_format(void) {
     // Byte offset sektör içinde = 128
     static uint8_t itable_sec[512];
     e2_memset(itable_sec, 0, 512);
-    e2_memcpy(itable_sec + INODE_SIZE, root_ino, sizeof(Ext2Inode));  // inode 2 = offset 128
+    e2_memcpy(itable_sec + INODE_SIZE, root_ino, sizeof(Ext3Inode));  // inode 2 = offset 128
     if (!disk_write_sector64(itable_lba, itable_sec)) return -1;
 
     // ── 6. Root dizin data block ─────────────────────────────
     // Ext2 dizin entry'leri: "." ve ".."
     e2_memset(buf, 0, sizeof(buf));
-    Ext2DirEntry* de;
+    Ext3DirEntry* de;
 
     // "." entry
-    de = (Ext2DirEntry*)buf;
-    de->inode     = EXT2_ROOT_INO;   // 2
+    de = (Ext3DirEntry*)buf;
+    de->inode     = EXT3_ROOT_INO;   // 2
     de->rec_len   = 12;              // 8 + 1 (name) + 3 (pad)
     de->name_len  = 1;
-    de->file_type = EXT2_FT_DIR;
+    de->file_type = EXT3_FT_DIR;
     de->name[0]   = '.';
 
     // ".." entry
-    de = (Ext2DirEntry*)(buf + 12);
-    de->inode     = EXT2_ROOT_INO;   // root'un parent'ı kendisi
+    de = (Ext3DirEntry*)(buf + 12);
+    de->inode     = EXT3_ROOT_INO;   // root'un parent'ı kendisi
     de->rec_len   = (uint16_t)(BLOCK_SIZE - 12u);  // bloğun geri kalanı
     de->name_len  = 2;
-    de->file_type = EXT2_FT_DIR;
+    de->file_type = EXT3_FT_DIR;
     de->name[0]   = '.';
     de->name[1]   = '.';
 
@@ -998,28 +1001,28 @@ int ext2_format(void) {
     if (!disk_write_sector64(data_lba,     buf))       return -1;
     if (!disk_write_sector64(data_lba + 1, buf + 512)) return -1;
 
-    serial_print("[EXT2] Format OK\n");
+    serial_print("[EXT3] Format OK\n");
     return 0;
 }
 
 // ============================================================
-//  ext2_mount
+//  ext3_mount
 // ============================================================
-int ext2_mount(void) {
+int ext3_mount(void) {
     // Zaten mount edilmişse tekrar yapma — state'i bozma
     if (state.mounted) return 0;
 
     // Superblock: LBA 2 (byte offset 1024)
-    static uint8_t sb_buf[EXT2_SECTOR_SIZE * 2];  // 2 sektör = 1024 byte
-    if (!disk_read_sector64(EXT2_SUPERBLOCK_LBA,     sb_buf))       return -1;
-    if (!disk_read_sector64(EXT2_SUPERBLOCK_LBA + 1, sb_buf + 512)) return -1;
+    static uint8_t sb_buf[EXT3_SECTOR_SIZE * 2];  // 2 sektör = 1024 byte
+    if (!disk_read_sector64(EXT3_SUPERBLOCK_LBA,     sb_buf))       return -1;
+    if (!disk_read_sector64(EXT3_SUPERBLOCK_LBA + 1, sb_buf + 512)) return -1;
 
-    Ext2Superblock* sb = (Ext2Superblock*)sb_buf;
+    Ext3Superblock* sb = (Ext3Superblock*)sb_buf;
 
-    if (sb->s_magic != EXT2_SUPER_MAGIC) return -1;
+    if (sb->s_magic != EXT3_SUPER_MAGIC) return -1;
 
     state.block_size       = 1024u << sb->s_log_block_size;
-    state.sectors_per_block= state.block_size / EXT2_SECTOR_SIZE;
+    state.sectors_per_block= state.block_size / EXT3_SECTOR_SIZE;
     state.inodes_per_group = sb->s_inodes_per_group;
     state.blocks_per_group = sb->s_blocks_per_group;
     state.first_data_block = sb->s_first_data_block;
@@ -1030,7 +1033,7 @@ int ext2_mount(void) {
         state.inode_size = sb->s_inode_size;
         state.first_ino  = sb->s_first_ino;
     } else {
-        state.inode_size = EXT2_INODE_SIZE_REV0;
+        state.inode_size = EXT3_INODE_SIZE_REV0;
         state.first_ino  = 11;
     }
 
@@ -1046,62 +1049,90 @@ int ext2_mount(void) {
     gdt_loaded = 0;  // İlk mount'ta GDT cache'i temizle
     ext2_init_clock();  // Timestamp için boot zamanını kaydet
 
-    serial_print("[EXT2] Mounted OK\n");
+    // KONUM 3: Journal desteğini kontrol et
+    if (sb->s_feature_compat & EXT3_FEATURE_COMPAT_HAS_JOURNAL) {
+        state.journal_enabled = 1;
+        state.journal_ino = sb->s_journal_ino;
+        
+        // Journal module'ü başlat
+        if (journal_init() != 0) {
+            serial_print("[EXT3] Journal init failed, mounting read-only\n");
+            state.journal_enabled = 0;
+        } else {
+            // Recovery gerekli mi kontrol et
+            if (sb->s_state != EXT3_VALID_FS) {
+                serial_print("[EXT3] Filesystem not cleanly unmounted, recovering...\n");
+                if (journal_recover() != 0) {
+                    serial_print("[EXT3] Recovery failed\n");
+                    ext3_unmount();
+                    return -1;
+                }
+            }
+        }
+    }
+
+    serial_print("[EXT3] Mounted OK\n");
     return 0;
 }
 
-int ext2_unmount(void) {
+int ext3_unmount(void) {
+    // KONUM 4: Journal'ı temiz kapat
+    if (state.journal_enabled) {
+        journal_destroy();
+        state.journal_enabled = 0;
+    }
+    
     state.mounted = 0;
     gdt_loaded    = 0;
     return 0;
 }
 
 // ============================================================
-//  ext2_path_is_file / ext2_path_is_dir
+//  ext3_path_is_file / ext3_path_is_dir
 // ============================================================
-int ext2_path_is_file(const char* path) {
+int ext3_path_is_file(const char* path) {
     if (!state.mounted || !path) return 0;
     uint32_t ino = path_resolve(path, 0, NULL);
     if (!ino) return 0;
-    Ext2Inode inode;
+    Ext3Inode inode;
     if (!read_inode(ino, &inode)) return 0;
-    return ((inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFREG) ? 1 : 0;
+    return ((inode.i_mode & EXT3_S_IFMT) == EXT3_S_IFREG) ? 1 : 0;
 }
 
-int ext2_path_is_dir(const char* path) {
+int ext3_path_is_dir(const char* path) {
     if (!state.mounted || !path) return 0;
     uint32_t ino = path_resolve(path, 0, NULL);
     if (!ino) return 0;
-    Ext2Inode inode;
+    Ext3Inode inode;
     if (!read_inode(ino, &inode)) return 0;
-    return ((inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFDIR) ? 1 : 0;
+    return ((inode.i_mode & EXT3_S_IFMT) == EXT3_S_IFDIR) ? 1 : 0;
 }
 
 // ============================================================
-//  ext2_file_size
+//  ext3_file_size
 // ============================================================
-uint32_t ext2_file_size(const char* path) {
+uint32_t ext3_file_size(const char* path) {
     if (!state.mounted || !path) return 0;
     uint32_t ino = cached_path_resolve(path);
     if (!ino) return 0;
-    Ext2Inode inode;
+    Ext3Inode inode;
     if (!read_inode(ino, &inode)) return 0;
-    if ((inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFREG) return 0;
+    if ((inode.i_mode & EXT3_S_IFMT) != EXT3_S_IFREG) return 0;
     return inode.i_size;
 }
 
 // ============================================================
-//  ext2_read_file
+//  ext3_read_file
 // ============================================================
-int ext2_read_file(const char* path, uint8_t* buf, uint32_t max_len) {
+int ext3_read_file(const char* path, uint8_t* buf, uint32_t max_len) {
     if (!state.mounted || !path || !buf) return -1;
 
     uint32_t ino = path_resolve(path, 0, NULL);
     if (!ino) return -1;
 
-    Ext2Inode inode;
+    Ext3Inode inode;
     if (!read_inode(ino, &inode)) return -1;
-    if ((inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFREG) return -1;
+    if ((inode.i_mode & EXT3_S_IFMT) != EXT3_S_IFREG) return -1;
 
     uint32_t fsize   = inode.i_size;
     uint32_t to_read = (fsize < max_len) ? fsize : max_len;
@@ -1131,19 +1162,48 @@ int ext2_read_file(const char* path, uint8_t* buf, uint32_t max_len) {
 }
 
 // ============================================================
-//  ext2_write_file — offset tabanlı, block alloc dahil
+//  ext3_write_file — offset tabanlı, block alloc dahil
 // ============================================================
-int ext2_write_file(const char* path, uint64_t offset,
+int ext3_write_file(const char* path, uint64_t offset,
                      const uint8_t* data, uint32_t len) {
     if (!state.mounted || !path || !data || len == 0) return -1;
 
     invalidate_ino_cache(path);
+    
+    // KONUM 5: Transaction başlat
+    JournalHandle* jh = NULL;
+    if (state.journal_enabled) {
+        jh = journal_start();
+        if (!jh) {
+            serial_print("[EXT3] Failed to start transaction\n");
+            return -2;
+        }
+    }
+    
     uint32_t ino = path_resolve(path, 0, NULL);
-    if (!ino) return -1;
+    if (!ino) {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
 
-    Ext2Inode inode;
-    if (!read_inode(ino, &inode)) return -1;
-    if ((inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFREG) return -1;
+    Ext3Inode inode;
+    if (!read_inode(ino, &inode)) {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
+    if ((inode.i_mode & EXT3_S_IFMT) != EXT3_S_IFREG) {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
+
+    // KONUM 5b: Inode write access
+    if (jh) {
+        if (journal_get_write_access(jh, ino) != 0) {
+            serial_print("[EXT3] Failed to get write access to inode\n");
+            journal_abort(jh);
+            return -4;
+        }
+    }
 
     uint32_t start   = (uint32_t)offset;
     uint32_t written = 0;
@@ -1156,12 +1216,20 @@ int ext2_write_file(const char* path, uint64_t offset,
 
         uint32_t phys = read_file_block(&inode, blk_idx);
         if (!phys) {
-            // Yeni blok tahsis et
             phys = alloc_file_block(&inode, blk_idx);
             if (!phys) goto write_done;
             e2_memset(fblk, 0, state.block_size);
         } else {
             if (!read_block(phys, fblk)) goto write_done;
+        }
+
+        // KONUM 5c: Data block write access
+        if (jh) {
+            if (journal_get_write_access(jh, phys) != 0) {
+                serial_print("[EXT3] Failed to journal data block\n");
+                journal_abort(jh);
+                return -5;
+            }
         }
 
         uint32_t chunk = state.block_size - intra_off;
@@ -1170,91 +1238,196 @@ int ext2_write_file(const char* path, uint64_t offset,
         e2_memcpy(fblk + intra_off, data + written, chunk);
         if (!write_block(phys, fblk)) goto write_done;
 
+        // KONUM 5d: Mark as dirty
+        if (jh) {
+            journal_dirty_metadata(jh, phys);
+        }
+
         written += chunk;
     }
 
 write_done:
-    // i_size ve i_mtime güncelle
+    inode.i_mtime = ext2_now();
     uint32_t new_end = start + written;
     if (new_end > inode.i_size) {
         inode.i_size = new_end;
         inode.i_blocks = ((new_end + state.block_size - 1) / state.block_size)
                           * state.sectors_per_block * 1;
     }
-    inode.i_mtime = ext2_now();
     write_inode(ino, &inode);
+    
+    // KONUM 5e: Transaction commit
+    if (jh) {
+        if (journal_stop(jh) != 0) {
+            serial_print("[EXT3] Failed to commit transaction\n");
+            return -6;
+        }
+    }
+    
     return (int)written;
 }
 
 // ============================================================
-//  ext2_create_file
+//  ext3_create_file
 // ============================================================
-int ext2_create_file(const char* path) {
+int ext3_create_file(const char* path) {
     if (!state.mounted || !path) return -1;
 
-    char leaf[EXT2_MAX_NAME + 1];
+    // KONUM 6: Transaction başlat
+    JournalHandle* jh = NULL;
+    if (state.journal_enabled) {
+        jh = journal_start();
+        if (!jh) return -2;
+    }
+
+    char leaf[EXT3_MAX_NAME + 1];
     uint32_t parent_ino = path_resolve(path, 1, leaf);
-    if (!parent_ino || leaf[0] == '\0') return -1;
+    if (!parent_ino || leaf[0] == '\0') {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
 
     // Zaten var mı?
-    if (dir_lookup(parent_ino, leaf)) return -1;
+    if (dir_lookup(parent_ino, leaf)) {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
 
     uint32_t new_ino = alloc_inode();
-    if (!new_ino) return -1;
+    if (!new_ino) {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
 
-    Ext2Inode inode;
+    // KONUM 6b: Journal write access for inode bitmap
+    if (jh) {
+        uint32_t group = (new_ino - 1) / state.inodes_per_group;
+        Ext3GroupDesc gd;
+        if (read_group_desc(group, &gd)) {
+            journal_get_write_access(jh, gd.bg_inode_bitmap);
+            journal_get_write_access(jh, gd.bg_inode_table);
+        }
+    }
+
+    Ext3Inode inode;
     e2_memset(&inode, 0, sizeof(inode));
-    inode.i_mode        = EXT2_S_IFREG | 0644u;
+    inode.i_mode        = EXT3_S_IFREG | 0644u;
     inode.i_links_count = 1;
     inode.i_ctime       = ext2_now();
     inode.i_mtime       = inode.i_ctime;
     inode.i_atime       = inode.i_ctime;
 
-    if (!write_inode(new_ino, &inode)) { free_inode(new_ino); return -1; }
-    if (dir_add_entry(parent_ino, leaf, new_ino, EXT2_FT_REG_FILE) != 0) {
-        free_inode(new_ino); return -1;
+    if (!write_inode(new_ino, &inode)) {
+        free_inode(new_ino);
+        if (jh) journal_abort(jh);
+        return -1;
     }
+
+    // KONUM 6c: Parent dizine entry ekle
+    if (jh) {
+        uint32_t pgroup = (parent_ino - 1) / state.inodes_per_group;
+        Ext3GroupDesc pgd;
+        if (read_group_desc(pgroup, &pgd)) {
+            journal_get_write_access(jh, pgd.bg_inode_table);
+        }
+    }
+
+    if (dir_add_entry(parent_ino, leaf, new_ino, EXT3_FT_REG_FILE) != 0) {
+        free_inode(new_ino);
+        if (jh) journal_abort(jh);
+        return -1;
+    }
+
+    // KONUM 6d: Transaction commit
+    if (jh) {
+        if (journal_stop(jh) != 0) {
+            return -3;
+        }
+    }
+
     return 0;
 }
 
 // ============================================================
-//  ext2_mkdir
+//  ext3_mkdir
 // ============================================================
-int ext2_mkdir(const char* path) {
+int ext3_mkdir(const char* path) {
     if (!state.mounted || !path) return -1;
 
-    char leaf[EXT2_MAX_NAME + 1];
-    uint32_t parent_ino = path_resolve(path, 1, leaf);
-    if (!parent_ino || leaf[0] == '\0') return -1;
+    // KONUM 7: Transaction başlat
+    JournalHandle* jh = NULL;
+    if (state.journal_enabled) {
+        jh = journal_start();
+        if (!jh) return -2;
+    }
 
-    if (dir_lookup(parent_ino, leaf)) return -1;  // zaten var
+    char leaf[EXT3_MAX_NAME + 1];
+    uint32_t parent_ino = path_resolve(path, 1, leaf);
+    if (!parent_ino || leaf[0] == '\0') {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
+
+    if (dir_lookup(parent_ino, leaf)) {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
 
     uint32_t new_ino = alloc_inode();
-    if (!new_ino) return -1;
+    if (!new_ino) {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
 
-    Ext2Inode inode;
+    // KONUM 7b: Journal write access for inode bitmap
+    if (jh) {
+        uint32_t group = (new_ino - 1) / state.inodes_per_group;
+        Ext3GroupDesc gd;
+        if (read_group_desc(group, &gd)) {
+            journal_get_write_access(jh, gd.bg_inode_bitmap);
+            journal_get_write_access(jh, gd.bg_inode_table);
+        }
+    }
+
+    Ext3Inode inode;
     e2_memset(&inode, 0, sizeof(inode));
-    inode.i_mode        = EXT2_S_IFDIR | 0755u;
+    inode.i_mode        = EXT3_S_IFDIR | 0755u;
     inode.i_links_count = 2;  // "." + parent'ın bu dizine linki
     inode.i_ctime       = ext2_now();
     inode.i_mtime       = inode.i_ctime;
     inode.i_atime       = inode.i_ctime;
 
-    if (!write_inode(new_ino, &inode)) { free_inode(new_ino); return -1; }
+    if (!write_inode(new_ino, &inode)) {
+        free_inode(new_ino);
+        if (jh) journal_abort(jh);
+        return -1;
+    }
 
     // "." ve ".." ekle
-    if (dir_add_entry(new_ino, ".",  new_ino,    EXT2_FT_DIR) != 0 ||
-        dir_add_entry(new_ino, "..", parent_ino, EXT2_FT_DIR) != 0) {
-        free_inode(new_ino); return -1;
+    if (dir_add_entry(new_ino, ".",  new_ino,    EXT3_FT_DIR) != 0 ||
+        dir_add_entry(new_ino, "..", parent_ino, EXT3_FT_DIR) != 0) {
+        free_inode(new_ino);
+        if (jh) journal_abort(jh);
+        return -1;
     }
 
     // Parent'a yeni dizini ekle
-    if (dir_add_entry(parent_ino, leaf, new_ino, EXT2_FT_DIR) != 0) {
-        free_inode(new_ino); return -1;
+    if (jh) {
+        uint32_t pgroup = (parent_ino - 1) / state.inodes_per_group;
+        Ext3GroupDesc pgd;
+        if (read_group_desc(pgroup, &pgd)) {
+            journal_get_write_access(jh, pgd.bg_inode_table);
+        }
     }
 
-    // Parent'ın links_count'ını artır (her alt dizin parent'a bir ".." linki ekler)
-    Ext2Inode par_inode;
+    if (dir_add_entry(parent_ino, leaf, new_ino, EXT3_FT_DIR) != 0) {
+        free_inode(new_ino);
+        if (jh) journal_abort(jh);
+        return -1;
+    }
+
+    // Parent'ın links_count'ını artır
+    Ext3Inode par_inode;
     if (read_inode(parent_ino, &par_inode)) {
         par_inode.i_links_count++;
         write_inode(parent_ino, &par_inode);
@@ -1262,28 +1435,35 @@ int ext2_mkdir(const char* path) {
 
     // used_dirs_count güncelle
     uint32_t g = (new_ino - 1) / state.inodes_per_group;
-    Ext2GroupDesc gd;
+    Ext3GroupDesc gd;
     if (read_group_desc(g, &gd)) {
         gd.bg_used_dirs_count++;
         write_group_desc(g, &gd);
+    }
+
+    // KONUM 7c: Transaction commit
+    if (jh) {
+        if (journal_stop(jh) != 0) {
+            return -3;
+        }
     }
 
     return 0;
 }
 
 // ============================================================
-//  ext2_mkdir_p — recursive mkdir ("mkdir -p" semantiği)
+//  ext3_mkdir_p — recursive mkdir ("mkdir -p" semantiği)
 //  Path boyunca eksik olan her dizini sırayla oluşturur.
 //  Zaten var olan bileşenler sessizce atlanır.
 //  Döner: 0 başarı, -1 hata
 // ============================================================
-int ext2_mkdir_p(const char* path) {
+int ext3_mkdir_p(const char* path) {
     if (!state.mounted || !path || path[0] == '\0') return -1;
     if (path[0] != '/') return -1;  // sadece mutlak path
 
-    char buf[EXT2_MAX_PATH];
+    char buf[EXT3_MAX_PATH];
     int  len = 0;
-    while (path[len] && len < (int)EXT2_MAX_PATH - 1) {
+    while (path[len] && len < (int)EXT3_MAX_PATH - 1) {
         buf[len] = path[len];
         len++;
     }
@@ -1298,8 +1478,8 @@ int ext2_mkdir_p(const char* path) {
             // Bu prefixe kadar olan yolu oluştur (root "/" atla)
             if (i > 1) {
                 // Zaten var mı?
-                if (!ext2_path_is_dir(buf)) {
-                    int r = ext2_mkdir(buf);
+                if (!ext3_path_is_dir(buf)) {
+                    int r = ext3_mkdir(buf);
                     if (r != 0) return -1;  // oluşturulamadı
                 }
             }
@@ -1311,21 +1491,21 @@ int ext2_mkdir_p(const char* path) {
 }
 
 // ============================================================
-//  ext2_rmdir — sadece boş dizinler
+//  ext3_rmdir — sadece boş dizinler
 // ============================================================
-int ext2_rmdir(const char* path) {
+int ext3_rmdir(const char* path) {
     if (!state.mounted || !path) return -1;
 
-    char leaf[EXT2_MAX_NAME + 1];
+    char leaf[EXT3_MAX_NAME + 1];
     uint32_t parent_ino = path_resolve(path, 1, leaf);
     if (!parent_ino || leaf[0] == '\0') return -1;
 
     uint32_t dir_ino = dir_lookup(parent_ino, leaf);
     if (!dir_ino) return -1;
 
-    Ext2Inode dir_inode;
+    Ext3Inode dir_inode;
     if (!read_inode(dir_ino, &dir_inode)) return -1;
-    if ((dir_inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return -1;
+    if ((dir_inode.i_mode & EXT3_S_IFMT) != EXT3_S_IFDIR) return -1;
 
     // Boş mu? (yalnızca "." ve ".." olmalı)
     uint32_t dir_size = dir_inode.i_size;
@@ -1341,7 +1521,7 @@ int ext2_rmdir(const char* path) {
 
         uint32_t intra = 0;
         while (intra < state.block_size && offset < dir_size) {
-            Ext2DirEntry* de = (Ext2DirEntry*)(dblk + intra);
+            Ext3DirEntry* de = (Ext3DirEntry*)(dblk + intra);
             if (de->rec_len == 0) break;
             if (de->inode) {
                 // "." ve ".." sayılmaz
@@ -1367,7 +1547,7 @@ int ext2_rmdir(const char* path) {
     dir_remove_entry(parent_ino, leaf);
 
     // Parent links_count azalt
-    Ext2Inode par_inode;
+    Ext3Inode par_inode;
     if (read_inode(parent_ino, &par_inode)) {
         if (par_inode.i_links_count > 1) par_inode.i_links_count--;
         write_inode(parent_ino, &par_inode);
@@ -1375,7 +1555,7 @@ int ext2_rmdir(const char* path) {
 
     // GDT used_dirs_count azalt
     uint32_t g = (dir_ino - 1) / state.inodes_per_group;
-    Ext2GroupDesc gd;
+    Ext3GroupDesc gd;
     if (read_group_desc(g, &gd)) {
         if (gd.bg_used_dirs_count > 0) gd.bg_used_dirs_count--;
         write_group_desc(g, &gd);
@@ -1385,21 +1565,48 @@ int ext2_rmdir(const char* path) {
 }
 
 // ============================================================
-//  ext2_unlink
+//  ext3_unlink
 // ============================================================
-int ext2_unlink(const char* path) {
+int ext3_unlink(const char* path) {
     if (!state.mounted || !path) return -1;
 
-    char leaf[EXT2_MAX_NAME + 1];
+    // KONUM 8: Transaction başlat
+    JournalHandle* jh = NULL;
+    if (state.journal_enabled) {
+        jh = journal_start();
+        if (!jh) return -2;
+    }
+
+    char leaf[EXT3_MAX_NAME + 1];
     uint32_t parent_ino = path_resolve(path, 1, leaf);
-    if (!parent_ino || leaf[0] == '\0') return -1;
+    if (!parent_ino || leaf[0] == '\0') {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
 
     uint32_t file_ino = dir_lookup(parent_ino, leaf);
-    if (!file_ino) return -1;
+    if (!file_ino) {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
 
-    Ext2Inode inode;
-    if (!read_inode(file_ino, &inode)) return -1;
-    if ((inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFDIR) return -1;  // EISDIR
+    Ext3Inode inode;
+    if (!read_inode(file_ino, &inode)) {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
+    if ((inode.i_mode & EXT3_S_IFMT) == EXT3_S_IFDIR) {
+        if (jh) journal_abort(jh);
+        return -1;  // EISDIR
+    }
+
+    // KONUM 8b: Orphan list'e ekle (crash protect)
+    if (jh) {
+        if (journal_add_orphan(jh, file_ino) != 0) {
+            journal_abort(jh);
+            return -4;
+        }
+    }
 
     // links_count azalt
     if (inode.i_links_count > 0) inode.i_links_count--;
@@ -1415,17 +1622,33 @@ int ext2_unlink(const char* path) {
     }
 
     dir_remove_entry(parent_ino, leaf);
+
+    // KONUM 8c: Orphan list'ten çıkar (başarı)
+    if (jh) {
+        if (journal_remove_orphan(jh, file_ino) != 0) {
+            journal_abort(jh);
+            return -5;
+        }
+    }
+
+    // KONUM 8d: Transaction commit
+    if (jh) {
+        if (journal_stop(jh) != 0) {
+            return -6;
+        }
+    }
+
     return 0;
 }
 
 // ============================================================
-//  ext2_rename
+//  ext3_rename
 // ============================================================
-int ext2_rename(const char* oldpath, const char* newpath) {
+int ext3_rename(const char* oldpath, const char* newpath) {
     if (!state.mounted || !oldpath || !newpath) return -1;
 
-    char old_leaf[EXT2_MAX_NAME + 1];
-    char new_leaf[EXT2_MAX_NAME + 1];
+    char old_leaf[EXT3_MAX_NAME + 1];
+    char new_leaf[EXT3_MAX_NAME + 1];
     uint32_t old_parent = path_resolve(oldpath, 1, old_leaf);
     uint32_t new_parent = path_resolve(newpath, 1, new_leaf);
     if (!old_parent || !new_parent) return -1;
@@ -1434,27 +1657,27 @@ int ext2_rename(const char* oldpath, const char* newpath) {
     uint32_t src_ino = dir_lookup(old_parent, old_leaf);
     if (!src_ino) return -1;
 
-    Ext2Inode src_inode;
+    Ext3Inode src_inode;
     if (!read_inode(src_ino, &src_inode)) return -1;
 
-    int is_dir = ((src_inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFDIR);
+    int is_dir = ((src_inode.i_mode & EXT3_S_IFMT) == EXT3_S_IFDIR);
 
     // Hedef varsa kaldır (basit overwrite)
     uint32_t dst_ino = dir_lookup(new_parent, new_leaf);
     if (dst_ino && dst_ino != src_ino) {
-        Ext2Inode dst_inode;
+        Ext3Inode dst_inode;
         if (!read_inode(dst_ino, &dst_inode)) return -1;
         // Dizinse rmdir, değilse unlink
-        if ((dst_inode.i_mode & EXT2_S_IFMT) == EXT2_S_IFDIR) {
+        if ((dst_inode.i_mode & EXT3_S_IFMT) == EXT3_S_IFDIR) {
             // Sadece boşsa
-            ext2_rmdir(newpath);
+            ext3_rmdir(newpath);
         } else {
-            ext2_unlink(newpath);
+            ext3_unlink(newpath);
         }
     }
 
     // Yeni parent'a entry ekle
-    uint8_t ft = is_dir ? EXT2_FT_DIR : EXT2_FT_REG_FILE;
+    uint8_t ft = is_dir ? EXT3_FT_DIR : EXT3_FT_REG_FILE;
     if (dir_add_entry(new_parent, new_leaf, src_ino, ft) != 0) return -1;
 
     // Eski entry'yi kaldır
@@ -1463,7 +1686,7 @@ int ext2_rename(const char* oldpath, const char* newpath) {
     // Eğer dizin ve parent değiştiyse ".." entry'sini güncelle
     if (is_dir && old_parent != new_parent) {
         // ".." entry'sini güncelle
-        Ext2Inode nd;
+        Ext3Inode nd;
         if (read_inode(src_ino, &nd)) {
             uint32_t dir_size = nd.i_size;
             uint32_t offset   = 0;
@@ -1476,7 +1699,7 @@ int ext2_rename(const char* oldpath, const char* newpath) {
                 uint32_t intra = 0;
                 int updated = 0;
                 while (intra < state.block_size && offset < dir_size) {
-                    Ext2DirEntry* de = (Ext2DirEntry*)(dblk + intra);
+                    Ext3DirEntry* de = (Ext3DirEntry*)(dblk + intra);
                     if (de->rec_len == 0) break;
                     if (de->inode && de->name_len == 2 &&
                         de->name[0] == '.' && de->name[1] == '.') {
@@ -1493,7 +1716,7 @@ int ext2_rename(const char* oldpath, const char* newpath) {
         }
 
         // Parent links_count güncelle
-        Ext2Inode old_par, new_par;
+        Ext3Inode old_par, new_par;
         if (read_inode(old_parent, &old_par)) {
             if (old_par.i_links_count > 1) old_par.i_links_count--;
             write_inode(old_parent, &old_par);
@@ -1508,22 +1731,51 @@ int ext2_rename(const char* oldpath, const char* newpath) {
 }
 
 // ============================================================
-//  ext2_truncate
+//  ext3_truncate
 // ============================================================
-int ext2_truncate(const char* path, uint64_t length) {
+int ext3_truncate(const char* path, uint64_t length) {
     if (!state.mounted || !path) return -1;
 
-    uint32_t ino = path_resolve(path, 0, NULL);
-    if (!ino) return -1;
+    // KONUM 9: Transaction başlat
+    JournalHandle* jh = NULL;
+    if (state.journal_enabled) {
+        jh = journal_start();
+        if (!jh) return -2;
+    }
 
-    Ext2Inode inode;
-    if (!read_inode(ino, &inode)) return -1;
-    if ((inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFREG) return -1;
+    uint32_t ino = path_resolve(path, 0, NULL);
+    if (!ino) {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
+
+    Ext3Inode inode;
+    if (!read_inode(ino, &inode)) {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
+    if ((inode.i_mode & EXT3_S_IFMT) != EXT3_S_IFREG) {
+        if (jh) journal_abort(jh);
+        return -1;
+    }
 
     uint32_t new_size = (uint32_t)length;
     uint32_t old_size = inode.i_size;
 
-    if (new_size == old_size) return 0;
+    if (new_size == old_size) {
+        if (jh) journal_stop(jh);
+        return 0;
+    }
+
+    // KONUM 9b: Journal block bitmap access
+    if (jh) {
+        uint32_t group = (ino - 1) / state.inodes_per_group;
+        Ext3GroupDesc gd;
+        if (read_group_desc(group, &gd)) {
+            journal_get_write_access(jh, gd.bg_block_bitmap);
+            journal_get_write_access(jh, gd.bg_inode_table);
+        }
+    }
 
     if (new_size < old_size) {
         // Kırp: new_size'dan sonraki blokları serbest bırak
@@ -1533,11 +1785,9 @@ int ext2_truncate(const char* path, uint64_t length) {
         for (uint32_t i = new_blocks; i < old_blocks; i++) {
             uint32_t phys = read_file_block(&inode, i);
             if (phys) free_block(phys);
-            // i_block pointer'larını temizleme: basitlik için sadece direct
             if (i < 12) inode.i_block[i] = 0;
         }
 
-        // Son bloğun artık kısmını sıfırla (kısmi blok)
         if (new_size > 0 && (new_size % state.block_size) != 0) {
             uint32_t last_blk   = (new_size - 1) / state.block_size;
             uint32_t last_phys  = read_file_block(&inode, last_blk);
@@ -1566,21 +1816,29 @@ int ext2_truncate(const char* path, uint64_t length) {
 
     inode.i_size = new_size;
     write_inode(ino, &inode);
+
+    // KONUM 9c: Transaction commit
+    if (jh) {
+        if (journal_stop(jh) != 0) {
+            return -3;
+        }
+    }
+
     return 0;
 }
 
 // ============================================================
-//  ext2_getdents
+//  ext3_getdents
 // ============================================================
-int ext2_getdents(const char* path, dirent64_t* buf, int buf_size) {
+int ext3_getdents(const char* path, dirent64_t* buf, int buf_size) {
     if (!state.mounted || !path || !buf || buf_size <= 0) return -1;
 
     uint32_t dir_ino = path_resolve(path, 0, NULL);
     if (!dir_ino) return -1;
 
-    Ext2Inode dir_inode;
+    Ext3Inode dir_inode;
     if (!read_inode(dir_ino, &dir_inode)) return -1;
-    if ((dir_inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return -1;
+    if ((dir_inode.i_mode & EXT3_S_IFMT) != EXT3_S_IFDIR) return -1;
 
     uint32_t dir_size = dir_inode.i_size;
     uint32_t offset   = 0;
@@ -1610,21 +1868,21 @@ int ext2_getdents(const char* path, dirent64_t* buf, int buf_size) {
 
         uint32_t intra = 0;
         while (intra < state.block_size && offset < dir_size) {
-            Ext2DirEntry* de = (Ext2DirEntry*)(dblk + intra);
+            Ext3DirEntry* de = (Ext3DirEntry*)(dblk + intra);
             if (de->rec_len == 0) break;
 
             if (de->inode && de->name_len > 0) {
                 uint8_t dtype;
-                if (de->file_type == EXT2_FT_DIR)      dtype = DT_DIR;
-                else if (de->file_type == EXT2_FT_REG_FILE) dtype = DT_REG;
+                if (de->file_type == EXT3_FT_DIR)      dtype = DT_DIR;
+                else if (de->file_type == EXT3_FT_REG_FILE) dtype = DT_REG;
                 else {
                     // file_type yoksa inode'dan kontrol et
-                    Ext2Inode ti;
+                    Ext3Inode ti;
                     dtype = DT_UNKNOWN;
                     if (read_inode(de->inode, &ti)) {
-                        uint16_t m = ti.i_mode & EXT2_S_IFMT;
-                        if (m == EXT2_S_IFDIR) dtype = DT_DIR;
-                        else if (m == EXT2_S_IFREG) dtype = DT_REG;
+                        uint16_t m = ti.i_mode & EXT3_S_IFMT;
+                        if (m == EXT3_S_IFDIR) dtype = DT_DIR;
+                        else if (m == EXT3_S_IFREG) dtype = DT_REG;
                     }
                 }
                 WDIRENT(de->name, de->name_len, dtype);
@@ -1642,13 +1900,13 @@ gd_done:
 }
 
 // ============================================================
-//  CWD: ext2_getcwd / ext2_chdir
+//  CWD: ext3_getcwd / ext3_chdir
 // ============================================================
-const char* ext2_getcwd(void) {
+const char* ext3_getcwd(void) {
     return state.cwd;
 }
 
-int ext2_chdir(const char* path) {
+int ext3_chdir(const char* path) {
     if (!state.mounted || !path) return -1;
 
     // ".." özel durumu
@@ -1668,9 +1926,9 @@ int ext2_chdir(const char* path) {
     uint32_t ino = path_resolve(path, 0, NULL);
     if (!ino) return -1;
 
-    Ext2Inode inode;
+    Ext3Inode inode;
     if (!read_inode(ino, &inode)) return -1;
-    if ((inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFDIR) return -1;
+    if ((inode.i_mode & EXT3_S_IFMT) != EXT3_S_IFDIR) return -1;
 
     // CWD'yi güncelle
     if (path[0] == '/') {
@@ -1688,12 +1946,12 @@ int ext2_chdir(const char* path) {
     return 0;
 }
 // ============================================================
-//  ext2_read_file_at — offset tabanlı kısmi okuma
+//  ext3_read_file_at — offset tabanlı kısmi okuma
 //  sys_read için: tüm dosyayı kmalloc etmeden sadece
 //  [offset, offset+max_len] aralığını okur.
 //  Büyük dosyalarda (libc.a vb.) bellek taşmasını önler.
 // ============================================================
-int ext2_read_file_at(const char* path, uint32_t offset,
+int ext3_read_file_at(const char* path, uint32_t offset,
                       uint8_t* buf, uint32_t max_len) {
     if (!state.mounted || !path || !buf) return -1;
     if (max_len == 0) return 0;
@@ -1701,9 +1959,9 @@ int ext2_read_file_at(const char* path, uint32_t offset,
     uint32_t ino = cached_path_resolve(path);
     if (!ino) return -1;
 
-    Ext2Inode inode;
+    Ext3Inode inode;
     if (!read_inode(ino, &inode)) return -1;
-    if ((inode.i_mode & EXT2_S_IFMT) != EXT2_S_IFREG) return -1;
+    if ((inode.i_mode & EXT3_S_IFMT) != EXT3_S_IFREG) return -1;
 
     uint32_t fsize = inode.i_size;
     if (offset >= fsize) return 0;           // EOF
@@ -1713,6 +1971,170 @@ int ext2_read_file_at(const char* path, uint32_t offset,
     uint32_t done    = 0;
 
     // abs_pos: dosya içindeki mutlak byte konumu
+    static uint8_t fblk[MAX_BLOCK_SIZE];
+
+    while (done < to_read) {
+        uint32_t abs_pos   = offset + done;
+        uint32_t blk_idx   = abs_pos / state.block_size;
+        uint32_t intra_off = abs_pos % state.block_size;
+        uint32_t phys      = read_file_block(&inode, blk_idx);
+
+        uint32_t chunk = state.block_size - intra_off;
+        if (done + chunk > to_read) chunk = to_read - done;
+
+        if (!phys) {
+            e2_memset(buf + done, 0, chunk);
+        } else {
+            if (!read_block(phys, fblk)) break;
+            e2_memcpy(buf + done, fblk + intra_off, chunk);
+        }
+        done += chunk;
+    }
+
+    return (int)done;
+}
+
+// ============================================================
+//  KONUM 10: EXT3 Helper Fonksiyonları
+// ============================================================
+
+int ext3_init_journal(void) {
+    if (!state.mounted) {
+        return -1;
+    }
+    
+    if (state.journal_enabled) {
+        return 0;
+    }
+    
+    if (journal_init() != 0) {
+        return -2;
+    }
+    
+    state.journal_enabled = 1;
+    state.journal_ino = 8;
+    
+    return 0;
+}
+
+int ext3_check_recovery_needed(void) {
+    // Superblock'tan kontrol et (mevcut implementasyonda ext3_mount içinde yapılıyor)
+    // Bu helper sadece explicit check için
+    Ext3Superblock sb;
+    if (!read_superblock(&sb)) {
+        return -1;
+    }
+    
+    if (sb.s_state != EXT3_VALID_FS) {
+        return 1;
+    }
+    
+    return 0;
+}
+
+int ext3_get_write_access_inode(JournalHandle* h, uint32_t ino) {
+    if (!h || !state.journal_enabled) {
+        return -1;
+    }
+    
+    uint32_t group = (ino - 1) / state.inodes_per_group;
+    uint32_t index_in_group = (ino - 1) % state.inodes_per_group;
+    
+    Ext3GroupDesc gd;
+    if (!read_group_desc(group, &gd)) {
+        return -2;
+    }
+    
+    uint32_t inode_block = gd.bg_inode_table + 
+                           (index_in_group * state.inode_size) / state.block_size;
+    
+    return journal_get_write_access(h, inode_block);
+}
+
+int ext3_add_to_orphan_list(JournalHandle* h, uint32_t ino) {
+    if (!h || !state.journal_enabled) {
+        return -1;
+    }
+    
+    return journal_add_orphan(h, ino);
+}
+
+int ext3_remove_from_orphan_list(JournalHandle* h, uint32_t ino) {
+    if (!h || !state.journal_enabled) {
+        return -1;
+    }
+    
+    return journal_remove_orphan(h, ino);
+}
+
+int ext3_alloc_block_transacted(JournalHandle* h, uint32_t* out_block) {
+    uint32_t block = alloc_block();
+    if (!block) {
+        return -1;
+    }
+    
+    if (h && state.journal_enabled) {
+        uint32_t group = block / state.blocks_per_group;
+        Ext3GroupDesc gd;
+        
+        if (read_group_desc(group, &gd)) {
+            if (journal_get_write_access(h, gd.bg_block_bitmap) != 0) {
+                free_block(block);
+                return -2;
+            }
+        }
+    }
+    
+    *out_block = block;
+    return 0;
+}
+
+int ext3_free_block_transacted(JournalHandle* h, uint32_t block) {
+    if (h && state.journal_enabled) {
+        uint32_t group = block / state.blocks_per_group;
+        Ext3GroupDesc gd;
+        
+        if (read_group_desc(group, &gd)) {
+            if (journal_get_write_access(h, gd.bg_block_bitmap) != 0) {
+                return -1;
+            }
+        }
+    }
+    
+    return free_block(block);
+}
+
+// ============================================================
+//  ext3_path_to_ino — path'i inode numarasına çevir
+//  open() sırasında kullanılır; dönen değer cached_ino olarak saklanır.
+//  Böylece sonraki ext3_read_inode_at çağrıları path_resolve'u atlar.
+// ============================================================
+uint32_t ext3_path_to_ino(const char* path) {
+    if (!state.mounted || !path) return 0;
+    return cached_path_resolve(path);
+}
+
+// ============================================================
+//  ext3_read_inode_at — inode numarası bilinenler için hızlı okuma
+//  sys_read içinde path_resolve adımını atlayarak doğrudan
+//  inode'dan [offset, offset+max_len] aralığını okur.
+// ============================================================
+int ext3_read_inode_at(uint32_t ino, uint32_t offset,
+                       uint8_t* buf, uint32_t max_len) {
+    if (!state.mounted || !ino || !buf) return -1;
+    if (max_len == 0) return 0;
+
+    Ext3Inode inode;
+    if (!read_inode(ino, &inode)) return -1;
+    if ((inode.i_mode & EXT3_S_IFMT) != EXT3_S_IFREG) return -1;
+
+    uint32_t fsize = inode.i_size;
+    if (offset >= fsize) return 0;  // EOF
+
+    uint32_t avail   = fsize - offset;
+    uint32_t to_read = (avail < max_len) ? avail : max_len;
+    uint32_t done    = 0;
+
     static uint8_t fblk[MAX_BLOCK_SIZE];
 
     while (done < to_read) {

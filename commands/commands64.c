@@ -6,7 +6,7 @@
 #include "../kernel/pmm.h"
 #include "../kernel/task.h"
 #include "../kernel/scheduler.h"
-#include "../kernel/ext2.h"
+#include "../kernel/ext3.h"
 #include "../kernel/elf64.h"
 #include "../kernel/syscall.h"
 #include "../kernel/signal64.h"
@@ -620,13 +620,13 @@ void cmd_about(const char* args, CommandOutput* output) {
 // ===========================================
 
 void cmd_ls(const char* args, CommandOutput* output) {
-    const char* path = (args && str_len(args) > 0) ? args : ext2_getcwd();
+    const char* path = (args && str_len(args) > 0) ? args : ext3_getcwd();
 
     static dirent64_t dents[256];
-    int total = ext2_getdents(path, dents, (int)sizeof(dents));
+    int total = ext3_getdents(path, dents, (int)sizeof(dents));
 
     if (total < 0) {
-        output_add_line(output, "Error: Cannot read directory (ext2 not mounted?)", VGA_RED);
+        output_add_line(output, "Error: Cannot read directory (ext3 not mounted?)", VGA_RED);
         return;
     }
 
@@ -659,7 +659,7 @@ void cmd_ls(const char* args, CommandOutput* output) {
                 int plen = str_len(fpath);
                 if (plen > 1) { fpath[plen] = '/'; fpath[plen+1] = '\0'; }
                 str_concat(fpath, de->d_name);
-                uint32_t fsz = ext2_file_size(fpath);
+                uint32_t fsz = ext3_file_size(fpath);
                 if (fsz > 0) {
                     str_concat(line, "  (");
                     char szb[16];
@@ -702,13 +702,13 @@ void cmd_cat(const char* args, CommandOutput* output) {
     if (args[0] == '/') {
         str_cpy(path, args);
     } else {
-        str_cpy(path, ext2_getcwd());
+        str_cpy(path, ext3_getcwd());
         int plen = str_len(path);
         if (plen > 1) { path[plen] = '/'; path[plen+1] = '\0'; }
         str_concat(path, args);
     }
 
-    uint32_t fsize = ext2_file_size(path);
+    uint32_t fsize = ext3_file_size(path);
     if (fsize == 0) {
         output_add_line(output, "File not found or empty: ", VGA_RED);
         output_add_line(output, path, VGA_RED);
@@ -717,7 +717,7 @@ void cmd_cat(const char* args, CommandOutput* output) {
 
     static uint8_t cat_buf[65536];
     uint32_t to_read = (fsize < sizeof(cat_buf) - 1) ? fsize : sizeof(cat_buf) - 1;
-    int n = ext2_read_file(path, cat_buf, to_read);
+    int n = ext3_read_file(path, cat_buf, to_read);
     if (n <= 0) {
         output_add_line(output, "Read error", VGA_RED);
         return;
@@ -763,9 +763,9 @@ void cmd_touch(const char* args, CommandOutput* output) {
 
     char tpath[256];
     if (args[0] == '/') { str_cpy(tpath, args); }
-    else { str_cpy(tpath, ext2_getcwd()); int pl=str_len(tpath); if(pl>1){tpath[pl]='/';tpath[pl+1]='\0';} str_concat(tpath, args); }
+    else { str_cpy(tpath, ext3_getcwd()); int pl=str_len(tpath); if(pl>1){tpath[pl]='/';tpath[pl+1]='\0';} str_concat(tpath, args); }
 
-    int rc = ext2_create_file(tpath);
+    int rc = ext3_create_file(tpath);
     if (rc == 0) {
         output_add_line(output, "File created: ", VGA_GREEN);
         output_add_line(output, tpath, VGA_YELLOW);
@@ -804,12 +804,12 @@ void cmd_write(const char* args, CommandOutput* output) {
 
     char wpath[256];
     if (filename[0] == '/') { str_cpy(wpath, filename); }
-    else { str_cpy(wpath, ext2_getcwd()); int pl=str_len(wpath); if(pl>1){wpath[pl]='/';wpath[pl+1]='\0';} str_concat(wpath, filename); }
+    else { str_cpy(wpath, ext3_getcwd()); int pl=str_len(wpath); if(pl>1){wpath[pl]='/';wpath[pl+1]='\0';} str_concat(wpath, filename); }
 
-    if (!ext2_path_is_file(wpath)) ext2_create_file(wpath);
+    if (!ext3_path_is_file(wpath)) ext3_create_file(wpath);
 
     int wlen = str_len(content);
-    int wrc = ext2_write_file(wpath, 0, (const uint8_t*)content, (uint32_t)wlen);
+    int wrc = ext3_write_file(wpath, 0, (const uint8_t*)content, (uint32_t)wlen);
     if (wrc >= 0) {
         char msg[MAX_LINE_LENGTH];
         str_cpy(msg, "Written to: "); str_concat(msg, wpath);
@@ -835,9 +835,9 @@ void cmd_rm(const char* args, CommandOutput* output) {
 
     char rmpath[256];
     if (args[0] == '/') { str_cpy(rmpath, args); }
-    else { str_cpy(rmpath, ext2_getcwd()); int pl=str_len(rmpath); if(pl>1){rmpath[pl]='/';rmpath[pl+1]='\0';} str_concat(rmpath, args); }
+    else { str_cpy(rmpath, ext3_getcwd()); int pl=str_len(rmpath); if(pl>1){rmpath[pl]='/';rmpath[pl+1]='\0';} str_concat(rmpath, args); }
 
-    int rmrc = ext2_unlink(rmpath);
+    int rmrc = ext3_unlink(rmpath);
     if (rmrc == 0) {
         char msg[MAX_LINE_LENGTH];
         str_cpy(msg, "Deleted: "); str_concat(msg, rmpath);
@@ -893,7 +893,7 @@ void cmd_neofetch(const char* args, CommandOutput* output) {
     int file_count = 0;
     {
         static dirent64_t neo_dents[64];
-        int tot = ext2_getdents("/bin", neo_dents, (int)sizeof(neo_dents));
+        int tot = ext3_getdents("/bin", neo_dents, (int)sizeof(neo_dents));
         if (tot > 0) {
             int off = 0;
             while (off < tot) {
@@ -1027,7 +1027,7 @@ void cmd_sysinfo(void) {
     {
         int file_count = 0;
         static dirent64_t si_dents[64];
-        int tot = ext2_getdents("/bin", si_dents, (int)sizeof(si_dents));
+        int tot = ext3_getdents("/bin", si_dents, (int)sizeof(si_dents));
         if (tot > 0) {
             int off = 0;
             while (off < tot) {
@@ -1202,9 +1202,9 @@ void cmd_mkdir(const char* args, CommandOutput* output) {
 
     char mdpath[256];
     if (args[0] == '/') { str_cpy(mdpath, args); }
-    else { str_cpy(mdpath, ext2_getcwd()); int pl=str_len(mdpath); if(pl>1){mdpath[pl]='/';mdpath[pl+1]='\0';} str_concat(mdpath, args); }
+    else { str_cpy(mdpath, ext3_getcwd()); int pl=str_len(mdpath); if(pl>1){mdpath[pl]='/';mdpath[pl+1]='\0';} str_concat(mdpath, args); }
 
-    int mdrc = ext2_mkdir(mdpath);
+    int mdrc = ext3_mkdir(mdpath);
     if (mdrc == 0) {
         char msg[MAX_LINE_LENGTH];
         str_cpy(msg, "Directory created: "); str_concat(msg, mdpath);
@@ -1230,9 +1230,9 @@ void cmd_rmdir(const char* args, CommandOutput* output) {
 
     char rdpath[256];
     if (args[0] == '/') { str_cpy(rdpath, args); }
-    else { str_cpy(rdpath, ext2_getcwd()); int pl=str_len(rdpath); if(pl>1){rdpath[pl]='/';rdpath[pl+1]='\0';} str_concat(rdpath, args); }
+    else { str_cpy(rdpath, ext3_getcwd()); int pl=str_len(rdpath); if(pl>1){rdpath[pl]='/';rdpath[pl+1]='\0';} str_concat(rdpath, args); }
 
-    int rdrc = ext2_rmdir(rdpath);
+    int rdrc = ext3_rmdir(rdpath);
     if (rdrc == 0) {
         char msg[MAX_LINE_LENGTH];
         str_cpy(msg, "Directory removed: "); str_concat(msg, rdpath);
@@ -1245,11 +1245,11 @@ void cmd_rmdir(const char* args, CommandOutput* output) {
 void cmd_cd(const char* args, CommandOutput* output) {
     const char* target = (str_len(args) == 0) ? "/" : args;
 
-    int rc = ext2_chdir(target);
+    int rc = ext3_chdir(target);
     if (rc == 0) {
         char msg[MAX_LINE_LENGTH];
         str_cpy(msg, "Changed directory to: ");
-        str_concat(msg, ext2_getcwd());
+        str_concat(msg, ext3_getcwd());
         output_add_line(output, msg, VGA_GREEN);
     } else {
         output_add_line(output, "Error: Directory not found", VGA_RED);
@@ -1258,7 +1258,7 @@ void cmd_cd(const char* args, CommandOutput* output) {
 
 void cmd_pwd(const char* args, CommandOutput* output) {
     (void)args;
-    const char* cwd = ext2_getcwd();
+    const char* cwd = ext3_getcwd();
     if (!cwd || cwd[0] == '\0') cwd = fs_getcwd64();
     output_add_line(output, cwd, VGA_CYAN);
 }
@@ -1823,17 +1823,17 @@ void cmd_elfinfo(const char* args, CommandOutput* output) {
         str_concat(path, args);
     }
 
-    uint32_t fsize = ext2_file_size(path);
+    uint32_t fsize = ext3_file_size(path);
     if (fsize == 0) {
         char line[96];
-        str_cpy(line, "File not found on ext2: ");
+        str_cpy(line, "File not found on ext3: ");
         str_concat(line, path);
         output_add_line(output, line, VGA_RED);
         return;
     }
 
     static uint8_t hdr_buf[512];
-    int n = ext2_read_file(path, hdr_buf, 512);
+    int n = ext3_read_file(path, hdr_buf, 512);
     if (n < 64) {
         output_add_line(output, "Failed to read file or file too small for ELF header", VGA_RED);
         return;
@@ -1857,7 +1857,7 @@ void cmd_elfinfo(const char* args, CommandOutput* output) {
 void cmd_exec(const char* args, CommandOutput* output) {
     if (!args || str_len(args) == 0) {
         output_add_line(output, "Usage: exec <FILE.ELF> [base_hex]", VGA_YELLOW);
-        output_add_line(output, "  Loads an ELF64 binary from ext2 and creates a Ring-3 task.", VGA_DARK_GRAY);
+        output_add_line(output, "  Loads an ELF64 binary from ext3 and creates a Ring-3 task.", VGA_DARK_GRAY);
         output_add_line(output, "  base_hex: Optional load base address for PIE (ET_DYN) binaries.", VGA_DARK_GRAY);
         output_add_line(output, "  Example: exec hello.elf", VGA_DARK_GRAY);
         output_add_line(output, "  Example: exec /bin/hello.elf 0x500000", VGA_DARK_GRAY);
@@ -1925,9 +1925,9 @@ void cmd_exec(const char* args, CommandOutput* output) {
         return;
     }
 
-   output_add_line(output, "[1/3] Loading ELF from ext2...", VGA_WHITE);
+   output_add_line(output, "[1/3] Loading ELF from ext3...", VGA_WHITE);
     ElfImage image;
-    int rc = elf64_exec_from_ext2(filepath, load_base, &image, output);
+    int rc = elf64_exec_from_ext3(filepath, load_base, &image, output);
     if (rc != ELF_OK) {
         str_cpy(line, "[Error] ELF Couldnt load: ");
         str_concat(line, elf64_strerror(rc));
@@ -2067,9 +2067,9 @@ void cmd_exec(const char* args, CommandOutput* output) {
 // ADVANCED FILE SYSTEM COMMANDS
 // ===========================================
 
-static void ext2_tree_recursive(const char* path, int depth, CommandOutput* output) {
+static void ext3_tree_recursive(const char* path, int depth, CommandOutput* output) {
     static dirent64_t dents[128];
-    int total = ext2_getdents(path, dents, (int)sizeof(dents));
+    int total = ext3_getdents(path, dents, (int)sizeof(dents));
     if (total < 0) return;
 
     int off = 0;
@@ -2097,7 +2097,7 @@ static void ext2_tree_recursive(const char* path, int depth, CommandOutput* outp
                 int plen = str_len(subpath);
                 if (plen > 1) { subpath[plen] = '/'; subpath[plen+1] = '\0'; }
                 str_concat(subpath, de->d_name);
-                if (depth < 4) ext2_tree_recursive(subpath, depth + 1, output);
+                if (depth < 4) ext3_tree_recursive(subpath, depth + 1, output);
             } else {
                 str_concat(line, "    ");
                 str_concat(line, de->d_name);
@@ -2112,7 +2112,7 @@ void cmd_tree(const char* args, CommandOutput* output) {
     (void)args;
     const char* root = "/";
     output_add_line(output, "/", VGA_CYAN);
-    ext2_tree_recursive(root, 1, output);
+    ext3_tree_recursive(root, 1, output);
 }
 
 void cmd_find(const char* args, CommandOutput* output) {
@@ -2126,7 +2126,7 @@ void cmd_find(const char* args, CommandOutput* output) {
     const char* search_dirs[] = {"/", "/bin", "/usr", "/etc", "/home", "/tmp", NULL};
     int found = 0;
     for (int di = 0; search_dirs[di]; di++) {
-        int tot = ext2_getdents(search_dirs[di], find_dents, (int)sizeof(find_dents));
+        int tot = ext3_getdents(search_dirs[di], find_dents, (int)sizeof(find_dents));
         if (tot < 0) continue;
         int off = 0;
         while (off < tot) {
@@ -2158,9 +2158,9 @@ void cmd_find(const char* args, CommandOutput* output) {
 }
 
 void cmd_du(const char* args, CommandOutput* output) {
-    const char* du_path = (args && str_len(args) > 0) ? args : ext2_getcwd();
+    const char* du_path = (args && str_len(args) > 0) ? args : ext3_getcwd();
     static dirent64_t du_dents[256];
-    int tot = ext2_getdents(du_path, du_dents, (int)sizeof(du_dents));
+    int tot = ext3_getdents(du_path, du_dents, (int)sizeof(du_dents));
     if (tot < 0) { output_add_line(output, "Cannot read directory", VGA_RED); return; }
 
     uint32_t total_bytes = 0;
@@ -2172,7 +2172,7 @@ void cmd_du(const char* args, CommandOutput* output) {
             char fp[256]; str_cpy(fp, du_path);
             int pl = str_len(fp); if(pl>1){fp[pl]='/';fp[pl+1]='\0';}
             str_concat(fp, de->d_name);
-            uint32_t fsz = ext2_file_size(fp);
+            uint32_t fsz = ext3_file_size(fp);
             total_bytes += fsz;
             char line[MAX_LINE_LENGTH];
             str_cpy(line, "  "); str_concat(line, de->d_name);
@@ -2199,10 +2199,10 @@ void cmd_rmr(const char* args, CommandOutput* output) {
     }
     char rmr_path[256];
     if (args[0] == '/') { str_cpy(rmr_path, args); }
-    else { str_cpy(rmr_path, ext2_getcwd()); int pl=str_len(rmr_path); if(pl>1){rmr_path[pl]='/';rmr_path[pl+1]='\0';} str_concat(rmr_path, args); }
-    // ext2 rmdir only deletes empty folders
+    else { str_cpy(rmr_path, ext3_getcwd()); int pl=str_len(rmr_path); if(pl>1){rmr_path[pl]='/';rmr_path[pl+1]='\0';} str_concat(rmr_path, args); }
+    // ext3 rmdir only deletes empty folders
     static dirent64_t rmr_dents[128];
-    int tot = ext2_getdents(rmr_path, rmr_dents, (int)sizeof(rmr_dents));
+    int tot = ext3_getdents(rmr_path, rmr_dents, (int)sizeof(rmr_dents));
     if (tot > 0) {
         int off = 0;
         while (off < tot) {
@@ -2212,13 +2212,13 @@ void cmd_rmr(const char* args, CommandOutput* output) {
                 char child[256]; str_cpy(child, rmr_path);
                 int pl=str_len(child); if(pl>1){child[pl]='/';child[pl+1]='\0';}
                 str_concat(child, de->d_name);
-                if (de->d_type == DT_REG) ext2_unlink(child);
-                else if (de->d_type == DT_DIR) ext2_rmdir(child);
+                if (de->d_type == DT_REG) ext3_unlink(child);
+                else if (de->d_type == DT_DIR) ext3_rmdir(child);
             }
             off += de->d_reclen;
         }
     }
-    int rmr_rc = ext2_rmdir(rmr_path);
+    int rmr_rc = ext3_rmdir(rmr_path);
     if (rmr_rc == 0) {
         output_add_line(output, "Directory removed", VGA_GREEN);
     } else {
@@ -4126,8 +4126,8 @@ static void cmd_wget(const char* args, CommandOutput* output) {
     // resp.body is null-terminated (http.c guarantee), can be written directly
     output_add_line(output, "  Saving to disk...", 0x0E);
 
-    if (!ext2_path_is_file(save_name)) ext2_create_file(save_name);
-    int written = ext2_write_file(save_name, 0, (const uint8_t*)resp.body, (uint32_t)resp.body_len);
+    if (!ext3_path_is_file(save_name)) ext3_create_file(save_name);
+    int written = ext3_write_file(save_name, 0, (const uint8_t*)resp.body, (uint32_t)resp.body_len);
 
     if (written >= 0) {
         char smsg[64]; str_cpy(smsg, "  Saved: ");
@@ -4136,7 +4136,7 @@ static void cmd_wget(const char* args, CommandOutput* output) {
         char tmp[8]; int_to_str((int)resp.body_len, tmp);
         str_concat(smsg, tmp); str_concat(smsg, " bytes)");
         output_add_line(output, smsg, 0x0A);
-        output_add_line(output, "  Written to ext2.", 0x0A);
+        output_add_line(output, "  Written to ext3.", 0x0A);
     } else {
         output_add_line(output, "  ERROR: Disk write failed!", 0x0C);
     }
@@ -4806,7 +4806,7 @@ static Command command_table[] = {
     {"du", "Show disk usage", cmd_du},
 
     // ELF loader commands
-    {"exec",    "Load and execute ELF64 binary from ext2", cmd_exec},
+    {"exec",    "Load and execute ELF64 binary from ext3", cmd_exec},
     {"elfinfo", "Show ELF64 header info (no load)",        cmd_elfinfo},
 
     // SYSCALL/SYSRET commands
@@ -4947,7 +4947,7 @@ int execute_command64(const char* input, CommandOutput* output) {
                 char try_path[64];
                 str_cpy(try_path, "/bin/");
                 str_concat(try_path, try_name);
-                if (ext2_file_size(try_path) == 0) {
+                if (ext3_file_size(try_path) == 0) {
                 
                     for (int _k = 0; try_name[_k]; _k++) {
                         char c = try_name[_k];
@@ -4984,7 +4984,7 @@ int execute_command64(const char* input, CommandOutput* output) {
         str_cpy(elf_path, "/bin/");
         str_concat(elf_path, elf_filename);
 
-        uint32_t fsize = ext2_file_size(elf_path);
+        uint32_t fsize = ext3_file_size(elf_path);
         if (fsize == 0) {
             char elf_lower[32];
             for (int _k = 0; _k < cmd_len; _k++) {
@@ -4999,7 +4999,7 @@ int execute_command64(const char* input, CommandOutput* output) {
             str_cpy(elf_lower_path, "/bin/");
             str_concat(elf_lower_path, elf_lower);
 
-            fsize = ext2_file_size(elf_lower_path);
+            fsize = ext3_file_size(elf_lower_path);
             if (fsize > 0) {
                 str_cpy(elf_filename, elf_lower);
             } else {

@@ -1,9 +1,9 @@
 // elf64.c - ELF-64 Loader for AscentOS
-// Ext2 üzerindeki ET_EXEC / ET_DYN (PIE) x86-64 ELF ikililerini
+// Ext3 üzerindeki ET_EXEC / ET_DYN (PIE) x86-64 ELF ikililerini
 // belleğe yükler; harici dinamik linker gerektirmez.
 
 #include "elf64.h"
-#include "../kernel/ext2.h"   // ext2_read_file, ext2_file_size
+#include "ext3.h"   // ext3_read_file, ext3_file_size
 #include "../commands/commands64.h"         // CommandOutput, output_add_line, renk sabitleri
 
 // ============================================================
@@ -320,11 +320,11 @@ void elf64_dump_header(const uint8_t* buf, void* cmd_output) {
 }
 
 // ============================================================
-// elf64_exec_from_ext2
-// Ext2'den dosyayı okur, doğrular, yükler, rapor verir.
-// path: tam ext2 yolu, örn. "/bin/hello.elf"
+// elf64_exec_from_ext3
+// Ext3'den dosyayı okur, doğrular, yükler, rapor verir.
+// path: tam ext3 yolu, örn. "/bin/hello.elf"
 // ============================================================
-int elf64_exec_from_ext2(const char* path,
+int elf64_exec_from_ext3(const char* path,
                          uint64_t    load_base,
                          ElfImage*   out,
                          void*       cmd_output) {
@@ -333,9 +333,9 @@ int elf64_exec_from_ext2(const char* path,
     if (!path || !out || !cout) return ELF_ERR_NULL;
 
     // --- 1. Dosya boyutunu öğren ---
-    uint32_t fsize = ext2_file_size(path);
+    uint32_t fsize = ext3_file_size(path);
     if (fsize == 0) {
-        output_add_line(cout, "  [ELF] File not found on ext2", VGA_RED);
+        output_add_line(cout, "  [ELF] File not found on ext3", VGA_RED);
         return ELF_ERR_NULL;
     }
     if (fsize > ELF_MAX_LOAD_SIZE) {
@@ -364,25 +364,25 @@ int elf64_exec_from_ext2(const char* path,
         return ELF_ERR_NOMEM;
     }
 
-    int n = ext2_read_file(path, elf_read_buf, fsize);
+    int n = ext3_read_file(path, elf_read_buf, fsize);
 
     // --- DEBUG: kaç byte okundu? ---
     {
         char dbg[96]; char t1[16]; char t2[16];
         fmt_u32(fsize, t1); fmt_u32((uint32_t)(n < 0 ? 0 : n), t2);
-        str_cpy(dbg, "  [ELF] ext2 fsize="); str_concat(dbg, t1);
+        str_cpy(dbg, "  [ELF] ext3 fsize="); str_concat(dbg, t1);
         str_concat(dbg, " read="); str_concat(dbg, t2);
         output_add_line(cout, dbg, VGA_YELLOW);
     }
 
     if (n <= 0) {
-        output_add_line(cout, "  [ELF] ext2 read failed", VGA_RED);
+        output_add_line(cout, "  [ELF] ext3 read failed", VGA_RED);
         kfree(elf_read_buf);
         return ELF_ERR_NULL;
     }
 
     // Okunan byte fsize'dan az gelirse buf_size olarak fsize kullan
-    // (ext2 driver kısa okursa segment offset kontrolü yanlış patlıyor)
+    // (ext3 driver kısa okursa segment offset kontrolü yanlış patlıyor)
     // Sparse bloklar sifir dolu gelir; effective_size = fsize
     uint32_t effective_size = fsize;
     (void)n;

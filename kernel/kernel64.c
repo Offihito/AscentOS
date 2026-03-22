@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include "idt64.h"
 #include "../drivers/ata64.h"
-#include "ext2.h"
+#include "ext3.h"
 #include "cpu64.h"   // SSE, CPUID, I/O port yardımcıları
 #include "../drivers/sb16.h"
 
@@ -172,15 +172,15 @@ static void test_lba48_driver(void) {
 
     uint8_t buf[512];
 
-    // ── 1. Ext2 superblock LBA'sini oku (LBA 2 = byte offset 1024) ──────────
+    // ── 1. Ext3 superblock LBA'sini oku (LBA 2 = byte offset 1024) ──────────
     int ok = disk_read_sector64(2, buf);
-    serial_print("[LBA48_TEST] LBA=2 (Ext2 superblock) oku: ");
+    serial_print("[LBA48_TEST] LBA=2 (Ext3 superblock) oku: ");
     serial_print(ok ? "OK\n" : "FAIL (disk yok/hata)\n");
 
     if (ok) {
-        // Ext2 magic: offset 56 = 0x38 → 0xEF53
+        // Ext3 magic: offset 56 = 0x38 → 0xEF53
         uint16_t magic = (uint16_t)(buf[56] | (buf[57] << 8));
-        serial_print("[LBA48_TEST]   Ext2 magic 0xEF53: ");
+        serial_print("[LBA48_TEST]   Ext3 magic 0xEF53: ");
         serial_print((magic == 0xEF53) ? "OK\n" : "FAIL\n");
     }
 
@@ -200,56 +200,56 @@ static void test_lba48_driver(void) {
 }
 
 // ============================================================
-//  Ext2 test fonksiyonu
+//  Ext3 test fonksiyonu
 //  Kernel boot'ta cagrilir; sonuclar serial porta yazilir.
 // ============================================================
-void test_ext2_driver(void) {
-    serial_print("[EXT2_TEST] Starting...\n");
+void test_ext3_driver(void) {
+    serial_print("[EXT3_TEST] Starting...\n");
 
     // 1. Mount
-    if (ext2_mount() != 0) {
-        serial_print("[EXT2_TEST] Mount FAILED\n");
+    if (ext3_mount() != 0) {
+        serial_print("[EXT3_TEST] Mount FAILED\n");
         return;
     }
-    serial_print("[EXT2_TEST] Mount OK\n");
+    serial_print("[EXT3_TEST] Mount OK\n");
 
     // 2. mkdir
-    int r = ext2_mkdir("/test_dir");
-    serial_print(r == 0 ? "[EXT2_TEST] mkdir OK\n"
-                        : "[EXT2_TEST] mkdir FAIL\n");
+    int r = ext3_mkdir("/test_dir");
+    serial_print(r == 0 ? "[EXT3_TEST] mkdir OK\n"
+                        : "[EXT3_TEST] mkdir FAIL\n");
 
     // 3. create + write file
-    ext2_create_file("/test_dir/hello.txt");
-    const uint8_t* msg = (const uint8_t*)"Hello Ext2!\n";
-    ext2_write_file("/test_dir/hello.txt", 0, msg, 12);
-    serial_print("[EXT2_TEST] write OK\n");
+    ext3_create_file("/test_dir/hello.txt");
+    const uint8_t* msg = (const uint8_t*)"Hello Ext3!\n";
+    ext3_write_file("/test_dir/hello.txt", 0, msg, 12);
+    serial_print("[EXT3_TEST] write OK\n");
 
     // 4. read file
     uint8_t rbuf[64];
     int i; for (i = 0; i < 64; i++) rbuf[i] = 0;
-    int rd = ext2_read_file("/test_dir/hello.txt", rbuf, 63);
+    int rd = ext3_read_file("/test_dir/hello.txt", rbuf, 63);
     if (rd == 12 && rbuf[0] == 'H')
-        serial_print("[EXT2_TEST] read OK\n");
+        serial_print("[EXT3_TEST] read OK\n");
     else
-        serial_print("[EXT2_TEST] read FAIL\n");
+        serial_print("[EXT3_TEST] read FAIL\n");
 
     // 5. getdents
     dirent64_t dbuf[8];
-    int n = ext2_getdents("/test_dir", dbuf, (int)sizeof(dbuf));
-    serial_print(n > 0 ? "[EXT2_TEST] getdents OK\n"
-                       : "[EXT2_TEST] getdents FAIL\n");
+    int n = ext3_getdents("/test_dir", dbuf, (int)sizeof(dbuf));
+    serial_print(n > 0 ? "[EXT3_TEST] getdents OK\n"
+                       : "[EXT3_TEST] getdents FAIL\n");
 
     // 6. unlink
-    r = ext2_unlink("/test_dir/hello.txt");
-    serial_print(r == 0 ? "[EXT2_TEST] unlink OK\n"
-                        : "[EXT2_TEST] unlink FAIL\n");
+    r = ext3_unlink("/test_dir/hello.txt");
+    serial_print(r == 0 ? "[EXT3_TEST] unlink OK\n"
+                        : "[EXT3_TEST] unlink FAIL\n");
 
     // 7. rmdir
-    r = ext2_rmdir("/test_dir");
-    serial_print(r == 0 ? "[EXT2_TEST] rmdir OK\n"
-                        : "[EXT2_TEST] rmdir FAIL\n");
+    r = ext3_rmdir("/test_dir");
+    serial_print(r == 0 ? "[EXT3_TEST] rmdir OK\n"
+                        : "[EXT3_TEST] rmdir FAIL\n");
 
-    serial_print("[EXT2_TEST] Done.\n");
+    serial_print("[EXT3_TEST] Done.\n");
 }
 
 void kernel_main(uint64_t multiboot_info) {
@@ -278,8 +278,8 @@ void kernel_main(uint64_t multiboot_info) {
     init_keyboard64();
     init_commands64();
 
-    // Ext2 sürücü testi — serial çıktıya yaz
-    test_ext2_driver();
+    // Ext3 sürücü testi — serial çıktıya yaz
+    test_ext3_driver();
 
     // LBA48 sürücü testi
     test_lba48_driver();
