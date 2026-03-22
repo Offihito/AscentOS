@@ -9,7 +9,7 @@
 Current Features (as of March 2026)
 
 - **64-bit x86_64 architecture** — designed for modern hardware
-- **EXT2 filesystem** — read/write support fully working
+- **EXT3 filesystem** — read/write support fully working
 - **Simple text-based shell**
 - **Modular memory management** (stabilized in recent updates)
 - **Musl libc** integration
@@ -17,7 +17,7 @@ Current Features (as of March 2026)
 - **GRUB2 multiboot booting**
 - **Full Network Stack**
 
-The OS currently **successfully boots on its own**, can read/write files on EXT2,
+The OS currently **successfully boots on its own**, can read/write files on EXT3,
 
  🛠️ Building & Running from Source
 
