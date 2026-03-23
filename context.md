@@ -39,24 +39,24 @@ userland/          → Ported user applications + musl libc build integration
 
 **Userland porting rules (very important – follow exactly)**
 
-1. Create folder → `userland/<app-name>/`  
-2. Place sources there (usually vanilla upstream + minimal patches)  
-3. Write a build script → `userland/<app-name>-build.sh`  
+1. Create shell script → `<app-name>-build.sh`  
+2. Write a build script → `<app-name>-build.sh`  
    - Use musl-based cross toolchain (`x86_64-ascent-musl-gcc` or similar)  
    - Always pass `-static` (dynamic linking not ready)  
    - Add musl-friendly flags: `-fno-stack-protect -U_FORTIFY_SOURCE -D_POSIX_C_SOURCE=200809L` etc.  
    - Look at existing clean examples: `kilo-build.sh` (simplest), `lua-build.sh`, `tcc-build.sh`, `doom-build.sh`  
-4. Output binary → copy to initrd / ramdisk location or embed in ISO  
-5. If new syscalls are required:  
+3. Output binary → copy to initrd / ramdisk location or embed in ISO  
+4. If new syscalls are required:  
    - Add them first in kernel (syscall table + implementation)  
-   - Update musl's `arch/x86_64/syscall_arch.h` or equivalent  
+   - Update musl's `kernel/syscall.c and syscall.h` or equivalent  
    - Rebuild musl & userland  
 
 **Build & run commands (reminder)**
 
-make               → full build  
-make run           → qemu-system-x86_64 (text mode)  
+make               → build
+make run           → qemu-system-x86_64 
 make clean         → clean build artifacts  
+make clean-all     → clean build artifacts + musl
 
 **Toolchain & musl facts**
 
