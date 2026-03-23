@@ -2,9 +2,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// ============================================================================
 // Colors (RGB)
-// ============================================================================
 typedef uint32_t VesaColor;
 
 #define VESA_BLACK          0x00000000
@@ -31,11 +29,7 @@ VesaColor vesa_color_from_vga(uint8_t vga_color_index);
 #define FONT_WIDTH   8    
 #define FONT_HEIGHT  16   
 
-// ============================================================================
 // Function declarations
-// ============================================================================
-
-
 void init_vesa64(void);
 
 void clear_screen64(void);

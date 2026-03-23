@@ -955,24 +955,41 @@ int ttyname_r(int fd, char *buf, size_t buflen) {
 //  BÖLÜM 7: BELLEK YÖNETİMİ
 // ═══════════════════════════════════════════════════════════════════════════
 
-// sbrk: newlib malloc/free bu fonksiyona bağlanır
-/* AscentOS: ASCENTOS_HEAP_PATCHED -- __heap_start fallback */
-#ifdef DASCENTOS_STATIC_HEAP
-/* user.ld olmadan derleme: statik 4MB heap tamponu */
-static char _static_heap[4 * 1024 * 1024];
-static char *_heap_ptr = _static_heap;
-#else
-extern char __heap_start;
-static char *_heap_ptr = 0;
-#endif
-
+// sbrk — Linux x86-64 ABI uyumlu implementasyon
+// ──────────────────────────────────────────────────────────────────────────
+// Linux'ta sbrk(3) bir libc sarmalayıcısıdır; altında her zaman brk(2)
+// (syscall 12) çağrılır. Önceki implementasyon kernel'dan bağımsız özel
+// bir _heap_ptr tutuyordu: bu nedenle brk(0) ve sbrk(0) hiçbir zaman
+// aynı değeri döndürmüyordu (B4 testi NG).
+//
+// Yeni implementasyon:
+//   sbrk(0)  → brk(0) syscall'ı ile mevcut break'i sorgula
+//   sbrk(+N) → break'i N byte büyüt; ESKİ break döner (POSIX)
+//   sbrk(-N) → break'i N byte küçült; ESKİ break döner
+//   Hata     → (void*)-1  (malloc bunu kontrol eder)
+//
+// Önemli: Linux brk(2) başarısızlıkta -errno DEĞİL, mevcut break'i döner.
+// Başarısızlığı "istek edilen adres != dönen adres" karşılaştırmasıyla
+// tespit ediyoruz.
+// ──────────────────────────────────────────────────────────────────────────
 void *sbrk(long incr) {
-#ifndef DASCENTOS_STATIC_HEAP
-    if (!_heap_ptr) _heap_ptr = &__heap_start;
-#endif
-    char *prev = _heap_ptr;
-    _heap_ptr += incr;
-    return (void*)prev;
+    // Adım 1: Mevcut break'i sorgula (brk(0) asla hata vermez)
+    void *cur = (void *)_sc1(SYS_BRK, 0);
+
+    if (incr == 0)
+        return cur;
+
+    // Adım 2: Hedef adresi hesapla ve kernel'a iste
+    void *target = (char *)cur + incr;
+    void *result = (void *)_sc1(SYS_BRK, (long)target);
+
+    // Adım 3: Başarı kontrolü — Linux break'i hareket ettiremediyse
+    // istenen adresi değil, mevcut break'i döndürür.
+    if (result != target)
+        return (void *)-1;   // ENOMEM; malloc (void*)-1 ile başarısızlığı algılar
+
+    // Başarı: ESKİ break'i döndür (POSIX/Linux sbrk semantiği)
+    return cur;
 }
 
 // ── Userland mmap pool ────────────────────────────────────────────────────

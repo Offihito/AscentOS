@@ -4,9 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// ============================================================================
 //  PCI Configuration Port Addresses
-// ============================================================================
 #define PCI_CONFIG_ADDR  0xCF8
 #define PCI_CONFIG_DATA  0xCFC
 
@@ -26,9 +24,7 @@
 #define PCI_CMD_MEM_SPACE       (1 << 1)
 #define PCI_CMD_BUS_MASTER      (1 << 2)
 
-// ============================================================================
 // BAR Types
-// ============================================================================
 #define PCI_BAR_TYPE_IO         0   
 #define PCI_BAR_TYPE_MEM32      1   
 #define PCI_BAR_TYPE_MEM64      2   
@@ -41,9 +37,7 @@ typedef struct {
     uint8_t  prefetchable;  
 } PCIBAR;
 
-// ============================================================================
 // PCI Device identifier
-// ============================================================================
 typedef struct {
     uint8_t  bus;
     uint8_t  dev;
@@ -56,18 +50,12 @@ typedef struct {
     uint8_t  irq;
 } PCIDevice;
 
-// ============================================================================
 // Basic PCI I/O
-// ============================================================================
-
 uint32_t pci_read32(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg);
 
 void pci_write32(uint8_t bus, uint8_t dev, uint8_t fn, uint8_t reg, uint32_t val);
 
-// ============================================================================
 // Helper Functions
-// ============================================================================
-
 void pci_enable_busmaster(uint8_t bus, uint8_t dev, uint8_t fn);
 
 bool pci_find_device(uint16_t vendor_id, uint16_t device_id, PCIDevice* out);

@@ -1190,23 +1190,41 @@ static void sys_getppid(syscall_frame_t* frame) {
 #endif
 }
 
+// Default heap base for user processes — used by both sys_sbrk and sys_brk.
+// Must be a valid canonical user-space address well clear of any ELF segment.
+#define USER_HEAP_BASE  0x10000000ULL   // 256 MB
+
 // ── SYS_SBRK (12) ───────────────────────────────────────────────
 static void sys_sbrk(syscall_frame_t* frame) {
     serial_print("[SYS_SBRK] called\n");
     task_t* cur = task_get_current();
     if (!cur) { frame->rax = SYSCALL_ERR_FAULT; return; }
 
+    // Lazily initialise — must agree with sys_brk's USER_HEAP_BASE.
+    if (cur->user_brk == 0)
+        cur->user_brk = USER_HEAP_BASE;
+
     int64_t  increment = (int64_t)frame->rdi;
     uint64_t old_brk   = cur->user_brk;
 
     if (increment == 0) { frame->rax = old_brk; return; }
-    if (increment < 0)  { frame->rax = SYSCALL_ERR_INVAL; return; }
 
-    uint64_t new_brk = old_brk + (uint64_t)increment;
-    if (new_brk > 0x80000000ULL) { frame->rax = SYSCALL_ERR_NOMEM; return; }
+    if (increment > 0) {
+        uint64_t new_brk = old_brk + (uint64_t)increment;
+        if (new_brk > 0x80000000ULL) { frame->rax = SYSCALL_ERR_NOMEM; return; }
+        cur->user_brk = new_brk;
+    } else {
+        // Negative increment: shrink the heap.
+        // Guard against underflow below the initial heap base.
+        uint64_t shrink = (uint64_t)(-(increment));
+        if (shrink > old_brk || old_brk - shrink < USER_HEAP_BASE) {
+            frame->rax = SYSCALL_ERR_INVAL;
+            return;
+        }
+        cur->user_brk = old_brk - shrink;
+    }
 
-    cur->user_brk = new_brk;
-    frame->rax    = old_brk;
+    frame->rax = old_brk;   // POSIX: return OLD break on success
 }
 
 // ── SYS_GETPRIORITY (13) ────────────────────────────────────────
@@ -1686,17 +1704,24 @@ static void sys_munmap(syscall_frame_t* frame) {
 // POSIX brk(): addr=0 ise mevcut brk döner; addr > current_brk ise genişletir.
 // sbrk()'den farkı: artış miktarı değil, hedef adres alınır.
 // ---------------------------------------------------------------
+
 static void sys_brk(syscall_frame_t* frame) {
     { static int sys_brk_logged = 0; if (!sys_brk_logged) { sys_brk_logged = 1; serial_print("[SYS_BRK] called\n"); } }
     // Per-task user brk — kernel heap'ten bağımsız
     task_t* cur = task_get_current();
     if (!cur) { frame->rax = SYSCALL_ERR_FAULT; return; }
 
+    // Lazily initialise user_brk on first use so that brk(0) always
+    // returns a valid (non-NULL) canonical user-space address.
+    if (cur->user_brk == 0)
+        cur->user_brk = USER_HEAP_BASE;
+
     uint64_t new_addr = frame->rdi;
     uint64_t cur_brk  = cur->user_brk;
 
     if (new_addr == 0)            { frame->rax = cur_brk; return; }
-    if (new_addr < cur_brk)       { frame->rax = cur_brk; return; }
+    // Allow shrinking down to the heap base, but not below it.
+    if (new_addr < USER_HEAP_BASE) { frame->rax = cur_brk; return; }
     if (new_addr > 0x80000000ULL) { frame->rax = SYSCALL_ERR_NOMEM; return; }
 
     cur->user_brk = new_addr;

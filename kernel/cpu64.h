@@ -110,6 +110,5 @@ uint64_t perf_cycles(const PerfCounter* pc);
 uint64_t perf_ns(const PerfCounter* pc);         
 uint32_t perf_us(const PerfCounter* pc);         
 void     perf_print(const PerfCounter* pc,       
-                    const char* label);
-
+const char* label);
 #endif 

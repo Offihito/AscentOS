@@ -154,9 +154,6 @@ tcp.o: network/tcp.c network/tcp.h network/ipv4.h network/arp.h drivers/rtl8139.
 http.o: network/http.c network/http.h network/tcp.h network/arp.h network/ipv4.h
 	$(CC) $(CFLAGS) -c network/http.c -o http.o
 
-syscalltest64.o: commands/syscalltest64.c commands/commands64.h kernel/syscall.h kernel/signal64.h kernel/task.h
-	$(CC) $(CFLAGS) -c commands/syscalltest64.c -o syscalltest64.o
-
 kernel64.o: kernel/kernel64.c drivers/mouse64.h \
             drivers/ata64.h kernel/ext3.h fs/files64.h kernel/cpu64.h \
             drivers/sb16.h
@@ -171,7 +168,7 @@ spinlock64.o: kernel/spinlock64.c kernel/spinlock64.h kernel/cpu64.h
 KERNEL_OBJS = boot64.o interrupts64.o idt64.o \
               font8x16.o vesa64.o mouse64.o journal.o \
               keyboard.o kernel64.o cpu64.o spinlock64.o \
-              commands64.o syscalltest64.o files64.o ata64.o ext3.o elf64.o \
+              commands64.o files64.o ata64.o ext3.o elf64.o \
               pmm.o heap.o vmm64.o timer.o pcspk.o sb16.o task.o scheduler.o \
               page_fault.o syscall.o signal64.o \
               panic64.o rtl8139.o pci.o arp.o ipv4.o icmp.o udp.o dhcp.o tcp.o http.o

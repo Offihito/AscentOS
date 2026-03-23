@@ -122,4 +122,4 @@ JournalState* journal_get_state(void);
 int journal_add_orphan(JournalHandle* h, uint32_t ino);
 int journal_remove_orphan(JournalHandle* h, uint32_t ino);
 
-#endif // JOURNAL_H
+#endif 

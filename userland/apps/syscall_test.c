@@ -1,4 +1,4 @@
-// syscall_test.c — AscentOS Syscall Test v10
+// syscall_test.c — AscentOS Syscall Test v12
 // Changes:
 //   - v3: File I/O (lseek, fstat, O_APPEND, double-close, pipe, large write)
 //   - v4: Advanced I/O (dup, dup2, fcntl, truncate, ftruncate, error fd modes)
@@ -13,6 +13,12 @@
 //          MAP_SHARED writeback, offset map, PROT_READ, mprotect upgrade)
 //  - v10: Advanced FD (pipe2 O_CLOEXEC, pipe2 O_NONBLOCK, writev scatter,
 //          writev byte count, getdents entry count, getdents find known file)
+//  - v11: uname (sysname, machine, nodename fields; NULL ptr guard),
+//         hard link / link(2) (new path readable, content matches source,
+//         link to dir rejected with EPERM, link over existing file rejected)
+//  - v12: brk/sbrk (Linux x86-64 ABI: brk(0) query, heap grow, sbrk(0) addr,
+//          sbrk(+N) grow, sbrk(-N) shrink, sbrk write/read, double sbrk grow,
+//          brk below current heap rejected, sbrk overflow guard)
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +30,7 @@
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <sys/uio.h>
+#include <sys/utsname.h>
 #include <time.h>
 
 // Linux x86-64 dirent64 layout for raw getdents64 syscall
@@ -1885,6 +1892,307 @@ int main(void) {
         else ng("getdents known file not found", 0);
         cleanup(KNOWN);
     f6_end:;
+    }
+
+    // ── SECTION 9: uname ───────────────────────────────────────────────────
+    printf("\n--- uname Tests ---\n");
+
+    // U1. uname returns 0 and fills sysname with a non-empty string
+    {
+        struct utsname u;
+        memset(&u, 0, sizeof(u));
+        int r = uname(&u);
+        if (r == 0 && u.sysname[0] != '\0')
+            ok("uname -> returns 0 and sysname is non-empty");
+        else
+            ng("uname return/sysname", r);
+    }
+
+    // U2. machine field must be "x86_64" (Linux x86-64 ABI compatibility)
+    {
+        struct utsname u;
+        memset(&u, 0, sizeof(u));
+        uname(&u);
+        if (strcmp(u.machine, "x86_64") == 0)
+            ok("uname -> machine == \"x86_64\"");
+        else
+            ng("uname machine wrong", (long)u.machine[0]);
+    }
+
+    // U3. nodename field must be non-empty (hostname is set at boot)
+    {
+        struct utsname u;
+        memset(&u, 0, sizeof(u));
+        uname(&u);
+        if (u.nodename[0] != '\0')
+            ok("uname -> nodename is non-empty");
+        else
+            ng("uname nodename empty", 0);
+    }
+
+    // ── SECTION 10: hard link / link(2) ────────────────────────────────────
+    // NOTE: AscentOS ext3 has no true inode hard links; link(2) is copy-based.
+    // st_nlink == 2 is therefore NOT tested. Behaviour tested instead:
+    //   - new path is readable after link()
+    //   - content of new path matches source
+    //   - linking a directory is rejected (EPERM)
+    //   - linking over an existing path is rejected (EEXIST / -17)
+    printf("\n--- hard link (link(2)) Tests ---\n");
+
+    const char* LNK_SRC  = "/tmp/sc_link_src.txt";
+    const char* LNK_DST  = "/tmp/sc_link_dst.txt";
+    const char* LNK_PAYLOAD = "LINKTEST_CONTENT";
+    const int   LNK_PAYLEN  = 16;
+
+    // L1. link() returns 0 and new path becomes readable
+    {
+        cleanup(LNK_SRC); cleanup(LNK_DST);
+        int fd = open(LNK_SRC, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("link(readable)/create-src", fd); goto l1_end; }
+        write(fd, LNK_PAYLOAD, LNK_PAYLEN);
+        close(fd);
+
+        int r = link(LNK_SRC, LNK_DST);
+        if (r != 0) { ng("link(readable)/link()", r); goto l1_end; }
+
+        // dst must now open successfully
+        fd = open(LNK_DST, O_RDONLY, 0);
+        if (fd >= 0) {
+            close(fd);
+            ok("link() -> new path is readable");
+        } else {
+            ng("link(readable) -> dst not openable", fd);
+        }
+    l1_end:
+        cleanup(LNK_SRC); cleanup(LNK_DST);
+    }
+
+    // L2. content of new path matches original source content
+    {
+        cleanup(LNK_SRC); cleanup(LNK_DST);
+        int fd = open(LNK_SRC, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("link(content)/create-src", fd); goto l2_end; }
+        write(fd, LNK_PAYLOAD, LNK_PAYLEN);
+        close(fd);
+
+        int r = link(LNK_SRC, LNK_DST);
+        if (r != 0) { ng("link(content)/link()", r); goto l2_end; }
+
+        char buf[32] = {0};
+        fd = open(LNK_DST, O_RDONLY, 0);
+        if (fd < 0) { ng("link(content)/open-dst", fd); goto l2_end; }
+        read(fd, buf, LNK_PAYLEN);
+        close(fd);
+
+        if (memcmp(buf, LNK_PAYLOAD, LNK_PAYLEN) == 0)
+            ok("link() -> dst content matches src content");
+        else
+            ng("link(content) content mismatch", (long)buf[0]);
+    l2_end:
+        cleanup(LNK_SRC); cleanup(LNK_DST);
+    }
+
+    // L3. link() on a directory must fail with EPERM (-1)
+    {
+        // /tmp is always present and is a directory
+        int r = link("/tmp", "/tmp/sc_link_dir_dst");
+        if (r < 0)
+            ok("link(dir) -> rejected with error (EPERM expected)");
+        else {
+            ng("link(dir) should have failed", r);
+            unlink("/tmp/sc_link_dir_dst");
+        }
+    }
+
+    // L4. link() over an already-existing path must fail (EEXIST / -17)
+    {
+        cleanup(LNK_SRC); cleanup(LNK_DST);
+        int fd = open(LNK_SRC, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("link(eexist)/create-src", fd); goto l4_end; }
+        write(fd, "x", 1); close(fd);
+
+        fd = open(LNK_DST, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("link(eexist)/create-dst", fd); goto l4_end; }
+        write(fd, "y", 1); close(fd);
+
+        // dst already exists — link() must refuse
+        int r = link(LNK_SRC, LNK_DST);
+        if (r < 0)
+            ok("link() over existing path -> rejected (EEXIST expected)");
+        else
+            ng("link(eexist) should have returned error", r);
+    l4_end:
+        cleanup(LNK_SRC); cleanup(LNK_DST);
+    }
+
+    // ── SECTION 11: brk / sbrk ─────────────────────────────────────────────
+    //
+    // Linux x86-64 ABI for brk(2):
+    //   syscall 12, arg1 = new_brk_addr
+    //   - brk(0)      → returns current program break (never fails)
+    //   - brk(addr)   → on success returns addr; on failure returns OLD break
+    //                   (NEVER returns -errno — errno is set by libc wrapper)
+    //
+    // sbrk(3) is a libc shim:
+    //   sbrk(0)  → current break  (calls brk(0))
+    //   sbrk(+N) → old break      (calls brk(cur + N), returns old on success)
+    //   sbrk(-N) → old break      (calls brk(cur - N), releases pages)
+    //   sbrk(N)  → (void*)-1 on failure (sets errno = ENOMEM)
+    //
+    // All raw brk() invocations below go through the inline _sys_brk() wrapper
+    // to exercise syscall 12 directly, matching AscentOS's SYS_BRK = 12.
+    printf("\n--- brk / sbrk Tests ---\n");
+
+    // Raw brk syscall wrapper — matches Linux x86-64 brk(2) exactly.
+    // Returns the new (or current) program break; never a negative error code.
+#define _sys_brk(addr) ({ \
+    long _r; \
+    __asm__ volatile("syscall" \
+        : "=a"(_r) \
+        : "0"(12L), "D"((long)(addr)) \
+        : "rcx", "r11", "memory"); \
+    (void*)_r; \
+})
+
+    // B1. brk(0) — query current break; must be a non-NULL canonical address
+    {
+        void* cur = _sys_brk(0);
+        // Valid user-space address: above 4 KB (not NULL / low trap page),
+        // below 128 TiB (Linux x86-64 user address space limit).
+        if (cur > (void*)0x1000 && cur < (void*)0x0000800000000000ULL)
+            ok("brk(0) -> returns valid current break address");
+        else
+            ng("brk(0) invalid address", (long)cur);
+    }
+
+    // B2. brk(cur + 4096) — grow heap by one page; kernel must honour it
+    {
+        void* before = _sys_brk(0);
+        void* target = (char*)before + 4096;
+        void* after  = _sys_brk(target);
+        // On success the kernel returns exactly the requested address.
+        if (after == target)
+            ok("brk(cur+4096) -> heap grows by one page");
+        else
+            ng("brk(cur+4096) returned wrong address", (long)after);
+        // Restore (best-effort; not fatal if it fails)
+        _sys_brk(before);
+    }
+
+    // B3. brk(cur + 4096) — break after grow must be >= before
+    {
+        void* before = _sys_brk(0);
+        void* target = (char*)before + 4096;
+        _sys_brk(target);
+        void* after = _sys_brk(0);   // re-query
+        if (after >= before)
+            ok("brk grow -> re-queried break is >= previous break");
+        else
+            ng("brk grow -> break went backwards", (long)(after - before));
+        _sys_brk(before);
+    }
+
+    // B4. sbrk(0) — libc wrapper; must return same value as brk(0) syscall
+    {
+        void* raw = _sys_brk(0);
+        void* lib = sbrk(0);
+        // After any previous _sys_brk restores, both must agree.
+        if (lib == raw)
+            ok("sbrk(0) == brk(0) raw syscall");
+        else
+            ng("sbrk(0) != brk(0) raw", (long)((char*)lib - (char*)raw));
+    }
+
+    // B5. sbrk(+4096) — returns OLD break, new break must advance by 4096
+    {
+        void* old_brk = sbrk(0);
+        void* ret     = sbrk(4096);
+        void* new_brk = sbrk(0);
+        if (ret == old_brk && (char*)new_brk == (char*)old_brk + 4096)
+            ok("sbrk(+4096) -> returns old break, new break advances by 4096");
+        else
+            ng("sbrk(+4096) semantics wrong",
+               (long)((char*)new_brk - (char*)old_brk));
+        sbrk(-4096);   // release
+    }
+
+    // B6. sbrk(-N) — shrink: break must retreat by exactly N bytes
+    {
+        sbrk(8192);                   // allocate 8 KiB first
+        void* before_shrink = sbrk(0);
+        void* ret           = sbrk(-4096);
+        void* after_shrink  = sbrk(0);
+        int ok_flag = (ret == before_shrink) &&
+                      ((char*)after_shrink == (char*)before_shrink - 4096);
+        if (ok_flag)
+            ok("sbrk(-4096) -> break retreats by 4096 bytes");
+        else
+            ng("sbrk(-4096) retreat wrong",
+               (long)((char*)after_shrink - (char*)before_shrink));
+        sbrk(-4096);   // release the first 8 KiB block
+    }
+
+    // B7. sbrk write/read — memory allocated via sbrk must be writable and readable
+    {
+        void* p = sbrk(4096);
+        if (p == (void*)-1) { ng("sbrk(write/read)/alloc", -1); goto b7_end; }
+        // Write a known pattern across the allocated page
+        unsigned char* b = (unsigned char*)p;
+        for (int i = 0; i < 4096; i++) b[i] = (unsigned char)(i & 0xFF);
+        int ok_flag = 1;
+        for (int i = 0; i < 4096; i++)
+            if (b[i] != (unsigned char)(i & 0xFF)) { ok_flag = 0; break; }
+        if (ok_flag)
+            ok("sbrk alloc -> page is writable and readable");
+        else
+            ng("sbrk alloc -> read-back mismatch", 0);
+        sbrk(-4096);
+    b7_end:;
+    }
+
+    // B8. two consecutive sbrk(+N) calls — break must advance cumulatively
+    {
+        void* base = sbrk(0);
+        sbrk(4096);
+        sbrk(4096);
+        void* top = sbrk(0);
+        if ((char*)top == (char*)base + 8192)
+            ok("two sbrk(+4096) calls -> break advances by 8192 total");
+        else
+            ng("double sbrk cumulative advance wrong",
+               (long)((char*)top - (char*)base));
+        sbrk(-8192);
+    }
+
+    // B9. brk below current break — Linux returns the CURRENT (unchanged) break,
+    //     not an error code.  The break must NOT move below its current position.
+    {
+        // Establish a known position first
+        void* cur = _sys_brk(0);
+        // Request a break far below the current value (NULL / page 0)
+        void* ret = _sys_brk((void*)0x1000);
+        (void)ret;
+        void* after = _sys_brk(0);
+        // Kernel must leave break at cur (or higher), never at 0x1000
+        if (after >= cur)
+            ok("brk(addr < cur) -> break unchanged (Linux semantics)");
+        else
+            ng("brk(addr < cur) moved break backwards", (long)after);
+    }
+
+    // B10. sbrk(0) after malloc — sbrk must still return a valid non-NULL address
+    //      (malloc may itself use brk; this ensures the two do not conflict
+    //       in ways that corrupt the break pointer)
+    {
+        void* before = sbrk(0);
+        void* m = malloc(1024);
+        void* after  = sbrk(0);
+        free(m);
+        // break must be >= before (malloc may have advanced it), never behind
+        if (after >= before && after != (void*)-1)
+            ok("sbrk(0) after malloc -> break is valid and non-regressing");
+        else
+            ng("sbrk(0) after malloc invalid", (long)after);
     }
 
     printf("\n--- Result: %d OK, %d NG ---\n", pass, fail);

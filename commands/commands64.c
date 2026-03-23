@@ -538,8 +538,6 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_empty_line(output);
     output_add_line(output, "SYSCALL Commands:", VGA_YELLOW);
     output_add_line(output, " syscallinfo - SYSCALL/SYSRET MSR configuration", VGA_WHITE);
-    output_add_line(output, " syscalltest - Run full test suite (116 tests)", VGA_WHITE);
-    output_add_line(output, "              v10: signal/sigaction/sigprocmask", VGA_WHITE);
     output_add_empty_line(output);
     output_add_line(output, "Network Commands (RTL8139):", VGA_CYAN);
     output_add_line(output, " netinit   - Start the RTL8139 network driver", VGA_WHITE);
@@ -2226,13 +2224,7 @@ void cmd_rmr(const char* args, CommandOutput* output) {
         output_add_line(output, "Failed: not empty or not found", VGA_RED);
     }
 }
-
-// ===========================================
-// SYSCALL COMMANDS 
-// ===========================================
-void cmd_syscalltest(const char* args, CommandOutput* output);
-
-// ============================================================================
+// ===========================================================================
 // SPINLOCK TEST 
 // ============================================================================
 static void cmd_spinlock(const char* args, CommandOutput* output) {
@@ -4804,10 +4796,6 @@ static Command command_table[] = {
     // ELF loader commands
     {"exec",    "Load and execute ELF64 binary from ext3", cmd_exec},
     {"elfinfo", "Show ELF64 header info (no load)",        cmd_elfinfo},
-
-    // SYSCALL/SYSRET commands
-    {"syscalltest", "Run SYSCALL test suite (116 tests)", cmd_syscalltest},
-
 
     // Network commands
     {"netinit",  "Initialize RTL8139 network driver",           cmd_netinit},

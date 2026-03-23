@@ -70,13 +70,11 @@ int fs_count_subdirs(const char* path);
 int fs_count_files_in_tree(const char* path);
 
 
-int      fs_path_is_file(const char* path);
+int fs_path_is_file(const char* path);
 
-int      fs_path_is_dir(const char* path);
+int fs_path_is_dir(const char* path);
 
 uint32_t fs_path_filesize(const char* path);
-
-
 
 int fs_unlink64(const char* path);
 
