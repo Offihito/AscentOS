@@ -4,10 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// ============================================================
 // I/O PORT MAP (base 0x220)
-// ============================================================
-
 #define SB16_BASE            0x220
 #define SB16_PORT_RESET      (SB16_BASE + 0x6)
 #define SB16_PORT_READ       (SB16_BASE + 0xA)
@@ -19,10 +16,7 @@
 #define SB16_PORT_MIXER_ADDR (SB16_BASE + 0x4)
 #define SB16_PORT_MIXER_DATA (SB16_BASE + 0x5)
 
-// ============================================================
 // DSP Commands
-// ============================================================
-
 #define SB16_CMD_GET_VERSION      0xE1
 #define SB16_CMD_SPEAKER_ON       0xD1
 #define SB16_CMD_SPEAKER_OFF      0xD3
@@ -38,10 +32,7 @@
 #define SB16_CMD_PLAY_8_AI        0xC6
 #define SB16_CMD_PLAY_16_AI       0xB6
 
-// ============================================================
 // MIXER
-// ============================================================
-
 #define SB16_MIX_MASTER_LEFT   0x30
 #define SB16_MIX_MASTER_RIGHT  0x31
 #define SB16_MIX_PCM_LEFT      0x32
@@ -51,10 +42,7 @@
 #define SB16_MIX_IRQ_STATUS    0x82
 #define SB16_MIX_OUTPUT_CTRL   0x3C
 
-// ============================================================
 // ISA DMA PORT MAP
-// ============================================================
-
 #define DMA8_MASK      0x0A
 #define DMA8_MODE      0x0B
 #define DMA8_CLEAR_FF  0x0C
@@ -66,10 +54,8 @@
 #define DMA_BUF_SIZE  8192
 #define DMA_HALF      4096
 
-// ============================================================
-// FORMAT
-// ============================================================
 
+// FORMAT
 typedef enum {
     SB16_FMT_8BIT_MONO      = 0,
     SB16_FMT_8BIT_STEREO    = 1,
@@ -97,9 +83,7 @@ extern int          g_sb16_initialized;
 
 typedef int (*sb16_stream_cb_t)(uint8_t* buf, int bytes_needed, void* ctx);
 
-// ============================================================
 // PUBLIC API
-// ============================================================
 bool    sb16_init(void);
 void    sb16_shutdown(void);
 bool    sb16_detect(void);

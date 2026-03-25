@@ -1,24 +1,7 @@
-// idt64.c — AscentOS 64-bit IDT Kurulumu + PIC Yönetimi
-//
-// keyboard_unified.c içinden ayrıştırıldı.
-// Sorumluluklar:
-//   - IDT tablo ve IDTR yönetimi
-//   - CPU exception handler (ISR 0-31) kayıtları
-//   - PIC 8259A yeniden haritalama ve IRQ mask yönetimi
-//   - IRQ handler'larının IDT'ye bağlanması (timer, klavye, mouse, ağ)
-//   - PIT 1000 Hz timer ayarı
-//
-// Bağımlılıklar:
-//   - interrupts64.asm  : isr_keyboard, isr_timer, isr_mouse, isr_net,
-//                         isr0-isr31, isr8_df, load_idt64
-//   - boot64_unified.asm: kernel_tss (df_stack_top IST1 kurulumu için)
-
 #include <stdint.h>
 #include "idt64.h"
 
-// ============================================================================
-// I/O Port Yardımcıları
-// ============================================================================
+// I/O Port Helpers
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
@@ -28,32 +11,21 @@ static inline uint8_t inb(uint16_t port) {
     return ret;
 }
 
-// ============================================================================
-// Seri port çıktısı (kernel64.c'den)
-// ============================================================================
 extern void serial_print(const char* s);
 
-// ============================================================================
-// IDT Tablosu ve IDTR
-// ============================================================================
 static struct idt_entry idt[256];
 static struct idt_ptr   idtr;
 
-// ============================================================================
-// task.h — kernel_tss (tss_t) doğru tipte buradan gelir
-// ============================================================================
 #include "task.h"
 
-// ============================================================================
-// ASM Sembolleri — interrupts64.asm
-// ============================================================================
+// ASM symbols
 extern void isr_keyboard(void);
 extern void isr_timer(void);
 extern void isr_mouse(void);
-extern void isr_net(void);     // IRQ11 → RTL8139 ağ kartı
-extern void isr_sb16(void);    // IRQ5  -> Sound Blaster 16
+extern void isr_net(void);    
+extern void isr_sb16(void); 
 
-// CPU Exception handler'lar (ISR 0-31)
+// CPU Exception handlers (ISR 0-31)
 extern void isr0(void);  extern void isr1(void);  extern void isr2(void);
 extern void isr3(void);  extern void isr4(void);  extern void isr5(void);
 extern void isr6(void);  extern void isr7(void);  extern void isr8_df(void);
@@ -66,7 +38,6 @@ extern void isr24(void); extern void isr25(void); extern void isr26(void);
 extern void isr27(void); extern void isr28(void); extern void isr29(void);
 extern void isr30(void); extern void isr31(void);
 
-// #DF IST1 stack tepesi + IDTR yükleyici (interrupts64.asm / boot64_unified.asm)
 extern uint8_t df_stack_top[];
 extern void    load_idt64(struct idt_ptr* ptr);
 
@@ -108,23 +79,17 @@ static void pic_remap(void) {
     outb(0xA1, 0xFF);
 }
 
-// ============================================================================
-// Genel API Implementasyonu
-// ============================================================================
-
-// Dış erişim için IDT girişi yaz (idt64.h'de ilan edildi)
+// General API Initialization Function
 void idt_set_entry(int n, uint64_t handler, uint16_t selector, uint8_t attr) {
     idt_write(n, handler, selector, attr);
 }
 
-// IRQ hattını etkinleştir (mask bit'ini 0 yap)
 void idt_irq_enable(uint8_t irq) {
     uint16_t port = (irq < 8) ? 0x21 : 0xA1;
     uint8_t  bit  = (irq < 8) ? irq : (irq - 8);
     outb(port, inb(port) & ~(1 << bit));
 }
 
-// IRQ hattını devre dışı bırak (mask bit'ini 1 yap)
 void idt_irq_disable(uint8_t irq) {
     uint16_t port = (irq < 8) ? 0x21 : 0xA1;
     uint8_t  bit  = (irq < 8) ? irq : (irq - 8);
@@ -184,49 +149,37 @@ void init_interrupts64(void) {
     idt_write(31, (uint64_t)isr31, 0x08, 0x8E);
     serial_print("[IDT] Exception handlers registered (INT 0-31)\n");
 
-    // ── TSS.IST1 = df_stack_top ───────────────────────────────────────────────
-    // Intel SDM tss_t layout: +36. bayt = IST1 (8 bayt, little-endian)
     *((uint64_t*)((uint8_t*)&kernel_tss + 36)) = (uint64_t)df_stack_top;
     serial_print("[IDT] IST1 (#DF stack) configured\n");
 
-    // ── PIC 8259A yeniden haritalama ─────────────────────────────────────────
     pic_remap();
     serial_print("[IDT] PIC 8259A remapped — Master:0x20 Slave:0x28\n");
 
-    // ── IRQ Handler'larını IDT'ye bağla ─────────────────────────────────────
-    idt_write(32, (uint64_t)isr_timer,    0x08, 0x8E); // IRQ0  Timer
-    idt_write(33, (uint64_t)isr_keyboard, 0x08, 0x8E); // IRQ1  Klavye
-    idt_write(37, (uint64_t)isr_sb16,     0x08, 0x8E); // IRQ5  SB16 (0x20+5=0x25)
-    idt_write(43, (uint64_t)isr_net,      0x08, 0x8E); // IRQ11 RTL8139 (0x20+11=0x2B)
-    idt_write(44, (uint64_t)isr_mouse,    0x08, 0x8E); // IRQ12 Mouse
+    idt_write(32, (uint64_t)isr_timer,    0x08, 0x8E);
+    idt_write(33, (uint64_t)isr_keyboard, 0x08, 0x8E); 
+    idt_write(37, (uint64_t)isr_sb16,     0x08, 0x8E); 
+    idt_write(43, (uint64_t)isr_net,      0x08, 0x8E);
+    idt_write(44, (uint64_t)isr_mouse,    0x08, 0x8E); 
     serial_print("[IDT] IRQ handlers: Timer(32) KB(33) SB16(37) Net(43) Mouse(44)\n");
 
-    // ── IDTR'yi yükle ────────────────────────────────────────────────────────
     idtr.limit = sizeof(idt) - 1;
     idtr.base  = (uint64_t)&idt;
     load_idt64(&idtr);
     serial_print("[IDT] IDTR loaded (256 entries, 4096 bytes)\n");
 
-    // ── IRQ mask'leri aç ─────────────────────────────────────────────────────
-    idt_irq_enable(0);   // Timer
-    idt_irq_enable(1);   // Klavye
-    idt_irq_enable(2);   // Cascade (slave PIC için zorunlu)
-    idt_irq_enable(5);   // SB16 -- IRQ5 master PIC
-    idt_irq_enable(11);  // RTL8139 ağ kartı
-    idt_irq_enable(12);  // Mouse
+    idt_irq_enable(0);   
+    idt_irq_enable(1);  
+    idt_irq_enable(2);  
+    idt_irq_enable(5);   
+    idt_irq_enable(11);  
+    idt_irq_enable(12);  
     serial_print("[IDT] IRQ lines unmasked: 0(Timer) 1(KB) 2(Cascade) 5(SB16) 11(Net) 12(Mouse)\n");
 
-    // ── PIT 1000 Hz Timer ────────────────────────────────────────────────────
-    // Kanal 0, Mode 3 (kare dalga), 1193182 / 1000 ≈ 1193 bölen
     uint32_t div = 1193182 / 1000;
-    outb(0x43, 0x36);               // Kontrol: kanal 0, lobyte/hibyte, mode 3
+    outb(0x43, 0x36);              
     outb(0x40, (uint8_t)(div & 0xFF));
     outb(0x40, (uint8_t)((div >> 8) & 0xFF));
     serial_print("[IDT] PIT configured: 1000 Hz (div=1193)\n");
 
-    // NOT: STI burada YAPILMIYOR.
-    // Timer IRQ 1ms'de bir ateşlenir; task sistemi hazır olmadan
-    // scheduler_tick() → NULL dereference → #GP.
-    // STI, kernel_main içinde task_init + scheduler_init bittikten sonra yapılır.
     serial_print("[IDT] Ready — STI deferred until scheduler init\n");
 }

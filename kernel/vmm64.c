@@ -1,18 +1,3 @@
-/* vmm64.c — AscentOS Virtual Memory Manager
- *
- * Higher-half kernel dönüşüm formülleri:
- *   phys → virt : phys + KERNEL_VMA
- *   virt → phys : virt - KERNEL_VMA
- *
- * Boot sayfaları:
- *   PML4[511] → fiziksel 0x0  ≡  sanal KERNEL_VMA   (higher-half)
- *   PML4[0]   → fiziksel 0x0  ≡  sanal 0x0          (kimlik — vmm_init siler)
- *
- * ÖNEMLİ: vmm_init() kimlik eşlemesini silmeden önce:
- *   - pmm_init_from_mb() çağrılmış olmalıdır (multiboot_mmap_addr fiziksel ptr)
- *   - MMIO bölgesi (VGA 0xB8000, framebuffer) higher-half'te yeniden eşlenir.
- */
-
 #include "vmm64.h"
 #include "pmm.h"
 #include "heap.h"

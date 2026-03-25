@@ -2,9 +2,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// ============================================================
 //  ATA PIO port map (primary channel, master drive)
-// ============================================================
 #define ATA_DATA        0x1F0
 #define ATA_ERROR       0x1F1
 #define ATA_SECTOR_CNT  0x1F2   
@@ -30,9 +28,7 @@
 #define ATA_SR_DRQ      0x08
 #define ATA_SR_ERR      0x01
 
-// ============================================================
 //  I/O Helpers
-// ============================================================
 static inline uint8_t inb_p(uint16_t port) {
     uint8_t v;
     __asm__ volatile ("inb %1, %0" : "=a"(v) : "Nd"(port));
@@ -125,10 +121,7 @@ static int ata_write_lba48(uint64_t lba, const uint8_t* buf) {
     return 1;
 }
 
-// ============================================================
 //  Public API
-// ============================================================
-
 int disk_read_sector64(uint32_t lba, uint8_t* buf) {
     return ata_read_lba48((uint64_t)lba, buf);
 }
