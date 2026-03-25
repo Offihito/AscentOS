@@ -1,7 +1,3 @@
-// font8x16.c — Dahili 8×16 bitmap font verisi
-// PC Screen Font (PSF1) uyumlu, ASCII 0x20–0x7F arası 96 karakter.
-// Her karakter 16 byte: 16 piksel satırı × 8 bit genişlik.
-
 #include "font8x16.h"
 
 const uint8_t font8x16[96][16] = {

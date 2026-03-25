@@ -3,9 +3,7 @@
 
 #include <stdint.h>
 
-// ----------------------------------------------------------
 // ELF Magic & Identification
-// ----------------------------------------------------------
 #define ELF_MAGIC0      0x7F
 #define ELF_MAGIC1      'E'
 #define ELF_MAGIC2      'L'

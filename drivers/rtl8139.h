@@ -6,9 +6,7 @@
 #include <stdbool.h>
 #include "pci.h"
 
-// ============================================================================
 // RTL8139 Register offsets
-// ============================================================================
 #define RTL_MAC0        0x00    
 #define RTL_MAR0        0x08  
 #define RTL_TSD0        0x10    
@@ -37,9 +35,7 @@
 #define CR_TE           0x04    
 #define CR_BUFE         0x01   
 
-// ============================================================================
 // ISR / IMR bytes
-// ============================================================================
 #define ISR_ROK         0x0001  // RX OK
 #define ISR_RER         0x0002  // RX Error
 #define ISR_TOK         0x0004  // TX OK
@@ -51,9 +47,7 @@
 #define ISR_TIMEOUT     0x4000  // Timer Timeout
 #define ISR_SERR        0x8000  // System Error
 
-// ============================================================================
 // RCR (RX Config) bytes
-// ============================================================================
 #define RCR_AAP         (1<<0)  
 #define RCR_APM         (1<<1)  
 #define RCR_AM          (1<<2)  
@@ -89,9 +83,7 @@
 
 typedef void (*packet_handler_t)(const uint8_t* buf, uint16_t len);
 
-// ============================================================================
 // RTL8139 Driver Statistic
-// ============================================================================
 typedef struct {
     uint16_t    io_base;            
     uint8_t     mac[ETH_ALEN];      
@@ -116,10 +108,7 @@ typedef struct {
     bool        initialized;
 } RTL8139;
 
-// ============================================================================
 // Public API
-// ============================================================================
-
 bool rtl8139_init(void);
 
 bool rtl8139_send(const uint8_t* data, uint16_t len);
