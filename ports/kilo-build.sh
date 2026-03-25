@@ -23,20 +23,20 @@ info()  { echo -e "${GRN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YLW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERR ]${NC} $*"; exit 1; }
 
-# ── Diske kopyalama ayarları ───────────────────────────────────
-DISK_IMG="${DISK_IMG:-disk.img}"
-
 # ── Kilo sürümü ───────────────────────────────────────────────
 KILO_REPO="https://github.com/antirez/kilo.git"
 KILO_SRC_DIR="kilo"
 
 # ── Yollar ────────────────────────────────────────────────────
 TARGET="x86_64-elf"
-MUSL_PREFIX="$(pwd)/toolchain/musl-install"
-USER_LD="$(pwd)/userland/libc/user.ld"
-CRT0_ASM="$(pwd)/userland/libc/crt0.asm"
-OUTPUT_DIR="$(pwd)/userland/bin"
-SYSCALLS_OBJ="$(pwd)/userland/out/syscalls.o"
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
+ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"            # projenin kök dizini (bir üst klasör)
+DISK_IMG="${DISK_IMG:-${ROOT}/disk.img}"
+MUSL_PREFIX="${ROOT}/toolchain/musl-install"
+USER_LD="${ROOT}/userland/libc/user.ld"
+CRT0_ASM="${ROOT}/userland/libc/crt0.asm"
+OUTPUT_DIR="${ROOT}/userland/bin"
+SYSCALLS_OBJ="${ROOT}/userland/out/syscalls.o"
 LIBGCC=$(${TARGET}-gcc -m64 --print-libgcc-file-name 2>/dev/null)
 GCC_INCLUDE=$(${TARGET}-gcc -m64 -print-file-name=include 2>/dev/null)
 
@@ -194,8 +194,8 @@ cd ..
 
 # ── crt0.o üret ───────────────────────────────────────────────
 info "crt0.o üretiliyor..."
-mkdir -p "$(pwd)/userland/out"
-nasm -f elf64 -o "$(pwd)/userland/out/crt0.o" "${CRT0_ASM}"
+mkdir -p "${ROOT}/userland/out"
+nasm -f elf64 -o "${ROOT}/userland/out/crt0.o" "${CRT0_ASM}"
 info "crt0.o üretildi."
 
 # ── Kilo'yu derle ─────────────────────────────────────────────
@@ -240,7 +240,7 @@ ${TARGET}-gcc \
     -T "${USER_LD}" \
     -Wl,-z,muldefs \
     -o "${OUTPUT_DIR}/kilo.elf" \
-    "$(pwd)/userland/out/crt0.o" \
+    "${ROOT}/userland/out/crt0.o" \
     "${SYSCALLS_OBJ}" \
     /tmp/kilo.o \
     -L"${MUSL_PREFIX}/lib" \

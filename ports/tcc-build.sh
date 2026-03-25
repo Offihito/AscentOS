@@ -29,19 +29,22 @@ warn()  { echo -e "${YLW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERR ]${NC} $*"; exit 1; }
 
 # ── Yapılandırma ──────────────────────────────────────────────
-DISK_IMG="${DISK_IMG:-disk.img}"
+DISK_IMG="${DISK_IMG:-}"
 TCC_VERSION="${TCC_VERSION:-0.9.27}"
 TCC_SRC_DIR="tinycc"
 TCC_REPO="https://repo.or.cz/tinycc.git"
 
 TARGET="x86_64-elf"
-MUSL_PREFIX="$(pwd)/toolchain/musl-install"
-USER_LD="$(pwd)/userland/libc/user.ld"
-CRT0_ASM="$(pwd)/userland/libc/crt0.asm"
-OUTPUT_DIR="$(pwd)/userland/bin"
-SYSCALLS_OBJ="$(pwd)/userland/out/syscalls.o"
-SYSCALLS_C="$(pwd)/userland/libc/syscalls.c"
-ASCENTOS_LIBC_A="$(pwd)/userland/out/ascentos_libc.a"
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
+ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"            # projenin kök dizini (bir üst klasör)
+DISK_IMG="${DISK_IMG:-${ROOT}/disk.img}"
+MUSL_PREFIX="${ROOT}/toolchain/musl-install"
+USER_LD="${ROOT}/userland/libc/user.ld"
+CRT0_ASM="${ROOT}/userland/libc/crt0.asm"
+OUTPUT_DIR="${ROOT}/userland/bin"
+SYSCALLS_OBJ="${ROOT}/userland/out/syscalls.o"
+SYSCALLS_C="${ROOT}/userland/libc/syscalls.c"
+ASCENTOS_LIBC_A="${ROOT}/userland/out/ascentos_libc.a"
 LIBGCC=$(${TARGET}-gcc -m64 --print-libgcc-file-name 2>/dev/null)
 GCC_INCLUDE=$(${TARGET}-gcc -m64 -print-file-name=include 2>/dev/null)
 
@@ -241,7 +244,7 @@ cd ..
 #  BÖLÜM 5 — Uyum katmanı & tanım header'ı
 # ════════════════════════════════════════════════════════════════
 info "ascentos_tcc_compat.c oluşturuluyor..."
-cat > ascentos_tcc_compat.c << 'COMPAT_EOF'
+cat > "${SCRIPT_DIR}/ascentos_tcc_compat.c" << 'COMPAT_EOF'
 /*
  * ascentos_tcc_compat.c — AscentOS TCC uyum katmanı
  *
@@ -313,7 +316,7 @@ COMPAT_EOF
 info "ascentos_tcc_compat.c oluşturuldu."
 
 info "ascentos_tcc_defs.h oluşturuluyor..."
-cat > ascentos_tcc_defs.h << 'DEFS_EOF'
+cat > "${SCRIPT_DIR}/ascentos_tcc_defs.h" << 'DEFS_EOF'
 /* ascentos_tcc_defs.h — gcc -include ile tüm TCC kaynaklarına enjekte edilir */
 #ifndef ASCENTOS_TCC_DEFS_H
 #define ASCENTOS_TCC_DEFS_H
@@ -338,7 +341,7 @@ info "ascentos_tcc_defs.h oluşturuldu."
 # ════════════════════════════════════════════════════════════════
 #  BÖLÜM 6 — user.ld'yi hazırla, crt0.asm'yi derle
 # ════════════════════════════════════════════════════════════════
-PATCHED_LD="$(pwd)/user_tcc.ld"
+PATCHED_LD="${SCRIPT_DIR}/user_tcc.ld"
 info "user.ld kopyalanıyor ve __heap_start ekleniyor..."
 cp "${USER_LD}" "${PATCHED_LD}"
 if ! grep -q "__heap_start" "${PATCHED_LD}"; then
@@ -352,7 +355,7 @@ USER_LD="${PATCHED_LD}"
 mkdir -p "${OUTPUT_DIR}"
 
 info "crt0.asm derleniyor..."
-nasm -f elf64 -o crt0.o "${CRT0_ASM}"
+nasm -f elf64 -o "${ROOT}/userland/out/crt0.o" "${CRT0_ASM}"
 
 # ════════════════════════════════════════════════════════════════
 #  BÖLÜM 7 — TCC'yi derle
@@ -400,8 +403,8 @@ ${TARGET}-gcc \
     -I"${MUSL_PREFIX}/include" \
     -isystem "${GCC_INCLUDE}" \
     -Wno-implicit-function-declaration \
-    -o ascentos_tcc_compat.o \
-    ascentos_tcc_compat.c
+    -o "${SCRIPT_DIR}/ascentos_tcc_compat.o" \
+    "${SCRIPT_DIR}/ascentos_tcc_compat.c"
 info "ascentos_tcc_compat.o derlendi."
 
 # Ana derleme
@@ -440,7 +443,7 @@ ${TARGET}-gcc \
     -DCONFIG_TCC_STATIC \
     -DHAVE_DLOPEN=0 \
     ${ONE_SOURCE_FLAG} \
-    -include "${PWD}/ascentos_tcc_defs.h" \
+    -include "${SCRIPT_DIR}/ascentos_tcc_defs.h" \
     -I"${TCC_SRC_DIR}" \
     -I"${MUSL_PREFIX}/include" \
     -isystem "${GCC_INCLUDE}" \
@@ -454,8 +457,8 @@ ${TARGET}-gcc \
     -Wl,--gc-sections \
     -Wl,--allow-multiple-definition \
     -o "${OUTPUT_DIR}/tcc.elf" \
-    crt0.o \
-    ascentos_tcc_compat.o \
+    "${ROOT}/userland/out/crt0.o" \
+    "${SCRIPT_DIR}/ascentos_tcc_compat.o" \
     ${COMPILE_SRCS} \
     "${SYSCALLS_OBJ}" \
     -lc \

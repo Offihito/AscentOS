@@ -31,23 +31,25 @@ warn()  { echo -e "${YLW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERR ]${NC} $*"; exit 1; }
 
 # ── Yapılandırma ──────────────────────────────────────────────
-DISK_IMG="${DISK_IMG:-disk.img}"
 WAD_FILE="${WAD_FILE:-doom1.wad}"                       # shareware veya tam wad
 DOOM_REPO="https://github.com/ozkl/doomgeneric.git"
 DOOM_SRC_DIR="doomgeneric"
 
 TARGET="x86_64-elf"
-MUSL_PREFIX="$(pwd)/toolchain/musl-install"
-USER_LD="$(pwd)/userland/libc/user.ld"
-CRT0_ASM="$(pwd)/userland/libc/crt0.asm"
-OUTPUT_DIR="$(pwd)/userland/bin"
-SYSCALLS_SRC="$(pwd)/userland/libc/syscalls.c"   # kaynak — her seferinde derlenir
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
+ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"            # projenin kök dizini (bir üst klasör)
+DISK_IMG="${DISK_IMG:-${ROOT}/disk.img}"
+MUSL_PREFIX="${ROOT}/toolchain/musl-install"
+USER_LD="${ROOT}/userland/libc/user.ld"
+CRT0_ASM="${ROOT}/userland/libc/crt0.asm"
+OUTPUT_DIR="${ROOT}/userland/bin"
+SYSCALLS_SRC="${ROOT}/userland/libc/syscalls.c"   # kaynak — her seferinde derlenir
 SYSCALLS_OBJ="/tmp/ascentos_doom_syscalls.o"      # geçici obj (eski .o'ya bağımlı değil)
 LIBGCC=$(${TARGET}-gcc -m64 --print-libgcc-file-name 2>/dev/null)
 GCC_INCLUDE=$(${TARGET}-gcc -m64 -print-file-name=include 2>/dev/null)
 
-# Port katmanı dosyası — bu script'in yanında bulunmalı
-PORT_LAYER="$(pwd)/doomgeneric_ascent.c"
+# Port katmanı dosyası — projenin kök dizininde bulunmalı
+PORT_LAYER="${ROOT}/doomgeneric_ascent.c"
 
 # ── Yardımcı: disk'e dosya yaz ────────────────────────────────
 disk_mkdir() {

@@ -14,9 +14,6 @@ info()  { echo -e "${GRN}[INFO]${NC} $*"; }
 warn()  { echo -e "${YLW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERR ]${NC} $*"; exit 1; }
 
-# ── Diske kopyalama ayarları ───────────────────────────────────
-DISK_IMG="${DISK_IMG:-disk.img}"          # Disk imajı dosyası (varsayılan: disk.img)
-
 # ── Lua sürümü ────────────────────────────────────────────────
 LUA_VERSION="${LUA_VERSION:-5.4.7}"
 LUA_MAJOR="5.4"
@@ -26,11 +23,14 @@ LUA_URL="https://www.lua.org/ftp/${LUA_TARBALL}"
 
 # ── Yollar ────────────────────────────────────────────────────
 TARGET="x86_64-elf"
-MUSL_PREFIX="$(pwd)/toolchain/musl-install"
-USER_LD="$(pwd)/userland/libc/user.ld"
-CRT0_ASM="$(pwd)/userland/libc/crt0.asm"
-OUTPUT_DIR="$(pwd)/userland/bin"
-SYSCALLS_OBJ="$(pwd)/userland/out/syscalls.o"
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
+ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"            # projenin kök dizini (bir üst klasör)
+DISK_IMG="${DISK_IMG:-${ROOT}/disk.img}"
+MUSL_PREFIX="${ROOT}/toolchain/musl-install"
+USER_LD="${ROOT}/userland/libc/user.ld"
+CRT0_ASM="${ROOT}/userland/libc/crt0.asm"
+OUTPUT_DIR="${ROOT}/userland/bin"
+SYSCALLS_OBJ="${ROOT}/userland/out/syscalls.o"
 LIBGCC=$(${TARGET}-gcc -m64 --print-libgcc-file-name 2>/dev/null)
 GCC_INCLUDE=$(${TARGET}-gcc -m64 -print-file-name=include 2>/dev/null)
 
@@ -161,7 +161,7 @@ mkdir -p "${OUTPUT_DIR}"
 #  Orijinal user.ld'yi kopyalayıp .bss bitiminden sonra
 #  __heap_start sembolünü ekliyoruz.
 # ──────────────────────────────────────────────────────────────
-PATCHED_LD="$(pwd)/user_lua.ld"
+PATCHED_LD="${ROOT}/user_lua.ld"
 info "user.ld kopyalanıyor ve __heap_start ekleniyor..."
 cp "${USER_LD}" "${PATCHED_LD}"
 
