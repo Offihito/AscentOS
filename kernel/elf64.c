@@ -3,7 +3,7 @@
 // belleğe yükler; harici dinamik linker gerektirmez.
 
 #include "elf64.h"
-#include "ext3.h"   // ext3_read_file, ext3_file_size
+#include "../fs/ext3.h"   // ext3_read_file, ext3_file_size
 #include "../commands/commands64.h"         // CommandOutput, output_add_line, renk sabitleri
 
 // ============================================================

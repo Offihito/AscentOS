@@ -1,6 +1,6 @@
 #include "journal.h"
 #include "ext3.h"
-#include "heap.h"
+#include "../kernel/heap.h"
 
 extern void* memset64(void* dest, int val, uint64_t n);
 extern void* memcpy64(void* dest, const void* src, uint64_t n);

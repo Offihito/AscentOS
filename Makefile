@@ -41,18 +41,18 @@ all: AscentOS.iso userland install-userland
 # SHARED KERNEL COMPONENTS
 # ============================================================================
 
-files64.o: fs/files64.c fs/files64.h kernel/ext3.h drivers/ata64.h
+files64.o: fs/files64.c fs/files64.h fs/ext3.h drivers/ata64.h
 	$(CC) $(CFLAGS) -c fs/files64.c -o files64.o
 
 ata64.o: drivers/ata64.c drivers/ata64.h
 	$(CC) $(CFLAGS) -c drivers/ata64.c -o ata64.o
 
 # Ext3 filesystem driver (FAT32'nin yerini aldı)
-ext3.o: kernel/ext3.c kernel/ext3.h drivers/ata64.h fs/files64.h
-	$(CC) $(CFLAGS) -c kernel/ext3.c -o ext3.o
+ext3.o: fs/ext3.c fs/ext3.h drivers/ata64.h fs/files64.h
+	$(CC) $(CFLAGS) -c fs/ext3.c -o ext3.o
 
-journal.o: kernel/journal.c kernel/journal.h
-	$(CC) $(CFLAGS) -c kernel/journal.c -o journal.o
+journal.o: fs/journal.c fs/journal.h
+	$(CC) $(CFLAGS) -c fs/journal.c -o journal.o
 
 elf64.o: kernel/elf64.c kernel/elf64.h
 	$(CC) $(CFLAGS) -c kernel/elf64.c -o elf64.o
@@ -155,7 +155,7 @@ http.o: network/http.c network/http.h network/tcp.h network/arp.h network/ipv4.h
 	$(CC) $(CFLAGS) -c network/http.c -o http.o
 
 kernel64.o: kernel/kernel64.c drivers/mouse64.h \
-            drivers/ata64.h kernel/ext3.h fs/files64.h kernel/cpu64.h \
+            drivers/ata64.h fs/ext3.h fs/files64.h kernel/cpu64.h \
             drivers/sb16.h
 	$(CC) $(CFLAGS) -c kernel/kernel64.c -o kernel64.o
 

@@ -6,7 +6,7 @@
 #include "../kernel/pmm.h"
 #include "../kernel/task.h"
 #include "../kernel/scheduler.h"
-#include "../kernel/ext3.h"
+#include "../fs/ext3.h"
 #include "../kernel/elf64.h"
 #include "../kernel/syscall.h"
 #include "../kernel/signal64.h"

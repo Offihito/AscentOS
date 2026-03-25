@@ -10,7 +10,7 @@ extern volatile int g_sb16_playing;  // sb16.c: DMA aktif mi (syscall 412)
 extern int  sb16_play_pcm_raw(const void* buf, unsigned short len,
                               unsigned int rate_hz, int fmt);
 #include "../fs/files64.h"
-#include "ext3.h"
+#include "../fs/ext3.h"
 #include "task.h"
 #include "scheduler.h"
 #include "timer.h"
