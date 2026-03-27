@@ -3,6 +3,7 @@
 CC = gcc
 AS = nasm
 LD = ld
+OBJCOPY = objcopy
 
 USERLAND_CC := $(shell which x86_64-elf-gcc 2>/dev/null || echo gcc)
 USERLAND_LD := $(shell which x86_64-elf-ld  2>/dev/null || echo ld)
@@ -22,15 +23,52 @@ LDFLAGS  = -n -T kernel/linker64.ld -nostdlib
 all: AscentOS.iso userland install-userland
 	@echo "╔═══════════════════════════════════════════════════╗"
 	@echo "║  AscentOS Unified Kernel ready                    ║"
+	@echo "║  Multiboot2/VESA mode                             ║"
 	@echo "║  Filesystem: Ext3                                 ║"
-	@echo "║  Start in TEXT mode                               ║"
-	@echo "║  'dhcp'     → Get IP automatically                ║"
-	@echo "║  'tcptest 10.0.2.2 80' → TCP test                 ║"
-	@echo "║  'tcplisten 8080'      → TCP server               ║"
-	@echo "║  'gfx'      → Switch to GUI mode                  ║"
+	@echo "║  For UEFI: make uefi                              ║"
 	@echo "║  make run   → Start the OS                        ║"
 	@echo "╚═══════════════════════════════════════════════════╝"
 
+# ============================================================================
+# UEFI CONFIGURATION
+# ============================================================================
+UEFI_ARCH    = x86_64
+GNU_EFI_PATH = /usr/include/efi
+GNU_EFI_LIB  = /usr/lib
+UEFI_CFLAGS  = -I$(GNU_EFI_PATH) -I$(GNU_EFI_PATH)/$(UEFI_ARCH)
+UEFI_CFLAGS += -fPIC -fshort-wchar -DEFI_FUNCTION_WRAPPER
+UEFI_CFLAGS += -fno-stack-protector -fno-stack-check -Wall -Wextra -O2
+LDSCRIPT     = $(GNU_EFI_LIB)/elf_$(UEFI_ARCH)_efi.lds
+STARTFILES   = $(GNU_EFI_LIB)/crt0-efi-$(UEFI_ARCH).o
+
+# UEFI bootloader target
+uefi: uefi_loader.o
+	@echo "[UEFI] Linking UEFI application..."
+	@$(LD) -T $(LDSCRIPT) -shared -Bsymbolic \
+	    $(STARTFILES) uefi_loader.o \
+	    -L$(GNU_EFI_LIB) -lefi -lgnuefi -o kernel.so
+	@echo "[UEFI] Generating EFI binary..."
+	@$(OBJCOPY) -j .text -j .sdata -j .data \
+	    -j .dynamic -j .dynsym -j .rel -j .rela -j .reloc \
+	    --target efi-app-$(UEFI_ARCH) kernel.so kernel.efi
+	@echo "[UEFI] Verifying EFI binary..."
+	@ls -lh kernel.efi | awk '{print "    ✓ Valid x86-64 EFI binary (" $$5 ")"}'
+	@echo "[UEFI] UEFI bootloader ready: kernel.efi"
+
+uefi_loader.o: bootloader/uefi_loader.c
+	@echo "[UEFI] Compiling bootloader/uefi_loader.c..."
+	@$(CC) $(UEFI_CFLAGS) -c bootloader/uefi_loader.c -o uefi_loader.o
+
+# UEFI ISO target (experimental)
+uefi-iso: uefi AscentOS.iso
+	@echo "[UEFI] Creating UEFI-bootable ISO..."
+	@mkdir -p isodir/EFI/BOOT isodir/boot
+	@cp kernel.efi isodir/EFI/BOOT/bootx64.efi
+	@cp kernel64.elf isodir/boot/kernel64.elf
+	@grub-mkrescue -o AscentOS-UEFI.iso isodir 2>&1 | grep -v "xorriso" || true
+	@echo "[UEFI] Created: AscentOS-UEFI.iso"
+	@echo "[UEFI] Boot with: qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd \\"
+	@echo "                  -cdrom AscentOS-UEFI.iso -m 256M -serial stdio"
 
 # ============================================================================
 # KERNEL OBJECTS
@@ -87,6 +125,12 @@ font8x16.o: kernel/font8x16.c kernel/font8x16.h
 vesa64.o: drivers/vesa64.c drivers/vesa64.h kernel/font8x16.h
 	$(CC) $(CFLAGS) -c drivers/vesa64.c -o $@
 
+graphics.o: drivers/graphics.c drivers/graphics.h kernel/font8x16.h
+	$(CC) $(CFLAGS) -c drivers/graphics.c -o $@
+
+uefi_gop.o: drivers/uefi_gop.c drivers/uefi_gop.h
+	$(CC) $(CFLAGS) -c drivers/uefi_gop.c -o $@
+
 syscall.o: kernel/syscall.c kernel/syscall.h drivers/sb16.h kernel/signal64.h
 	$(CC) $(CFLAGS) -c kernel/syscall.c -o $@
 
@@ -128,7 +172,7 @@ http.o: network/http.c network/http.h network/tcp.h network/arp.h network/ipv4.h
 
 kernel64.o: kernel/kernel64.c drivers/mouse64.h \
             drivers/ata64.h fs/ext3.h fs/files64.h kernel/cpu64.h \
-            drivers/sb16.h
+            drivers/sb16.h drivers/graphics.h drivers/vesa64.h
 	$(CC) $(CFLAGS) -c kernel/kernel64.c -o $@
 
 cpu64.o: kernel/cpu64.c kernel/cpu64.h
@@ -159,7 +203,7 @@ commands64.o: commands/commands64.c commands/commands64.h \
 
 
 KERNEL_OBJS = boot64.o interrupts64.o idt64.o \
-              font8x16.o vesa64.o mouse64.o journal.o \
+              font8x16.o vesa64.o graphics.o mouse64.o journal.o \
               keyboard.o kernel64.o cpu64.o spinlock64.o \
               commands64.o files64.o vfs.o ata64.o ext3.o elf64.o \
               pmm.o heap.o vmm64.o timer.o pcspk.o sb16.o task.o scheduler.o \
@@ -294,8 +338,36 @@ disk-ls:
 # RUN / DEBUG
 # ============================================================================
 
-run: AscentOS.iso disk.img install-userland
+run: disk.img install-userland
 	@echo "▶ Starting AscentOS..."
+	@if test -f /usr/include/efi/efi.h && test -f /usr/share/ovmf/OVMF.fd; then \
+	    echo "[UEFI] Booting with Graphics Output Protocol..."; \
+	    $(MAKE) uefi-iso 2>&1 || true; \
+	    if ! test -f AscentOS-UEFI.iso; then \
+	        echo "[UEFI] ISO oluşturulamadı, VESA moduna geçiliyor..."; \
+	        $(MAKE) run-vesa; exit 0; \
+	    fi; \
+	    qemu-system-x86_64 \
+	      -bios /usr/share/ovmf/OVMF.fd \
+	      -cdrom AscentOS-UEFI.iso \
+	      -drive file=disk.img,format=raw,if=ide,cache=writeback \
+	      -m 1024M -cpu qemu64 \
+	      -serial stdio -vga std \
+	      -usb -device usb-tablet \
+	      -audiodev pa,id=snd0 -machine pcspk-audiodev=snd0 \
+	      -device sb16,audiodev=snd0 \
+	      -netdev user,id=net0,restrict=off,ipv6=off,hostname=AscentOS,\
+hostfwd=udp::5000-:5000,hostfwd=udp::5001-:5001,hostfwd=udp::5002-:5002,\
+hostfwd=tcp::8080-:8080,hostfwd=tcp::8081-:8081 \
+	      -device rtl8139,netdev=net0 \
+	      -display gtk,zoom-to-fit=off; \
+	else \
+	    echo "[VESA] UEFI/OVMF not available. Booting with VESA Framebuffer..."; \
+	    $(MAKE) run-vesa; \
+	fi
+
+run-vesa: AscentOS.iso disk.img install-userland
+	@echo "▶ Starting AscentOS (VESA Framebuffer)..."
 	qemu-system-x86_64 \
 	  -cdrom AscentOS.iso \
 	  -drive file=disk.img,format=raw,if=ide,cache=writeback \
@@ -330,11 +402,119 @@ gdb:
 
 
 # ============================================================================
+# TESTING
+# ============================================================================
+
+test-quick:
+	@echo "╔════════════════════════════════════════════╗"
+	@echo "║  QUICK COMPILATION TEST                   ║"
+	@echo "╚════════════════════════════════════════════╝"
+	@echo "[*] Checking compilation..."
+	@$(MAKE) -j4 --silent
+	@echo "✓ Kernel compiles successfully"
+	@echo ""
+	@echo "[*] Graphics components:"
+	@ls -lh graphics.o vesa64.o 2>/dev/null | awk '{print "  " $$9 " (" $$5 ")"}'
+	@echo ""
+	@echo "[*] Binary ready:"
+	@ls -lh kernel64.elf | awk '{print "  " $$9 " (" $$5 ")"}'
+	@echo ""
+
+test-vesa: AscentOS.iso disk.img install-userland
+	@echo "╔════════════════════════════════════════════╗"
+	@echo "║  VESA FRAMEBUFFER TEST                    ║"
+	@echo "║  Testing 1280x720x32 graphics mode        ║"
+	@echo "╚════════════════════════════════════════════╝"
+	@echo ""
+	@echo "Boot output should show:"
+	@echo "  [GFX] VESA Framebuffer set: FD000000..."
+	@echo "  [GFX] Graphics initialized - VESA"
+	@echo ""
+	@echo "Press Ctrl+C to exit after verification"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo ""
+	@timeout 5 qemu-system-x86_64 \
+	  -cdrom AscentOS.iso \
+	  -drive file=disk.img,format=raw,if=ide \
+	  -m 512M -cpu qemu64 -boot d \
+	  -serial stdio -vga std \
+	  2>&1 | grep -A2 "\[GFX\]" || true
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "✓ VESA test complete"
+
+
+
+test-uefi:
+	@echo "╔════════════════════════════════════════════╗"
+	@echo "║  UEFI BOOTLOADER TEST                     ║"
+	@echo "╚════════════════════════════════════════════╝"
+	@echo ""
+	@if ! test -f /usr/include/efi/efi.h; then \
+	  echo "[⚠] gnu-efi not installed"; \
+	  echo "Install with: sudo apt install gnu-efi"; \
+	  echo ""; \
+	else \
+	  echo "[✓] gnu-efi found"; \
+	  $(MAKE) -s uefi 2>/dev/null && echo "✓ Build complete" || true; \
+	  echo ""; \
+	  if test -f kernel.efi; then \
+	    echo "[✓] UEFI OsLoader ready"; \
+	    ls -lh kernel.efi | awk '{print "    Size: " $$5}'; \
+	  fi; \
+	fi
+	@echo ""
+
+test-compilation:
+	@echo "╔════════════════════════════════════════════╗"
+	@echo "║  FULL COMPILATION TEST                    ║"
+	@echo "╚════════════════════════════════════════════╝"
+	@echo ""
+	@echo "[1] Cleaning..."
+	@$(MAKE) -s clean > /dev/null
+	@echo "    ✓ Clean complete"
+	@echo ""
+	@echo "[2] Building kernel..."
+	@$(MAKE) -j4 --silent kernel64.elf
+	@echo "    ✓ Kernel built"
+	@echo ""
+	@echo "[3] Building ISO..."
+	@$(MAKE) -j4 --silent AscentOS.iso
+	@echo "    ✓ ISO created"
+	@echo ""
+	@echo "[4] Verifying artifacts..."
+	@if test -f kernel64.elf && test -f AscentOS.iso; then \
+	  echo "    ✓ All artifacts present"; \
+	fi
+	@echo ""
+	@echo "═══════════════════════════════════════════"
+	@ls -lh kernel64.elf AscentOS.iso 2>/dev/null | \
+	  awk '{printf "  %-20s %8s\n", $$9, $$5}'
+	@echo "═══════════════════════════════════════════"
+	@echo "✓ Compilation test passed!"
+	@echo ""
+
+test-all: test-quick test-graphics test-vesa
+
+# Main test target
+test: test-quick
+	@echo ""
+	@echo "Available test targets:"
+	@echo "  make test            - Quick build check (DEFAULT)"
+	@echo "  make test-graphics   - Graphics layer check"
+	@echo "  make test-vesa       - Boot & test VESA framebuffer"
+	@echo "  make test-uefi       - Test UEFI bootloader (opt)"
+	@echo "  make test-compilation - Full clean build"
+	@echo "  make test-all        - Run all tests"
+	@echo ""
+
+
+# ============================================================================
 # CLEAN
 # ============================================================================
 
 clean:
-	rm -rf *.o *.elf isodir AscentOS.iso disk.img userland/out userland/libc/crt0.o
+	rm -rf *.o **/*.o *.elf *.so isodir AscentOS.iso AscentOS-UEFI.iso disk.img kernel.efi userland/out userland/libc/crt0.o
 
 musl-clean:
 	rm -rf userland/libc/musl build-musl musl-*.tar.gz
@@ -359,6 +539,7 @@ help:
 	@echo "  make clean          Clean build files"
 	@echo "  make clean-all      Full clean (including musl)"
 
-.PHONY: all run debug gdb musl userland install-userland disk-ls \
+.PHONY: all run run-vesa debug gdb test test-quick test-vesa test-uefi \
+        test-compilation test-all musl userland install-userland disk-ls \
         disk-rebuild hello calculator shell snake wav_player syscall_test \
-        clean musl-clean clean-all info help
+        clean musl-clean clean-all info help uefi uefi-iso

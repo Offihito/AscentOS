@@ -944,6 +944,11 @@ void syscall_dispatch(syscall_frame_t* frame);
 // Basit test rutini
 void syscall_test(void);
 
+// Son N syscall'ı (numara + arg1 + arg2 + dönüş) serial porta döker.
+// Kernel panic handler'ından çağrın: syscall_log_dump();
+// User-space'den tetiklemek için: SYS_DEBUG (103) ile "SCLOG" yazın.
+void syscall_log_dump(void);
+
 // ── Alarm yardımcı API (scheduler entegrasyonu için) ───────────────
 // scheduler her tick'te alarm_is_active() kontrolü yaparak
 // deadline geçtiyse task'a SIGALRM inject eder.

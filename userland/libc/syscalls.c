@@ -1495,7 +1495,7 @@ int set_robust_list(void *head, size_t len) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  BÖLÜM 23: WRITEV (v27)
+//  BÖLÜM 23: WRITEV / READV (v27 / v28)
 // ═══════════════════════════════════════════════════════════════════════════
 
 // iovec yapısı
@@ -1506,6 +1506,17 @@ struct iovec {
 
 ssize_t writev(int fd, const struct iovec *iov, int iovcnt) {
     long ret = _sc3(SYS_WRITEV, (long)fd, (long)iov, (long)iovcnt);
+    SET_ERRNO_RET(ret, -1);
+    return (ssize_t)ret;
+}
+
+// readv — scatter/gather read (SYS_READV = 19, Linux x86-64 ABI)
+// musl'ün readv() shim'i __syscall_cp'ye bağımlıdır; biz doğrudan syscall
+// kullanarak o bağımlılığı ortadan kaldırıyoruz.
+#define SYS_READV 19
+
+ssize_t readv(int fd, const struct iovec *iov, int iovcnt) {
+    long ret = _sc3(SYS_READV, (long)fd, (long)iov, (long)iovcnt);
     SET_ERRNO_RET(ret, -1);
     return (ssize_t)ret;
 }

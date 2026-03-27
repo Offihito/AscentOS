@@ -10,7 +10,8 @@ AscentOS is a minimal, from-scratch 64-bit x86_64 hobby OS with a higher-half ke
 - SSE-enabled spinlocks  
 - Full IDT / GDT / TSS / TLS support  
 - PCI enumeration & basic driver support  
-- Drivers: ATA (disk), RTL8139 (network), Sound Blaster 16, PC speaker  
+- **Graphics abstraction layer** (NEW): UEFI GOP + VESA framebuffer support  
+- Drivers: ATA (disk), RTL8139 (network), Sound Blaster 16, PC speaker, **Graphics (GOP/VESA)**  
 - Filesystem: EXT3 (read/write + journaling)  
 - Network: full TCP/IP/UDP stack + minimal HTTP server  
 - Userland: statically linked with musl libc  
@@ -79,10 +80,11 @@ make clean-all     → clean build artifacts + musl
 
 **Current development priorities**
 
-1. Test all remaining syscalls
-2. Port GNU Core Utils 
-3. Switching to UEFI GOP and fallback to vesa 
-4. Implementing SMP
+1. Fixing doom gpf
+2. Test all remaining syscalls
+3. Port GNU Core Utils 
+4. Switching to UEFI GOP and fallback to vesa 
+5. Implementing SMP
 
 **When in doubt**  
 - Check existing port scripts in `userland/` — they are the source of truth for musl-friendly builds  

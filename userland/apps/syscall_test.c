@@ -1,4 +1,4 @@
-// syscall_test.c — AscentOS Syscall Test v12
+// syscall_test.c — AscentOS Syscall Test v14
 // Changes:
 //   - v3: File I/O (lseek, fstat, O_APPEND, double-close, pipe, large write)
 //   - v4: Advanced I/O (dup, dup2, fcntl, truncate, ftruncate, error fd modes)
@@ -19,6 +19,15 @@
 //  - v12: brk/sbrk (Linux x86-64 ABI: brk(0) query, heap grow, sbrk(0) addr,
 //          sbrk(+N) grow, sbrk(-N) shrink, sbrk write/read, double sbrk grow,
 //          brk below current heap rejected, sbrk overflow guard)
+//  - v13: readv (gather read into 1/3 iovec, byte count, partial fill, empty iov,
+//          bad-fd guard), lseek extended (negative offset SEEK_END, SEEK_CUR
+//          report, seek-past-EOF size unchanged, bad-fd guard, SEEK_SET=0
+//          on write-only fd)
+//  - v14: Stress tests — readv (1000-iteration scatter correctness, 64-iovec fan-out,
+//          interleaved readv+lseek, pipe-backed readv, write-only fd guard),
+//         lseek (1000-iteration seek+read sweep, alternating SEEK_END/SEEK_SET
+//          boundary walk, seek+write hole fill, concurrent seek independence
+//          via pipe-fd pair, SEEK_CUR accumulation over 500 steps)
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,6 +92,17 @@ static inline long _getdents64(int fd, void* buf, int count) {
     return r;
 }
 
+// readv(fd, iov, iovcnt) — direct syscall 19, bypasses musl's __syscall_cp shim
+#define SYS_READV 19
+static inline long _readv(int fd, const struct iovec* iov, int iovcnt) {
+    long r;
+    __asm__ volatile("syscall"
+        : "=a"(r)
+        : "0"((long)SYS_READV), "D"((long)fd), "S"((long)iov), "d"((long)iovcnt)
+        : "rcx", "r11", "memory");
+    return r;
+}
+
 // struct stat from sys/stat.h uses the Linux x86-64 ABI layout (144 bytes):
 //   st_dev @ 0 (u64), st_ino @ 8 (u64), st_nlink @ 16 (u64),
 //   st_mode @ 24 (u32), st_uid @ 28 (u32), st_gid @ 32 (u32),
@@ -121,7 +141,7 @@ static void cleanup(const char* path) {
 }
 
 int main(void) {
-    printf("=== AscentOS Syscall Test v3 ===\n\n");
+    printf("=== AscentOS Syscall Test v13 ===\n\n");
 
     // ── SECTION 1: Basic syscalls ───────────────────────────────
 
@@ -2193,6 +2213,668 @@ int main(void) {
             ok("sbrk(0) after malloc -> break is valid and non-regressing");
         else
             ng("sbrk(0) after malloc invalid", (long)after);
+    }
+
+    // ── SECTION 12: readv (gather read) ────────────────────────────────────
+    //
+    // Linux x86-64 ABI for readv(2):
+    //   syscall 19, arg1=fd, arg2=iov[], arg3=iovcnt
+    //   Returns total bytes placed across all buffers, or -errno on error.
+    //   Buffers are filled left-to-right; a short file fills only as many
+    //   vectors as data permits.
+    printf("\n--- readv Tests ---\n");
+
+    const char* RV_FILE = "/tmp/sc_readv_test.txt";
+
+    // RV1. readv into a single iovec — full content returned in one buffer
+    {
+        cleanup(RV_FILE);
+        int fd = open(RV_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("readv(single)/open", fd); goto rv1_end; }
+
+        write(fd, "HELLO", 5);
+        lseek(fd, 0, SEEK_SET);
+
+        char buf[16] = {0};
+        struct iovec iov[1];
+        iov[0].iov_base = buf;
+        iov[0].iov_len  = sizeof(buf) - 1;
+
+        long r = _readv(fd, iov, 1);
+
+        if (r == 5 && memcmp(buf, "HELLO", 5) == 0)
+            ok("readv(single iovec) -> full content read");
+        else
+            ng("readv(single iovec) content/count wrong", r);
+
+        close(fd);
+    rv1_end:
+        cleanup(RV_FILE);
+    }
+
+    // RV2. readv scatter into 3 iovecs — each buffer filled in order
+    {
+        cleanup(RV_FILE);
+        int fd = open(RV_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("readv(scatter)/open", fd); goto rv2_end; }
+
+        write(fd, "FOOBARBAZ", 9);   // 9 bytes: 3+3+3
+        lseek(fd, 0, SEEK_SET);
+
+        char b0[4] = {0}, b1[4] = {0}, b2[4] = {0};
+        struct iovec iov[3];
+        iov[0].iov_base = b0; iov[0].iov_len = 3;
+        iov[1].iov_base = b1; iov[1].iov_len = 3;
+        iov[2].iov_base = b2; iov[2].iov_len = 3;
+
+        long r = _readv(fd, iov, 3);
+
+        if (r == 9 &&
+            memcmp(b0, "FOO", 3) == 0 &&
+            memcmp(b1, "BAR", 3) == 0 &&
+            memcmp(b2, "BAZ", 3) == 0)
+            ok("readv(3 iovecs) -> buffers filled in order (FOO/BAR/BAZ)");
+        else
+            ng("readv scatter content wrong", r);
+
+        close(fd);
+    rv2_end:
+        cleanup(RV_FILE);
+    }
+
+    // RV3. readv byte count — return value equals sum of bytes actually read
+    {
+        cleanup(RV_FILE);
+        int fd = open(RV_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("readv(bytecount)/open", fd); goto rv3_end; }
+
+        // Write 14 bytes total: 1+4+2+7
+        write(fd, "ABCDEFGHIJKLMN", 14);
+        lseek(fd, 0, SEEK_SET);
+
+        char b0[2]={0}, b1[5]={0}, b2[3]={0}, b3[8]={0};
+        struct iovec iov[4];
+        iov[0].iov_base = b0; iov[0].iov_len = 1;
+        iov[1].iov_base = b1; iov[1].iov_len = 4;
+        iov[2].iov_base = b2; iov[2].iov_len = 2;
+        iov[3].iov_base = b3; iov[3].iov_len = 7;
+
+        long r = _readv(fd, iov, 4);
+
+        if (r == 14)
+            ok("readv byte count -> returns sum of iov_len filled (14)");
+        else
+            ng("readv byte count wrong", r);
+
+        close(fd);
+    rv3_end:
+        cleanup(RV_FILE);
+    }
+
+    // RV4. readv partial fill — file shorter than iovec capacity;
+    //      return value == file size, trailing buffers stay zeroed
+    {
+        cleanup(RV_FILE);
+        int fd = open(RV_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("readv(partial)/open", fd); goto rv4_end; }
+
+        write(fd, "AB", 2);   // only 2 bytes
+        lseek(fd, 0, SEEK_SET);
+
+        char b0[4] = {0}, b1[4] = {0};
+        struct iovec iov[2];
+        iov[0].iov_base = b0; iov[0].iov_len = 4;   // first buf: capacity 4
+        iov[1].iov_base = b1; iov[1].iov_len = 4;   // second buf: capacity 4
+
+        long r = _readv(fd, iov, 2);
+
+        // Must read exactly 2 bytes; b0[0..1]=="AB"; b0[2..3] and b1 stay zero
+        if (r == 2 && b0[0] == 'A' && b0[1] == 'B' && b0[2] == '\0' && b1[0] == '\0')
+            ok("readv partial fill -> returns actual bytes; trailing buffers zeroed");
+        else
+            ng("readv partial fill wrong", r);
+
+        close(fd);
+    rv4_end:
+        cleanup(RV_FILE);
+    }
+
+    // RV5. readv with iovcnt==0 — must return 0 (no-op), not an error
+    {
+        cleanup(RV_FILE);
+        int fd = open(RV_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("readv(empty)/open", fd); goto rv5_end; }
+
+        write(fd, "X", 1);
+        lseek(fd, 0, SEEK_SET);
+
+        struct iovec iov[1];   // unused, but must be a valid ptr
+        long r = _readv(fd, iov, 0);
+
+        if (r == 0)
+            ok("readv(iovcnt=0) -> returns 0 (no-op)");
+        else
+            ng("readv(iovcnt=0) unexpected return", r);
+
+        close(fd);
+    rv5_end:
+        cleanup(RV_FILE);
+    }
+
+    // RV6. readv on a bad fd — must return an error (< 0), not crash
+    {
+        char buf[8] = {0};
+        struct iovec iov[1];
+        iov[0].iov_base = buf;
+        iov[0].iov_len  = sizeof(buf);
+
+        long r = _readv(999, iov, 1);
+
+        if (r < 0)
+            ok("readv(bad_fd) -> returns error (EBADF expected)");
+        else
+            ng("readv(bad_fd) should have failed", r);
+    }
+
+    // ── SECTION 13: lseek extended ─────────────────────────────────────────
+    //
+    // Linux x86-64 ABI for lseek(2):
+    //   syscall 8, arg1=fd, arg2=offset, arg3=whence
+    //   Returns new file offset (>= 0) on success, -errno on error.
+    //   SEEK_SET=0, SEEK_CUR=1, SEEK_END=2
+    printf("\n--- lseek Extended Tests ---\n");
+
+    const char* LS_FILE = "/tmp/sc_lseek_ext_test.txt";
+
+    // LS1. SEEK_END with negative offset — positions inside the file
+    {
+        cleanup(LS_FILE);
+        int fd = open(LS_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("lseek(SEEK_END-neg)/open", fd); goto ls1_end; }
+
+        write(fd, "ABCDE", 5);   // 5 bytes -> EOF at offset 5
+
+        // Seek to 2 bytes before EOF -> offset 3 -> should read 'D'
+        long pos = lseek(fd, -2, SEEK_END);
+        char c = 0;
+        read(fd, &c, 1);
+
+        if (pos == 3 && c == 'D')
+            ok("lseek(SEEK_END, -2) -> positions 2 bytes before EOF, reads correct byte");
+        else
+            ng("lseek(SEEK_END, -2) wrong position or byte", pos);
+
+        close(fd);
+    ls1_end:
+        cleanup(LS_FILE);
+    }
+
+    // LS2. SEEK_CUR reports current position after reads
+    {
+        cleanup(LS_FILE);
+        int fd = open(LS_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("lseek(SEEK_CUR-report)/open", fd); goto ls2_end; }
+
+        write(fd, "ABCDEF", 6);
+        lseek(fd, 0, SEEK_SET);
+
+        char tmp[3];
+        read(fd, tmp, 3);   // read 3 bytes -> position is now 3
+
+        // lseek(fd, 0, SEEK_CUR) is the POSIX way to query current offset
+        long pos = lseek(fd, 0, SEEK_CUR);
+
+        if (pos == 3)
+            ok("lseek(SEEK_CUR, 0) after read(3) -> reports offset 3");
+        else
+            ng("lseek(SEEK_CUR) report wrong", pos);
+
+        close(fd);
+    ls2_end:
+        cleanup(LS_FILE);
+    }
+
+    // LS3. Seek past EOF — file size must NOT change until a write occurs
+    {
+        cleanup(LS_FILE);
+        int fd = open(LS_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("lseek(past-EOF)/open", fd); goto ls3_end; }
+
+        write(fd, "HI", 2);   // 2-byte file
+
+        long pos = lseek(fd, 100, SEEK_SET);   // seek well past EOF
+
+        struct stat st;
+        memset(&st, 0, sizeof(st));
+        fstat(fd, &st);
+
+        // Position must be 100; file size must still be 2 (no implicit extension)
+        if (pos == 100 && st.st_size == 2)
+            ok("lseek past EOF -> offset advances but st_size unchanged");
+        else
+            ng("lseek past EOF: pos or size wrong", (long)st.st_size);
+
+        close(fd);
+    ls3_end:
+        cleanup(LS_FILE);
+    }
+
+    // LS4. lseek on a bad fd — must return error (< 0), no crash
+    {
+        long r = lseek(999, 0, SEEK_SET);
+        if (r < 0)
+            ok("lseek(bad_fd) -> returns error (EBADF expected)");
+        else
+            ng("lseek(bad_fd) should have failed", r);
+    }
+
+    // LS5. lseek(SEEK_SET, 0) on a write-only fd — must succeed (returns 0)
+    //      Seeking is independent of read/write permission.
+    {
+        cleanup(LS_FILE);
+        int fd = open(LS_FILE, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("lseek(wronly)/open", fd); goto ls5_end; }
+
+        write(fd, "TEST", 4);
+
+        long pos = lseek(fd, 0, SEEK_SET);
+
+        if (pos == 0)
+            ok("lseek(SEEK_SET, 0) on O_WRONLY fd -> returns 0 (seek independent of mode)");
+        else
+            ng("lseek on O_WRONLY fd wrong", pos);
+
+        close(fd);
+    ls5_end:
+        cleanup(LS_FILE);
+    }
+
+    // LS6. Chained SEEK_CUR advances — cumulative offset must be exact
+    {
+        cleanup(LS_FILE);
+        int fd = open(LS_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("lseek(chain)/open", fd); goto ls6_end; }
+
+        write(fd, "ABCDEFGHIJ", 10);
+        lseek(fd, 0, SEEK_SET);
+
+        lseek(fd, 2, SEEK_CUR);   // -> 2
+        lseek(fd, 3, SEEK_CUR);   // -> 5
+        long pos = lseek(fd, 1, SEEK_CUR);   // -> 6
+
+        char c = 0;
+        read(fd, &c, 1);   // should read byte at offset 6 == 'G'
+
+        if (pos == 6 && c == 'G')
+            ok("lseek chained SEEK_CUR -> cumulative offset correct, reads right byte");
+        else
+            ng("lseek chain SEEK_CUR wrong", pos);
+
+        close(fd);
+    ls6_end:
+        cleanup(LS_FILE);
+    }
+
+    // ── SECTION 14: readv stress tests ────────────────────────────────────────
+    //
+    // These tests exercise readv under repeated, varied, and adversarial
+    // conditions to catch off-by-one errors, iovec accounting bugs, and
+    // fd-state corruption that single-shot tests cannot expose.
+    printf("\n--- readv Stress Tests ---\n");
+
+    const char* SRV_FILE = "/tmp/sc_readv_stress.txt";
+
+    // RS1. 1000-iteration scatter correctness
+    //      Write a fixed 9-byte pattern, rewind, readv into 3 bufs, verify,
+    //      repeat 1000 times. Catches position-tracking bugs that only surface
+    //      after many seeks.
+    {
+        cleanup(SRV_FILE);
+        int fd = open(SRV_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("readv-stress(iter)/open", fd); goto rs1_end; }
+
+        write(fd, "FOOBARBAZ", 9);
+
+        int ok_count = 0;
+        for (int i = 0; i < 1000; i++) {
+            lseek(fd, 0, SEEK_SET);
+            char b0[3]={0}, b1[3]={0}, b2[3]={0};
+            struct iovec iov[3];
+            iov[0].iov_base = b0; iov[0].iov_len = 3;
+            iov[1].iov_base = b1; iov[1].iov_len = 3;
+            iov[2].iov_base = b2; iov[2].iov_len = 3;
+            long r = _readv(fd, iov, 3);
+            if (r == 9 &&
+                memcmp(b0, "FOO", 3) == 0 &&
+                memcmp(b1, "BAR", 3) == 0 &&
+                memcmp(b2, "BAZ", 3) == 0)
+                ok_count++;
+        }
+
+        if (ok_count == 1000)
+            ok("readv stress: 1000 iterations scatter correct every time");
+        else
+            ng("readv stress: scatter mismatch in iteration loop", ok_count);
+
+        close(fd);
+    rs1_end:
+        cleanup(SRV_FILE);
+    }
+
+    // RS2. 64-iovec fan-out
+    //      Write 64 bytes (one per iovec), scatter-read into 64 single-byte
+    //      buffers. Verifies the kernel correctly walks the full iov[] array
+    //      even when iovcnt approaches IOV_MAX.
+    {
+        cleanup(SRV_FILE);
+        int fd = open(SRV_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("readv-stress(64iov)/open", fd); goto rs2_end; }
+
+        // Write bytes 0x00..0x3F so each is uniquely identifiable
+        char wbuf[64];
+        for (int i = 0; i < 64; i++) wbuf[i] = (char)i;
+        write(fd, wbuf, 64);
+        lseek(fd, 0, SEEK_SET);
+
+        char rbuf[64];
+        memset(rbuf, 0xFF, 64);
+        struct iovec iov[64];
+        for (int i = 0; i < 64; i++) {
+            iov[i].iov_base = &rbuf[i];
+            iov[i].iov_len  = 1;
+        }
+
+        long r = _readv(fd, iov, 64);
+
+        int match = (r == 64);
+        for (int i = 0; i < 64 && match; i++)
+            if (rbuf[i] != (char)i) match = 0;
+
+        if (match)
+            ok("readv stress: 64-iovec fan-out, all bytes placed correctly");
+        else
+            ng("readv stress: 64-iovec fan-out mismatch", r);
+
+        close(fd);
+    rs2_end:
+        cleanup(SRV_FILE);
+    }
+
+    // RS3. Interleaved readv + lseek — alternating readv and SEEK_SET in a loop
+    //      ensures that lseek properly resets the file offset between readv calls
+    //      and that readv does not cache or corrupt the position.
+    {
+        cleanup(SRV_FILE);
+        int fd = open(SRV_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("readv-stress(interleave)/open", fd); goto rs3_end; }
+
+        // 8 distinct 4-byte words side-by-side; we'll seek to each and readv it
+        const char* pattern = "AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH";  // 8*4 = 32 bytes
+        write(fd, pattern, 32);
+
+        int errors = 0;
+        // Read each 4-byte word in reverse order via lseek+readv
+        for (int i = 7; i >= 0; i--) {
+            lseek(fd, i * 4, SEEK_SET);
+            char b0[2]={0}, b1[2]={0};
+            struct iovec iov[2];
+            iov[0].iov_base = b0; iov[0].iov_len = 2;
+            iov[1].iov_base = b1; iov[1].iov_len = 2;
+            long r = _readv(fd, iov, 2);
+            // All 4 bytes at offset i*4 should be the same character
+            char expected = pattern[i * 4];
+            if (r != 4 || b0[0] != expected || b0[1] != expected ||
+                b1[0] != expected || b1[1] != expected)
+                errors++;
+        }
+
+        if (errors == 0)
+            ok("readv stress: interleaved readv+lseek, all words correct");
+        else
+            ng("readv stress: interleaved readv+lseek mismatch count", errors);
+
+        close(fd);
+    rs3_end:
+        cleanup(SRV_FILE);
+    }
+
+    // RS4. Pipe-backed readv — readv must work on pipe fds, not just regular files.
+    //      Pipes are a common readv target (e.g. socket/network code paths) and
+    //      exercise a different kernel code path than file-backed reads.
+    {
+        int pfd[2] = {-1, -1};
+        if (pipe(pfd) != 0) { ng("readv-stress(pipe)/pipe", -1); goto rs4_end; }
+
+        // Write 12 bytes in one shot; read them back with a 3-iovec readv
+        write(pfd[1], "HELLOWORLD!!", 12);
+        close(pfd[1]);
+
+        char b0[5]={0}, b1[5]={0}, b2[3]={0};
+        struct iovec iov[3];
+        iov[0].iov_base = b0; iov[0].iov_len = 5;
+        iov[1].iov_base = b1; iov[1].iov_len = 5;
+        iov[2].iov_base = b2; iov[2].iov_len = 2;
+
+        long r = _readv(pfd[0], iov, 3);
+        close(pfd[0]);
+
+        if (r == 12 &&
+            memcmp(b0, "HELLO", 5) == 0 &&
+            memcmp(b1, "WORLD", 5) == 0 &&
+            b2[0] == '!' && b2[1] == '!')
+            ok("readv stress: pipe-backed readv scatter correct");
+        else
+            ng("readv stress: pipe-backed readv wrong", r);
+
+    rs4_end:;
+    }
+
+    // RS5. Write-only fd guard under load
+    //      Attempt readv on an O_WRONLY fd 100 times; every call must return
+    //      an error. A buggy implementation might succeed on some iterations
+    //      if it fails to re-check mode on each entry.
+    {
+        cleanup(SRV_FILE);
+        int fd = open(SRV_FILE, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("readv-stress(wronly)/open", fd); goto rs5_end; }
+        write(fd, "secret", 6);
+
+        int guard_ok = 1;
+        char buf[8];
+        struct iovec iov[1];
+        iov[0].iov_base = buf;
+        iov[0].iov_len  = sizeof(buf);
+        for (int i = 0; i < 100; i++) {
+            if (_readv(fd, iov, 1) >= 0) { guard_ok = 0; break; }
+        }
+
+        if (guard_ok)
+            ok("readv stress: O_WRONLY fd rejected every time (100 attempts)");
+        else
+            ng("readv stress: O_WRONLY fd allowed readv unexpectedly", 0);
+
+        close(fd);
+    rs5_end:
+        cleanup(SRV_FILE);
+    }
+
+    // ── SECTION 15: lseek stress tests ────────────────────────────────────────
+    printf("\n--- lseek Stress Tests ---\n");
+
+    const char* SLS_FILE = "/tmp/sc_lseek_stress.txt";
+
+    // SS1. 1000-iteration seek+read sweep
+    //      Write 26 bytes ('A'..'Z'), then for 1000 iterations seek to a
+    //      pseudo-random offset and verify the byte read matches the expected
+    //      character. Catches position-tracking drift under sustained use.
+    {
+        cleanup(SLS_FILE);
+        int fd = open(SLS_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("lseek-stress(sweep)/open", fd); goto ss1_end; }
+
+        char alpha[26];
+        for (int i = 0; i < 26; i++) alpha[i] = 'A' + i;
+        write(fd, alpha, 26);
+
+        int errors = 0;
+        // Simple LCG for deterministic but varied offsets: x = (x*1103515245+12345) & 0x7fffffff
+        unsigned int x = 0xdeadbeef;
+        for (int i = 0; i < 1000; i++) {
+            x = x * 1103515245u + 12345u;
+            int off = (int)(x % 26);
+            long pos = lseek(fd, off, SEEK_SET);
+            char c = 0;
+            read(fd, &c, 1);
+            if (pos != off || c != ('A' + off)) errors++;
+        }
+
+        if (errors == 0)
+            ok("lseek stress: 1000 random-offset seek+read, all correct");
+        else
+            ng("lseek stress: seek+read sweep had mismatches", errors);
+
+        close(fd);
+    ss1_end:
+        cleanup(SLS_FILE);
+    }
+
+    // SS2. Alternating SEEK_END / SEEK_SET boundary walk
+    //      Repeatedly bounce between the very start and very end of a file.
+    //      Verifies that SEEK_END and SEEK_SET interact correctly and that
+    //      the returned offset is always exact (no off-by-one at boundaries).
+    {
+        cleanup(SLS_FILE);
+        int fd = open(SLS_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("lseek-stress(boundary)/open", fd); goto ss2_end; }
+
+        write(fd, "BOUNDARY", 8);   // 8-byte file
+
+        int errors = 0;
+        for (int i = 0; i < 500; i++) {
+            long end = lseek(fd, 0, SEEK_END);   // must be 8
+            long beg = lseek(fd, 0, SEEK_SET);   // must be 0
+            if (end != 8 || beg != 0) errors++;
+        }
+
+        if (errors == 0)
+            ok("lseek stress: 500x SEEK_END/SEEK_SET boundary walk correct");
+        else
+            ng("lseek stress: boundary walk had position errors", errors);
+
+        close(fd);
+    ss2_end:
+        cleanup(SLS_FILE);
+    }
+
+    // SS3. Seek + write hole fill
+    //      Seek past EOF and write a single byte to create a sparse "hole",
+    //      then seek back and verify: bytes in the hole read as zero (POSIX),
+    //      the byte written at the far offset reads back correctly, and st_size
+    //      equals the furthest byte written + 1.
+    {
+        cleanup(SLS_FILE);
+        int fd = open(SLS_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("lseek-stress(hole)/open", fd); goto ss3_end; }
+
+        write(fd, "X", 1);                    // offset 0: 'X'
+        lseek(fd, 99, SEEK_SET);              // seek 98 bytes past EOF
+        write(fd, "Z", 1);                    // offset 99: 'Z', creates hole
+
+        // Check file size
+        struct stat st;
+        memset(&st, 0, sizeof(st));
+        fstat(fd, &st);
+
+        // Read back the hole byte (offset 50) and the sentinel bytes
+        lseek(fd, 0, SEEK_SET);
+        char first = 0;
+        read(fd, &first, 1);
+
+        lseek(fd, 50, SEEK_SET);
+        char hole = 0xFF;
+        read(fd, &hole, 1);
+
+        lseek(fd, 99, SEEK_SET);
+        char last = 0;
+        read(fd, &last, 1);
+
+        if (st.st_size == 100 && first == 'X' && hole == '\0' && last == 'Z')
+            ok("lseek stress: seek+write hole — size correct, hole zeroed, sentinel correct");
+        else
+            ng("lseek stress: hole fill mismatch", (long)st.st_size);
+
+        close(fd);
+    ss3_end:
+        cleanup(SLS_FILE);
+    }
+
+    // SS4. Two independent fds, independent positions
+    //      Open the same file twice; seek each fd to a different offset and
+    //      confirm that seeking one does NOT move the other. Tests that the
+    //      kernel maintains per-open-file-description offsets correctly.
+    {
+        cleanup(SLS_FILE);
+        int fd1 = open(SLS_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd1 < 0) { ng("lseek-stress(indep)/open1", fd1); goto ss4_end; }
+        int fd2 = open(SLS_FILE, O_RDONLY, 0);
+        if (fd2 < 0) { ng("lseek-stress(indep)/open2", fd2); close(fd1); goto ss4_end; }
+
+        write(fd1, "ABCDEFGHIJ", 10);
+
+        lseek(fd1, 2, SEEK_SET);   // fd1 at offset 2
+        lseek(fd2, 7, SEEK_SET);   // fd2 at offset 7
+
+        long p1 = lseek(fd1, 0, SEEK_CUR);   // should still be 2
+        long p2 = lseek(fd2, 0, SEEK_CUR);   // should still be 7
+
+        // Move fd1 to 0 — must NOT affect fd2
+        lseek(fd1, 0, SEEK_SET);
+        long p2_after = lseek(fd2, 0, SEEK_CUR);   // must still be 7
+
+        if (p1 == 2 && p2 == 7 && p2_after == 7)
+            ok("lseek stress: two fds on same file have independent positions");
+        else
+            ng("lseek stress: independent fd positions wrong", p2_after);
+
+        close(fd1);
+        close(fd2);
+    ss4_end:
+        cleanup(SLS_FILE);
+    }
+
+    // SS5. SEEK_CUR accumulation over 500 steps
+    //      Starting at offset 0, apply 500 x SEEK_CUR(+1) advances and verify
+    //      the final reported offset is exactly 500. Also checks that a single
+    //      SEEK_CUR(-500) brings it back to 0. Exercises the cumulative
+    //      arithmetic path in the kernel without any intermediate resets.
+    {
+        cleanup(SLS_FILE);
+        int fd = open(SLS_FILE, O_RDWR|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ng("lseek-stress(accumulate)/open", fd); goto ss5_end; }
+
+        // Pre-fill 512 bytes so seeking within them is valid
+        char filler[512];
+        memset(filler, 0xCC, 512);
+        write(fd, filler, 512);
+        lseek(fd, 0, SEEK_SET);
+
+        long pos = 0;
+        int drift = 0;
+        for (int i = 0; i < 500; i++) {
+            pos = lseek(fd, 1, SEEK_CUR);
+            if (pos != i + 1) { drift++; break; }
+        }
+
+        long back = lseek(fd, -500, SEEK_CUR);
+
+        if (drift == 0 && pos == 500 && back == 0)
+            ok("lseek stress: 500x SEEK_CUR(+1) then SEEK_CUR(-500) -> exact offsets");
+        else
+            ng("lseek stress: SEEK_CUR accumulation drift", pos);
+
+        close(fd);
+    ss5_end:
+        cleanup(SLS_FILE);
     }
 
     printf("\n--- Result: %d OK, %d NG ---\n", pass, fail);

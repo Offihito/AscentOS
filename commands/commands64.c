@@ -2073,10 +2073,69 @@ void cmd_exec(const char* args, CommandOutput* output) {
 // ADVANCED FILE SYSTEM COMMANDS
 // ===========================================
 
-static void ext3_tree_recursive(const char* path, int depth, CommandOutput* output) {
+void cmd_tree(const char* args, CommandOutput* output) {
+    (void)args;
     static dirent64_t dents[128];
+    
+    output_add_line(output, "/ (root directory - level 1 only)", VGA_CYAN);
+    output_add_empty_line(output);
+    
+    int total = ext3_getdents("/", dents, (int)sizeof(dents));
+    if (total <= 0) {
+        output_add_line(output, "Cannot read root directory", VGA_RED);
+        return;
+    }
+    
+    int count = 0;
+    int off = 0;
+    while (off < total) {
+        dirent64_t* de = (dirent64_t*)((char*)dents + off);
+        if (de->d_reclen == 0) break;
+        
+        // Skip . and ..
+        if (de->d_name[0] == '.' &&
+            (de->d_name[1] == '\0' ||
+             (de->d_name[1] == '.' && de->d_name[2] == '\0'))) {
+            off += de->d_reclen;
+            continue;
+        }
+        
+        char line[MAX_LINE_LENGTH];
+        str_cpy(line, "  ");
+        
+        if (de->d_type == DT_DIR) {
+            str_concat(line, "[DIR]  ");
+        } else {
+            str_concat(line, "[FILE] ");
+        }
+        str_concat(line, de->d_name);
+        
+        uint8_t color = (de->d_type == DT_DIR) ? VGA_YELLOW : VGA_WHITE;
+        output_add_line(output, line, color);
+        count++;
+        
+        off += de->d_reclen;
+    }
+    
+    if (count == 0) {
+        output_add_line(output, "  (empty directory)", VGA_DARK_GRAY);
+    } else {
+        output_add_empty_line(output);
+        char summary[64];
+        str_cpy(summary, "Total items: ");
+        char cstr[8];
+        int_to_str(count, cstr);
+        str_concat(summary, cstr);
+        output_add_line(output, summary, VGA_CYAN);
+        output_add_empty_line(output);
+        output_add_line(output, "Tip: Use 'ls <dir>' to see subdirectory contents", VGA_DARK_GRAY);
+    }
+}
+
+static void ext3_tree_recursive(const char* path, int depth, CommandOutput* output) {
+    static dirent64_t dents[512];
     int total = ext3_getdents(path, dents, (int)sizeof(dents));
-    if (total < 0) return;
+    if (total <= 0) return;
 
     int off = 0;
     while (off < total) {
@@ -2087,9 +2146,10 @@ static void ext3_tree_recursive(const char* path, int depth, CommandOutput* outp
               (de->d_name[1] == '\0' ||
               (de->d_name[1] == '.' && de->d_name[2] == '\0')))) {
             char line[MAX_LINE_LENGTH];
-            for (int d = 0; d < depth && d < 8; d++) str_concat(line, "  ");
-            line[depth * 2 < MAX_LINE_LENGTH ? depth * 2 : MAX_LINE_LENGTH - 1] = '\0';
-            int dsp = depth * 2; if (dsp >= MAX_LINE_LENGTH) dsp = MAX_LINE_LENGTH - 1;
+            line[0] = '\0';
+            
+            int dsp = depth * 2;
+            if (dsp >= MAX_LINE_LENGTH) dsp = MAX_LINE_LENGTH - 1;
             for (int k = 0; k < dsp; k++) line[k] = ' ';
             line[dsp] = '\0';
 
@@ -2114,20 +2174,13 @@ static void ext3_tree_recursive(const char* path, int depth, CommandOutput* outp
     }
 }
 
-void cmd_tree(const char* args, CommandOutput* output) {
-    (void)args;
-    const char* root = "/";
-    output_add_line(output, "/", VGA_CYAN);
-    ext3_tree_recursive(root, 1, output);
-}
-
 void cmd_find(const char* args, CommandOutput* output) {
     if (!args || str_len(args) == 0) {
         output_add_line(output, "Usage: find <pattern>", VGA_YELLOW);
         output_add_line(output, "Example: find txt", VGA_DARK_GRAY);
         return;
     }
-    static dirent64_t find_dents[128];
+    static dirent64_t find_dents[512];
 
     const char* search_dirs[] = {"/", "/bin", "/usr", "/etc", "/home", "/tmp", NULL};
     int found = 0;

@@ -1098,6 +1098,15 @@ static void sys_uptime(syscall_frame_t* frame) {
 static void sys_debug(syscall_frame_t* frame) {
     const char* msg = (const char*)frame->rdi;
     if (!is_valid_user_ptr(msg, 256)) { frame->rax = SYSCALL_ERR_INVAL; return; }
+
+    // Özel komut: "SCLOG" → syscall tamponunu hemen serial'a dök.
+    // User-space'den tetiklemek için: syscall(103, "SCLOG")
+    if (msg[0]=='S' && msg[1]=='C' && msg[2]=='L' && msg[3]=='O' && msg[4]=='G' && msg[5]=='\0') {
+        syscall_log_dump();
+        frame->rax = SYSCALL_OK;
+        return;
+    }
+
     serial_print("[DEBUG] ");
     serial_print(msg);
     serial_print("\n");
@@ -6510,6 +6519,126 @@ static void sys_connect(syscall_frame_t* frame) {
     frame->rax = 0;
 }
 
+// ============================================================
+// Syscall ring-buffer logger — panic/debug araştırma için
+//
+// Doom'un her frame'inde onlarca syscall olur (fb_blit, kb_read,
+// getticks, sb16…). Bunları hepsini anında serial'a basmak hem
+// seriyi doldurur hem de performansı çökertir.
+//
+// Çözüm: Son SCLOG_CAP syscall'ı (numara + arg1 + dönüş) sessizce
+// döngüsel tampona yaz. Şu durumlarda tüm tamponu seri porta dök:
+//   1. syscall_log_dump() çağrısında (kernel panic handler'ından çağır).
+//   2. SYS_DEBUG (103) ile "SCLOG" stringi geldiğinde — user-space
+//      test programından elle tetiklemek için.
+//
+// Yüksek frekanslı syscall'lar (fb_blit=409, kb_read=410, sb16=411,
+// getticks=404, yield=24, read=0, write=1) örnekleme ile logllanır:
+// her SCLOG_SAMPLE_SKIP çağrıda bir kayıt alınır. Böylece tampon
+// gerçekten önemli/nadir syscall'larla dolmaz.
+// ============================================================
+
+#define SCLOG_CAP          256    // tampon büyüklüğü (2'nin kuvveti olmalı)
+#define SCLOG_MASK         (SCLOG_CAP - 1)
+#define SCLOG_SAMPLE_SKIP  15     // yüksek frekanslı syscall'lar: her 16'da 1 kayıt
+
+// Yüksek frekanslı (gürültülü) syscall numaraları — örnekleme uygulanır
+#define SCLOG_IS_NOISY(n) ((n)==409||(n)==410||(n)==411||(n)==404|| \
+                           (n)==24 ||(n)==0  ||(n)==1  ||(n)==412|| \
+                           (n)==7  ||(n)==23 ||(n)==35 ||(n)==228)
+
+typedef struct {
+    uint32_t num;    // syscall numarası
+    uint64_t arg1;   // rdi (ilk argüman — genellikle fd veya pointer)
+    uint64_t arg2;   // rsi (ikinci argüman — genellikle boyut/offset)
+    int64_t  ret;    // dönüş değeri (frame->rax, syscall sonrası)
+} sclog_entry_t;
+
+static sclog_entry_t  sclog_buf[SCLOG_CAP];
+static volatile int   sclog_head  = 0;   // bir sonraki yazılacak slot
+static volatile int   sclog_count = 0;   // toplam kaydedilen (en fazla SCLOG_CAP)
+static uint32_t       sclog_noisy_ctr = 0; // örnekleme sayacı
+
+// Tek bir uint64 değerini hex olarak serial'a yazar (0x prefix dahil)
+static void sclog_print_hex(uint64_t v) {
+    char buf[20];
+    buf[0]='0'; buf[1]='x';
+    const char* h = "0123456789abcdef";
+    for (int i = 0; i < 16; i++) buf[2+i] = h[(v >> (60 - i*4)) & 0xf];
+    buf[18]='\n'; buf[19]=0;
+    // sadece değeri yaz, newline olmadan (çağıran halleder)
+    buf[18]=0;
+    serial_print(buf);
+}
+
+// uint64 değerini onluk olarak serial'a yazar
+static void sclog_print_dec(int64_t v) {
+    char buf[24];
+    if (v == 0) { serial_print("0"); return; }
+    int neg = (v < 0);
+    uint64_t u = neg ? (uint64_t)(-v) : (uint64_t)v;
+    int i = 22; buf[23] = 0; buf[22] = 0;
+    while (u > 0 && i > 0) { buf[--i] = '0' + (int)(u % 10); u /= 10; }
+    if (neg && i > 0) buf[--i] = '-';
+    serial_print(buf + i);
+}
+
+// Tampondaki tüm kayıtları (kronolojik sırayla) serial porta döker.
+// Kernel panic handler'ından ve SYS_DEBUG "SCLOG" komutundan çağrılır.
+void syscall_log_dump(void) {
+    serial_print("\n[SCLOG] === Son ");
+    sclog_print_dec((int64_t)(sclog_count < SCLOG_CAP ? sclog_count : SCLOG_CAP));
+    serial_print(" syscall (en eskiden en yeniye) ===\n");
+
+    int total   = sclog_count < SCLOG_CAP ? sclog_count : SCLOG_CAP;
+    int start   = (sclog_count >= SCLOG_CAP) ? sclog_head : 0;
+
+    for (int i = 0; i < total; i++) {
+        int idx = (start + i) & SCLOG_MASK;
+        sclog_entry_t* e = &sclog_buf[idx];
+        serial_print("[SCLOG] #");
+        sclog_print_dec((int64_t)i);
+        serial_print(" sys=");
+        sclog_print_dec((int64_t)e->num);
+        serial_print(" arg1=");
+        sclog_print_hex(e->arg1);
+        serial_print(" arg2=");
+        sclog_print_hex(e->arg2);
+        serial_print(" ret=");
+        sclog_print_dec(e->ret);
+        serial_print("\n");
+    }
+    serial_print("[SCLOG] === bitti ===\n");
+}
+
+// Her syscall girişinde çağrılır (num bilinir, ret henüz belli değil).
+// Döngüsel tampona yazar; noisy syscall'ları örnekler.
+// Dönüş değerini syscall bittikten SONRA aynı slot'a yazar.
+// Slot indeksi döndürülür; çağıran bunu sclog_set_ret() ile kapatır.
+static int sclog_enter(uint32_t num, uint64_t arg1, uint64_t arg2) {
+    if (SCLOG_IS_NOISY(num)) {
+        sclog_noisy_ctr++;
+        if ((sclog_noisy_ctr & (uint32_t)SCLOG_SAMPLE_SKIP) != 0)
+            return -1;  // bu çağrıyı kaydetme
+    }
+    int slot = sclog_head;
+    sclog_buf[slot].num  = num;
+    sclog_buf[slot].arg1 = arg1;
+    sclog_buf[slot].arg2 = arg2;
+    sclog_buf[slot].ret  = 0x7FFFFFFF7FFFFFFFll; // "henüz dönmedi" sentinel
+    sclog_head  = (sclog_head + 1) & SCLOG_MASK;
+    sclog_count++;
+    return slot;
+}
+
+static void sclog_set_ret(int slot, int64_t ret) {
+    if (slot < 0) return;
+    sclog_buf[slot].ret = ret;
+}
+
+// Kernel panic handler'ından çağrılabilmesi için extern bildir
+void syscall_log_dump(void);
+
 void syscall_dispatch(syscall_frame_t* frame) {
     // ── TLS (FS_BASE) restore — giriş ────────────────────────────
     // Context switch sonrası CPU FS_BASE'i sıfırlayabilir.
@@ -6527,6 +6656,10 @@ void syscall_dispatch(syscall_frame_t* frame) {
 
     uint64_t num = frame->rax;
 
+    // ── Syscall ring-buffer logger — giriş kaydı ─────────────────────────
+    // Dönüş değeri henüz belli değil; slot'u şimdi al, sonra kapat.
+    int _sclog_slot = sclog_enter((uint32_t)num, frame->rdi, frame->rsi);
+
     // ── SYS_SB16_PLAY (411): sinyal dispatch OLMADAN işle ─────────────────
     // signal_dispatch_pending() context switch yapabiliyor; bu wav_player'ı
     // beklenmedik anlarda durduruyor → DMA buffer boşalıyor → cızırtı.
@@ -6536,13 +6669,14 @@ void syscall_dispatch(syscall_frame_t* frame) {
         uint64_t    ulen  = frame->rsi;
         uint32_t    rate  = (uint32_t)frame->rdx;
         uint32_t    fmt   = (uint32_t)frame->r10;
-        if (!ubuf || ulen == 0 || ulen > 8192) { frame->rax = SYSCALL_ERR_INVAL; return; }
-        if (!is_valid_user_ptr(ubuf, ulen))     { frame->rax = SYSCALL_ERR_FAULT; return; }
-        if (rate < 4000 || rate > 48000)        { frame->rax = SYSCALL_ERR_INVAL; return; }
-        if (fmt > 3)                            { frame->rax = SYSCALL_ERR_INVAL; return; }
-        if (!g_sb16_initialized)                { frame->rax = -19; return; }
+        if (!ubuf || ulen == 0 || ulen > 8192) { frame->rax = SYSCALL_ERR_INVAL; sclog_set_ret(_sclog_slot, (int64_t)frame->rax); return; }
+        if (!is_valid_user_ptr(ubuf, ulen))     { frame->rax = SYSCALL_ERR_FAULT; sclog_set_ret(_sclog_slot, (int64_t)frame->rax); return; }
+        if (rate < 4000 || rate > 48000)        { frame->rax = SYSCALL_ERR_INVAL; sclog_set_ret(_sclog_slot, (int64_t)frame->rax); return; }
+        if (fmt > 3)                            { frame->rax = SYSCALL_ERR_INVAL; sclog_set_ret(_sclog_slot, (int64_t)frame->rax); return; }
+        if (!g_sb16_initialized)                { frame->rax = -19;              sclog_set_ret(_sclog_slot, (int64_t)frame->rax); return; }
         int ok = sb16_play_pcm_raw(ubuf, (unsigned short)ulen, rate, (int)fmt);
         frame->rax = (ok == 0) ? 0 : -5;
+        sclog_set_ret(_sclog_slot, (int64_t)frame->rax);
         return;  // signal_dispatch_pending() ATLANDI
     }
 
@@ -6718,6 +6852,9 @@ void syscall_dispatch(syscall_frame_t* frame) {
         frame->rax = SYSCALL_ERR_NOSYS;
         break;
     }
+
+    // ── Syscall ring-buffer logger — dönüş kaydı ─────────────────────────
+    sclog_set_ret(_sclog_slot, (int64_t)frame->rax);
 
     // Her syscall dönüşünde bekleyen sinyalleri kontrol et ve işle.
     signal_dispatch_pending();

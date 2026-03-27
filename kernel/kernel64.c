@@ -7,6 +7,8 @@
 #include "cpu64.h"
 #include "../arch/x86_64/apic.h"
 #include "../drivers/sb16.h"
+#include "../drivers/graphics.h"
+#include "../drivers/vesa64.h"
 
 #define COM1 0x3F8
 
@@ -19,7 +21,26 @@ int strcmp64(const char* a, const char* b) { while(*a&&*a==*b){a++;b++;} return 
 void* memset64(void* d, int v, size_t n) { uint8_t*p=d; while(n--)*p++=(uint8_t)v; return d; }
 void* memcpy64(void* d, const void* s, size_t n) { uint8_t*dp=d; const uint8_t*sp=s; while(n--)*dp++=*sp++; return d; }
 
-// Multiboot2
+// External framebuffer variables (from boot loader)
+extern uint64_t framebuffer_addr;
+extern uint32_t framebuffer_pitch;
+extern uint32_t framebuffer_width;
+extern uint32_t framebuffer_height;
+extern uint8_t  framebuffer_bpp;
+
+// Graphics initialization helper
+static void graphics_init_from_bootloader(void) {
+    if (!framebuffer_addr || !framebuffer_width || !framebuffer_height) {
+        serial_print("[GFX] No framebuffer configured by bootloader\n");
+        return;
+    }
+
+    // Setup graphics abstraction layer with VESA framebuffer
+    // (Future: check UEFI mode and call gfx_set_gop_framebuffer instead)
+    gfx_set_vesa_framebuffer(framebuffer_addr, framebuffer_width, 
+                             framebuffer_height, framebuffer_pitch, framebuffer_bpp);
+    gfx_init();
+}
 extern uint64_t multiboot_mmap_addr;
 extern uint32_t multiboot_mmap_entry_size;
 extern uint32_t multiboot_mmap_total_size;
@@ -219,7 +240,12 @@ void kernel_main(uint64_t multiboot_info) {
     (void)multiboot_info;
     serial_print("\n=== AscentOS Unified Kernel ===\n");
 
+    // Initialize graphics (UEFI GOP or VESA)
+    graphics_init_from_bootloader();
+    
+    // Legacy VESA text mode initialization
     init_vesa64();
+    
     pmm_init_from_mb();
     vmm_init();
     gdt_install_user_segments();
