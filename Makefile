@@ -39,6 +39,9 @@ all: AscentOS.iso userland install-userland
 files64.o: fs/files64.c fs/files64.h fs/ext3.h drivers/ata64.h
 	$(CC) $(CFLAGS) -c fs/files64.c -o $@
 
+vfs.o: fs/vfs.c fs/vfs.h fs/files64.h
+	$(CC) $(CFLAGS) -c fs/vfs.c -o $@
+
 ata64.o: drivers/ata64.c drivers/ata64.h
 	$(CC) $(CFLAGS) -c drivers/ata64.c -o $@
 
@@ -95,6 +98,9 @@ panic64.o: kernel/panic64.c
 
 pci.o: drivers/pci.c drivers/pci.h
 	$(CC) $(CFLAGS) -c drivers/pci.c -o $@
+
+apic.o: arch/x86_64/apic.c arch/x86_64/apic.h
+	$(CC) $(CFLAGS) -c arch/x86_64/apic.c -o $@
 
 rtl8139.o: drivers/rtl8139.c drivers/rtl8139.h drivers/pci.h
 	$(CC) $(CFLAGS) -c drivers/rtl8139.c -o $@
@@ -155,10 +161,11 @@ commands64.o: commands/commands64.c commands/commands64.h \
 KERNEL_OBJS = boot64.o interrupts64.o idt64.o \
               font8x16.o vesa64.o mouse64.o journal.o \
               keyboard.o kernel64.o cpu64.o spinlock64.o \
-              commands64.o files64.o ata64.o ext3.o elf64.o \
+              commands64.o files64.o vfs.o ata64.o ext3.o elf64.o \
               pmm.o heap.o vmm64.o timer.o pcspk.o sb16.o task.o scheduler.o \
               page_fault.o syscall.o signal64.o \
-              panic64.o rtl8139.o pci.o arp.o ipv4.o icmp.o udp.o dhcp.o tcp.o http.o
+              panic64.o rtl8139.o pci.o arp.o ipv4.o icmp.o udp.o dhcp.o tcp.o http.o \
+			  apic.o
 
 kernel64.elf: $(KERNEL_OBJS)
 	$(LD) $(LDFLAGS) $^ -o $@

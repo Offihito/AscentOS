@@ -16,6 +16,7 @@
 #include "../kernel/spinlock64.h"
 #include "../drivers/pci.h"
 #include <stdbool.h>
+#include "../arch/x86_64/apic.h"
 
 extern void spinlock_test(void); 
 
@@ -294,7 +295,13 @@ static void net_packet_callback(const uint8_t* buf, uint16_t len) {
     }
 }
 
-
+static void apic_u32_to_hex(uint32_t v, char* out) {
+    const char* h = "0123456789ABCDEF";
+    out[0] = '0'; out[1] = 'x';
+    for (int i = 0; i < 8; i++)
+        out[2 + i] = h[(v >> (28 - i * 4)) & 0xF];
+    out[10] = '\0';
+}
 
 // ===========================================
 // CPU USAGE TRACKING
@@ -2348,12 +2355,32 @@ static void panic_do_div0(void) {
     (void)c;
 }
 
-static void panic_do_stack_overflow(int depth) {
-    volatile char buf[512];
-    buf[0] = (char)depth;
-    (void)buf;
-    panic_do_stack_overflow(depth + 1);
+// Stack overflow testi.
+//
+// x86-64 long mode'da segment limit kontrolü yoktur (#SS bu yolla üretilemez).
+// Gerçek stack overflow, VMM'nin stack'in altına koyduğu guard page'e çarpınca
+// #PF olarak gelir — bu #PF, handler stack'i de taşmışsa #DF'e dönüşür.
+//
+// En güvenilir yöntem: int $0x0C ile doğrudan #SS vektörünü ateşlemek.
+// IDT'de #SS handler'ı varsa kernel_panic_handler çağrılır ve ekran görünür.
+// Bu "sahte" bir #SS'tir ama panic ekranı + serial dump açısından farkı yoktur.
+//
+// Alternatif olarak gerçek guard page çarpması da deneniyor (yorum satırı).
+static __attribute__((noinline, noreturn)) void panic_do_stack_overflow(void) {
+    // int $0x0C → #SS Stack-Segment Fault (vektör 12)
+    // IDT'deki #SS handler'ını doğrudan tetikler, triple fault riski yok.
+    __asm__ volatile("int $0x0C");
+    __builtin_unreachable();
 }
+//
+// Gerçek guard page yöntemi (VMM guard page kuruluysa çalışır):
+//   __asm__ volatile(
+//       "mov %%rsp, %%rax\n\t"
+//       "and $~0xFFFF, %%rax\n\t"   // stack'in 64KB-hizalı tabanı
+//       "sub $0x1000, %%rax\n\t"    // guard page'in hemen altı
+//       "mov (%%rax), %%rbx\n\t"    // guard page'e oku → #PF → #DF
+//       ::: "rax", "rbx", "memory"
+//   );
 
 static void cmd_panic(const char* args, CommandOutput* output) {
     if (!args || str_len(args) == 0) {
@@ -2403,10 +2430,10 @@ static void cmd_panic(const char* args, CommandOutput* output) {
         panic_do_div0();
 
     } else if (str_cmp(args, "stack") == 0) {
-        output_add_line(output, "[PANIC TEST] Triggering stack overflow...", VGA_RED);
-        output_add_line(output, "  Infinite recursion -> #SS or #DF", VGA_DARK_GRAY);
+        output_add_line(output, "[PANIC TEST] Triggering stack overflow (#SS)...", VGA_RED);
+        output_add_line(output, "  int 0x0C -> #SS handler -> kernel_panic_handler", VGA_DARK_GRAY);
         for (volatile int i = 0; i < 5000000; i++);
-        panic_do_stack_overflow(0);
+        panic_do_stack_overflow();
 
     } else {
         output_add_line(output, "Unknown panic type. Type 'panic' to see the list.", VGA_YELLOW);
@@ -4228,7 +4255,476 @@ static void cmd_httppost(const char* args, CommandOutput* output) {
         output_add_line(output, sz, 0x07);
     }
 }
-
+static void cmd_apic(const char* args, CommandOutput* output) {
+ 
+    // Argüman yoksa → info moduna düş
+    int show_info    = (!args || str_len(args) == 0 ||
+                        str_cmp(args, "info") == 0);
+    int do_init      = (args && str_cmp(args, "init") == 0);
+    int do_test      = (args && str_cmp(args, "test") == 0);
+    int do_disablepic = (args && str_cmp(args, "disablepic") == 0);
+    int do_stoptimer = (args && str_cmp(args, "stoptimer") == 0);
+ 
+    // "timer N" ayrıştırması
+    uint32_t timer_hz = 0;
+    int do_timer = 0;
+    if (args && args[0] == 't' && args[1] == 'i' && args[2] == 'm' &&
+        args[3] == 'e' && args[4] == 'r' &&
+        (args[5] == ' ' || args[5] == '\0')) {
+        if (args[5] == ' ') {
+            const char* p = args + 6;
+            while (*p >= '0' && *p <= '9')
+                timer_hz = timer_hz * 10 + (uint32_t)(*p++ - '0');
+        }
+        do_timer = 1;
+    }
+ 
+    // ════════════════════════════════════════════════════════════════════════
+    // APIC INFO
+    // ════════════════════════════════════════════════════════════════════════
+    if (show_info || do_init || do_timer || do_test ||
+        do_disablepic || do_stoptimer) {
+ 
+        // ── İlk satır: başlık ──────────────────────────────────────────────
+        output_add_line(output,
+            "=== APIC (Advanced Programmable Interrupt Controller) ===",
+            VGA_CYAN);
+        output_add_empty_line(output);
+ 
+        // ── CPUID kontrolü ─────────────────────────────────────────────────
+        int detected = apic_detect();
+        {
+            char line[MAX_LINE_LENGTH];
+            str_cpy(line, "  CPUID APIC bit  : ");
+            str_concat(line, detected ? "PRESENT" : "NOT PRESENT");
+            output_add_line(output, line,
+                            detected ? VGA_GREEN : VGA_RED);
+        }
+ 
+        if (!detected) {
+            output_add_empty_line(output);
+            output_add_line(output,
+                "  APIC not supported by this CPU.",
+                VGA_RED);
+            return;
+        }
+ 
+        // ── Genel durum ────────────────────────────────────────────────────
+        int inited = apic_is_initialized();
+        {
+            char line[MAX_LINE_LENGTH];
+            str_cpy(line, "  Initialized     : ");
+            str_concat(line, inited ? "YES" : "NO");
+            output_add_line(output, line,
+                            inited ? VGA_GREEN : VGA_YELLOW);
+        }
+ 
+        // ── INIT komutu ────────────────────────────────────────────────────
+        if (do_init) {
+            if (inited) {
+                output_add_line(output,
+                    "  [INFO] APIC already initialized.",
+                    VGA_YELLOW);
+            } else {
+                output_add_line(output,
+                    "  Initializing LAPIC + IOAPIC ...",
+                    VGA_YELLOW);
+                apic_init();
+                inited = apic_is_initialized();
+                output_add_line(output,
+                    inited ? "  [OK] APIC initialized!" :
+                             "  [ERROR] Initialization failed.",
+                    inited ? VGA_GREEN : VGA_RED);
+            }
+        }
+ 
+        // ── Ayrıntılı bilgi (init sonrası veya info modu) ──────────────────
+        if (inited) {
+            APICInfo ai;
+            apic_get_info(&ai);
+ 
+            output_add_empty_line(output);
+            output_add_line(output, "  ── Local APIC ──", VGA_CYAN);
+ 
+            // Fiziksel taban
+            {
+                char line[MAX_LINE_LENGTH];
+                char hex[11];
+                str_cpy(line, "  Phys base       : ");
+                apic_u32_to_hex((uint32_t)ai.lapic_phys_base, hex);
+                str_concat(line, hex);
+                output_add_line(output, line, VGA_WHITE);
+            }
+ 
+            // LAPIC ID
+            {
+                char line[MAX_LINE_LENGTH];
+                char num[16];
+                str_cpy(line, "  LAPIC ID        : ");
+                uint64_to_string(ai.lapic_id, num);
+                str_concat(line, num);
+                output_add_line(output, line, VGA_WHITE);
+            }
+ 
+            // LAPIC versiyon + LVT sayısı
+            {
+                char line[MAX_LINE_LENGTH];
+                char num[16];
+                str_cpy(line, "  Version         : 0x");
+                uint64_to_string(ai.lapic_version, num);
+                str_concat(line, num);
+                str_concat(line, "  Max LVT: ");
+                uint64_to_string(ai.lapic_max_lvt, num);
+                str_concat(line, num);
+                output_add_line(output, line, VGA_WHITE);
+            }
+ 
+            // Timer durumu
+            {
+                char line[MAX_LINE_LENGTH];
+                char num[16];
+                str_cpy(line, "  Timer           : ");
+                if (ai.timer_hz > 0) {
+                    uint64_to_string((uint64_t)ai.timer_hz, num);
+                    str_concat(line, num);
+                    str_concat(line, " Hz (running)");
+                    output_add_line(output, line, VGA_GREEN);
+                } else {
+                    str_concat(line, "Stopped");
+                    output_add_line(output, line, VGA_YELLOW);
+                }
+ 
+                str_cpy(line, "  Calibration     : ");
+                uint64_to_string(ai.timer_ticks_per_ms, num);
+                str_concat(line, num);
+                str_concat(line, " ticks/ms  (div=16)");
+                output_add_line(output, line, VGA_WHITE);
+            }
+ 
+            output_add_empty_line(output);
+            output_add_line(output, "  ── I/O APIC ──", VGA_CYAN);
+ 
+            {
+                char line[MAX_LINE_LENGTH];
+                char hex[11];
+                str_cpy(line, "  IOAPIC phys     : ");
+                apic_u32_to_hex((uint32_t)ai.ioapic_phys_base, hex);
+                str_concat(line, hex);
+                output_add_line(output, line, VGA_WHITE);
+            }
+            {
+                char line[MAX_LINE_LENGTH];
+                char num[16];
+                str_cpy(line, "  IOAPIC ID       : ");
+                uint64_to_string(ai.ioapic_id, num);
+                str_concat(line, num);
+                output_add_line(output, line, VGA_WHITE);
+            }
+            {
+                char line[MAX_LINE_LENGTH];
+                char num[16];
+                str_cpy(line, "  IOAPIC version  : 0x");
+                uint64_to_string(ai.ioapic_version, num);
+                str_concat(line, num);
+                str_concat(line, "  Max redir: ");
+                uint64_to_string(ai.ioapic_max_redir, num);
+                str_concat(line, num);
+                output_add_line(output, line, VGA_WHITE);
+            }
+ 
+            // PIC durumu
+            output_add_empty_line(output);
+            {
+                char line[MAX_LINE_LENGTH];
+                str_cpy(line, "  8259A PIC       : ");
+                str_concat(line, ai.pic_disabled ?
+                    "Masked (APIC mode)" : "Active (legacy mode)");
+                output_add_line(output, line,
+                    ai.pic_disabled ? VGA_YELLOW : VGA_WHITE);
+            }
+        }
+ 
+        output_add_empty_line(output);
+ 
+        // ── TIMER komutu ────────────────────────────────────────────────────
+        if (do_timer) {
+            if (!inited) {
+                output_add_line(output,
+                    "  [ERROR] Run 'apic init' first.",
+                    VGA_RED);
+                return;
+            }
+            if (timer_hz == 0 || timer_hz > 10000) {
+                output_add_line(output,
+                    "  Usage: apic timer <hz>   (1-10000)",
+                    VGA_YELLOW);
+                return;
+            }
+ 
+            output_add_line(output, "  Calibrating LAPIC timer (PIT ch2)...",
+                            VGA_YELLOW);
+            uint32_t tpm = lapic_timer_calibrate();
+            {
+                char line[MAX_LINE_LENGTH];
+                char num[16];
+                str_cpy(line, "  [OK] Calibrated: ");
+                uint64_to_string(tpm, num);
+                str_concat(line, num);
+                str_concat(line, " ticks/ms");
+                output_add_line(output, line, VGA_GREEN);
+            }
+ 
+            lapic_timer_init(timer_hz);
+ 
+            {
+                char line[MAX_LINE_LENGTH];
+                char num[16];
+                str_cpy(line, "  [OK] LAPIC timer started: ");
+                uint64_to_string(timer_hz, num);
+                str_concat(line, num);
+                str_concat(line, " Hz  (vector 0x40)");
+                output_add_line(output, line, VGA_GREEN);
+            }
+            output_add_line(output,
+                "  NOTE: Timer uses isr_apic_timer in interrupts64.asm.",
+                VGA_GREEN);
+            output_add_line(output,
+                "  NOTE: PIT timer (isr_timer) is still active in parallel.",
+                VGA_GREEN);
+            output_add_line(output,
+                "  TIP : Run 'apic disablepic' after switching fully to APIC.",
+                VGA_YELLOW);
+            return;
+        }
+ 
+        // ── STOPTIMER komutu ─────────────────────────────────────────────────
+        if (do_stoptimer) {
+            if (!inited) {
+                output_add_line(output,
+                    "  [ERROR] APIC not initialized.",
+                    VGA_RED);
+                return;
+            }
+            lapic_timer_stop();
+            output_add_line(output,
+                "  [OK] LAPIC timer stopped.",
+                VGA_GREEN);
+            return;
+        }
+ 
+        // ── DISABLEPIC komutu ───────────────────────────────────────────────
+        if (do_disablepic) {
+            if (!inited) {
+                output_add_line(output,
+                    "  [ERROR] Initialize APIC first ('apic init').",
+                    VGA_RED);
+                return;
+            }
+            output_add_line(output,
+                "  Masking all 8259A IRQs (APIC takes over)...",
+                VGA_YELLOW);
+            apic_disable_pic();
+            output_add_line(output,
+                "  [OK] PIC masked. LAPIC is sole interrupt controller.",
+                VGA_GREEN);
+            output_add_line(output,
+                "  WARNING: Keyboard/network will stop unless IOAPIC routes them.",
+                VGA_RED);
+            return;
+        }
+ 
+        // ── TEST komutu ─────────────────────────────────────────────────────
+        if (do_test) {
+            output_add_line(output,
+                "=== APIC Test Suite ===",
+                VGA_CYAN);
+            output_add_empty_line(output);
+ 
+            // ── Test 1: CPUID ──────────────────────────────────────────────
+            output_add_line(output, "[T1] CPUID APIC presence ...", VGA_YELLOW);
+            if (apic_detect()) {
+                output_add_line(output,
+                    "  [OK] APIC present (CPUID:EDX bit-9 = 1)",
+                    VGA_GREEN);
+            } else {
+                output_add_line(output,
+                    "  [FAIL] APIC not present",
+                    VGA_RED);
+                return;
+            }
+            output_add_empty_line(output);
+ 
+            // ── Test 2: Başlatma ───────────────────────────────────────────
+            output_add_line(output, "[T2] APIC initialization ...", VGA_YELLOW);
+            if (!apic_is_initialized()) {
+                apic_init();
+            }
+            if (apic_is_initialized()) {
+                output_add_line(output,
+                    "  [OK] LAPIC + IOAPIC initialized",
+                    VGA_GREEN);
+            } else {
+                output_add_line(output,
+                    "  [FAIL] apic_init() failed",
+                    VGA_RED);
+                return;
+            }
+            output_add_empty_line(output);
+ 
+            // ── Test 3: LAPIC yazmaç okuma ─────────────────────────────────
+            output_add_line(output, "[T3] LAPIC register read ...", VGA_YELLOW);
+            {
+                APICInfo ai;
+                apic_get_info(&ai);
+                char line[MAX_LINE_LENGTH];
+                char hex[11];
+                char num[16];
+ 
+                str_cpy(line, "  LAPIC ID      = ");
+                uint64_to_string(ai.lapic_id, num);
+                str_concat(line, num);
+                output_add_line(output, line, VGA_WHITE);
+ 
+                str_cpy(line, "  LAPIC version = 0x");
+                uint64_to_string(ai.lapic_version, num);
+                str_concat(line, num);
+                output_add_line(output, line, VGA_WHITE);
+ 
+                str_cpy(line, "  LAPIC max LVT = ");
+                uint64_to_string(ai.lapic_max_lvt, num);
+                str_concat(line, num);
+                output_add_line(output, line, VGA_WHITE);
+ 
+                str_cpy(line, "  Phys base     = ");
+                apic_u32_to_hex((uint32_t)ai.lapic_phys_base, hex);
+                str_concat(line, hex);
+                output_add_line(output, line, VGA_WHITE);
+ 
+                // Versiyon 0x10-0x15 arası gerçek LAPIC için beklenen değer
+                int ver_ok = (ai.lapic_version >= 0x10 &&
+                              ai.lapic_version <= 0x15);
+                output_add_line(output,
+                    ver_ok ? "  [OK] Version in expected range (0x10-0x15)"
+                           : "  [WARN] Unexpected LAPIC version (might be xAPIC/x2APIC)",
+                    ver_ok ? VGA_GREEN : VGA_YELLOW);
+            }
+            output_add_empty_line(output);
+ 
+            // ── Test 4: IOAPIC yazmaç okuma ────────────────────────────────
+            output_add_line(output, "[T4] IOAPIC register read ...", VGA_YELLOW);
+            {
+                APICInfo ai;
+                apic_get_info(&ai);
+                char line[MAX_LINE_LENGTH];
+                char num[16];
+ 
+                str_cpy(line, "  IOAPIC ID         = ");
+                uint64_to_string(ai.ioapic_id, num);
+                str_concat(line, num);
+                output_add_line(output, line, VGA_WHITE);
+ 
+                str_cpy(line, "  IOAPIC version    = 0x");
+                uint64_to_string(ai.ioapic_version, num);
+                str_concat(line, num);
+                output_add_line(output, line, VGA_WHITE);
+ 
+                str_cpy(line, "  IOAPIC max redir  = ");
+                uint64_to_string(ai.ioapic_max_redir, num);
+                str_concat(line, num);
+                output_add_line(output, line, VGA_WHITE);
+ 
+                int redir_ok = (ai.ioapic_max_redir >= 0x17);   // >=23 giriş
+                output_add_line(output,
+                    redir_ok ? "  [OK] >= 24 redirection entries"
+                             : "  [WARN] Few redirection entries",
+                    redir_ok ? VGA_GREEN : VGA_YELLOW);
+            }
+            output_add_empty_line(output);
+ 
+            // ── Test 5: Timer kalibrasyonu ─────────────────────────────────
+            output_add_line(output,
+                "[T5] LAPIC timer calibration (PIT ch2, ~10ms) ...",
+                VGA_YELLOW);
+            {
+                uint32_t tpm = lapic_timer_calibrate();
+                char line[MAX_LINE_LENGTH];
+                char num[16];
+ 
+                str_cpy(line, "  Calibrated: ");
+                uint64_to_string(tpm, num);
+                str_concat(line, num);
+                str_concat(line, " ticks/ms  (div=16)");
+                output_add_line(output, line, VGA_WHITE);
+ 
+                // Mantıklı bir değer mi? (tipik: 1000-100000 arası)
+                int cal_ok = (tpm >= 100 && tpm <= 500000);
+                output_add_line(output,
+                    cal_ok ? "  [OK] Calibration value in expected range"
+                           : "  [WARN] Unexpected calibration value",
+                    cal_ok ? VGA_GREEN : VGA_YELLOW);
+ 
+                // Tahmini frekans: tpm * 16 * 1000 Hz → MHz
+                uint64_t est_mhz = (uint64_t)tpm * 16u / 1000u;
+                str_cpy(line, "  Est. CPU freq  : ~");
+                uint64_to_string(est_mhz, num);
+                str_concat(line, num);
+                str_concat(line, " MHz");
+                output_add_line(output, line, VGA_CYAN);
+            }
+            output_add_empty_line(output);
+ 
+            // ── Test 6: EOI yazması ────────────────────────────────────────
+            output_add_line(output, "[T6] LAPIC EOI write ...", VGA_YELLOW);
+            lapic_eoi();   // MMIO yazması; CPU çökmezse OK
+            output_add_line(output,
+                "  [OK] EOI write did not fault",
+                VGA_GREEN);
+            output_add_empty_line(output);
+ 
+            // ── Özet ──────────────────────────────────────────────────────
+            output_add_line(output,
+                "=== All APIC tests completed! ===",
+                VGA_CYAN);
+            output_add_empty_line(output);
+            output_add_line(output,
+                "  Next steps:",
+                VGA_WHITE);
+            output_add_line(output,
+                "  apic timer 1000  — Start LAPIC timer @ 1 kHz",
+                VGA_WHITE);
+            output_add_line(output,
+                "  apic disablepic  — Mask 8259A (full APIC mode)",
+                VGA_WHITE);
+            output_add_line(output,
+                "  apic stoptimer   — Stop LAPIC timer",
+                VGA_WHITE);
+            return;
+        }
+ 
+        // ── Sadece INFO modu: yardım ipuçları ──────────────────────────────
+        if (show_info && !do_init) {
+            output_add_line(output, "  Subcommands:", VGA_CYAN);
+            output_add_line(output,
+                "  apic info         — Show this status",
+                VGA_WHITE);
+            output_add_line(output,
+                "  apic init         — Initialize LAPIC + IOAPIC",
+                VGA_WHITE);
+            output_add_line(output,
+                "  apic test         — Run full APIC test suite",
+                VGA_WHITE);
+            output_add_line(output,
+                "  apic timer <hz>   — Start LAPIC timer (e.g. apic timer 1000)",
+                VGA_WHITE);
+            output_add_line(output,
+                "  apic stoptimer    — Stop LAPIC timer",
+                VGA_WHITE);
+            output_add_line(output,
+                "  apic disablepic   — Mask 8259A PIC (APIC takes over)",
+                VGA_WHITE);
+        }
+    }
+}
 // ── tcptest ───────────────────────────────────────────────────────────────────
 // Full TCP round-trip test: SYN → ESTABLISHED → HTTP GET → wait for reply → FIN
 // Usage: tcptest 10.0.2.2 80
@@ -4854,6 +5350,7 @@ static Command command_table[] = {
     // PC Speaker test
     {"beep", "Play sound with PC Speaker  e.g.: beep 440 300", cmd_beep},
     {"sb16", "Sound Blaster 16 driver  [tone|ding|vol N|stop]", cmd_sb16},
+    {"apic", "APIC info/init/timer/test [init|info|timer <hz>|test|disablepic]", cmd_apic},
 };
 static int command_count = sizeof(command_table) / sizeof(Command);
 

@@ -12,6 +12,10 @@ extern keyboard_handler64
 extern rtl8139_irq_handler
 extern sb16_irq_handler
 extern scheduler_tick
+global isr_apic_timer
+global isr_apic_spurious
+extern lapic_eoi
+extern apic_pic_is_disabled
 extern task_needs_switch
 extern task_get_current_context
 extern task_save_current_stack
@@ -52,8 +56,15 @@ isr_keyboard:
 
     call keyboard_handler64
 
+    call apic_pic_is_disabled
+    test eax, eax
+    jz .kb_pic_eoi
+    call lapic_eoi
+    jmp .kb_eoi_done
+.kb_pic_eoi:
     mov al, 0x20
     out 0x20, al        ; Master PIC EOI
+.kb_eoi_done:
 
     pop r15
     pop r14
@@ -96,9 +107,16 @@ isr_mouse:
 
     call mouse_handler64
 
+    call apic_pic_is_disabled
+    test eax, eax
+    jz .mouse_pic_eoi
+    call lapic_eoi
+    jmp .mouse_eoi_done
+.mouse_pic_eoi:
     mov al, 0x20
     out 0xA0, al        ; Slave PIC EOI
     out 0x20, al        ; Master PIC EOI
+.mouse_eoi_done:
 
     pop r15
     pop r14
@@ -142,9 +160,16 @@ isr_net:
 
     call rtl8139_irq_handler
 
+    call apic_pic_is_disabled
+    test eax, eax
+    jz .net_pic_eoi
+    call lapic_eoi
+    jmp .net_eoi_done
+.net_pic_eoi:
     mov al, 0x20
     out 0xA0, al        ; Slave PIC EOI  (IRQ11 -> slave)
     out 0x20, al        ; Master PIC EOI
+.net_eoi_done:
 
     pop r15
     pop r14
@@ -256,8 +281,15 @@ isr_timer:
     mov rsp, [rax + 56]     ; load RSP from cpu_context_t.rsp
 
 .no_switch:
+    call apic_pic_is_disabled
+    test eax, eax
+    jz .timer_pic_eoi
+    call lapic_eoi
+    jmp .timer_eoi_done
+.timer_pic_eoi:
     mov al, 0x20
     out 0x20, al            ; Master PIC EOI
+.timer_eoi_done:
 
     ; Restore FS_BASE before iretq.
     ; The timer can fire while a Ring-3 task is running (even inside a syscall).
@@ -282,7 +314,96 @@ isr_timer:
     pop rax
 
     iretq
+; ============================================================================
+; APIC TIMER ISR (INT 0x40)
+;
+; PIC-tabanlı isr_timer'dan farkı:
+;   - EOI olarak lapic_eoi() kullanır (outb 0x20 DEĞİL)
+;   - Aynı zamanlayıcı mantığını çalıştırır: scheduler_tick + bağlam değiştirme
+;
+; isr_timer ile aynı yapıda tutuldu; APIC etkin olduğunda
+; PIT timer yerine bu ISR çalışır.
+; ============================================================================
+isr_apic_timer:
+    ; ── Genel amaçlı yazmaçları kaydet ──────────────────────────────────────
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+ 
+    ; ── Tick bookkeeping ─────────────────────────────────────────────────────
+    call scheduler_tick
+ 
+    ; ── Context switch check (same semantics as isr_timer) ──────────────────
+    call task_needs_switch
+    test rax, rax
+    jz .apic_timer_no_switch
 
+    mov rdi, rsp
+    call task_save_current_stack
+
+    call task_get_next_context
+    test rax, rax
+    jz .apic_timer_no_switch
+
+    ; Keep parity with PIC timer path:
+    ; cpu_context_t* in RAX, stack pointer is ctx->rsp (offset 56), not ctx ptr.
+    push rax
+    mov rdi, rax
+    call tss_update_rsp0_from_context
+    pop rax
+
+    mov rsp, [rax + 56]
+
+.apic_timer_no_switch:
+    ; APIC interrupt acknowledge
+    call lapic_eoi
+
+    ; Always restore FS_BASE before iretq.
+    ; Timer can hit while returning to userland; stale/zero FS_BASE breaks TLS.
+    call task_restore_fs_base
+
+    ; ── Yazmaçları geri yükle ───────────────────────────────────────────────
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+ 
+    iretq
+ 
+; ============================================================================
+; APIC SPURIOUS ISR (INT 0xFF)
+;
+; LAPIC, bir kesmeyi teslim edemediğinde bu vektörü kullanır.
+; x86 kılavuzu: spurious ISR'dan EOI gönderilmemeli.
+; Yalnızca hata sayacı / debug kaydı tutulabilir.
+; ============================================================================
+isr_apic_spurious:
+    ; Spurious kesmeler için EOI gerekmez (Intel SDM Vol. 3A §10.9)
+    ; Sadece iretq ile çık.
+    iretq
 global task_switch_context
 task_switch_context:
     ; RDI = old_ctx, RSI = new_ctx

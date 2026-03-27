@@ -15,6 +15,7 @@ extern int  sb16_play_pcm_raw(const void* buf, unsigned short len,
 #include "scheduler.h"
 #include "timer.h"
 #include <stddef.h>
+#include "../arch/x86_64/apic.h"
 // ============================================================
 // External declarations
 // ============================================================

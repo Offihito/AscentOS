@@ -5,6 +5,7 @@
 #include "../drivers/ata64.h"
 #include "../fs/ext3.h"
 #include "cpu64.h"
+#include "../arch/x86_64/apic.h"
 #include "../drivers/sb16.h"
 
 #define COM1 0x3F8
@@ -238,6 +239,20 @@ void kernel_main(uint64_t multiboot_info) {
 
     test_ext3_driver();
     test_lba48_driver();
+
+    apic_init();
+    if (apic_is_initialized()) {
+        // APIC as main scheduler clock: use LAPIC timer (1kHz)
+        lapic_timer_init(1000);
+
+        // Prevent double ticks from PIT + LAPIC by masking PIC IRQ0.
+        // Other PIC IRQs can stay enabled until full IOAPIC takeover.
+        idt_irq_disable(0);
+        serial_print("[TIMER] LAPIC timer @1000Hz enabled (primary)\n");
+        serial_print("[TIMER] PIT IRQ0 masked (PIT kept as fallback path)\n");
+    } else {
+        serial_print("[TIMER] APIC unavailable, using PIT IRQ0 (fallback)\n");
+    }
 
     net_stack_init();
 
