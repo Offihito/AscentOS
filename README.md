@@ -15,6 +15,7 @@ Current Features (as of March 2026)
 - **Musl libc** integration
 - **First userland application:** [kilo](https://github.com/antirez/kilo) text editor successfully ported
 - **GRUB2 multiboot booting**
+- **Both UEFI + BIOS Boot**
 - **Full Network Stack**
 
 The OS currently **successfully boots on its own**, can read/write files on EXT3,
@@ -25,6 +26,7 @@ Prerequisites
 
 - `make`, `gcc` / `clang`, `nasm`, `grub-mkrescue`, `qemu-system-x86_64`
 - `xorriso` (for creating the bootable ISO)
+- `gnu-efi` (for UEFI boot)
 - Musl cross-toolchain (builds automatically, or install manually if preferred)
 
 Quick Start
