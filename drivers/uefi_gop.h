@@ -51,9 +51,12 @@ typedef struct {
     uint32_t ReservedMask;
 } EFI_PIXEL_BITMASK;
 
-// Pixel format info
+// Pixel format info (UEFI Spec 2.10 §12.9)
 typedef struct {
-    EFI_GRAPHICS_PIXEL_FORMAT Format;
+    uint32_t Version;
+    uint32_t HorizontalResolution;
+    uint32_t VerticalResolution;
+    EFI_GRAPHICS_PIXEL_FORMAT PixelFormat;
     EFI_PIXEL_BITMASK PixelInformation;
     uint32_t PixelsPerScanLine;
 } EFI_GRAPHICS_OUTPUT_MODE_INFORMATION;

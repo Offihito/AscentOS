@@ -27,6 +27,7 @@ extern uint32_t framebuffer_pitch;
 extern uint32_t framebuffer_width;
 extern uint32_t framebuffer_height;
 extern uint8_t  framebuffer_bpp;
+extern uint32_t boot_is_uefi;
 
 // Graphics initialization helper
 static void graphics_init_from_bootloader(void) {
@@ -35,10 +36,15 @@ static void graphics_init_from_bootloader(void) {
         return;
     }
 
-    // Setup graphics abstraction layer with VESA framebuffer
-    // (Future: check UEFI mode and call gfx_set_gop_framebuffer instead)
-    gfx_set_vesa_framebuffer(framebuffer_addr, framebuffer_width, 
-                             framebuffer_height, framebuffer_pitch, framebuffer_bpp);
+    if (boot_is_uefi) {
+        gfx_set_gop_framebuffer(framebuffer_addr, framebuffer_width,
+                                  framebuffer_height, framebuffer_pitch,
+                                  framebuffer_bpp, GFX_PIXEL_ARGB8888);
+    } else {
+        gfx_set_vesa_framebuffer(framebuffer_addr, framebuffer_width,
+                                 framebuffer_height, framebuffer_pitch,
+                                 framebuffer_bpp);
+    }
     gfx_init();
 }
 extern uint64_t multiboot_mmap_addr;

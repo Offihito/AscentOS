@@ -72,7 +72,10 @@ static EFI_STATUS find_gop_mode(
 
     Print(L"[UEFI] Available graphics modes:\n");
 
-    for (uint32_t mode = 0; mode < max_mode && mode < 16; mode++) {
+    uint32_t fallback_mode = 0;
+    int fallback_found = 0;
+
+    for (uint32_t mode = 0; mode < max_mode && mode < 32; mode++) {
         UINTN size = 0;
         EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
 
@@ -80,21 +83,34 @@ static EFI_STATUS find_gop_mode(
         
         if (EFI_ERROR(status)) continue;
 
-        uint32_t w = info->PixelsPerScanLine;
-        uint32_t h = (w == 1280) ? 720 : (w == 1024) ? 768 : (w == 800) ? 600 : w * 9 / 16;
+        uint32_t w = info->HorizontalResolution;
+        uint32_t h = info->VerticalResolution;
 
-        Print(L"  Mode %d: %ux%u\n", mode, w, h);
+        Print(L"  Mode %d: %ux%u (stride=%u, fmt=%d)\n", mode, w, h,
+              info->PixelsPerScanLine, info->PixelFormat);
 
         // Exact match preferred
         if (w == target_width && h == target_height && !found) {
             best = mode;
             found = 1;
         }
+        // Fallback: en büyük çözünürlüğü seç (1280x720'den küçükse)
+        if (!found && !fallback_found && w >= 1024 && h >= 768) {
+            fallback_mode = mode;
+            fallback_found = 1;
+        }
     }
 
     if (!found) {
-        Print(L"[UEFI] No exact match for %ux%u, using mode 0\n", target_width, target_height);
-        best = 0;
+        if (fallback_found) {
+            Print(L"[UEFI] No exact match for %ux%u, using fallback mode %d\n",
+                  target_width, target_height, fallback_mode);
+            best = fallback_mode;
+        } else {
+            Print(L"[UEFI] No exact match for %ux%u, using mode 0\n",
+                  target_width, target_height);
+            best = 0;
+        }
     }
 
     *best_mode = best;
@@ -119,19 +135,10 @@ static EFI_STATUS set_gop_mode(
         EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *minfo = gop->Mode->Info;
         
         info->framebuffer_addr = gop->Mode->FrameBufferBase;
-        info->framebuffer_width = minfo->PixelsPerScanLine;
-        info->framebuffer_pitch = minfo->PixelsPerScanLine * 4;  // Assume 32-bit
+        info->framebuffer_width = minfo->HorizontalResolution;
+        info->framebuffer_height = minfo->VerticalResolution;
+        info->framebuffer_pitch = minfo->PixelsPerScanLine * 4;  // 32-bit pixel
         info->framebuffer_bpp = 32;
-        
-        // Estimate height based on width
-        if (info->framebuffer_width == 1280)
-            info->framebuffer_height = 720;
-        else if (info->framebuffer_width == 1024)
-            info->framebuffer_height = 768;
-        else if (info->framebuffer_width == 800)
-            info->framebuffer_height = 600;
-        else
-            info->framebuffer_height = info->framebuffer_width * 9 / 16;
 
         Print(L"[UEFI] GOP mode set: %ux%u @ 0x%lx\n",
               info->framebuffer_width, info->framebuffer_height, 

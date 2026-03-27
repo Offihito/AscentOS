@@ -24,13 +24,6 @@ gfx_info_t gfx_state = {
 // Helper Functions
 // ============================================================================
 
-static void* memset_gfx(void* dest, int val, uint64_t n) {
-    uint8_t* d = (uint8_t*)dest;
-    while (n--) *d++ = (uint8_t)val;
-    return dest;
-}
-
-static void serial_print(const char* str);
 extern void serial_print(const char* str);
 
 static void int_to_str_gfx(int num, char* str) {
@@ -61,14 +54,14 @@ static void uint64_to_string_gfx(uint64_t num, char* str) {
 // ============================================================================
 
 void gfx_set_gop_framebuffer(uint64_t fb_addr, uint32_t width, uint32_t height,
-                               uint32_t pitch, gfx_pixel_format_t fmt)
+                               uint32_t pitch, uint8_t bpp, gfx_pixel_format_t fmt)
 {
     gfx_state.mode = GFX_MODE_GOP;
     gfx_state.fb_addr = fb_addr;
     gfx_state.width = width;
     gfx_state.height = height;
     gfx_state.pitch = pitch;
-    gfx_state.bpp = 32;  // GOP genellikle 32-bit
+    gfx_state.bpp = bpp ? bpp : 32;
     gfx_state.pixel_format = fmt;
     gfx_state.fb_size = (uint64_t)pitch * height;
 
@@ -172,20 +165,38 @@ static void put_pixel_raw(uint32_t x, uint32_t y, uint32_t color)
     if (!gfx_state.fb_addr || x >= gfx_state.width || y >= gfx_state.height)
         return;
 
-    uint64_t offset = (uint64_t)y * gfx_state.pitch + (uint64_t)x * 4;
-    uint32_t* pixel = (uint32_t*)(gfx_state.fb_addr + offset);
-    *pixel = color;
+    uint32_t bytespp = (gfx_state.bpp + 7u) / 8u;
+    if (bytespp == 0) bytespp = 4;
+
+    uint64_t offset = (uint64_t)y * gfx_state.pitch + (uint64_t)x * bytespp;
+    uint8_t* pixel = (uint8_t*)(gfx_state.fb_addr + offset);
+
+    if (bytespp >= 4) {
+        *((uint32_t*)pixel) = color;
+    } else if (bytespp == 3) {
+        pixel[0] = (uint8_t)(color & 0xFF);
+        pixel[1] = (uint8_t)((color >> 8) & 0xFF);
+        pixel[2] = (uint8_t)((color >> 16) & 0xFF);
+    } else if (bytespp == 2) {
+        uint8_t r = (uint8_t)((color >> 16) & 0xFF);
+        uint8_t g = (uint8_t)((color >> 8) & 0xFF);
+        uint8_t b = (uint8_t)(color & 0xFF);
+        uint16_t rgb565 = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+        *((uint16_t*)pixel) = rgb565;
+    } else {
+        pixel[0] = (uint8_t)(color & 0xFF);
+    }
 }
 
 void gfx_fill(uint32_t color)
 {
     if (!gfx_state.fb_addr) return;
 
-    uint32_t* fb = (uint32_t*)gfx_state.fb_addr;
-    uint32_t total_pixels = gfx_state.width * gfx_state.height;
-
-    for (uint32_t i = 0; i < total_pixels; i++)
-        fb[i] = color;
+    for (uint32_t y = 0; y < gfx_state.height; y++) {
+        for (uint32_t x = 0; x < gfx_state.width; x++) {
+            put_pixel_raw(x, y, color);
+        }
+    }
 }
 
 void gfx_put_pixel(uint32_t x, uint32_t y, uint32_t color)

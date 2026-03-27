@@ -47,7 +47,7 @@ extern gfx_info_t gfx_state;
 
 // UEFI GOP framebuffer bilgisini kaydet
 void gfx_set_gop_framebuffer(uint64_t fb_addr, uint32_t width, uint32_t height,
-                               uint32_t pitch, gfx_pixel_format_t fmt);
+                               uint32_t pitch, uint8_t bpp, gfx_pixel_format_t fmt);
 
 // VESA/Multiboot2 framebuffer bilgisini kaydet
 void gfx_set_vesa_framebuffer(uint64_t fb_addr, uint32_t width, uint32_t height,

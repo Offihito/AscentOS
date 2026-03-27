@@ -128,7 +128,21 @@ static inline void put_pixel(uint32_t x, uint32_t y, uint32_t color) {
         ptr[0] = color & 0xFF;
         ptr[1] = (color >> 8) & 0xFF;
         ptr[2] = (color >> 16) & 0xFF;
+    } else if (fb_bpp == 16) {
+        uint8_t r = (uint8_t)((color >> 16) & 0xFF);
+        uint8_t g = (uint8_t)((color >> 8) & 0xFF);
+        uint8_t b = (uint8_t)(color & 0xFF);
+        uint16_t rgb565 = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+        *(uint16_t*)ptr = rgb565;
     }
+}
+
+// Tam ekran / dikdörtgen doldurma — clear ve scroll son satır için (bpp doğru)
+static void fill_rect_fb(uint32_t x0, uint32_t y0, uint32_t w, uint32_t h,
+                         uint32_t color) {
+    for (uint32_t y = y0; y < y0 + h && y < fb_h; y++)
+        for (uint32_t x = x0; x < x0 + w && x < fb_w; x++)
+            put_pixel(x, y, color);
 }
 
 // ============================================================================
@@ -243,13 +257,10 @@ static void scroll_screen_up(void) {
     uint32_t total64 = (line_bytes * (uint32_t)(rows - 1)) / 8;
     for (uint32_t i = 0; i < total64; i++)
         dst64[i] = src64[i];
-    // Son satırı arkaplan rengiyle doldur
+    // Son metin satırını arkaplan rengiyle doldur (24bpp için uint64 ile doldurma yanlış)
     uint32_t bg = vga_palette[(cur_color >> 4) & 0x07];
-    uint64_t bg64 = ((uint64_t)bg << 32) | bg;
-    uint64_t* last64 = (uint64_t*)(fb + (uint32_t)(rows-1) * line_bytes);
-    uint32_t fill64 = (fb_p * FONT_HEIGHT) / 8;
-    for (uint32_t i = 0; i < fill64; i++)
-        last64[i] = bg64;
+    uint32_t py = (uint32_t)((rows - 1) * FONT_HEIGHT);
+    fill_rect_fb(0, py, fb_w, FONT_HEIGHT, bg);
 }
 
 // ============================================================================
@@ -305,11 +316,9 @@ void clear_screen64(void) {
     pending_wrap = 0;
     scroll_view_offset = 0;
 
-    // Framebuffer'ı arkaplan rengiyle doldur
+    // Framebuffer'ı arkaplan rengiyle doldur (24/16bpp'te uint32 ile doldurma hizayı bozar)
     uint32_t bg = vga_palette[(cur_color >> 4) & 0x07];
-    uint32_t total_pixels = fb_p * fb_h;
-    for (uint32_t i = 0; i < total_pixels; i += 4)
-        *(uint32_t*)(fb + i) = bg;
+    fill_rect_fb(0, 0, fb_w, fb_h, bg);
 }
 
 void set_color64(uint8_t fg, uint8_t bg) {

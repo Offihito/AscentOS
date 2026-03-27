@@ -350,7 +350,8 @@ run: disk.img install-userland
 	      -cdrom AscentOS-UEFI.iso \
 	      -drive file=disk.img,format=raw,if=ide,cache=writeback \
 	      -m 1024M -cpu qemu64 \
-	      -serial stdio -vga std \
+	      -serial stdio \
+	      -device virtio-vga \
 	      -usb -device usb-tablet \
 	      -audiodev pa,id=snd0 -machine pcspk-audiodev=snd0 \
 	      -device sb16,audiodev=snd0 \

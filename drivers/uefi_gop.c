@@ -62,22 +62,21 @@ EFI_STATUS gop_find_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL* gop,
         EFI_STATUS status = gop->QueryMode(gop, mode, &info_size, &info);
         if (status != EFI_SUCCESS) continue;
 
-        uint32_t w = info->PixelsPerScanLine;
-        uint32_t h = 0;
-        // Height bilgisi QueryMode'dan doğrudan dönmez; mode'dan tahmin yapılır
-        // Genellikle 16:9, 4:3 oranlarıdır
+        uint32_t w = info->HorizontalResolution;
+        uint32_t h = info->VerticalResolution;
 
         print_str("  Mode ");
         print_uint32(mode);
         print_str(": ");
         print_uint32(w);
-        print_str("x?");
+        print_str("x");
+        print_uint32(h);
         print_str(" Format=");
-        print_uint32(info->Format);
+        print_uint32(info->PixelFormat);
         print_str("\n");
 
-        // İlk bulduğumuz mode'u seç (genellikle en uygun)
-        if (w == target_width && !found) {
+        // Tam eşleşme tercih et
+        if (w == target_width && h == target_height && !found) {
             best_match = mode;
             found = 1;
         }
@@ -119,16 +118,9 @@ EFI_STATUS gop_set_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL* gop,
     }
 
     *fb_addr = gop->Mode->FrameBufferBase;
-    *width = gop->Mode->Info->PixelsPerScanLine;
-    *pitch = *width * 4;  // RGBA/ARGB genellikle 32-bit
-    
-    // Height bilgisi: Some UEFI impls. bunları sağlamaz
-    // Tahmin: 16:9 oranı
-    if (*width == 1280) *height = 720;
-    else if (*width == 1920) *height = 1080;
-    else if (*width == 1024) *height = 768;
-    else if (*width == 800) *height = 600;
-    else *height = *width * 9 / 16;
+    *width = gop->Mode->Info->HorizontalResolution;
+    *height = gop->Mode->Info->VerticalResolution;
+    *pitch = gop->Mode->Info->PixelsPerScanLine * 4;  // 32-bit pixel
 
     print_str("[GOP] Mode set successfully:\n");
     print_str("  FB Address: 0x");
@@ -166,9 +158,11 @@ void gop_list_modes(EFI_GRAPHICS_OUTPUT_PROTOCOL* gop)
         print_str("  [");
         print_uint32(mode);
         print_str("] ");
-        print_uint32(info->PixelsPerScanLine);
-        print_str("px Format=");
-        print_uint32(info->Format);
+        print_uint32(info->HorizontalResolution);
+        print_str("x");
+        print_uint32(info->VerticalResolution);
+        print_str(" Format=");
+        print_uint32(info->PixelFormat);
         print_str("\n");
     }
 }

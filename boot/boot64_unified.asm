@@ -52,9 +52,13 @@ multiboot_header:
     align 8
     dw 1
     dw 0
-    dd 20
+    dd 32
     dd 3
     dd 8
+    dd 9
+    dd 10
+    dd 11
+    dd 12
     dd 0
 
 ; VESA framebuffer tag
@@ -118,6 +122,9 @@ framebuffer_pitch:  dd 0
 framebuffer_width:  dd 0
 framebuffer_height: dd 0
 framebuffer_bpp:    db 0
+align 4
+global boot_is_uefi
+boot_is_uefi:       dd 0
 
 global multiboot_mmap_addr
 global multiboot_mmap_entry_size
@@ -302,6 +309,14 @@ parse_multiboot_info:
     mov eax, [esi]      ; tag type
     test eax, eax
     jz .done
+    cmp eax, 9
+    je .found_efi
+    cmp eax, 10
+    je .found_efi
+    cmp eax, 11
+    je .found_efi
+    cmp eax, 12
+    je .found_efi
     cmp eax, 8
     je .found_framebuffer
     cmp eax, 6
@@ -325,6 +340,19 @@ parse_multiboot_info:
     sub ecx, 16
     mov [V2P(multiboot_mmap_total_size)], ecx
     ; sonraki tag'a geç
+    mov ecx, [esi + 4]
+    add esi, ecx
+    add esi, 7
+    and esi, ~7
+    jmp .tag_loop
+
+.found_efi:
+    ; Multiboot2 EFI tags:
+    ; 9  = EFI32 image handle pointer
+    ; 10 = EFI64 image handle pointer
+    ; 11 = EFI32 system table pointer
+    ; 12 = EFI64 system table pointer
+    mov dword [V2P(boot_is_uefi)], 1
     mov ecx, [esi + 4]
     add esi, ecx
     add esi, 7
