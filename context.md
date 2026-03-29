@@ -80,11 +80,9 @@ make clean-all     → clean build artifacts + musl
 
 **Current development priorities**
 
-1. Fixing doom gpf
-2. Test all remaining syscalls
-3. Port GNU Core Utils 
-4. Switching to UEFI GOP and fallback to vesa 
-5. Implementing SMP
+1. Test all remaining syscalls
+2. Port GNU Core Utils 
+3. Implementing SMP
 
 **When in doubt**  
 - Check existing port scripts in `userland/` — they are the source of truth for musl-friendly builds  

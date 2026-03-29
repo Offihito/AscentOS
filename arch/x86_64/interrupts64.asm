@@ -29,15 +29,12 @@ extern kernel_panic_handler
 section .text
 bits 64
 
-
-load_idt64:
-    lidt [rdi]
-    ret
-
 ; ============================================================================
-; KEYBOARD INTERRUPT (IRQ1)
+; MAKROLAR
 ; ============================================================================
-isr_keyboard:
+
+; Tüm genel amaçlı yazmaçları kaydet (15 register, 120 byte)
+%macro PUSH_ALL 0
     push rax
     push rbx
     push rcx
@@ -53,19 +50,10 @@ isr_keyboard:
     push r13
     push r14
     push r15
+%endmacro
 
-    call keyboard_handler64
-
-    call apic_pic_is_disabled
-    test eax, eax
-    jz .kb_pic_eoi
-    call lapic_eoi
-    jmp .kb_eoi_done
-.kb_pic_eoi:
-    mov al, 0x20
-    out 0x20, al        ; Master PIC EOI
-.kb_eoi_done:
-
+; Tüm genel amaçlı yazmaçları geri yükle (ters sırada)
+%macro POP_ALL 0
     pop r15
     pop r14
     pop r13
@@ -81,215 +69,130 @@ isr_keyboard:
     pop rcx
     pop rbx
     pop rax
+%endmacro
 
-    iretq
-
-; ============================================================================
-; MOUSE INTERRUPT (IRQ12 → INT 0x2C) — PS/2 Mouse, text-mode overlay
-; IRQ12 slave PIC üzerinde; EOI sırası: slave (0xA0) → master (0x20)
-; ============================================================================
-isr_mouse:
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
-
-    call mouse_handler64
-
+; Master PIC EOI veya APIC EOI gönder
+; Kullanım: SEND_EOI <prefix>
+; prefix: etiket isimlerinin çakışmamasını sağlar (ör. kb, mouse, net, timer)
+%macro SEND_EOI_MASTER 1
     call apic_pic_is_disabled
     test eax, eax
-    jz .mouse_pic_eoi
+    jz %%pic_eoi
     call lapic_eoi
-    jmp .mouse_eoi_done
-.mouse_pic_eoi:
+    jmp %%eoi_done
+%%pic_eoi:
+    mov al, 0x20
+    out 0x20, al        ; Master PIC EOI
+%%eoi_done:
+%endmacro
+
+; Slave + Master PIC EOI veya APIC EOI gönder (IRQ8-15 için)
+%macro SEND_EOI_SLAVE 1
+    call apic_pic_is_disabled
+    test eax, eax
+    jz %%pic_eoi
+    call lapic_eoi
+    jmp %%eoi_done
+%%pic_eoi:
     mov al, 0x20
     out 0xA0, al        ; Slave PIC EOI
     out 0x20, al        ; Master PIC EOI
-.mouse_eoi_done:
+%%eoi_done:
+%endmacro
 
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-
-    iretq
-
-; ============================================================================
-; NETWORK INTERRUPT (IRQ11 â INT 0x2B) â RTL8139
-; IRQ11 is on the slave PIC (IRQ8-15); EOI order: slave (0xA0) then master (0x20).
-; Installed at IDT vector 0x2B via idt_set(43,...) in init_interrupts64().
-; ============================================================================
-isr_net:
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
-
-    call rtl8139_irq_handler
-
-    call apic_pic_is_disabled
-    test eax, eax
-    jz .net_pic_eoi
-    call lapic_eoi
-    jmp .net_eoi_done
-.net_pic_eoi:
-    mov al, 0x20
-    out 0xA0, al        ; Slave PIC EOI  (IRQ11 -> slave)
-    out 0x20, al        ; Master PIC EOI
-.net_eoi_done:
-
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-
-    iretq
-
-; ============================================================================
-; SB16 INTERRUPT (IRQ5 → INT 0x25) — Sound Blaster 16
-; IRQ5 is on the master PIC (IRQ0-7).
-; EOI order: master PIC only (0x20).
-; Installed at IDT vector 37 (0x20+5) via idt_set_entry(37,...) in init_interrupts64().
-; sb16_irq_handler() sends DSP ACK and clears g_sb16.playing.
-; ============================================================================
-isr_sb16:
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
-
-    call sb16_irq_handler       ; DSP acknowledge + g_sb16.playing=false
-                                ; EOI is handled inside sb16_irq_handler()
-                                ; to allow it to read IRQ status first.
-
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-
-    iretq
-
-; ============================================================================
-; TIMER INTERRUPT (IRQ0) - Context switch support
-; ============================================================================
-isr_timer:
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
-
-    call scheduler_tick
-
+; Context switch mantığı (isr_timer ve isr_apic_timer ortak)
+; Kullanım: TIMER_CONTEXT_SWITCH <no_switch_label>
+%macro TIMER_CONTEXT_SWITCH 1
     call task_needs_switch
     test rax, rax
-    jz .no_switch
+    jz %1
 
     mov rdi, rsp
     call task_save_current_stack
 
     call task_get_next_context
     test rax, rax
-    jz .no_switch
+    jz %1
 
-    ; Update TSS.RSP0 for the incoming task.
-    ; When the new task takes an interrupt/syscall from Ring-3, the CPU
-    ; loads the kernel stack pointer from TSS.RSP0.
-    ; Stale RSP0 -> wrong stack -> #DF -> triple fault.
-    ; rax = cpu_context_t* (returned by task_get_next_context)
     push rax
     mov rdi, rax
     call tss_update_rsp0_from_context
     pop rax
 
     mov rsp, [rax + 56]     ; load RSP from cpu_context_t.rsp
+%endmacro
+
+; Basit ISR: kaydet → handler çağır → master EOI → geri yükle → iretq
+; Kullanım: SIMPLE_ISR_MASTER <isim>, <handler>
+%macro SIMPLE_ISR_MASTER 2
+global %1
+%1:
+    PUSH_ALL
+    call %2
+    SEND_EOI_MASTER %1
+    POP_ALL
+    iretq
+%endmacro
+
+; Basit ISR: kaydet → handler çağır → slave+master EOI → geri yükle → iretq
+; Kullanım: SIMPLE_ISR_SLAVE <isim>, <handler>
+%macro SIMPLE_ISR_SLAVE 2
+global %1
+%1:
+    PUSH_ALL
+    call %2
+    SEND_EOI_SLAVE %1
+    POP_ALL
+    iretq
+%endmacro
+
+; ============================================================================
+
+load_idt64:
+    lidt [rdi]
+    ret
+
+; ============================================================================
+; KEYBOARD INTERRUPT (IRQ1) — Master PIC
+; ============================================================================
+SIMPLE_ISR_MASTER isr_keyboard, keyboard_handler64
+
+; ============================================================================
+; MOUSE INTERRUPT (IRQ12 → INT 0x2C) — PS/2 Mouse, Slave PIC
+; IRQ12 slave PIC üzerinde; EOI sırası: slave (0xA0) → master (0x20)
+; ============================================================================
+SIMPLE_ISR_SLAVE isr_mouse, mouse_handler64
+
+; ============================================================================
+; NETWORK INTERRUPT (IRQ11 → INT 0x2B) — RTL8139, Slave PIC
+; Installed at IDT vector 0x2B via idt_set(43,...) in init_interrupts64().
+; ============================================================================
+SIMPLE_ISR_SLAVE isr_net, rtl8139_irq_handler
+
+; ============================================================================
+; SB16 INTERRUPT (IRQ5 → INT 0x25) — Sound Blaster 16, Master PIC
+; sb16_irq_handler() kendi EOI'sini içinde halleder.
+; ============================================================================
+isr_sb16:
+    PUSH_ALL
+    call sb16_irq_handler       ; DSP acknowledge + g_sb16.playing=false
+                                ; EOI is handled inside sb16_irq_handler()
+                                ; to allow it to read IRQ status first.
+    POP_ALL
+    iretq
+
+; ============================================================================
+; TIMER INTERRUPT (IRQ0) — PIC tabanlı, context switch desteği
+; ============================================================================
+isr_timer:
+    PUSH_ALL
+
+    call scheduler_tick
+
+    TIMER_CONTEXT_SWITCH .no_switch
 
 .no_switch:
-    call apic_pic_is_disabled
-    test eax, eax
-    jz .timer_pic_eoi
-    call lapic_eoi
-    jmp .timer_eoi_done
-.timer_pic_eoi:
-    mov al, 0x20
-    out 0x20, al            ; Master PIC EOI
-.timer_eoi_done:
+    SEND_EOI_MASTER timer
 
     ; Restore FS_BASE before iretq.
     ; The timer can fire while a Ring-3 task is running (even inside a syscall).
@@ -297,76 +200,24 @@ isr_timer:
     ; switch occurred; otherwise musl pthread_self() -> %fs:0 -> zero -> #GP.
     call task_restore_fs_base
 
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-
+    POP_ALL
     iretq
+
 ; ============================================================================
 ; APIC TIMER ISR (INT 0x40)
 ;
 ; PIC-tabanlı isr_timer'dan farkı:
 ;   - EOI olarak lapic_eoi() kullanır (outb 0x20 DEĞİL)
 ;   - Aynı zamanlayıcı mantığını çalıştırır: scheduler_tick + bağlam değiştirme
-;
-; isr_timer ile aynı yapıda tutuldu; APIC etkin olduğunda
-; PIT timer yerine bu ISR çalışır.
 ; ============================================================================
 isr_apic_timer:
-    ; ── Genel amaçlı yazmaçları kaydet ──────────────────────────────────────
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
- 
-    ; ── Tick bookkeeping ─────────────────────────────────────────────────────
+    PUSH_ALL
+
     call scheduler_tick
- 
-    ; ── Context switch check (same semantics as isr_timer) ──────────────────
-    call task_needs_switch
-    test rax, rax
-    jz .apic_timer_no_switch
 
-    mov rdi, rsp
-    call task_save_current_stack
+    TIMER_CONTEXT_SWITCH .no_switch
 
-    call task_get_next_context
-    test rax, rax
-    jz .apic_timer_no_switch
-
-    ; Keep parity with PIC timer path:
-    ; cpu_context_t* in RAX, stack pointer is ctx->rsp (offset 56), not ctx ptr.
-    push rax
-    mov rdi, rax
-    call tss_update_rsp0_from_context
-    pop rax
-
-    mov rsp, [rax + 56]
-
-.apic_timer_no_switch:
+.no_switch:
     ; APIC interrupt acknowledge
     call lapic_eoi
 
@@ -374,42 +225,24 @@ isr_apic_timer:
     ; Timer can hit while returning to userland; stale/zero FS_BASE breaks TLS.
     call task_restore_fs_base
 
-    ; ── Yazmaçları geri yükle ───────────────────────────────────────────────
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
- 
+    POP_ALL
     iretq
- 
+
 ; ============================================================================
 ; APIC SPURIOUS ISR (INT 0xFF)
 ;
 ; LAPIC, bir kesmeyi teslim edemediğinde bu vektörü kullanır.
 ; x86 kılavuzu: spurious ISR'dan EOI gönderilmemeli.
-; Yalnızca hata sayacı / debug kaydı tutulabilir.
 ; ============================================================================
 isr_apic_spurious:
     ; Spurious kesmeler için EOI gerekmez (Intel SDM Vol. 3A §10.9)
-    ; Sadece iretq ile çık.
     iretq
+
 global task_switch_context
 task_switch_context:
     ; RDI = old_ctx, RSI = new_ctx
     test rdi, rdi
     jz .load_new
-
 
     push rdi                 ; save real rdi on stack
 
@@ -536,25 +369,36 @@ task_load_and_jump_context:
     mov rsp, [rdi + 56]     ; context.rsp -> kernel stack top
 
     ; Pop 15 registers (pushed in order by task_create / task_create_user)
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rbp
-    pop rdi     ; rdi is no longer the context pointer, safe to pop
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-
-
+    POP_ALL
     iretq
 
+
+; ============================================================================
+; IST (Interrupt Stack Table) TAHSİSATI
+; ============================================================================
+;
+; x86-64 TSS, 7 bağımsız IST yuvası sunar (IST1..IST7).
+; Her IST, IDT gate'inin IST alanına (bit 2:0) yazılarak aktif edilir.
+; CPU o gate'i tetiklendiğinde TSS.ISTn'den RSP'yi yükler — mevcut RSP
+; ne olursa olsun (bozuk, kullanıcı alanı, Ring-3 vs.).
+;
+; Tahsisat (init_interrupts64() içinde IDT gate'lerine yansıtılmalı):
+;
+;   IST1 → #DF  (Double Fault,       vektör  8) — bozuk RSP'ye karşı zorunlu
+;   IST2 → #NMI (Non-Maskable Int,   vektör  2) — NMI iç içe geçme sorununu önler
+;   IST3 → #MC  (Machine Check,      vektör 18) — donanım hatası, yığın güvenilmez
+;   IST4 → #SS  (Stack-Segment Fault,vektör 12) — #SS zaten yığın bozukluğu
+;   IST5 → #GP  (General Protection, vektör 13) — kernel #GP'de RSP geçersiz olabilir
+;   IST6 → #PF  (Page Fault,         vektör 14) — sayfa hatası + bozuk RSP → #DF
+;   IST7 → (rezerve / gelecek kullanım)
+;
+; .bss'teki stack tamponları: IST_STACK_SIZE (16 KB) × 6 adet
+; tss_init() içinde: tss.ist1 = ist1_stack_top, tss.ist2 = ist2_stack_top, ...
+; ============================================================================
+
+%define IST_STACK_SIZE  16384   ; 16 KB — her IST yığını için
+
+; ── Exception makroları ─────────────────────────────────────────────────────
 
 %macro ISR_NOERRCODE 1
 global isr%1
@@ -572,71 +416,128 @@ isr%1:
     jmp isr_panic_common
 %endmacro
 
-; Common panic entry point
-isr_panic_common:
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
+; IST'li exception'lar için ayrı giriş noktası makrosu.
+; ISR_NOERRCODE/ISR_ERRCODE ile aynı işi yapar; tek farkı yorum + global isim
+; kuralıdır — asıl IST anahtarlaması IDT gate'inde yapılır (IST alanı).
+; Bu makro, IST'li gate'lerin hangi etikete atlandığını netleştirir.
+%macro ISR_NOERRCODE_IST 2          ; %1=vektör, %2=IST numarası (belgeleme amaçlı)
+global isr%1
+isr%1:
+    push 0
+    push %1
+    jmp isr_panic_common            ; IST yığını CPU tarafından zaten seçildi
+%endmacro
 
+%macro ISR_ERRCODE_IST 2            ; %1=vektör, %2=IST numarası
+global isr%1
+isr%1:
+    push %1
+    jmp isr_panic_common
+%endmacro
+
+; ── Ortak panic giriş noktası ───────────────────────────────────────────────
+;
+; Yığın düzeni bu noktada (IST veya normal, fark yok):
+;   [RSP+0 .. +112]  PUSH_ALL  (15 × 8 = 120 byte)
+;   [RSP+120]        isr_num   (push %1)
+;   [RSP+128]        err_code  (CPU veya pseudo)
+;   [RSP+136]        RIP       } CPU'nun otomatik
+;   [RSP+144]        CS        } iretq çerçevesi
+;   [RSP+152]        RFLAGS    }
+;   [RSP+160]        RSP       } (CPL değişiminde)
+;   [RSP+168]        SS        }
+;
+; kernel_panic_handler(panic_frame_t *frame) → RDI = RSP
+isr_panic_common:
+    PUSH_ALL
     mov  rdi, rsp
-    call kernel_panic_handler   
+    call kernel_panic_handler
 
     cli
 .hang:
     hlt
     jmp .hang
 
-; Exception table
-ISR_NOERRCODE 0    ; #DE Divide Error
-ISR_NOERRCODE 1    ; #DB Debug
-ISR_NOERRCODE 2    ; #NMI Non-Maskable Interrupt
-ISR_NOERRCODE 3    ; #BP Breakpoint
-ISR_NOERRCODE 4    ; #OF Overflow
-ISR_NOERRCODE 5    ; #BR Bound Range Exceeded
-ISR_NOERRCODE 6    ; #UD Invalid Opcode
-ISR_NOERRCODE 7    ; #NM Device Not Available
-; #DF handled by isr8_df below (IST1 stack)
+; ── Exception tablosu ───────────────────────────────────────────────────────
 
-; #DF Double Fault â uses IST1 stack.
-; If #DF fires with a corrupt RSP the CPU would generate a second fault ->
-; triple fault. Fix: set IDT gate IST=1 so the CPU switches to TSS.IST1,
-; an independent clean stack unaffected by the corrupted RSP.
+ISR_NOERRCODE 0    ; #DE  Divide Error
+ISR_NOERRCODE 1    ; #DB  Debug
+
+; #NMI — IST2
+; NMI, başka bir NMI işlenirken de gelebilir. Normal yığında iç içe NMI
+; çerçevesi IRET bloğunu bozar (Intel SDM Vol.3 §6.7.1).
+; IST2 ile her NMI temiz, bağımsız bir yığıla girer.
+ISR_NOERRCODE_IST 2, 2  ; #NMI Non-Maskable Interrupt  → IST2
+
+ISR_NOERRCODE 3    ; #BP  Breakpoint
+ISR_NOERRCODE 4    ; #OF  Overflow
+ISR_NOERRCODE 5    ; #BR  Bound Range Exceeded
+ISR_NOERRCODE 6    ; #UD  Invalid Opcode
+ISR_NOERRCODE 7    ; #NM  Device Not Available
+
+; #DF — IST1
+; Çift hata, genellikle bozuk RSP ile tetiklenir. IST1 olmadan CPU
+; aynı bozuk RSP'yi kullanır → ikinci fault → triple fault.
 ;
-; Required setup:
-;   tss.ist1 = (uint64_t)df_stack_top   <- in tss_init()
-;   idt[8] gate IST field = 1           <- in init_interrupts64()
+; Gerekli kurulum (init_interrupts64):
+;   tss.ist1 = ist1_stack_top
+;   IDT[8].ist = 1
 global isr8_df
 isr8_df:
-    ; CPU switched to IST1 stack; RSP is clean.
-    ; #DF err_code is always 0 (already pushed by CPU).
-    push 8          ; isr_num
+    ; CPU IST1 yığınına geçti; RSP temiz.
+    ; #DF err_code = 0 (CPU tarafından zaten push edildi).
+    push 8
     jmp isr_panic_common
 
-ISR_NOERRCODE 9    ; #09 Coprocessor Segment Overrun
-ISR_ERRCODE   10   ; #TS Invalid TSS
-ISR_ERRCODE   11   ; #NP Segment Not Present
-ISR_ERRCODE   12   ; #SS Stack-Segment Fault
-ISR_ERRCODE   13   ; #GP General Protection
-ISR_ERRCODE   14   ; #PF Page Fault          <- CR2 = fault address
-ISR_NOERRCODE 15   ; #15 Reserved
-ISR_NOERRCODE 16   ; #MF x87 FP Error
-ISR_ERRCODE   17   ; #AC Alignment Check
-ISR_NOERRCODE 18   ; #MC Machine Check
-ISR_NOERRCODE 19   ; #XF SIMD FP Exception
-ISR_NOERRCODE 20   ; #VE Virtualization Exception
-ISR_NOERRCODE 21   ; #CP Control Protection
+ISR_NOERRCODE 9    ; #09  Coprocessor Segment Overrun
+ISR_ERRCODE   10   ; #TS  Invalid TSS
+ISR_ERRCODE   11   ; #NP  Segment Not Present
+
+; #SS — IST4
+; Yığın-segment hatası zaten yığın bozukluğunu işaret eder.
+; Aynı yığını kullanmak güvenilmez; IST4 bağımsız yığın sağlar.
+;
+; Gerekli kurulum:
+;   tss.ist4 = ist4_stack_top
+;   IDT[12].ist = 4
+ISR_ERRCODE_IST 12, 4   ; #SS  Stack-Segment Fault      → IST4
+
+; #GP — IST5
+; Kernel modunda #GP patlıyor ve RSP geçersizse (ör. yanlış yığın
+; pointer'ı) normal yığında handler çalışamaz → #DF zinciri.
+; IST5 bu zinciri kırar.
+;
+; Gerekli kurulum:
+;   tss.ist5 = ist5_stack_top
+;   IDT[13].ist = 5
+ISR_ERRCODE_IST 13, 5   ; #GP  General Protection        → IST5
+
+; #PF — IST6
+; Sayfa hatası + bozuk RSP kombinasyonu #DF'ye yol açar.
+; IST6, #PF handler'ını RSP durumundan bağımsız kılar.
+; Not: CR2 = fault address (okunması geciktirilmemeli).
+;
+; Gerekli kurulum:
+;   tss.ist6 = ist6_stack_top
+;   IDT[14].ist = 6
+ISR_ERRCODE_IST 14, 6   ; #PF  Page Fault (CR2=fault addr) → IST6
+
+ISR_NOERRCODE 15   ; #15  Reserved
+ISR_NOERRCODE 16   ; #MF  x87 FP Error
+ISR_ERRCODE   17   ; #AC  Alignment Check
+
+; #MC — IST3
+; Makine hatası asenkrondur ve herhangi bir komut sınırında oluşabilir.
+; Yığın durumu tamamen belirsiz; IST3 garantili temiz yığın sağlar.
+;
+; Gerekli kurulum:
+;   tss.ist3 = ist3_stack_top
+;   IDT[18].ist = 3
+ISR_NOERRCODE_IST 18, 3 ; #MC  Machine Check               → IST3
+
+ISR_NOERRCODE 19   ; #XF  SIMD FP Exception
+ISR_NOERRCODE 20   ; #VE  Virtualization Exception
+ISR_NOERRCODE 21   ; #CP  Control Protection
 ISR_NOERRCODE 22
 ISR_NOERRCODE 23
 ISR_NOERRCODE 24
@@ -645,7 +546,7 @@ ISR_NOERRCODE 26
 ISR_NOERRCODE 27
 ISR_NOERRCODE 28
 ISR_NOERRCODE 29
-ISR_ERRCODE   30   ; #SX Security Exception
+ISR_ERRCODE   30   ; #SX  Security Exception
 ISR_NOERRCODE 31
 
 extern kernel_tss
@@ -673,15 +574,15 @@ syscall_entry:
     push r15
 
     ; Build syscall_frame_t (must match syscall.h, offsets +0..+64)
-    push r11        ; frame.r11  (+64) â saved RFLAGS
-    push rcx        ; frame.rcx  (+56) â saved RIP (return address)
+    push r11        ; frame.r11  (+64) — saved RFLAGS
+    push rcx        ; frame.rcx  (+56) — saved RIP (return address)
     push r9         ; frame.r9   (+48)
     push r8         ; frame.r8   (+40)
     push r10        ; frame.r10  (+32)
     push rdx        ; frame.rdx  (+24)
     push rsi        ; frame.rsi  (+16)
     push rdi        ; frame.rdi  (+8)
-    push rax        ; frame.rax  (+0)  â syscall number
+    push rax        ; frame.rax  (+0)  — syscall number
 
     mov rdi, rsp
     call syscall_dispatch
@@ -791,9 +692,64 @@ syscall_entry:
     o64 sysret
 
 
+; ============================================================================
+; IST YIĞIN TAMPONLARI (.bss)
+; ============================================================================
+;
+; Her IST yığını 16 KB, 16-byte hizalı.
+; tss_init() içinde şu atamaları yap:
+;
+;   tss.ist1 = (uint64_t)ist1_stack_top   ; #DF
+;   tss.ist2 = (uint64_t)ist2_stack_top   ; #NMI
+;   tss.ist3 = (uint64_t)ist3_stack_top   ; #MC
+;   tss.ist4 = (uint64_t)ist4_stack_top   ; #SS
+;   tss.ist5 = (uint64_t)ist5_stack_top   ; #GP
+;   tss.ist6 = (uint64_t)ist6_stack_top   ; #PF
+;
+; init_interrupts64() içinde IDT gate IST alanlarını güncelle:
+;
+;   idt_set_ist(8,  1)   ; #DF  → IST1
+;   idt_set_ist(2,  2)   ; #NMI → IST2
+;   idt_set_ist(18, 3)   ; #MC  → IST3
+;   idt_set_ist(12, 4)   ; #SS  → IST4
+;   idt_set_ist(13, 5)   ; #GP  → IST5
+;   idt_set_ist(14, 6)   ; #PF  → IST6
+; ============================================================================
+
 section .bss
 align 16
-df_stack_bottom:
-    resb 16384          ; 16 KB
-global df_stack_top
-df_stack_top:
+
+; IST1 — #DF Double Fault
+global ist1_stack_top
+ist1_stack_bottom: resb IST_STACK_SIZE
+ist1_stack_top:
+
+; IST2 — #NMI Non-Maskable Interrupt
+global ist2_stack_top
+ist2_stack_bottom: resb IST_STACK_SIZE
+ist2_stack_top:
+
+; IST3 — #MC Machine Check
+global ist3_stack_top
+ist3_stack_bottom: resb IST_STACK_SIZE
+ist3_stack_top:
+
+; IST4 — #SS Stack-Segment Fault
+global ist4_stack_top
+ist4_stack_bottom: resb IST_STACK_SIZE
+ist4_stack_top:
+
+; IST5 — #GP General Protection
+global ist5_stack_top
+ist5_stack_bottom: resb IST_STACK_SIZE
+ist5_stack_top:
+
+; IST6 — #PF Page Fault
+global ist6_stack_top
+ist6_stack_bottom: resb IST_STACK_SIZE
+ist6_stack_top:
+
+; IST7 — rezerve (gelecek kullanım için)
+global ist7_stack_top
+ist7_stack_bottom: resb IST_STACK_SIZE
+ist7_stack_top:

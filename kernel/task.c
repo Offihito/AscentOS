@@ -243,6 +243,14 @@ void gdt_install_user_segments(void)
 // TSS YONETIMI
 // ============================================================
 
+// IST yığın tepeleri (interrupts64.asm .bss'de tanımlı)
+extern uint8_t ist1_stack_top[];   // #DF  Double Fault
+extern uint8_t ist2_stack_top[];   // #NMI Non-Maskable Interrupt
+extern uint8_t ist3_stack_top[];   // #MC  Machine Check
+extern uint8_t ist4_stack_top[];   // #SS  Stack-Segment Fault
+extern uint8_t ist5_stack_top[];   // #GP  General Protection
+extern uint8_t ist6_stack_top[];   // #PF  Page Fault
+
 void tss_init(void)
 {
     serial_print("[TSS] Initializing TSS (64-bit)...\n");
@@ -251,16 +259,24 @@ void tss_init(void)
     memset_task(&kernel_tss, 0, sizeof(tss_t));
 
     // IOPB offset: sizeof(tss_t) => I/O Permission Bitmap yok
-    // Ring-0 tum I/O portlarina eriSebilir
+    // Ring-0 tum I/O portlarina erisebilir
     kernel_tss.iopb_offset = (uint16_t)sizeof(tss_t);
 
     // RSP0: ilk deger olarak 0; ilk context switch'te
     // tss_set_kernel_stack(task->kernel_stack_top) cagirilir.
     kernel_tss.rsp0 = 0;
 
-    // IST1: kritik interrupt'lar (NMI, Double Fault) icin ayri stack
-    // Simdilik 0 (kernel stack yeterli)
-    kernel_tss.ist1 = 0;
+    // ── IST yığınlarını bağla ─────────────────────────────────────────────
+    // Her IST yığını interrupts64.asm'de 16 KB olarak ayrılmış bağımsız
+    // bir tampondur. IDT gate'lerindeki IST alanı bu yuvaya işaret eder;
+    // CPU o exception geldiğinde mevcut RSP'yi görmeksizin doğrudan
+    // TSS.ISTn'yi yükler.
+    kernel_tss.ist1 = (uint64_t)ist1_stack_top;  // #DF  → IDT[8].ist  = 1
+    kernel_tss.ist2 = (uint64_t)ist2_stack_top;  // #NMI → IDT[2].ist  = 2
+    kernel_tss.ist3 = (uint64_t)ist3_stack_top;  // #MC  → IDT[18].ist = 3
+    kernel_tss.ist4 = (uint64_t)ist4_stack_top;  // #SS  → IDT[12].ist = 4
+    kernel_tss.ist5 = (uint64_t)ist5_stack_top;  // #GP  → IDT[13].ist = 5
+    kernel_tss.ist6 = (uint64_t)ist6_stack_top;  // #PF  → IDT[14].ist = 6
 
     // TR (Task Register) register'ini yukle
     // ltr: GDT'deki TSS selector'i TR'ye yazar
@@ -276,9 +292,6 @@ void tss_init(void)
     serial_print("[TSS] TR loaded with selector 0x28\n");
 
     {
-        // uint64_t VMA adresi ondalıkta 20 hane olabilir (0xFFFFFFFF80... = ~1.84e19).
-        // Eski char num[8] höher-half'te 20 byte yazarak stack frame'i bozuyordu
-        // → tss_init() return'ünde corrupt RIP → triple fault.
         char num[32];
         serial_print("[TSS] kernel_tss @ 0x");
         uint64_to_string((uint64_t)&kernel_tss, num);
@@ -291,6 +304,13 @@ void tss_init(void)
         int_to_str(kernel_tss.iopb_offset, num);
         serial_print(num);
         serial_print("\n");
+
+        serial_print("[TSS] IST1(#DF)=0x");  uint64_to_string((uint64_t)ist1_stack_top, num); serial_print(num); serial_print("\n");
+        serial_print("[TSS] IST2(#NMI)=0x"); uint64_to_string((uint64_t)ist2_stack_top, num); serial_print(num); serial_print("\n");
+        serial_print("[TSS] IST3(#MC)=0x");  uint64_to_string((uint64_t)ist3_stack_top, num); serial_print(num); serial_print("\n");
+        serial_print("[TSS] IST4(#SS)=0x");  uint64_to_string((uint64_t)ist4_stack_top, num); serial_print(num); serial_print("\n");
+        serial_print("[TSS] IST5(#GP)=0x");  uint64_to_string((uint64_t)ist5_stack_top, num); serial_print(num); serial_print("\n");
+        serial_print("[TSS] IST6(#PF)=0x");  uint64_to_string((uint64_t)ist6_stack_top, num); serial_print(num); serial_print("\n");
     }
 }
 
@@ -1045,11 +1065,24 @@ void task_restore_fs_base(void) {
     );
 }
 
+// panic64.c'deki stack sınır değişkenleri — panic anında overflow tespiti için
+extern uint64_t g_panic_user_stack_base;
+extern uint64_t g_panic_user_stack_top;
+extern uint64_t g_panic_kern_stack_base;
+extern uint64_t g_panic_kern_stack_top;
+
 void task_switch(task_t* from, task_t* to) {
     if (!to) {
         serial_print("[TASK ERROR] Cannot switch to NULL task!\n");
         return;
     }
+
+    // Panic handler'ın görebileceği stack sınırlarını güncelle.
+    // Bir sonraki panic bu task'ın stack'ini doğru aralıkla karşılaştırır.
+    g_panic_kern_stack_base = to->kernel_stack_base;
+    g_panic_kern_stack_top  = to->kernel_stack_top;
+    g_panic_user_stack_base = to->user_stack_base;
+    g_panic_user_stack_top  = to->user_stack_top;
 
     // Context switch öncesi mevcut task'ın FS.base değerini kaydet.
     // mov fs, 0 CPU'nun MSR_FS_BASE'i sıfırlamasına yol açar; bir sonraki

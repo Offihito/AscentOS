@@ -13,6 +13,8 @@
 // ── Syscall numaralari ──────────────────────────────────────────
 #define SYS_WRITE      1
 #define SYS_EXIT      60
+#define SYS_YIELD     24   
+#define SYS_SLEEP    406    
 #define SYS_GETTICKS 404
 #define SYS_FB_INFO  407
 #define SYS_KB_RAW   408
@@ -218,7 +220,17 @@ void DG_DrawFrame(void) {
     _sc1(SYS_FB_BLIT, (long)&req);
 }
 
-void DG_SleepMs(uint32_t ms) { (void)ms; }
+void DG_SleepMs(uint32_t ms) {
+    if (ms == 0) {
+        // Süre sıfırsa sadece scheduler'a bırak.
+        // Bu R_SortVisSprites'ın aynı frame içinde iki kez çağrılmasını engeller:
+        // timer tick gelmeden Tick() döngüsü tekrar başlamaz.
+        _sc0(SYS_YIELD);
+        return;
+    }
+    // ms > 0: kernel sleep syscall'ı — busy-wait yerine task'ı blokla
+    _sc1(SYS_SLEEP, (long)ms);
+}
 
 uint32_t DG_GetTicksMs(void) {
     static uint64_t t0 = 0;

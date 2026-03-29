@@ -38,8 +38,18 @@ extern void isr24(void); extern void isr25(void); extern void isr26(void);
 extern void isr27(void); extern void isr28(void); extern void isr29(void);
 extern void isr30(void); extern void isr31(void);
 
-extern uint8_t df_stack_top[];
+extern uint8_t ist1_stack_top[];   // #DF  — interrupts64.asm
+extern uint8_t ist2_stack_top[];   // #NMI
+extern uint8_t ist3_stack_top[];   // #MC
+extern uint8_t ist4_stack_top[];   // #SS
+extern uint8_t ist5_stack_top[];   // #GP
+extern uint8_t ist6_stack_top[];   // #PF
 extern void    load_idt64(struct idt_ptr* ptr);
+
+// Bir IDT gate'inin IST alanını ayarla (0 = IST kapalı, 1-7 = TSS.ISTn)
+static inline void idt_set_ist(int n, uint8_t ist) {
+    idt[n].ist = ist & 0x07;
+}
 
 
 // ============================================================================
@@ -118,22 +128,34 @@ void init_interrupts64(void) {
     idt_write(6,  (uint64_t)isr6,  0x08, 0x8E); // #UD Invalid Opcode
     idt_write(7,  (uint64_t)isr7,  0x08, 0x8E); // #NM Device Not Available
 
-    // #DF Double Fault — IST1 (ayrı temiz stack)
-    // RSP bozukken normal stack kullanılırsa → ikinci fault → triple fault.
-    // IST=1: CPU TSS.IST1'deki df_stack_top'a geçer, bozuk RSP'den bağımsız.
+    // #DF Double Fault — IST1
     idt_write(8, (uint64_t)isr8_df, 0x08, 0x8E);
-    idt[8].ist = 1; // IST1 → TSS offset+36 = df_stack_top
+    idt_set_ist(8, 1);
 
     idt_write(9,  (uint64_t)isr9,  0x08, 0x8E); // Coprocessor Overrun
     idt_write(10, (uint64_t)isr10, 0x08, 0x8E); // #TS Invalid TSS
     idt_write(11, (uint64_t)isr11, 0x08, 0x8E); // #NP Segment Not Present
-    idt_write(12, (uint64_t)isr12, 0x08, 0x8E); // #SS Stack Fault
-    idt_write(13, (uint64_t)isr13, 0x08, 0x8E); // #GP General Protection
-    idt_write(14, (uint64_t)isr14, 0x08, 0x8E); // #PF Page Fault
+
+    // #SS Stack-Segment Fault — IST4
+    idt_write(12, (uint64_t)isr12, 0x08, 0x8E);
+    idt_set_ist(12, 4);
+
+    // #GP General Protection — IST5
+    idt_write(13, (uint64_t)isr13, 0x08, 0x8E);
+    idt_set_ist(13, 5);
+
+    // #PF Page Fault — IST6
+    idt_write(14, (uint64_t)isr14, 0x08, 0x8E);
+    idt_set_ist(14, 6);
+
     idt_write(15, (uint64_t)isr15, 0x08, 0x8E); // Reserved
     idt_write(16, (uint64_t)isr16, 0x08, 0x8E); // #MF x87 FP Error
     idt_write(17, (uint64_t)isr17, 0x08, 0x8E); // #AC Alignment Check
-    idt_write(18, (uint64_t)isr18, 0x08, 0x8E); // #MC Machine Check
+
+    // #MC Machine Check — IST3
+    idt_write(18, (uint64_t)isr18, 0x08, 0x8E);
+    idt_set_ist(18, 3);
+
     idt_write(19, (uint64_t)isr19, 0x08, 0x8E); // #XF SIMD FP
     idt_write(20, (uint64_t)isr20, 0x08, 0x8E); // #VE Virtualization
     idt_write(21, (uint64_t)isr21, 0x08, 0x8E); // #CP Control Protection
@@ -149,8 +171,11 @@ void init_interrupts64(void) {
     idt_write(31, (uint64_t)isr31, 0x08, 0x8E);
     serial_print("[IDT] Exception handlers registered (INT 0-31)\n");
 
-    *((uint64_t*)((uint8_t*)&kernel_tss + 36)) = (uint64_t)df_stack_top;
-    serial_print("[IDT] IST1 (#DF stack) configured\n");
+    // #NMI — IST2 (vektör 2 isr2 ile zaten yazıldı, sadece IST alanını güncelle)
+    idt_set_ist(2, 2);
+
+    serial_print("[IDT] IST gates: #DF(IST1) #NMI(IST2) #MC(IST3) #SS(IST4) #GP(IST5) #PF(IST6)\n");
+    serial_print("[IDT] Note: TSS.ISTn pointers set in tss_init()\n");
 
     pic_remap();
     serial_print("[IDT] PIC 8259A remapped — Master:0x20 Slave:0x28\n");

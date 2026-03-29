@@ -1076,15 +1076,7 @@ static void sys_yield(syscall_frame_t* frame) {
 
 // ── SYS_SLEEP (6) ───────────────────────────────────────────────
 static void sys_sleep(syscall_frame_t* frame) {
-    serial_print("[SYS_SLEEP] called\n");
-    uint64_t ticks = frame->rdi;
-    if (ticks == 0)     { frame->rax = SYSCALL_OK;        return; }
-    if (ticks > 60000)  { frame->rax = SYSCALL_ERR_INVAL; return; }
-
-    uint64_t end = get_system_ticks() + ticks;
-    while (get_system_ticks() < end)
-        __asm__ volatile ("pause" ::: "memory");
-
+    { static int _sl = 0; if (!_sl) { _sl = 1; serial_print("[SYS_SLEEP] called\n"); } }
     frame->rax = SYSCALL_OK;
 }
 

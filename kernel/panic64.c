@@ -31,6 +31,18 @@ extern uint8_t   framebuffer_bpp;
 extern void serial_print(const char* s);
 
 // ============================================================================
+// Stack sınır değişkenleri — task.c'den doldurulur.
+// Panic öncesinde task_switch() veya task_create() içinden set edilmeli:
+//
+//   g_panic_user_stack_base = task->user_stack_base;
+//   g_panic_user_stack_top  = task->user_stack_top;
+//   g_panic_kern_stack_base = task->kernel_stack_base;
+//   g_panic_kern_stack_top  = task->kernel_stack_top;
+//
+// panic64.h'a extern bildirimleri ekle, task.c'de #include "panic64.h" yap.
+// ============================================================================
+
+// ============================================================================
 // Renkler (0x00RRGGBB — framebuffer little-endian 32bpp varsayımı)
 // ============================================================================
 #define COL_BG        0x00200000u   // Koyu kırmızı arka plan
@@ -199,6 +211,132 @@ static void strcat_p(char* dst, const char* src) {
 // ============================================================================
 // Serial dump
 // ============================================================================
+// ============================================================================
+// Kernel/user stack sınırlarını dışarıdan bildir (task.c'de doldurulur).
+// Sıfır bırakılırsa overflow kontrolü atlanır.
+// ============================================================================
+uint64_t g_panic_user_stack_base = 0;   // task->user_stack_base
+uint64_t g_panic_user_stack_top  = 0;   // task->user_stack_top
+uint64_t g_panic_kern_stack_base = 0;   // task->kernel_stack_base
+uint64_t g_panic_kern_stack_top  = 0;   // task->kernel_stack_top
+
+// #GP err_code: segment selector (sıfırsa segmentsiz genel koruma hatası)
+static void print_gp_hint(uint64_t err_code, uint64_t rip, uint64_t rsp,
+                           uint64_t fs_base) {
+    serial_print("  --- #GP TANI ---\r\n");
+
+    // err_code != 0 → belirli bir segment ihlali
+    if (err_code & ~1ULL) {
+        serial_print("  Segment selector=");
+        char b[20]; hex64(err_code & ~1ULL, b); serial_print(b);
+        serial_print((err_code & 1) ? " [EXT]\r\n" : " [IDT/LDT/GDT]\r\n");
+    } else {
+        serial_print("  err_code=0: genel koruma (segment yok)\r\n");
+    }
+
+    // FS_BASE sıfırsa musl __pthread_self → adres 0 → #GP en yaygın neden
+    if (fs_base == 0 || fs_base < 0x1000ULL) {
+        serial_print("  >> OLASI NEDEN: FS_BASE=0 → musl pthread_self() %fs:0 okuyor\r\n");
+        serial_print("     → task_restore_fs_base() timer/syscall dönüşünde çağrıldı mı?\r\n");
+    }
+
+    // RIP NULL veya çok düşükse NULL dereference'tan gelmiş olabilir
+    if (rip < 0x1000ULL) {
+        serial_print("  >> OLASI NEDEN: RIP<0x1000 → NULL fonksiyon pointer çağrısı\r\n");
+    }
+
+    // RSP hizalaması: CALL öncesi 16-byte hizalı olmalı, sonra 8 kayar
+    if (rsp & 0xF) {
+        serial_print("  >> OLASI NEDEN: RSP hizasız (SSE/AVX talimatı veya ABI ihlali)\r\n");
+        char b[20]; hex64(rsp, b);
+        serial_print("     RSP="); serial_print(b); serial_print("\r\n");
+    }
+}
+
+// #PF err_code bitlerini oku
+static void print_pf_hint(uint64_t err_code, uint64_t cr2,
+                           uint64_t user_base, uint64_t user_top) {
+    serial_print("  --- #PF TANI ---\r\n");
+    char b[20];
+    serial_print("  CR2="); hex64(cr2, b); serial_print(b); serial_print("\r\n");
+    serial_print("  Flags:");
+    if (!(err_code & 1)) serial_print(" NOT_PRESENT");
+    else                 serial_print(" PROTECTION");
+    if (err_code & 2)    serial_print(" WRITE");
+    else                 serial_print(" READ");
+    if (err_code & 4)    serial_print(" USER");
+    if (err_code & 8)    serial_print(" RSVD_BIT");
+    if (err_code & 16)   serial_print(" INSTR_FETCH");
+    serial_print("\r\n");
+
+    // Kullanıcı stack'inin hemen altına düştüyse → stack overflow
+    if (user_base && user_top && cr2 < user_base && cr2 >= user_base - 65536ULL) {
+        serial_print("  >> STACK OVERFLOW: CR2 user stack tabaninin hemen altinda!\r\n");
+        serial_print("     user_stack_base="); hex64(user_base, b);
+        serial_print(b); serial_print("\r\n");
+        serial_print("     Cozum: USER_STACK_SIZE artirin veya Doom rekürsyonunu azaltin.\r\n");
+    } else if (cr2 < 0x1000ULL) {
+        serial_print("  >> NULL pointer dereference (CR2<0x1000)\r\n");
+    }
+}
+
+// Stack overflow tespiti: RSP stack sınırlarını aştı mı?
+static void check_stack_overflow(uint64_t rsp,
+                                  uint64_t kern_base, uint64_t kern_top,
+                                  uint64_t user_base, uint64_t user_top) {
+    serial_print("  --- STACK OVERFLOW KONTROLU ---\r\n");
+    char b[20];
+
+    int checked = 0;
+
+    if (kern_base && kern_top) {
+        checked = 1;
+        serial_print("  Kernel stack: [");
+        hex64(kern_base, b); serial_print(b); serial_print(" — ");
+        hex64(kern_top,  b); serial_print(b); serial_print("]\r\n");
+
+        if (rsp < kern_base) {
+            serial_print("  !! KERNEL STACK OVERFLOW: RSP taşmış! RSP=");
+            hex64(rsp, b); serial_print(b);
+            serial_print("  altinda="); hex64(kern_base - rsp, b);
+            serial_print(b); serial_print(" byte\r\n");
+        } else if (rsp >= kern_base && rsp < kern_base + 512) {
+            serial_print("  !! KERNEL STACK KRITIK: RSP tabana cok yakin (<512 byte)\r\n");
+        } else if (rsp >= kern_base && rsp <= kern_top) {
+            uint64_t used = kern_top - rsp;
+            serial_print("  Kernel stack kullanimiı: ");
+            hex64(used, b); serial_print(b); serial_print(" byte\r\n");
+        } else {
+            serial_print("  RSP kernel stack disinda. RSP=");
+            hex64(rsp, b); serial_print(b); serial_print("\r\n");
+        }
+    }
+
+    if (user_base && user_top) {
+        checked = 1;
+        serial_print("  User stack:   [");
+        hex64(user_base, b); serial_print(b); serial_print(" — ");
+        hex64(user_top,  b); serial_print(b); serial_print("]\r\n");
+
+        if (rsp < user_base) {
+            serial_print("  !! USER STACK OVERFLOW: RSP tasmiş! RSP=");
+            hex64(rsp, b); serial_print(b);
+            serial_print("  altinda="); hex64(user_base - rsp, b);
+            serial_print(b); serial_print(" byte\r\n");
+            serial_print("  >> Cozum: task_create_user() icerisinde USER_STACK_SIZE degerini artirin.\r\n");
+        } else if (rsp >= user_base && rsp < user_base + 4096) {
+            serial_print("  !! USER STACK KRITIK: RSP tabana cok yakin (<4KB)\r\n");
+        } else if (rsp >= user_base && rsp <= user_top) {
+            uint64_t used = user_top - rsp;
+            serial_print("  User stack kullanimi: ");
+            hex64(used, b); serial_print(b); serial_print(" byte\r\n");
+        }
+    }
+
+    if (!checked)
+        serial_print("  Stack sinirlari bilinmiyor (g_panic_*_stack_* set edilmemis)\r\n");
+}
+
 static void serial_dump(const exception_frame_t* f) {
     char buf[20];
     serial_print("\r\n============================================================\r\n");
@@ -208,14 +346,55 @@ static void serial_dump(const exception_frame_t* f) {
     serial_print(" ***\r\n------------------------------------------------------------\r\n");
 
 #define SD(lbl,val) do { hex64(val,buf); serial_print("  " lbl "  "); serial_print(buf); serial_print("\r\n"); } while(0)
-    SD("RIP   ", f->rip);   SD("RSP   ", f->rsp);
-    SD("CS    ", f->cs);    SD("SS    ", f->ss);
-    SD("RFLAGS", f->rflags);SD("ERRCODE", f->err_code);
-    if (f->isr_num == 14)   { SD("CR2   ", cpu_get_cr2()); }
+    SD("RIP    ", f->rip);    SD("RSP    ", f->rsp);
+    SD("CS     ", f->cs);     SD("SS     ", f->ss);
+    SD("RFLAGS ", f->rflags); SD("ERRCODE", f->err_code);
+
+    // CPL
+    {
+        int ring = (int)(f->cs & 3);
+        serial_print("  CPL    = Ring-");
+        buf[0] = '0' + ring; buf[1] = '\r'; buf[2] = '\n'; buf[3] = 0;
+        serial_print(buf);
+        if (ring == 0) serial_print("  *** Panic kernel (Ring-0) modunda ***\r\n");
+        else           serial_print("  *** Panic kullanici (Ring-3) modunda ***\r\n");
+    }
+
+    // FS_BASE — erken oku, hem GP hem genel tana icin kullanilir
+    uint64_t fs_base = 0;
+    {
+        uint32_t _lo = 0, _hi = 0;
+        __asm__ volatile("rdmsr" : "=a"(_lo),"=d"(_hi) : "c"(0xC0000100u));
+        fs_base = ((uint64_t)_hi << 32) | _lo;
+        SD("FS_BASE", fs_base);
+        if (fs_base == 0)
+            serial_print("  *** FS_BASE=0: musl pthread_self() -> #GP ***\r\n");
+        else if (fs_base < 0x1000ULL)
+            serial_print("  *** FS_BASE<0x1000: gecersiz TLS ***\r\n");
+    }
+
+    // Exception'a ozel tani
+    if (f->isr_num == 13)
+        print_gp_hint(f->err_code, f->rip, f->rsp, fs_base);
+
+    if (f->isr_num == 14) {
+        uint64_t cr2 = cpu_get_cr2();
+        print_pf_hint(f->err_code, cr2,
+                      g_panic_user_stack_base, g_panic_user_stack_top);
+    }
+
     if (f->isr_num == 12)
-        serial_print("  *** #SS Stack-Segment Fault: stack overflow or bad SS. RAX=0xDEAD -> overflow test. ***\r\n");
+        serial_print("  *** #SS: stack overflow veya gecersiz SS segment ***\r\n");
+
     if (f->isr_num == 8)
-        serial_print("  *** #DF Double Fault: check IST in TSS for #SS/#DF handlers! ***\r\n");
+        serial_print("  *** #DF: kotu stack / IDT hatasi / RSP hizasizligi ***\r\n");
+
+    // Stack overflow kontrolu
+    check_stack_overflow(f->rsp,
+                         g_panic_kern_stack_base, g_panic_kern_stack_top,
+                         g_panic_user_stack_base, g_panic_user_stack_top);
+
+    // GPR tablosu
     serial_print("  --- GPR ---\r\n");
     SD("RAX   ", f->rax);   SD("RBX   ", f->rbx);
     SD("RCX   ", f->rcx);   SD("RDX   ", f->rdx);
@@ -226,83 +405,40 @@ static void serial_dump(const exception_frame_t* f) {
     SD("R12   ", f->r12);   SD("R13   ", f->r13);
     SD("R14   ", f->r14);   SD("R15   ", f->r15);
 
-    /* ── GENIŞLETILMIŞ DEBUG BİLGİSİ ─────────────────────────────────────
-     * Asıl soru: 0x42B7B8 hangi fonksiyon?
-     * 1. FS_BASE MSR'ının anlık değeri (musl TLS sorunu mu?)
-     * 2. Kernel stack'teki return adresleri (call chain)
-     * 3. CS analizi: Ring-0 mı Ring-3 mü?
-     * ------------------------------------------------------------------ */
-    serial_print("  --- EXTENDED DEBUG ---\r\n");
-
-    /* FS_BASE (MSR 0xC0000100) — sıfırsa musl TLS bug'ı */
+    // Stack walk — RSP'den 24 slot
+    serial_print("  --- STACK WALK (RSP) ---\r\n");
     {
-        uint32_t _lo = 0, _hi = 0;
-        __asm__ volatile("rdmsr" : "=a"(_lo),"=d"(_hi) : "c"(0xC0000100u));
-        uint64_t fs_base = ((uint64_t)_hi << 32) | _lo;
-        SD("FS_BASE", fs_base);
-        if (fs_base == 0)
-            serial_print("  *** FS_BASE=0: musl __pthread_self() -> BIOS IVT -> #GP! ***\r\n");
-        else if (fs_base < 0x1000ULL)
-            serial_print("  *** FS_BASE<0x1000: likely zeroed/invalid TLS ***\r\n");
-    }
-
-    /* Ring level analizi */
-    {
-        int ring = (int)(f->cs & 3);
-        serial_print("  CPL     = Ring-");
-        buf[0] = '0' + ring; buf[1] = '\r'; buf[2] = '\n'; buf[3] = 0;
-        serial_print(buf);
-        if (ring == 0)
-            serial_print("  *** Panic in Ring-0 (kernel/IRQ context) ***\r\n");
-    }
-
-    /* Panic önceki RSP → stack frame walk
-     * isr_panic_common push dizisi:
-     *   rax,rbx,rcx,rdx,rsi,rdi,rbp,r8-r15 = 15 reg × 8 = 120 byte
-     *   err_code(8) + isr_num(8) + rip(8) + cs(8) + rflags(8) + rsp(8) + ss(8)
-     * exception handler'a girerken kernel_stack'teki return adresleri: */
-    serial_print("  --- STACK TRACE (kernel RSP walk) ---\r\n");
-    {
-        /* panic anındaki kernel RSP'den itibaren 16 adres bas */
         uint64_t* sp = (uint64_t*)(uintptr_t)f->rsp;
-        /* RSP'nin makul kernel aralığında olup olmadığını kontrol et */
-        if ((uint64_t)(uintptr_t)sp >= 0x100000ULL &&
-            (uint64_t)(uintptr_t)sp <  0x200000000ULL) {
-            for (int i = 0; i < 16; i++) {
+        if ((uint64_t)(uintptr_t)sp >= 0x1000ULL &&
+            (uint64_t)(uintptr_t)sp <  0xFFFFFFFFFFFFULL) {
+            for (int i = 0; i < 24; i++) {
                 serial_print("  [RSP+");
-                /* offset */
-                buf[0] = '0' + (char)((i * 8) / 100 % 10);
-                buf[1] = '0' + (char)((i * 8) /  10 % 10);
-                buf[2] = '0' + (char)((i * 8)       % 10);
+                buf[0] = '0' + (char)((i*8)/100%10);
+                buf[1] = '0' + (char)((i*8)/ 10%10);
+                buf[2] = '0' + (char)((i*8)    %10);
                 buf[3] = ']'; buf[4] = ' '; buf[5] = 0;
                 serial_print(buf);
-                hex64(sp[i], buf);
-                serial_print(buf);
+                hex64(sp[i], buf); serial_print(buf);
                 serial_print("\r\n");
             }
         } else {
-            serial_print("  RSP out of expected range — no walk\r\n");
+            serial_print("  RSP gecersiz aralikta, walk atlanıyor\r\n");
         }
     }
 
-    /* isr_panic_common'a gelirken interrupt frame'inden bir önceki RIP:
-     * f->rip = exception anındaki gerçek RIP (patlayan adres).
-     * f->rbp ile frame pointer walk yap (GCC -fno-omit-frame-pointer ise çalışır) */
+    // Frame pointer zinciri (GCC -fno-omit-frame-pointer ile anlamlı)
     serial_print("  --- FRAME POINTER CHAIN ---\r\n");
     {
         uint64_t rbp = f->rbp;
-        for (int depth = 0; depth < 8 && rbp != 0; depth++) {
-            if (rbp < 0x100000ULL || rbp >= 0x200000000ULL) break;
-            if (rbp & 7) break;  /* hizasız — geçersiz */
+        for (int depth = 0; depth < 16 && rbp != 0; depth++) {
+            if (rbp < 0x1000ULL || (rbp & 7)) break;
             uint64_t saved_rbp = ((uint64_t*)(uintptr_t)rbp)[0];
             uint64_t ret_addr  = ((uint64_t*)(uintptr_t)rbp)[1];
-            serial_print("  #");
-            buf[0] = '0' + depth; buf[1] = ' '; buf[2] = 0;
-            serial_print(buf);
-            serial_print("ret=");
-            hex64(ret_addr, buf); serial_print(buf);
-            serial_print("  rbp=");
-            hex64(saved_rbp, buf); serial_print(buf);
+            buf[0] = '#'; buf[1] = '0' + (depth/10); buf[2] = '0' + (depth%10);
+            buf[3] = ' '; buf[4] = 0;
+            serial_print("  "); serial_print(buf);
+            serial_print("ret="); hex64(ret_addr,  buf); serial_print(buf);
+            serial_print("  rbp="); hex64(saved_rbp, buf); serial_print(buf);
             serial_print("\r\n");
             rbp = saved_rbp;
         }
@@ -418,9 +554,44 @@ void kernel_panic_handler(exception_frame_t* f) {
             "#SS STACK FAULT — Stack overflow or bad SS segment",
             0x00FF8888u, 0x00280000u, 1);
         cy += 12;
+    }
+
+    // #GP özel not
+    if (f->isr_num == 13) {
+        if (f->err_code == 0) {
+            uint32_t _lo=0,_hi=0;
+            __asm__ volatile("rdmsr"::"c"(0xC0000100u),"a"(_lo),"d"(_hi));
+            // FS_BASE okunamaz burada (clobber), sadece genel mesaj yeterli
+            draw_str_centered(cy, PX, PW,
+                "#GP err_code=0: NULL func ptr / bad RSP align / FS_BASE=0",
+                0x00FF8888u, 0x00280000u, 1);
+        } else {
+            draw_str_centered(cy, PX, PW,
+                "#GP: Segment ihlali — selector bilgisi serial logda",
+                0x00FF8888u, 0x00280000u, 1);
+        }
+        cy += 12;
         draw_str_centered(cy, PX, PW,
-            "RAX=0xDEAD confirms panic stack-overflow test triggered",
+            "Bkz: serial log -> #GP TANI bolumu",
             0x00FFAA55u, 0x00280000u, 1);
+        cy += 12;
+    }
+
+    // Stack overflow özeti (user stack taştıysa)
+    if (g_panic_user_stack_base && f->rsp < g_panic_user_stack_base) {
+        draw_str_centered(cy, PX, PW,
+            "!! USER STACK OVERFLOW !! RSP stack tabaninin altinda",
+            0x00FF4444u, 0x00280000u, 1);
+        cy += 12;
+        draw_str_centered(cy, PX, PW,
+            "Cozum: USER_STACK_SIZE artirin (task_create_user)",
+            0x00FFAA55u, 0x00280000u, 1);
+        cy += 12;
+    }
+    if (g_panic_kern_stack_base && f->rsp < g_panic_kern_stack_base) {
+        draw_str_centered(cy, PX, PW,
+            "!! KERNEL STACK OVERFLOW !! RSP kernel stack tabaninin altinda",
+            0x00FF4444u, 0x00280000u, 1);
         cy += 12;
     }
 
