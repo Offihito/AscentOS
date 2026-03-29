@@ -141,7 +141,23 @@ fi
 info "Port katmanı kopyalanıyor..."
 cp "${PORT_LAYER}" "${DOOM_SRC_DIR}/doomgeneric/doomgeneric_ascent.c"
 
-# ── BÖLÜM 3: crt0.o üret ─────────────────────────────────────
+# ── BÖLÜM 2b: r_things.c clamp patch'i uygula ───────────────
+# R_SortVisSprites, vissprite_p'nin array sınırını aşıp aşmadığını
+# kontrol etmiyor. Taşma olursa list walk geçersiz belleğe ulaşır → #GP.
+# Bu patch fonksiyon başına bir clamp guard ekler.
+info "r_things.c clamp patch'i uygulanıyor..."
+RTHINGS="${DOOM_SRC_DIR}/doomgeneric/r_things.c"
+PATCH_MARKER="/* ASCENT_VISSPRITE_CLAMP */"
+
+if grep -q "${PATCH_MARKER}" "${RTHINGS}"; then
+    info "  r_things.c patch zaten uygulanmış, atlanıyor."
+else
+    # R_SortVisSprites fonksiyonunun ilk satırından önce clamp guard ekle.
+    # "count = vissprite_p - vissprites;" satırından önce yerleştir.
+    sed -i "s|    count = vissprite_p - vissprites;|    ${PATCH_MARKER}\n    if (vissprite_p > \&vissprites[MAXVISSPRITES])\n        vissprite_p = \&vissprites[MAXVISSPRITES];\n    count = vissprite_p - vissprites;|" "${RTHINGS}" \
+        || error "r_things.c patch başarısız."
+    info "  r_things.c clamp patch'i uygulandı (MAXVISSPRITES=512 guard)."
+fi
 info "crt0.o derleniyor..."
 CRT0_OBJ="/tmp/ascentos_doom_crt0.o"
 nasm -f elf64 "${CRT0_ASM}" -o "${CRT0_OBJ}" \
@@ -215,6 +231,12 @@ COMMON_CFLAGS="\
     --sysroot=${MUSL_PREFIX}"
 
 COMMON_CFLAGS="${COMMON_CFLAGS} -Wno-implicit-function-declaration -Wno-int-conversion -Wno-unused-result"
+
+# R_SortVisSprites linked list corruption fix:
+# Varsayılan MAXVISSPRITES=128 yoğun sahnelerde taşıyor →
+# vissprite_t list walk'u geçersiz pointer'a ulaşıyor → #GP.
+# 512'ye çıkarmak + r_things.c clamp patch'i birlikte uygulanır.
+COMMON_CFLAGS="${COMMON_CFLAGS} -DMAXVISSPRITES=512"
 
 DOOM_OBJ_LIST=""
 
