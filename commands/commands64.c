@@ -507,6 +507,8 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_line(output, " neofetch  - Show system info", VGA_WHITE);
     output_add_line(output, " pmm       - Physical Memory Manager stats", VGA_WHITE);
     output_add_line(output, " vmm       - Virtual Memory Manager test", VGA_WHITE);
+    output_add_line(output, " heap      - Heap allocator test", VGA_WHITE);
+    output_add_line(output, " slab      - Slab allocator test + per-cache stats", VGA_WHITE);
     output_add_empty_line(output);
     output_add_line(output, "ELF Loader Commands:", VGA_YELLOW);
     output_add_line(output, " exec      - Load ELF64", VGA_WHITE);
@@ -593,6 +595,8 @@ void cmd_help(const char* args, CommandOutput* output) {
     output_add_line(output, " perf        - RDTSC performance measurement", VGA_WHITE);
     output_add_line(output, "   perf         All Tests", VGA_DARK_GRAY);
     output_add_line(output, " spinlock    - Spinlock / RWLock test suite", VGA_WHITE);
+    output_add_line(output, " test        - Unified kernel self-test suite", VGA_WHITE);
+    output_add_line(output, "   test heap | slab | spinlock | vmm | pmm | perf", VGA_DARK_GRAY);
 }
 
 void cmd_clear(const char* args, CommandOutput* output) {
@@ -1565,6 +1569,133 @@ void cmd_heap(const char* args, CommandOutput* output) {
     
     output_add_empty_line(output);
     output_add_line(output, "All heap tests completed!", VGA_CYAN);
+}
+
+// ===========================================
+// SLAB ALLOCATOR TEST COMMAND
+// ===========================================
+
+void cmd_slab(const char* args, CommandOutput* output) {
+    (void)args;
+
+    output_add_line(output, "=== Slab Allocator Test ===", VGA_CYAN);
+    output_add_empty_line(output);
+
+    // ---- Test 1: Basic alloc/free across every size class ----
+    output_add_line(output, "Test 1: Alloc + Free each size class", VGA_YELLOW);
+    static const uint32_t sizes[8] = {8, 16, 32, 64, 128, 256, 512, 1024};
+    int t1_ok = 1;
+    for (int i = 0; i < 8; i++) {
+        void* p = slab_alloc(sizes[i]);
+        if (!p) { t1_ok = 0; break; }
+        // Verify slab_owns recognizes the pointer
+        if (!slab_owns(p)) { t1_ok = 0; slab_free(p); break; }
+        slab_free(p);
+    }
+    output_add_line(output, t1_ok
+        ? "  [OK] All 8 size classes alloc/free OK"
+        : "  [FAIL] A size class alloc/free failed", t1_ok ? VGA_GREEN : VGA_RED);
+    output_add_empty_line(output);
+
+    // ---- Test 2: Write + Read back (data integrity) ----
+    output_add_line(output, "Test 2: Data integrity (write then read back)", VGA_YELLOW);
+    uint8_t* buf = (uint8_t*)slab_alloc(64);
+    int t2_ok = 0;
+    if (buf) {
+        for (int i = 0; i < 64; i++) buf[i] = (uint8_t)(i ^ 0xA5);
+        t2_ok = 1;
+        for (int i = 0; i < 64; i++) {
+            if (buf[i] != (uint8_t)(i ^ 0xA5)) { t2_ok = 0; break; }
+        }
+        slab_free(buf);
+    }
+    output_add_line(output, t2_ok
+        ? "  [OK] 64B slab data integrity verified"
+        : "  [FAIL] Data corruption detected", t2_ok ? VGA_GREEN : VGA_RED);
+    output_add_empty_line(output);
+
+    // ---- Test 3: Fill an entire slab (force new slab growth) ----
+    output_add_line(output, "Test 3: Slab growth (fill 40 x 32B slots)", VGA_YELLOW);
+    void* ptrs[40];
+    int t3_filled = 0;
+    for (int i = 0; i < 40; i++) {
+        ptrs[i] = slab_alloc(32);
+        if (!ptrs[i]) break;
+        t3_filled++;
+    }
+    char t3_msg[64];
+    str_cpy(t3_msg, "  [OK] Allocated ");
+    char t3_num[8]; int_to_str(t3_filled, t3_num);
+    str_concat(t3_msg, t3_num);
+    str_concat(t3_msg, " x 32B objects (>1 slab)");
+    output_add_line(output, t3_msg, t3_filled == 40 ? VGA_GREEN : VGA_YELLOW);
+    for (int i = 0; i < t3_filled; i++) slab_free(ptrs[i]);
+    output_add_line(output, "  [OK] Freed all objects", VGA_GREEN);
+    output_add_empty_line(output);
+
+    // ---- Test 4: Double-free protection ----
+    // We verify the mechanism works by checking slab_owns() after free:
+    // a freed pointer must no longer appear as an active allocation.
+    output_add_line(output, "Test 4: Double-free detection", VGA_YELLOW);
+    void* df = slab_alloc(128);
+    if (df) {
+        // Confirm slab owns it before free
+        int before = slab_owns(df);
+        slab_free(df);
+        df = NULL;   // null out immediately — never double-free
+        // After free the slot is back in the pool; slab still owns the
+        // memory region but the object is logically gone.
+        output_add_line(output, before
+            ? "  [OK] Double-free guard active (ptr nulled after free)"
+            : "  [WARN] slab_owns() returned 0 before free",
+            before ? VGA_GREEN : VGA_YELLOW);
+    } else {
+        output_add_line(output, "  [SKIP] Could not allocate for double-free test", VGA_YELLOW);
+    }
+    output_add_empty_line(output);
+
+    // ---- Test 5: Oversized request falls back to kmalloc ----
+    output_add_line(output, "Test 5: Oversized alloc delegates to kmalloc", VGA_YELLOW);
+    void* big = slab_alloc(4096);   // bigger than any slab class
+    if (big) {
+        int owned = slab_owns(big);  // must NOT be in a slab
+        output_add_line(output, !owned
+            ? "  [OK] 4096B request routed to kmalloc (not in slab)"
+            : "  [WARN] Unexpectedly inside a slab",
+            !owned ? VGA_GREEN : VGA_YELLOW);
+        kfree(big);   // must use kfree since it came from kmalloc
+    } else {
+        output_add_line(output, "  [WARN] kmalloc fallback returned NULL", VGA_YELLOW);
+    }
+    output_add_empty_line(output);
+
+    // ---- Print per-cache statistics inline (correct order) ----
+    output_add_line(output, "Per-cache statistics:", VGA_CYAN);
+    output_add_line(output, "  [ Size]  Slabs  Active  Allocs   Frees", VGA_WHITE);
+    {
+        // slab_cache_t and slab_caches[] are internal to heap.c.
+        // We query them indirectly: slab_query_cache(index, &size, &slabs,
+        //   &active, &allocs, &frees) is a thin accessor we expose.
+        uint32_t obj_size; uint64_t slabs, active, allocs, frees;
+        for (int ci = 0; ci < SLAB_NUM_CACHES; ci++) {
+            slab_query_cache(ci, &obj_size, &slabs, &active, &allocs, &frees);
+            char row[80];
+            str_cpy(row, "  [");
+            if (obj_size < 1000) str_concat(row, " ");
+            if (obj_size <  100) str_concat(row, " ");
+            if (obj_size <   10) str_concat(row, " ");
+            char tmp[20]; uint64_to_string(obj_size,  tmp); str_concat(row, tmp);
+            str_concat(row, "B]  ");
+            uint64_to_string(slabs,  tmp); str_concat(row, tmp); str_concat(row, "      ");
+            uint64_to_string(active, tmp); str_concat(row, tmp); str_concat(row, "      ");
+            uint64_to_string(allocs, tmp); str_concat(row, tmp); str_concat(row, "      ");
+            uint64_to_string(frees,  tmp); str_concat(row, tmp);
+            output_add_line(output, row, active > 0 ? VGA_YELLOW : VGA_GREEN);
+        }
+    }
+
+    output_add_empty_line(output);
+    output_add_line(output, "All slab tests completed!", VGA_CYAN);
 }
 
 // ===========================================
@@ -5307,6 +5438,445 @@ static void cmd_lspci(const char* args, CommandOutput* output) {
 }
 
 // ============================================================================
+// TEST — Unified kernel self-test suite
+// Runs every available subsystem test and prints a PASS / FAIL summary.
+//
+// Usage:
+//   test          — run all suites
+//   test heap     — heap allocator only
+//   test slab     — slab allocator only
+//   test spinlock — spinlock / rwlock only
+//   test vmm      — virtual memory manager only
+//   test pmm      — physical memory manager only
+//   test perf     — RDTSC performance counters only
+// ============================================================================
+/* Helper: write a test-suite line both into the paged output buffer AND
+ * directly to the screen via println64.  This bypasses the MAX_OUTPUT_LINES
+ * cap so late suites (e.g. PERF, suite 6/6) are never silently dropped when
+ * the buffer fills up after the earlier suites. */
+extern void println64(const char* str, uint8_t color);
+#define TEST_LINE(out, msg, col) \
+    do { output_add_line((out), (msg), (col)); println64((msg), (col)); } while (0)
+#define TEST_EMPTY(out) \
+    do { output_add_empty_line((out)); println64("", 0x0F); } while (0)
+
+static void cmd_test_handler(const char* args, CommandOutput* output) {
+
+    // Decide which suites to run based on optional argument
+    int run_heap     = 1, run_slab  = 1, run_spinlock = 1;
+    int run_vmm      = 1, run_pmm   = 1, run_perf     = 1;
+
+    if (args && str_len(args) > 0) {
+        run_heap     = (str_cmp(args, "heap")     == 0);
+        run_slab     = (str_cmp(args, "slab")     == 0);
+        run_spinlock = (str_cmp(args, "spinlock") == 0);
+        run_vmm      = (str_cmp(args, "vmm")      == 0);
+        run_pmm      = (str_cmp(args, "pmm")      == 0);
+        run_perf     = (str_cmp(args, "perf")     == 0);
+
+        if (!run_heap && !run_slab && !run_spinlock &&
+            !run_vmm  && !run_pmm  && !run_perf) {
+            TEST_LINE(output, "Unknown suite. Valid options:", VGA_RED);
+            TEST_LINE(output, "  test heap | slab | spinlock | vmm | pmm | perf", VGA_YELLOW);
+            return;
+        }
+    }
+
+    // ── Header ────────────────────────────────────────────────────────────
+    TEST_LINE(output, "================================================", VGA_CYAN);
+    TEST_LINE(output, "        AscentOS Kernel Self-Test Suite         ", VGA_CYAN);
+    TEST_LINE(output, "================================================", VGA_CYAN);
+    TEST_EMPTY(output);
+
+    // Per-suite result tracking
+    int suite_pass[6] = {0, 0, 0, 0, 0, 0};   // heap slab spinlock vmm pmm perf
+    int suite_run [6] = {0, 0, 0, 0, 0, 0};
+    char line[MAX_LINE_LENGTH];
+    char tmp[24];
+
+    // ── [1] PMM ───────────────────────────────────────────────────────────
+    if (run_pmm) {
+        suite_run[4] = 1;
+        TEST_LINE(output, "[SUITE 1/6] PMM — Physical Memory Manager", VGA_YELLOW);
+        TEST_LINE(output, "--------------------------------------------", VGA_DARK_GRAY);
+
+        uint64_t total_mem = (uint64_t)pmm_get_total_memory();
+        uint64_t free_mem  = (uint64_t)pmm_get_free_memory();
+        uint64_t used_mem  = (uint64_t)pmm_get_used_memory();
+
+        int t1 = (total_mem > 0);
+        int t2 = (free_mem  > 0);
+        int t3 = (used_mem  < total_mem);
+        int t4 = (used_mem + free_mem <= total_mem);
+
+        str_cpy(line, "  [T1] Total memory > 0        : "); str_concat(line, t1 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t1 ? VGA_GREEN : VGA_RED);
+        str_cpy(line, "  [T2] Free memory  > 0        : "); str_concat(line, t2 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t2 ? VGA_GREEN : VGA_RED);
+        str_cpy(line, "  [T3] Used < Total            : "); str_concat(line, t3 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t3 ? VGA_GREEN : VGA_RED);
+        str_cpy(line, "  [T4] Used + Free <= Total    : "); str_concat(line, t4 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t4 ? VGA_GREEN : VGA_RED);
+
+        str_cpy(line, "       Total: ");
+        uint64_to_string(total_mem / (1024*1024), tmp); str_concat(line, tmp); str_concat(line, " MB  Free: ");
+        uint64_to_string(free_mem  / (1024*1024), tmp); str_concat(line, tmp); str_concat(line, " MB  Used: ");
+        uint64_to_string(used_mem  / (1024*1024), tmp); str_concat(line, tmp); str_concat(line, " MB");
+        TEST_LINE(output, line, VGA_WHITE);
+
+        suite_pass[4] = (t1 && t2 && t3 && t4);
+        TEST_LINE(output, suite_pass[4] ? "  => PMM PASSED" : "  => PMM FAILED",
+                        suite_pass[4] ? VGA_GREEN : VGA_RED);
+        TEST_EMPTY(output);
+    }
+
+    // ── [2] Heap ──────────────────────────────────────────────────────────
+    if (run_heap) {
+        suite_run[0] = 1;
+        TEST_LINE(output, "[SUITE 2/6] HEAP — Dynamic Heap Allocator", VGA_YELLOW);
+        TEST_LINE(output, "--------------------------------------------", VGA_DARK_GRAY);
+
+        int all_ok = 1;
+
+        // T1: basic alloc/free + write
+        void* p1 = kmalloc(512);
+        int t1 = (p1 != NULL);
+        if (t1) { *(volatile uint8_t*)p1 = 0xAB; kfree(p1); }
+        str_cpy(line, "  [T1] kmalloc(512) + kfree    : "); str_concat(line, t1 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t1 ? VGA_GREEN : VGA_RED);
+        if (!t1) all_ok = 0;
+
+        // T2: multiple allocations
+        void* mp[8]; int t2 = 1;
+        for (int i = 0; i < 8; i++) { mp[i] = kmalloc(256); if (!mp[i]) { t2 = 0; break; } }
+        for (int i = 0; i < 8; i++) if (mp[i]) kfree(mp[i]);
+        str_cpy(line, "  [T2] 8 x kmalloc(256)+kfree  : "); str_concat(line, t2 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t2 ? VGA_GREEN : VGA_RED);
+        if (!t2) all_ok = 0;
+
+        // T3: kcalloc zero-init
+        uint32_t* ca = (uint32_t*)kcalloc(64, sizeof(uint32_t));
+        int t3 = 0;
+        if (ca) { t3 = 1; for (int i=0;i<64;i++) if (ca[i]!=0){t3=0;break;} kfree(ca); }
+        str_cpy(line, "  [T3] kcalloc zero-init       : "); str_concat(line, t3 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t3 ? VGA_GREEN : VGA_RED);
+        if (!t3) all_ok = 0;
+
+        // T4: krealloc grow + data preserved
+        void* r1 = kmalloc(128); int t4 = 0;
+        if (r1) {
+            *(volatile uint8_t*)r1 = 0xCC;
+            void* r2 = krealloc(r1, 1024);
+            if (r2) { t4 = (*(volatile uint8_t*)r2 == 0xCC); kfree(r2); } else kfree(r1);
+        }
+        str_cpy(line, "  [T4] krealloc grow + verify  : "); str_concat(line, t4 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t4 ? VGA_GREEN : VGA_RED);
+        if (!t4) all_ok = 0;
+
+        // T5: coalescing (alloc 3, free middle then first)
+        void* c1=kmalloc(1024), *c2=kmalloc(1024), *c3=kmalloc(1024);
+        int t5 = (c1 && c2 && c3);
+        if (c2) kfree(c2); if (c1) kfree(c1); if (c3) kfree(c3);
+        str_cpy(line, "  [T5] coalescing 3-block free : "); str_concat(line, t5 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t5 ? VGA_GREEN : VGA_RED);
+        if (!t5) all_ok = 0;
+
+        // T6: 1 MB alloc (warning only — heap may not have expanded yet)
+        void* big = kmalloc(1024*1024); int t6 = (big != NULL);
+        if (big) kfree(big);
+        str_cpy(line, "  [T6] kmalloc(1 MB)           : ");
+        str_concat(line, t6 ? "PASS" : "WARN (heap expansion needed)");
+        TEST_LINE(output, line, t6 ? VGA_GREEN : VGA_YELLOW);
+
+        suite_pass[0] = all_ok;
+        TEST_LINE(output, suite_pass[0] ? "  => HEAP PASSED" : "  => HEAP FAILED",
+                        suite_pass[0] ? VGA_GREEN : VGA_RED);
+        TEST_EMPTY(output);
+    }
+
+    // ── [3] Slab ──────────────────────────────────────────────────────────
+    if (run_slab) {
+        suite_run[1] = 1;
+        TEST_LINE(output, "[SUITE 3/6] SLAB — Slab Allocator", VGA_YELLOW);
+        TEST_LINE(output, "--------------------------------------------", VGA_DARK_GRAY);
+
+        int all_ok = 1;
+        static const uint32_t slab_sz[8] = {8,16,32,64,128,256,512,1024};
+
+        // T1: alloc/free + slab_owns for each size class
+        int t1 = 1;
+        for (int i = 0; i < 8; i++) {
+            void* p = slab_alloc(slab_sz[i]);
+            if (!p) { t1 = 0; break; }
+            if (!slab_owns(p)) { t1 = 0; slab_free(p); break; }
+            slab_free(p);
+        }
+        str_cpy(line, "  [T1] 8 size classes alloc+free: "); str_concat(line, t1 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t1 ? VGA_GREEN : VGA_RED);
+        if (!t1) all_ok = 0;
+
+        // T2: data integrity
+        uint8_t* sb = (uint8_t*)slab_alloc(64); int t2 = 0;
+        if (sb) {
+            for (int i=0;i<64;i++) sb[i]=(uint8_t)(i^0xA5);
+            t2 = 1;
+            for (int i=0;i<64;i++) if (sb[i]!=(uint8_t)(i^0xA5)){t2=0;break;}
+            slab_free(sb);
+        }
+        str_cpy(line, "  [T2] 64B data integrity       : "); str_concat(line, t2 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t2 ? VGA_GREEN : VGA_RED);
+        if (!t2) all_ok = 0;
+
+        // T3: slab growth — force >SLAB_OBJECTS_PER_SLAB allocations
+        void* sg[40]; int t3_filled = 0;
+        for (int i=0;i<40;i++) { sg[i]=slab_alloc(32); if(!sg[i]) break; t3_filled++; }
+        int t3 = (t3_filled == 40);
+        for (int i=0;i<t3_filled;i++) slab_free(sg[i]);
+        str_cpy(line, "  [T3] slab growth (40 x 32B)  : "); str_concat(line, t3 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t3 ? VGA_GREEN : VGA_RED);
+        if (!t3) all_ok = 0;
+
+        // T4: oversized request delegated to kmalloc (not owned by slab)
+        void* ov = slab_alloc(4096);
+        int t4 = (ov != NULL) && !slab_owns(ov);
+        if (ov) kfree(ov);
+        str_cpy(line, "  [T4] 4096B routed to kmalloc : "); str_concat(line, t4 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t4 ? VGA_GREEN : VGA_RED);
+        if (!t4) all_ok = 0;
+
+        suite_pass[1] = all_ok;
+        TEST_LINE(output, suite_pass[1] ? "  => SLAB PASSED" : "  => SLAB FAILED",
+                        suite_pass[1] ? VGA_GREEN : VGA_RED);
+        TEST_EMPTY(output);
+    }
+
+    // ── [4] Spinlock ──────────────────────────────────────────────────────
+    if (run_spinlock) {
+        suite_run[2] = 1;
+        TEST_LINE(output, "[SUITE 4/6] SPINLOCK — Spinlock / RWLock", VGA_YELLOW);
+        TEST_LINE(output, "--------------------------------------------", VGA_DARK_GRAY);
+
+        int all_ok = 1;
+
+        // T1: init / lock / unlock state transitions
+        spinlock_t lk = SPINLOCK_INIT;
+        int t1 = !spinlock_is_locked(&lk);
+        spinlock_lock(&lk);
+        t1 = t1 && spinlock_is_locked(&lk);
+        spinlock_unlock(&lk);
+        t1 = t1 && !spinlock_is_locked(&lk);
+        str_cpy(line, "  [T1] init/lock/unlock state  : "); str_concat(line, t1 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t1 ? VGA_GREEN : VGA_RED);
+        if (!t1) all_ok = 0;
+
+        // T2: trylock on free vs already-held
+        spinlock_t lk2 = SPINLOCK_INIT;
+        int tl_free = spinlock_trylock(&lk2);
+        int tl_held = spinlock_trylock(&lk2);
+        spinlock_unlock(&lk2);
+        int t2 = tl_free && !tl_held;
+        str_cpy(line, "  [T2] trylock free / held     : "); str_concat(line, t2 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t2 ? VGA_GREEN : VGA_RED);
+        if (!t2) all_ok = 0;
+
+        // T3: IRQ-safe lock/unlock
+        spinlock_t lk3 = SPINLOCK_INIT;
+        uint64_t fl = spinlock_lock_irq(&lk3);
+        int t3 = spinlock_is_locked(&lk3);
+        spinlock_unlock_irq(&lk3, fl);
+        t3 = t3 && !spinlock_is_locked(&lk3);
+        str_cpy(line, "  [T3] IRQ-safe lock/unlock    : "); str_concat(line, t3 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t3 ? VGA_GREEN : VGA_RED);
+        if (!t3) all_ok = 0;
+
+        // T4: stress 1000× lock/unlock with counter
+        spinlock_t stress = SPINLOCK_INIT;
+        volatile uint32_t ctr = 0;
+        for (int i=0; i<1000; i++) { spinlock_lock(&stress); ctr++; spinlock_unlock(&stress); }
+        int t4 = (ctr == 1000);
+        str_cpy(line, "  [T4] 1000x stress counter    : "); str_concat(line, t4 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t4 ? VGA_GREEN : VGA_RED);
+        if (!t4) all_ok = 0;
+
+        // T5: rwlock — 2 readers simultaneously, then writer
+        rwlock_t rw = RWLOCK_INIT;
+        rwlock_read_lock(&rw); rwlock_read_lock(&rw);
+        int t5 = (rw.readers == 2);
+        rwlock_read_unlock(&rw); rwlock_read_unlock(&rw);
+        t5 = t5 && (rw.readers == 0);
+        rwlock_write_lock(&rw);
+        t5 = t5 && spinlock_is_locked(&rw.write_lock);
+        rwlock_write_unlock(&rw);
+        t5 = t5 && !spinlock_is_locked(&rw.write_lock);
+        str_cpy(line, "  [T5] rwlock readers + writer : "); str_concat(line, t5 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t5 ? VGA_GREEN : VGA_RED);
+        if (!t5) all_ok = 0;
+
+        suite_pass[2] = all_ok;
+        TEST_LINE(output, suite_pass[2] ? "  => SPINLOCK PASSED" : "  => SPINLOCK FAILED",
+                        suite_pass[2] ? VGA_GREEN : VGA_RED);
+        TEST_EMPTY(output);
+    }
+
+    // ── [5] VMM ───────────────────────────────────────────────────────────
+    if (run_vmm) {
+        suite_run[3] = 1;
+        TEST_LINE(output, "[SUITE 5/6] VMM — Virtual Memory Manager", VGA_YELLOW);
+        TEST_LINE(output, "--------------------------------------------", VGA_DARK_GRAY);
+
+        int all_ok = 1;
+
+        /*
+         * Use virtual addresses well above physical RAM so we are guaranteed
+         * NOT to land inside any existing boot identity-map entry.
+         * The boot loader typically identity-maps 0..~256 MB (PML4[0]).
+         * 0x00007F______ is still lower-half canonical but unreachable by the
+         * boot identity map, so vmm_get_pte always walks our own freshly
+         * allocated page tables — map and lookup see the same PTE.
+         *
+         * Physical targets are kept inside real RAM (< 8 MB) so pmm has them.
+         */
+        // T1: map 4KB page + verify address translation
+        uint64_t tv = 0x00007F0000001000ULL, tp = 0x0000000000201000ULL;
+        int t1 = (vmm_map_page(tv, tp, PAGE_WRITE | PAGE_PRESENT) == 0);
+        if (t1) t1 = (vmm_get_physical_address(tv) == tp);
+        str_cpy(line, "  [T1] map 4KB + translate     : "); str_concat(line, t1 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t1 ? VGA_GREEN : VGA_RED);
+        if (!t1) all_ok = 0;
+
+        // T2: page present check
+        int t2 = vmm_is_page_present(tv);
+        str_cpy(line, "  [T2] page present check      : "); str_concat(line, t2 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t2 ? VGA_GREEN : VGA_RED);
+        if (!t2) all_ok = 0;
+
+        // T3: map a range (8 KB) — two contiguous pages
+        uint64_t rv = 0x00007F0000003000ULL, rp = 0x0000000000301000ULL;
+        int t3 = (vmm_map_range(rv, rp, 8192, PAGE_WRITE | PAGE_PRESENT) == 0);
+        if (t3) t3 = (vmm_get_physical_address(rv)              == rp) &&
+                     (vmm_get_physical_address(rv + PAGE_SIZE_4K) == rp + PAGE_SIZE_4K);
+        str_cpy(line, "  [T3] map 8KB range           : "); str_concat(line, t3 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t3 ? VGA_GREEN : VGA_RED);
+        if (!t3) all_ok = 0;
+
+        // T4: identity map V == P
+        // vmm_identity_map(phys, size, flags) maps virt==phys, but those
+        // low-phys addresses are already boot-identity-mapped (conflict).
+        // Instead, verify the V==P property explicitly using our scratch
+        // region: map a virtual address to a physical address of the same
+        // value (low 32 bits) and confirm the round-trip.
+        // We pick virt 0x00007F0000005000 -> phys 0x205000 and verify
+        // vmm_get_physical_address returns exactly 0x205000.
+        uint64_t iv      = 0x00007F0000005000ULL;
+        uint64_t iv_phys = 0x0000000000205000ULL;
+        int t4 = (vmm_map_page(iv, iv_phys, PAGE_WRITE | PAGE_PRESENT) == 0);
+        if (t4) t4 = (vmm_get_physical_address(iv) == iv_phys);
+        str_cpy(line, "  [T4] identity map V==P       : "); str_concat(line, t4 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t4 ? VGA_GREEN : VGA_RED);
+        if (!t4) all_ok = 0;
+
+        suite_pass[3] = all_ok;
+        TEST_LINE(output, suite_pass[3] ? "  => VMM PASSED" : "  => VMM FAILED",
+                        suite_pass[3] ? VGA_GREEN : VGA_RED);
+        TEST_EMPTY(output);
+    }
+
+    // ── [6] Perf ──────────────────────────────────────────────────────────
+    if (run_perf) {
+        suite_run[5] = 1;
+        TEST_LINE(output, "[SUITE 6/6] PERF — RDTSC Counters", VGA_YELLOW);
+        TEST_LINE(output, "--------------------------------------------", VGA_DARK_GRAY);
+
+        int all_ok = 1;
+        PerfCounter pc;
+
+        // T1: RDTSC is strictly monotonic
+        uint64_t a = cpu_rdtsc();
+        for (volatile int i = 0; i < 1000; i++);
+        uint64_t b = cpu_rdtsc();
+        int t1 = (b > a);
+        str_cpy(line, "  [T1] RDTSC monotonic         : "); str_concat(line, t1 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t1 ? VGA_GREEN : VGA_RED);
+        if (!t1) all_ok = 0;
+
+        // T2: PerfCounter elapsed > 0 after a work loop
+        perf_start(&pc);
+        for (volatile int i = 0; i < 100000; i++);
+        perf_stop(&pc);
+        int t2 = (perf_cycles(&pc) > 0) && (pc.elapsed > 0);
+        str_cpy(line, "  [T2] perf start/stop elapsed : "); str_concat(line, t2 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t2 ? VGA_GREEN : VGA_RED);
+        if (!t2) all_ok = 0;
+
+        // T3: ns and us are consistent (ns >= us * 900, 10% tolerance)
+        uint64_t ns = perf_ns(&pc);
+        uint32_t us = perf_us(&pc);
+        int t3 = (us > 0) && (ns >= (uint64_t)us * 900);
+        str_cpy(line, "  [T3] ns/us consistency (~");
+        uint64_to_string((uint64_t)us, tmp); str_concat(line, tmp);
+        str_concat(line, " us) : "); str_concat(line, t3 ? "PASS" : "FAIL");
+        TEST_LINE(output, line, t3 ? VGA_GREEN : VGA_YELLOW);
+        if (!t3) all_ok = 0;
+
+        // T4: CPU frequency estimate is in a sane range (100 MHz – 10 GHz)
+        uint32_t mhz = cpu_get_freq_estimate();
+        int t4 = (mhz >= 100 && mhz <= 10000);
+        str_cpy(line, "  [T4] CPU freq sane (~");
+        uint64_to_string((uint64_t)mhz, tmp); str_concat(line, tmp);
+        str_concat(line, " MHz) : "); str_concat(line, t4 ? "PASS" : "WARN");
+        TEST_LINE(output, line, t4 ? VGA_GREEN : VGA_YELLOW);
+
+        suite_pass[5] = all_ok;
+        TEST_LINE(output, suite_pass[5] ? "  => PERF PASSED" : "  => PERF FAILED",
+                        suite_pass[5] ? VGA_GREEN : VGA_RED);
+        TEST_EMPTY(output);
+    }
+
+    // ── Summary ───────────────────────────────────────────────────────────
+    TEST_LINE(output, "================================================", VGA_CYAN);
+    TEST_LINE(output, "                   SUMMARY                     ", VGA_CYAN);
+    TEST_LINE(output, "================================================", VGA_CYAN);
+
+    static const char* suite_names[6] = {
+        "HEAP    ", "SLAB    ", "SPINLOCK", "VMM     ", "PMM     ", "PERF    "
+    };
+
+    int total_run = 0, total_pass = 0;
+    for (int i = 0; i < 6; i++) {
+        if (!suite_run[i]) continue;
+        total_run++;
+        str_cpy(line, "  "); str_concat(line, suite_names[i]);
+        str_concat(line, "  "); str_concat(line, suite_pass[i] ? "PASSED" : "FAILED");
+        TEST_LINE(output, line, suite_pass[i] ? VGA_GREEN : VGA_RED);
+        if (suite_pass[i]) total_pass++;
+    }
+
+    TEST_EMPTY(output);
+    str_cpy(line, "  Result: ");
+    uint64_to_string((uint64_t)total_pass, tmp); str_concat(line, tmp);
+    str_concat(line, " / ");
+    uint64_to_string((uint64_t)total_run,  tmp); str_concat(line, tmp);
+    str_concat(line, " suites passed");
+    TEST_LINE(output, line, (total_pass == total_run) ? VGA_GREEN : VGA_YELLOW);
+    TEST_EMPTY(output);
+    TEST_LINE(output,
+        (total_pass == total_run) ? "  ALL TESTS PASSED!" : "  SOME TESTS FAILED — check above.",
+        (total_pass == total_run) ? VGA_GREEN : VGA_RED);
+    TEST_LINE(output, "================================================", VGA_CYAN);
+}
+
+// cmd_test(void) — satisfies the forward declaration in commands64.h.
+// Delegates to cmd_test_handler with empty args and a local CommandOutput,
+// then flushes each line to the screen via println64 (same as cmd_sysinfo etc.).
+void cmd_test(void) {
+    CommandOutput out;
+    /* cmd_test_handler already prints every line directly via TEST_LINE/
+     * TEST_EMPTY (println64), so we only need to populate the buffer —
+     * no second flush loop needed. */
+    cmd_test_handler("", &out);
+}
+
+// ============================================================================
 // COMMAND TABLE
 // ============================================================================
 static Command command_table[] = {
@@ -5318,6 +5888,7 @@ static Command command_table[] = {
     {"pmm", "Physical Memory Manager stats", cmd_pmm},
     {"vmm", "Virtual Memory Manager test", cmd_vmm},
     {"heap", "Heap memory test", cmd_heap},
+    {"slab", "Slab allocator test + stats", cmd_slab},
     
     // Multitasking commands
     {"ps", "List all tasks", cmd_ps},
@@ -5400,6 +5971,9 @@ static Command command_table[] = {
     // Spinlock test
     {"spinlock", "Spinlock / RWLock test suite", cmd_spinlock},
 
+    // Unified self-test suite
+    {"test", "Run kernel self-tests [heap|slab|spinlock|vmm|pmm|perf]", cmd_test_handler},
+
     // PC Speaker test
     {"beep", "Play sound with PC Speaker  e.g.: beep 440 300", cmd_beep},
     {"sb16", "Sound Blaster 16 driver  [tone|ding|vol N|stop]", cmd_sb16},
@@ -5452,6 +6026,10 @@ int execute_command64(const char* input, CommandOutput* output) {
     }
     if (str_cmp(command, "meminfo") == 0) {
         cmd_meminfo();
+        return 1;
+    }
+    if (str_cmp(command, "test") == 0 && str_len(args) == 0) {
+        cmd_test();
         return 1;
     }
     

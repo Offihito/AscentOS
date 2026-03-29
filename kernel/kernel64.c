@@ -56,6 +56,8 @@ struct mmap_entry { unsigned long base,len; unsigned int type,acpi; };
 static struct mmap_entry parsed_mmap[MAX_MMAP];
 void pmm_init(struct mmap_entry*, uint32_t);
 void vmm_init(void);
+void init_heap(void);
+void slab_init(void);
 void gdt_install_user_segments(void);
 void tss_init(void);
 void task_init(void);
@@ -254,6 +256,8 @@ void kernel_main(uint64_t multiboot_info) {
     
     pmm_init_from_mb();
     vmm_init();
+    init_heap();
+    slab_init();
     gdt_install_user_segments();
     tss_init();
 

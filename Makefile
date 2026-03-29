@@ -24,7 +24,8 @@ all: AscentOS.iso userland install-userland
 	@echo "║  Multiboot2/VESA mode                             ║"
 	@echo "║  Filesystem: Ext3                                 ║"
 	@echo "║  For UEFI: make uefi                              ║"
-	@echo "║  make run   → Start the OS                        ║"
+	@echo "║  make run        → Start the OS                   ║"
+	@echo "║  make memstress  → Build memory stress test       ║"
 	@echo "╚═══════════════════════════════════════════════════╝"
 
 # ============================================================================
@@ -279,7 +280,7 @@ USERLAND_LDFLAGS := -T userland/libc/user.ld -static -nostdlib \
 
 USERLAND_CRT0   := userland/libc/crt0.o
 SYSCALLS_OBJ    := userland/out/syscalls.o
-USERLAND_APPS   := hello calculator shell snake wav_player syscall_test
+USERLAND_APPS   := hello calculator shell snake wav_player syscall_test memstress
 USERLAND_ELFS   := $(addprefix userland/out/, $(addsuffix .elf, $(USERLAND_APPS)))
 
 userland: $(MUSL_STAMP) userland/out $(USERLAND_CRT0) $(SYSCALLS_OBJ) $(USERLAND_ELFS)
@@ -306,7 +307,7 @@ userland/out/%.elf: userland/out/%.o $(USERLAND_CRT0) $(SYSCALLS_OBJ) | $(MUSL_S
 	@echo "  ✓ $@ built"
 
 # Short targets
-hello calculator shell snake wav_player syscall_test: userland/out/$@.elf
+hello calculator shell snake wav_player syscall_test memstress: userland/out/$@.elf
 	@echo "  ✓ $@.elf ready"
 
 # Install userland binaries to Ext3 disk
@@ -319,6 +320,7 @@ install-userland: userland disk.img
 	    debugfs -w disk.img -R "write userland/out/shell.elf      bin/shell.elf"       2>/dev/null || true; \
 	    debugfs -w disk.img -R "write userland/out/wav_player.elf bin/wav_player.elf"  2>/dev/null || true; \
 	    debugfs -w disk.img -R "write userland/out/syscall_test.elf bin/syscall_test.elf" 2>/dev/null || true; \
+	    debugfs -w disk.img -R "write userland/out/memstress.elf  bin/memstress.elf"   2>/dev/null || true; \
 	    echo "✓ Binaries installed to /bin/ using debugfs"; \
 	else \
 	    echo "⚠ debugfs not found. Install e2fsprogs."; \
@@ -426,10 +428,11 @@ help:
 	@echo "  make                Build everything"
 	@echo "  make musl           Build musl libc (first time only)"
 	@echo "  make run            Build + run in QEMU"
+	@echo "  make memstress      Build memory stress test ELF"
 	@echo "  make clean          Clean build files"
 	@echo "  make clean-all      Full clean (including musl)"
 
 .PHONY: all run run-vesa debug gdb test test-quick test-vesa test-uefi \
         test-compilation test-all musl userland install-userland disk-ls \
-        disk-rebuild hello calculator shell snake wav_player syscall_test \
+        disk-rebuild hello calculator shell snake wav_player syscall_test memstress \
         clean musl-clean clean-all info help uefi uefi-iso
