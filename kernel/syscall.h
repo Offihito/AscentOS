@@ -376,39 +376,10 @@ typedef struct {
 #define SYS_GETSOCKOPT   55   // getsockopt(fd,lvl,opt,*val,*len)        -> 0  | err
 
 // AscentOS özel syscall'lar 400-409 aralığında; Linux syscall'ları max ~450'de bitiyor.
-#define SYS_FB_INFO      407  // fb_info(fb_info_t* out)        -> 0 | err  [AscentOS özel]
-#define SYS_KB_RAW       408  // kb_raw(int enable)             -> 0 | err  [AscentOS özel]
-#define SYS_FB_BLIT      409  // fb_blit(ascent_fb_blit_t* req) -> 0 | err  [AscentOS özel]
 #define SYS_KB_READ      410  // kb_read(buf, len)              -> n | err  [AscentOS özel]
 #define SYS_SB16_PLAY    411  // sb16_play(buf,len,rate,fmt)    -> 0 | err  [AscentOS özel]
 #define SYSCALL_MAX      410  // AscentOS özel alan üst sınırı
 
-// ============================================================
-// fb_info_t — SYS_FB_INFO dönüş struct'ı
-// Kernel → user-space framebuffer bilgisi aktarımı.
-// vesa64.c extern'leriyle birebir eşleşir.
-// ============================================================
-// v4: Tüm field'lar uint64_t — hizalama garantili, mixed-type sorunları yok
-typedef struct {
-    uint64_t addr;      // Framebuffer fiziksel/lineer adresi
-    uint64_t width;     // Pixel cinsinden genişlik
-    uint64_t height;    // Pixel cinsinden yükseklik
-    uint64_t pitch;     // Satır başına byte
-    uint64_t bpp;       // Bit per pixel (genellikle 32)
-} fb_info_t;
-
-// ============================================================
-// ascent_fb_blit_t — SYS_FB_BLIT istek struct'ı  (v4: tüm field'lar uint64_t)
-// User-space Doom buffer'ını kernel VRAM'ına kopyalatır.
-// ============================================================
-typedef struct {
-    uint64_t src_pixels;  // user-space uint32_t* (Doom XRGB8888 buffer)
-    uint64_t src_w;       // kaynak genişlik  (tipik: 320)
-    uint64_t src_h;       // kaynak yükseklik (tipik: 200)
-    uint64_t dst_x;       // hedef x ofseti
-    uint64_t dst_y;       // hedef y ofseti
-    uint64_t scale;       // büyütme çarpanı: 1, 2 veya 3
-} ascent_fb_blit_t;
 
 // ============================================================
 // kill() sinyal numaraları (POSIX alt kümesi)
@@ -969,14 +940,6 @@ fd_entry_t* fd_get(fd_entry_t* table, int fd);
 pipe_buf_t* pipe_buf_alloc(void);
 void        pipe_buf_release(pipe_buf_t* pb);  // ref_count--; 0'da kfree
 
-// ── Doom / grafik syscall'lar (v29) ─────────────────────────
-// sys_fb_info: vesa64.c extern'lerinden fb bilgisini user-space'e aktarır.
-// sys_kb_raw:  klavye raw scancode modunu açar/kapatır (PS/2 varsa).
-// sys_fb_blit: Doom screen buffer'ını kernel VRAM'ına nearest-neighbor ile kopyalar.
-//              User-space fiziksel adrese hiç dokunmaz; tüm yazma Ring-0'da olur.
-void sys_fb_info (syscall_frame_t* frame);
-void sys_kb_raw  (syscall_frame_t* frame);
-void sys_fb_blit (syscall_frame_t* frame);
 
 // ============================================================
 // Low-level MSR Helpers

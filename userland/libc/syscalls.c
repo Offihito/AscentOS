@@ -1602,60 +1602,11 @@ int prlimit(pid_t pid, int resource,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  BÖLÜM 29: DOOM / GRAFİK SYSCALL'LARI (v29)
-//
-//  SYS_FB_INFO (407): Framebuffer bilgisini kernel'dan alır.
-//  SYS_KB_RAW  (408): Klavye raw scancode modunu açar/kapatır.
+//  BÖLÜM 29: DOOM / SES SYSCALL'LARI (v29)
 // ═══════════════════════════════════════════════════════════════════════════
 
-#define SYS_FB_INFO  407
-#define SYS_KB_RAW   408
-#define SYS_FB_BLIT  409
-#define SYS_KB_READ  410
+#define SYS_KB_READ   410
 #define SYS_SB16_PLAY 411
-
-// fb_info_t — kernel fb_info_t ile birebir aynı olmalı
-// Kernel syscall.h: TÜM FIELD'LAR uint64_t
-typedef struct {
-    unsigned long long addr;    // Framebuffer fiziksel/lineer adresi — offset 0
-    unsigned long long width;   // Pixel cinsinden genişlik            — offset 8
-    unsigned long long height;  // Pixel cinsinden yükseklik           — offset 16
-    unsigned long long pitch;   // Satır başına byte                   — offset 24
-    unsigned long long bpp;     // Bit per pixel (genellikle 32)       — offset 32
-} ascent_fb_info_t;             // toplam: 40 byte
-
-// ascent_fb_blit_t — kernel ascent_fb_blit_t ile birebir aynı olmalı
-// UYARI: Kernel syscall.h'da TÜM FIELD'LAR uint64_t (8 byte).
-// uint32_t kullanmak offset uyumsuzluğuna ve sessiz veri kaybına yol açar!
-typedef struct {
-    unsigned long long src_pixels;  // user-space uint32_t* (Doom XRGB8888) — offset 0
-    unsigned long long src_w;       // kaynak genişlik  (320)               — offset 8
-    unsigned long long src_h;       // kaynak yükseklik (200)               — offset 16
-    unsigned long long dst_x;       // hedef x ofseti                       — offset 24
-    unsigned long long dst_y;       // hedef y ofseti                       — offset 32
-    unsigned long long scale;       // 1, 2 veya 3                          — offset 40
-} ascent_fb_blit_t;                 // toplam: 48 byte — kernel ile birebir
-
-// fb_info: framebuffer bilgisini doldurur
-// Dönüş: 0 başarı, -1 hata (errno ayarlanır)
-int fb_info(ascent_fb_info_t* out) {
-    long ret = _sc1(SYS_FB_INFO, (long)out);
-    SET_ERRNO_RET(ret, -1);
-    return (int)ret;
-}
-
-// kb_raw: raw klavye modu aç (1) / kapat (0)
-// Dönüş: 0 başarı, -1 hata
-int kb_raw(int enable) {
-    long ret = _sc1(SYS_KB_RAW, (long)enable);
-    SET_ERRNO_RET(ret, -1);
-    return (int)ret;
-}
-
-// fb_blit: Doom screen buffer'ını kernel VRAM'ına kopyalat
-// Dönüş: 0 başarı, -1 hata
-int fb_blit(ascent_fb_blit_t* req) {
-    long ret = _sc1(SYS_FB_BLIT, (long)req);
 
 // ── SYS_SB16_PLAY (411): SB16 PCM calmak icin ──────────────────────────────
 // buf      : PCM verisi (user-space, max 4096 byte)
@@ -1663,7 +1614,6 @@ int fb_blit(ascent_fb_blit_t* req) {
 // rate_hz  : ornekleme hizi (4000-44100 Hz)
 // fmt      : 0=8bit_mono 1=8bit_stereo 2=16bit_mono 3=16bit_stereo
 // Donus    : 0=basari, -19=ENODEV (SB16 yok), -22=EINVAL, -5=EIO
-#define SYS_SB16_PLAY 411
 // __attribute__((used)): -Wunused-function uyarısını önler.
 // wav_player.c bu fonksiyonu inline syscall ile çağırıyor;
 // gerekirse doğrudan bu stub da kullanılabilir.
@@ -1676,10 +1626,6 @@ int __attribute__((used)) sb16_play(const void* buf, int len, int rate_hz, int f
         : "=a"(ret)
         : "0"(411L), "D"((long)buf), "S"((long)len), "d"((long)rate_hz), "r"(r10)
         : "rcx", "r11", "memory");
-    SET_ERRNO_RET(ret, -1);
-    return (int)ret;
-}
-
     SET_ERRNO_RET(ret, -1);
     return (int)ret;
 }
