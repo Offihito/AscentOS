@@ -39,11 +39,6 @@ endif
 
 LDFLAGS :=
 
-ifneq ($(filter-out clean distclean,$(MAKECMDGOALS)),)
-    ifeq ($(wildcard .deps-obtained),)
-        $(error Please run the ./get-deps script first)
-    endif
-endif
 
 override CC_IS_CLANG := $(shell ! $(CC) --version 2>/dev/null | grep -q '^Target: '; echo $$?)
 
@@ -146,4 +141,4 @@ clean:
 
 .PHONY: distclean
 distclean:
-	rm -rf bin-* obj-* .deps-obtained .cache compile_commands.json freestnd-c-hdrs cc-runtime limine-protocol
+	rm -rf bin-* obj-* .cache compile_commands.json

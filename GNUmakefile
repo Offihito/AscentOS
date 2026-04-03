@@ -46,11 +46,8 @@ limine/limine:
 		LDFLAGS="$(HOST_LDFLAGS)" \
 		LIBS="$(HOST_LIBS)"
 
-kernel/.deps-obtained:
-	./kernel/get-deps
-
 .PHONY: kernel
-kernel: kernel/.deps-obtained
+kernel:
 	$(MAKE) -C kernel
 
 $(IMAGE_NAME).iso: limine/limine kernel
