@@ -2,9 +2,11 @@
 #include "mm/pmm.h"
 #include <stdint.h>
 #include <stddef.h>
-
 #define PHYS_TO_VIRT(p) ((void*)((uint64_t)(p) + pmm_get_hhdm_offset()))
 #define PAGE_MASK 0xFFFFFFFFFFFFF000
+
+#include "lock/spinlock.h"
+static spinlock_t vmm_lock = SPINLOCK_INIT;
 
 static uint64_t *kernel_pml4 = NULL;
 
@@ -48,6 +50,8 @@ static uint64_t *get_next_level(uint64_t *current_level, size_t index, bool allo
 }
 
 void vmm_map_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr, uint64_t flags) {
+    spinlock_acquire(&vmm_lock);
+
     // Determine the indices for each page table level
     size_t pml4_index = (virtual_addr >> 39) & 0x1FF;
     size_t pdpt_index = (virtual_addr >> 30) & 0x1FF;
@@ -57,19 +61,24 @@ void vmm_map_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
     uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4);
 
     uint64_t *pdpt_virt = get_next_level(pml4_virt, pml4_index, true);
-    if (!pdpt_virt) return;
+    if (!pdpt_virt) goto unlock;
 
     uint64_t *pd_virt = get_next_level(pdpt_virt, pdpt_index, true);
-    if (!pd_virt) return;
+    if (!pd_virt) goto unlock;
 
     uint64_t *pt_virt = get_next_level(pd_virt, pd_index, true);
-    if (!pt_virt) return;
+    if (!pt_virt) goto unlock;
 
     pt_virt[pt_index] = (physical_addr & PAGE_MASK) | flags | PAGE_FLAG_PRESENT;
     vmm_flush_tlb(virtual_addr);
+
+unlock:
+    spinlock_release(&vmm_lock);
 }
 
 void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
+    spinlock_acquire(&vmm_lock);
+
     size_t pml4_index = (virtual_addr >> 39) & 0x1FF;
     size_t pdpt_index = (virtual_addr >> 30) & 0x1FF;
     size_t pd_index   = (virtual_addr >> 21) & 0x1FF;
@@ -78,14 +87,17 @@ void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
     uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4);
 
     uint64_t *pdpt_virt = get_next_level(pml4_virt, pml4_index, false);
-    if (!pdpt_virt) return;
+    if (!pdpt_virt) goto unlock;
 
     uint64_t *pd_virt = get_next_level(pdpt_virt, pdpt_index, false);
-    if (!pd_virt) return;
+    if (!pd_virt) goto unlock;
 
     uint64_t *pt_virt = get_next_level(pd_virt, pd_index, false);
-    if (!pt_virt) return;
+    if (!pt_virt) goto unlock;
 
     pt_virt[pt_index] = 0; // Clear the entry
     vmm_flush_tlb(virtual_addr);
+
+unlock:
+    spinlock_release(&vmm_lock);
 }

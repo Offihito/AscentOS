@@ -1,6 +1,7 @@
 #include "isr.h"
 #include "../console/console.h"
 #include "pic.h"
+#include "apic/lapic.h"
 
 const char *exception_messages[] = {"Division By Zero",
                                     "Debug",
@@ -43,31 +44,57 @@ static void print_hex(uint64_t value) {
   }
 }
 
-// Array of custom interrupt handlers
+// ── Interrupt handler table ──────────────────────────────────────────────────
 static isr_t interrupt_handlers[256] = {0};
+
+// ── APIC mode flag ───────────────────────────────────────────────────────────
+static bool apic_mode = false;
+
+void isr_set_apic_mode(bool enabled) {
+  apic_mode = enabled;
+}
 
 void register_interrupt_handler(uint8_t n, isr_t handler) {
   interrupt_handlers[n] = handler;
 }
 
+// ── EOI dispatch ─────────────────────────────────────────────────────────────
+// Routes the End-of-Interrupt signal to the correct controller depending on
+// whether we are in legacy PIC mode or APIC mode.
+static void send_eoi(struct registers *regs) {
+  // Never send EOI for LAPIC spurious interrupts (vector 0xFF)
+  if (regs->int_no == LAPIC_SPURIOUS_VECTOR) return;
+
+  // CPU exceptions (vectors 0-31) are not delivered by any interrupt
+  // controller – no EOI required.
+  if (regs->int_no < 32) return;
+
+  if (apic_mode) {
+    lapic_send_eoi();
+  } else {
+    if (regs->int_no <= 47) {
+      pic_send_eoi(regs->int_no - 32);
+    }
+  }
+}
+
+// ── Common ISR handler (called from assembly stub) ───────────────────────────
 void isr_handler(struct registers *regs) {
-  // If we have a custom handler attached safely route to it
+  // If we have a custom handler attached, route to it
   if (interrupt_handlers[regs->int_no] != 0) {
     isr_t handler = interrupt_handlers[regs->int_no];
     handler(regs);
-
-    // Auto EOI for hardware interrupts to signal the PIC we're done
-    if (regs->int_no >= 32 && regs->int_no <= 47) {
-      pic_send_eoi(regs->int_no - 32);
-    }
+    send_eoi(regs);
     return;
   }
 
-  // Ignore silent unknown IRQs to prevent panic on spurious interrupts
-  if (regs->int_no >= 32 && regs->int_no <= 47) {
-    pic_send_eoi(regs->int_no - 32);
+  // Ignore unhandled hardware interrupts (just send EOI)
+  if (regs->int_no >= 32) {
+    send_eoi(regs);
     return;
   }
+
+  // ── CPU Exception → KERNEL PANIC ──────────────────────────────────────
   console_clear();
   console_puts("==================== KERNEL PANIC ====================\n");
   if (regs->int_no < 32) {

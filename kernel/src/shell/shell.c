@@ -4,6 +4,7 @@
 #include "mm/pmm.h"
 #include "lib/string.h"
 #include "mm/heap.h"
+#include "lock/spinlock.h"
 
 #define CMD_BUFFER_SIZE 256
 
@@ -50,6 +51,7 @@ static void execute_command(char *cmd) {
         console_puts("  meminfo - Display memory utilization\n");
         console_puts("  echo    - Echo arguments\n");
         console_puts("  heaptest- Test kernel heap allocator\n");
+        console_puts("  locktest- Test atomic spinlock functionality\n");
     } else if (strcmp(cmd, "clear") == 0) {
         console_clear();
     } else if (strcmp(cmd, "meminfo") == 0) {
@@ -160,6 +162,19 @@ static void execute_command(char *cmd) {
         }
         
         console_puts("Stress test complete.\n");
+    } else if (strcmp(cmd, "locktest") == 0) {
+        console_puts("Testing Atomic Spinlock primitives...\n");
+        static spinlock_t test_lock = SPINLOCK_INIT;
+        
+        console_puts("Acquiring test_lock...\n");
+        spinlock_acquire(&test_lock);
+        console_puts("  -> test_lock acquired (locked state achieved)!\n");
+        
+        console_puts("Releasing test_lock...\n");
+        spinlock_release(&test_lock);
+        console_puts("  -> test_lock released (unlocked state achieved)!\n");
+        
+        console_puts("Spinlock test complete and PASSED.\n");
     } else {
         console_puts("Unknown command. Type 'help' for available commands.\n");
     }

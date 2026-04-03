@@ -1,5 +1,8 @@
 #include "mm/pmm.h"
 #include <stdint.h>
+#include "lock/spinlock.h"
+
+static spinlock_t pmm_lock = SPINLOCK_INIT;
 
 static uint8_t *bitmap = NULL;
 static size_t bitmap_size = 0; // in bytes
@@ -96,6 +99,8 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
 void *pmm_alloc_blocks(size_t count) {
     if (count == 0) return NULL;
     
+    spinlock_acquire(&pmm_lock);
+    
     size_t consecutive = 0;
     size_t start_bit = 0;
 
@@ -109,6 +114,7 @@ void *pmm_alloc_blocks(size_t count) {
                     bitmap_set(j);
                 }
                 last_scanned_page = start_bit + count;
+                spinlock_release(&pmm_lock);
                 return (void *)(start_bit * PAGE_SIZE); // Physical ptr
             }
         } else {
@@ -129,6 +135,7 @@ void *pmm_alloc_blocks(size_t count) {
                         bitmap_set(j);
                     }
                     last_scanned_page = start_bit + count;
+                    spinlock_release(&pmm_lock);
                     return (void *)(start_bit * PAGE_SIZE); 
                 }
             } else {
@@ -137,6 +144,7 @@ void *pmm_alloc_blocks(size_t count) {
         }
     }
 
+    spinlock_release(&pmm_lock);
     return NULL; // Out of memory
 }
 
@@ -145,6 +153,8 @@ void *pmm_alloc(void) {
 }
 
 void pmm_free_blocks(void *ptr, size_t count) {
+    if (!ptr) return;
+    spinlock_acquire(&pmm_lock);
     size_t start_bit = ((uint64_t)ptr) / PAGE_SIZE;
     for (size_t i = start_bit; i < start_bit + count; i++) {
         bitmap_clear(i);
@@ -154,6 +164,7 @@ void pmm_free_blocks(void *ptr, size_t count) {
     if (start_bit < last_scanned_page) {
         last_scanned_page = start_bit;
     }
+    spinlock_release(&pmm_lock);
 }
 
 void pmm_free(void *ptr) {

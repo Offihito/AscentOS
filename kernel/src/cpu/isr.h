@@ -2,6 +2,7 @@
 #define CPU_ISR_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 struct registers {
   uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
@@ -14,5 +15,8 @@ typedef void (*isr_t)(struct registers *);
 void register_interrupt_handler(uint8_t n, isr_t handler);
 
 void isr_handler(struct registers *regs);
+
+// Switch ISR EOI routing from legacy PIC to Local APIC mode.
+void isr_set_apic_mode(bool enabled);
 
 #endif

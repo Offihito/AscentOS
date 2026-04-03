@@ -3,8 +3,12 @@
 #include "lib/string.h"
 #include "console/console.h"
 
+#include "lock/spinlock.h"
+
 #define HEAP_MAGIC 0xC001CAFE
 #define ALIGN_UP(val, align) (((val) + (align) - 1) & ~((align) - 1))
+
+static spinlock_t heap_lock = SPINLOCK_INIT;
 
 struct heap_segment {
     uint32_t magic;
@@ -27,6 +31,9 @@ void *kmalloc(size_t size) {
 
     // Align size to 16 bytes for proper memory alignment
     size_t size_aligned = ALIGN_UP(size, 16);
+    
+    spinlock_acquire(&heap_lock);
+    
     struct heap_segment *current = head_segment;
 
     // Search for a suitable free segment
@@ -50,6 +57,7 @@ void *kmalloc(size_t size) {
             }
             
             current->is_free = false;
+            spinlock_release(&heap_lock);
             return (void *)((uint8_t *)current + sizeof(struct heap_segment));
         }
         current = current->next;
@@ -62,6 +70,7 @@ void *kmalloc(size_t size) {
     void *phys = pmm_alloc_blocks(pages_needed);
     if (!phys) {
         console_puts("[ERR] kmalloc Out of Memory!\n");
+        spinlock_release(&heap_lock);
         return NULL;
     }
 
@@ -99,6 +108,7 @@ void *kmalloc(size_t size) {
         new_seg->size = size_aligned;
     }
 
+    spinlock_release(&heap_lock);
     return (void *)((uint8_t *)new_seg + sizeof(struct heap_segment));
 }
 
@@ -107,16 +117,20 @@ void kfree(void *ptr) {
         return;
     }
 
+    spinlock_acquire(&heap_lock);
+
     struct heap_segment *seg = (struct heap_segment *)((uint8_t *)ptr - sizeof(struct heap_segment));
     
     // Check for memory corruption or double-free
     if (seg->magic != HEAP_MAGIC) {
         console_puts("[WARN] kfree: Magic number mismatch! Possible memory corruption.\n");
+        spinlock_release(&heap_lock);
         return;
     }
 
     if (seg->is_free) {
         console_puts("[WARN] kfree: Double free detected!\n");
+        spinlock_release(&heap_lock);
         return;
     }
 
@@ -139,6 +153,8 @@ void kfree(void *ptr) {
             seg->next->prev = seg->prev;
         }
     }
+    
+    spinlock_release(&heap_lock);
 }
 
 void *kcalloc(size_t num, size_t size) {
@@ -160,17 +176,24 @@ void *krealloc(void *ptr, size_t new_size) {
         return NULL;
     }
 
+    spinlock_acquire(&heap_lock);
+
     struct heap_segment *seg = (struct heap_segment *)((uint8_t *)ptr - sizeof(struct heap_segment));
     
     if (seg->magic != HEAP_MAGIC) {
+        spinlock_release(&heap_lock);
         return NULL; // Invalid pointer
     }
 
     // If the current block is already large enough, just return it
     if (seg->size >= new_size) {
+        spinlock_release(&heap_lock);
         // We could shrink the block here, but for simplicity, we don't.
         return ptr;
     }
+    
+    size_t copy_size = seg->size;
+    spinlock_release(&heap_lock);
 
     // Allocate a new block
     void *new_ptr = kmalloc(new_size);
@@ -179,7 +202,7 @@ void *krealloc(void *ptr, size_t new_size) {
     }
 
     // Copy old data to the new block
-    memcpy(new_ptr, ptr, seg->size);
+    memcpy(new_ptr, ptr, copy_size);
     
     // Free the old block
     kfree(ptr);

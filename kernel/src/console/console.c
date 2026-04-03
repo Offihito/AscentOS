@@ -3,6 +3,9 @@
 #include "font/font.h"
 #include <stdint.h>
 #include <stddef.h>
+#include "lock/spinlock.h"
+
+static spinlock_t console_lock = SPINLOCK_INIT;
 
 #define BG_COLOR   0x001E1E2E
 #define FG_COLOR   0x00CDD6F4
@@ -68,7 +71,7 @@ static void draw_char(char c, uint32_t col, uint32_t row) {
     }
 }
 
-void console_putchar(char c) {
+static void console_putchar_unlocked(char c) {
     bool was_visible = cursor_visible;
     if (was_visible) {
         console_update_cursor(false);
@@ -132,6 +135,12 @@ void console_putchar(char c) {
     }
 }
 
+void console_putchar(char c) {
+    spinlock_acquire(&console_lock);
+    console_putchar_unlocked(c);
+    spinlock_release(&console_lock);
+}
+
 void console_update_cursor(bool visible) {
     cursor_visible = visible;
     if (visible) {
@@ -148,13 +157,17 @@ void console_update_cursor(bool visible) {
 }
 
 void console_puts(const char *s) {
+    spinlock_acquire(&console_lock);
     while (*s) {
-        console_putchar(*s++);
+        console_putchar_unlocked(*s++);
     }
+    spinlock_release(&console_lock);
 }
 
 void console_clear(void) {
+    spinlock_acquire(&console_lock);
     fb_clear(BG_COLOR);
     cursor_x = 0;
     cursor_y = 0;
+    spinlock_release(&console_lock);
 }

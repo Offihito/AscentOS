@@ -43,3 +43,14 @@ void pit_init(uint32_t frequency) {
 uint64_t pit_get_ticks(void) {
     return pit_ticks;
 }
+
+void pit_sleep(uint32_t ms) {
+    // 100Hz = 10ms per tick
+    uint64_t ticks_to_wait = ms / 10;
+    if (ticks_to_wait == 0) ticks_to_wait = 1;
+
+    uint64_t end = pit_ticks + ticks_to_wait;
+    while (pit_ticks < end) {
+        __asm__ volatile("hlt");
+    }
+}

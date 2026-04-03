@@ -66,6 +66,9 @@ ISR_NOERRCODE 45
 ISR_NOERRCODE 46
 ISR_NOERRCODE 47
 
+; LAPIC spurious interrupt vector
+ISR_NOERRCODE 255
+
 isr_common_stub:
     ; Push all general purpose registers
     push rax

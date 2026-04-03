@@ -1,6 +1,11 @@
 #include "console/console.h"
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
+#include "cpu/isr.h"
+#include "acpi/acpi.h"
+#include "apic/lapic.h"
+#include "apic/ioapic.h"
+#include "smp/cpu.h"
 #include "cpu/pic.h"
 #include "drivers/keyboard.h"
 #include "drivers/pit.h"
@@ -10,15 +15,16 @@
 #include "mm/vmm.h"
 #include "shell/shell.h"
 #include <limine.h>
-#include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
 
 __attribute__((used,
                section(".limine_requests_start"))) static volatile uint64_t
     limine_requests_start_marker[4] = LIMINE_REQUESTS_START_MARKER;
 
 __attribute__((used, section(".limine_requests"))) static volatile uint64_t
-    limine_base_revision[3] = LIMINE_BASE_REVISION(3);
+    limine_base_revision[3] = LIMINE_BASE_REVISION(0);
 
 __attribute__((
     used,
@@ -45,6 +51,11 @@ __attribute__((
     used,
     section(".limine_requests"))) static volatile struct limine_hhdm_request
     hhdm_request = {.id = LIMINE_HHDM_REQUEST_ID, .revision = 0};
+
+__attribute__((
+    used,
+    section(".limine_requests"))) static volatile struct limine_rsdp_request
+    rsdp_request = {.id = LIMINE_RSDP_REQUEST_ID, .revision = 0};
 
 __attribute__((used, section(".limine_requests_end"))) static volatile uint64_t
     limine_requests_end_marker[2] = LIMINE_REQUESTS_END_MARKER;
@@ -99,20 +110,28 @@ void kmain(void) {
     console_puts("[WARN] Paging mode response not provided by Limine.\n");
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Phase 1: CPU descriptor tables
+  // ═══════════════════════════════════════════════════════════════════════
   gdt_init();
   idt_init();
 
-  // Set up Programmable Interrupt Controller
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Phase 2: Legacy PIC — used temporarily until APIC takes over
+  // ═══════════════════════════════════════════════════════════════════════
   pic_remap(32, 40);
-  outb(0x21, 0xFC); // 0xFC = 11111100 (IRQ0 inside PIT and IRQ1 inside Keyboard unmasked)
-  outb(0xA1, 0xFF); // Everything masked on Slave
-  
-  pit_init(100);    // Start PIT at 100 Hz
+  outb(0x21, 0xFC); // unmask IRQ0 (PIT) and IRQ1 (Keyboard)
+  outb(0xA1, 0xFF); // mask everything on slave PIC
+
+  pit_init(100);
   console_puts("[OK] Legacy PIC Remapped and PIT 100Hz started.\n");
 
   keyboard_init();
   __asm__ volatile("sti"); // Enable hardware interrupts!
 
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Phase 3: Memory management
+  // ═══════════════════════════════════════════════════════════════════════
   if (memmap_request.response == NULL || hhdm_request.response == NULL) {
     console_puts(
         "[ERR] Missing Limine memory map or HHDM responses. Halting.\n");
@@ -157,14 +176,86 @@ void kmain(void) {
     }
   }
 
-  console_puts("\nKernel initialization complete. Starting shell...\n");
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Phase 4: ACPI discovery
+  // ═══════════════════════════════════════════════════════════════════════
+  acpi_init(rsdp_request.response);
 
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Phase 4.5: (Moved to end of Phase 5)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Phase 5: Transition from legacy PIC → APIC
+  // ═══════════════════════════════════════════════════════════════════════
+  uint32_t lapic_base = acpi_get_lapic_base();
+  uint32_t ioapic_base = acpi_get_ioapic_base();
+
+  if (lapic_base && ioapic_base) {
+    console_puts("\n[INFO] Switching to APIC interrupt mode...\n");
+
+    // Disable interrupts during the transition
+    __asm__ volatile("cli");
+
+    // ── 5a. Disable the legacy 8259 PIC ─────────────────────────────────
+    pic_disable();
+    console_puts("[OK] Legacy 8259 PIC disabled.\n");
+
+    // ── 5b. Initialize the Local APIC ───────────────────────────────────
+    lapic_init((uint64_t)lapic_base);
+
+    // ── 5c. Initialize the I/O APIC ─────────────────────────────────────
+    ioapic_init((uint64_t)ioapic_base, acpi_get_ioapic_gsi_base());
+
+    // ── 5d. Route PIT (IRQ 0) through the I/O APIC ─────────────────────
+    uint32_t pit_gsi = 0;
+    uint16_t pit_flags = 0;
+    acpi_get_irq_override(0, &pit_gsi, &pit_flags);
+    ioapic_route_irq((uint8_t)pit_gsi, 32, (uint8_t)lapic_get_id(), pit_flags);
+    console_puts("[OK] PIT routed: GSI ");
+    {
+      char c = '0' + (char)pit_gsi;
+      console_putchar(c);
+    }
+    console_puts(" -> Vector 32\n");
+
+    // ── 5e. Route Keyboard (IRQ 1) through the I/O APIC ────────────────
+    uint32_t kbd_gsi = 1;
+    uint16_t kbd_flags = 0;
+    acpi_get_irq_override(1, &kbd_gsi, &kbd_flags);
+    ioapic_route_irq((uint8_t)kbd_gsi, 33, (uint8_t)lapic_get_id(), kbd_flags);
+    console_puts("[OK] Keyboard routed: GSI ");
+    {
+      char c = '0' + (char)kbd_gsi;
+      console_putchar(c);
+    }
+    console_puts(" -> Vector 33\n");
+
+    // ── 5f. Switch ISR EOI routing to LAPIC ─────────────────────────────
+    isr_set_apic_mode(true);
+
+    // Re-enable interrupts — now handled through the APIC path
+    __asm__ volatile("sti");
+
+    console_puts("[OK] APIC interrupt mode ACTIVE.\n\n");
+  } else {
+    console_puts(
+        "[WARN] APIC hardware not detected — staying with legacy PIC.\n\n");
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Phase 5.5: SMP initialization (wake up APs)
+  // ═══════════════════════════════════════════════════════════════════════
+  cpu_init();
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Phase 6: Kernel heap
+  // ═══════════════════════════════════════════════════════════════════════
   console_puts("[OK] Initializing Kernel Heap...\n");
   heap_init();
   char *heap_test = kmalloc(64);
   if (heap_test) {
     const char *test_msg = "     Heap allocation SUCCESSFUL!\n";
-    // avoid string.h for speed, just copy manually or include it
     int i = 0;
     while (test_msg[i] != '\0') {
       heap_test[i] = test_msg[i];
@@ -177,6 +268,10 @@ void kmain(void) {
     console_puts("     Heap allocation FAILED!\n");
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Phase 7: Interactive shell
+  // ═══════════════════════════════════════════════════════════════════════
+  console_puts("\nKernel initialization complete. Starting shell...\n");
   shell_init();
   shell_run();
 }

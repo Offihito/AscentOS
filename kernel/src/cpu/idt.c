@@ -52,6 +52,7 @@ extern void isr44(void);
 extern void isr45(void);
 extern void isr46(void);
 extern void isr47(void);
+extern void isr255(void);
 
 void idt_set_gate(uint8_t num, uint64_t base, uint16_t sel, uint8_t flags) {
   idt[num].base_low = (base & 0xFFFF);
@@ -122,6 +123,9 @@ void idt_init(void) {
   idt_set_gate(45, (uint64_t)isr45, sel, flags);
   idt_set_gate(46, (uint64_t)isr46, sel, flags);
   idt_set_gate(47, (uint64_t)isr47, sel, flags);
+
+  // LAPIC spurious interrupt vector
+  idt_set_gate(255, (uint64_t)isr255, sel, flags);
 
   __asm__ volatile("lidt %0" : : "m"(idtp));
 }
