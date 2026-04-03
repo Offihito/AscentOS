@@ -35,3 +35,11 @@ uint32_t fb_get_width(void) {
 uint32_t fb_get_height(void) {
     return fb->height;
 }
+
+void *fb_get_base(void) {
+    return fb->address;
+}
+
+uint32_t fb_get_pitch(void) {
+    return fb->pitch;
+}

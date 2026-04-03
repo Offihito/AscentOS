@@ -15,25 +15,27 @@ static uint32_t max_rows;
 static void scroll_up(void) {
     uint32_t fb_w = fb_get_width();
     uint32_t fb_h = fb_get_height();
-    uint32_t row_pixels = FONT_HEIGHT;
+    uint32_t pitch = fb_get_pitch();
+    void *base = fb_get_base();
 
-    volatile uint32_t *base = (volatile uint32_t *)((uint8_t *)0);
+    uint32_t move_height = fb_h - FONT_HEIGHT;
+    uint64_t bytes_to_copy = move_height * pitch;
 
-    // We need access to the raw fb pointer for memmove-like scroll.
-    // Use framebuffer functions instead: redraw approach.
-    // For simplicity, just clear screen and reset cursor.
-    // A proper scroll would copy pixel rows, but requires raw fb access.
-    // We'll implement a basic version using the fb API.
+    // Shift pixels up by one full text row using a forward copy loop.
+    // Since dst < src, forward copying prevents overlap corruption.
+    uint8_t *dst = (uint8_t *)base;
+    uint8_t *src = (uint8_t *)base + (FONT_HEIGHT * pitch);
+    for (uint64_t i = 0; i < bytes_to_copy; i++) {
+        dst[i] = src[i];
+    }
 
-    (void)base;
-    (void)fb_w;
-    (void)fb_h;
-    (void)row_pixels;
+    // Erase the bottom row
+    fb_fill_rect(0, fb_h - FONT_HEIGHT, fb_w, FONT_HEIGHT, BG_COLOR);
 
-    // Simple approach: clear and reset
-    fb_clear(BG_COLOR);
-    cursor_x = 0;
-    cursor_y = 0;
+    // Pull cursor back onto the valid screen
+    if (cursor_y > 0) {
+        cursor_y--;
+    }
 }
 
 void console_init(struct limine_framebuffer *framebuffer) {
@@ -73,6 +75,17 @@ void console_putchar(char c) {
 
     if (c == '\r') {
         cursor_x = 0;
+        return;
+    }
+    
+    if (c == '\b') {
+        if (cursor_x > 0) {
+            cursor_x--;
+        } else if (cursor_y > 0) {
+            cursor_y--;
+            cursor_x = max_cols - 1;
+        }
+        draw_char(' ', cursor_x, cursor_y); 
         return;
     }
 

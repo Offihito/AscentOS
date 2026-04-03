@@ -31,4 +31,7 @@ uint64_t pmm_get_usable_memory(void);
 // Return total generic memory in bytes
 uint64_t pmm_get_total_memory(void);
 
+// Expose the HHDM base
+uint64_t pmm_get_hhdm_offset(void);
+
 #endif

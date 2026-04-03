@@ -1,4 +1,5 @@
 #include "isr.h"
+#include "pic.h"
 #include "../console/console.h"
 
 const char *exception_messages[] = {
@@ -44,7 +45,31 @@ static void print_hex(uint64_t value) {
     }
 }
 
+// Array of custom interrupt handlers
+static isr_t interrupt_handlers[256] = {0};
+
+void register_interrupt_handler(uint8_t n, isr_t handler) {
+    interrupt_handlers[n] = handler;
+}
+
 void isr_handler(struct registers *regs) {
+    // If we have a custom handler attached safely route to it
+    if (interrupt_handlers[regs->int_no] != 0) {
+        isr_t handler = interrupt_handlers[regs->int_no];
+        handler(regs);
+        
+        // Auto EOI for hardware interrupts to signal the PIC we're done
+        if (regs->int_no >= 32 && regs->int_no <= 47) {
+            pic_send_eoi(regs->int_no - 32);
+        }
+        return;
+    }
+    
+    // Ignore silent unknown IRQs to prevent panic on spurious interrupts
+    if (regs->int_no >= 32 && regs->int_no <= 47) {
+        pic_send_eoi(regs->int_no - 32);
+        return;
+    }
     console_clear();
     console_puts("==================== KERNEL PANIC ====================\n");
     if (regs->int_no < 32) {

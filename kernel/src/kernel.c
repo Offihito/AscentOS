@@ -1,7 +1,11 @@
 #include "console/console.h"
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
+#include "cpu/pic.h"
+#include "io/io.h"
+#include "drivers/keyboard.h"
 #include "mm/pmm.h"
+#include "mm/vmm.h"
 #include <limine.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -95,6 +99,15 @@ void kmain(void) {
     gdt_init();
     idt_init();
 
+    // Set up Programmable Interrupt Controller
+    pic_remap(32, 40);
+    outb(0x21, 0xFD); // 0xFD = 11111101 (IRQ1 unmasked on Master)
+    outb(0xA1, 0xFF); // Everything masked on Slave
+    console_puts("[OK] Legacy PIC Remapped (IRQ0-15 -> IDT32-47).\n");
+
+    keyboard_init();
+    __asm__ volatile ("sti"); // Enable hardware interrupts!
+
     if (memmap_request.response == NULL || hhdm_request.response == NULL) {
         console_puts("[ERR] Missing Limine memory map or HHDM responses. Halting.\n");
         halt();
@@ -117,6 +130,35 @@ void kmain(void) {
     print_uint64(pmm_get_usable_memory() / (1024 * 1024));
     console_puts(" MB\n\n");
 
-    console_puts("Kernel initialization complete. Halting.\n");
-    halt();
+    console_puts("[OK] Initializing Virtual Memory Manager (VMM)...\n");
+    vmm_init();
+    console_puts("     Active CR3 Page Map hooked.\n");
+
+    console_puts("[OK] Testing VMM mapping... (0xCAFEBABE000)\n");
+    void *test_phys = pmm_alloc();
+    if (test_phys) {
+        uint64_t vaddr = 0xCAFEBABE000;
+        vmm_map_page(vmm_get_active_pml4(), vaddr, (uint64_t)test_phys, PAGE_FLAG_RW | PAGE_FLAG_USER);
+        
+        volatile uint64_t *test_ptr = (volatile uint64_t *)vaddr;
+        *test_ptr = 0x1337BEEF; // If this page faults, the mapping failed!
+        
+        if (*test_ptr == 0x1337BEEF) {
+            console_puts("     VMM custom mapping test SUCCESSFUL!\n");
+        } else {
+            console_puts("     VMM custom mapping test FAILED!\n");
+        }
+    }
+
+    console_puts("\nKernel initialization complete. Halting.\n");
+
+    console_puts("======================================\n");
+    console_puts("Type normally, press shift, try backspace! Welcome to AscentOS Terminal.\n");
+
+    while (1) {
+        char c = keyboard_get_char();
+        if (c != 0) {
+            console_putchar(c);
+        }
+    }
 }

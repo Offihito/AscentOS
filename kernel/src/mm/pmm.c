@@ -8,6 +8,7 @@ static uint64_t usable_memory = 0;
 static uint64_t total_memory = 0;
 static uint64_t physical_memory_offset = 0;
 static struct limine_memmap_response *internal_memmap = NULL;
+static size_t last_scanned_page = 0;
 
 // Set bit in bitmap
 static inline void bitmap_set(size_t bit) {
@@ -98,7 +99,7 @@ void *pmm_alloc_blocks(size_t count) {
     size_t consecutive = 0;
     size_t start_bit = 0;
 
-    for (size_t i = 0; i < highest_page; i++) {
+    for (size_t i = last_scanned_page; i < highest_page; i++) {
         if (!bitmap_test(i)) {
             if (consecutive == 0) start_bit = i;
             consecutive++;
@@ -107,12 +108,35 @@ void *pmm_alloc_blocks(size_t count) {
                 for (size_t j = start_bit; j < start_bit + count; j++) {
                     bitmap_set(j);
                 }
+                last_scanned_page = start_bit + count;
                 return (void *)(start_bit * PAGE_SIZE); // Physical ptr
             }
         } else {
             consecutive = 0; // Reset
         }
     }
+    
+    // If not found, wrap around and check from the beginning!
+    if (last_scanned_page > 0) {
+        consecutive = 0;
+        start_bit = 0;
+        for (size_t i = 0; i < last_scanned_page; i++) {
+            if (!bitmap_test(i)) {
+                if (consecutive == 0) start_bit = i;
+                consecutive++;
+                if (consecutive == count) {
+                    for (size_t j = start_bit; j < start_bit + count; j++) {
+                        bitmap_set(j);
+                    }
+                    last_scanned_page = start_bit + count;
+                    return (void *)(start_bit * PAGE_SIZE); 
+                }
+            } else {
+                consecutive = 0; 
+            }
+        }
+    }
+
     return NULL; // Out of memory
 }
 
@@ -124,6 +148,11 @@ void pmm_free_blocks(void *ptr, size_t count) {
     size_t start_bit = ((uint64_t)ptr) / PAGE_SIZE;
     for (size_t i = start_bit; i < start_bit + count; i++) {
         bitmap_clear(i);
+    }
+    
+    // If we free memory behind the cursor, back up the cursor!
+    if (start_bit < last_scanned_page) {
+        last_scanned_page = start_bit;
     }
 }
 
@@ -146,6 +175,7 @@ void pmm_reclaim_bootloader(void) {
     
     // Nullify pointer to prevent duplicate reclamations
     internal_memmap = NULL;
+    last_scanned_page = 0; // Reset cursor to allow allocations in freshly freed space
 }
 
 uint64_t pmm_get_usable_memory(void) {
@@ -154,4 +184,8 @@ uint64_t pmm_get_usable_memory(void) {
 
 uint64_t pmm_get_total_memory(void) {
     return total_memory;
+}
+
+uint64_t pmm_get_hhdm_offset(void) {
+    return physical_memory_offset;
 }

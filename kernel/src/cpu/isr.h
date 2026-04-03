@@ -10,6 +10,9 @@ struct registers {
     uint64_t rip, cs, rflags, rsp, ss;
 };
 
+typedef void (*isr_t)(struct registers *);
+void register_interrupt_handler(uint8_t n, isr_t handler);
+
 void isr_handler(struct registers *regs);
 
 #endif

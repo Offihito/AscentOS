@@ -10,5 +10,7 @@ void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color
 void fb_clear(uint32_t color);
 uint32_t fb_get_width(void);
 uint32_t fb_get_height(void);
+void *fb_get_base(void);
+uint32_t fb_get_pitch(void);
 
 #endif

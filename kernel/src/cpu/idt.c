@@ -36,6 +36,22 @@ extern void isr28(void);
 extern void isr29(void);
 extern void isr30(void);
 extern void isr31(void);
+extern void isr32(void);
+extern void isr33(void);
+extern void isr34(void);
+extern void isr35(void);
+extern void isr36(void);
+extern void isr37(void);
+extern void isr38(void);
+extern void isr39(void);
+extern void isr40(void);
+extern void isr41(void);
+extern void isr42(void);
+extern void isr43(void);
+extern void isr44(void);
+extern void isr45(void);
+extern void isr46(void);
+extern void isr47(void);
 
 void idt_set_gate(uint8_t num, uint64_t base, uint16_t sel, uint8_t flags) {
   idt[num].base_low = (base & 0xFFFF);
@@ -90,6 +106,22 @@ void idt_init(void) {
   idt_set_gate(29, (uint64_t)isr29, sel, flags);
   idt_set_gate(30, (uint64_t)isr30, sel, flags);
   idt_set_gate(31, (uint64_t)isr31, sel, flags);
+  idt_set_gate(32, (uint64_t)isr32, sel, flags);
+  idt_set_gate(33, (uint64_t)isr33, sel, flags);
+  idt_set_gate(34, (uint64_t)isr34, sel, flags);
+  idt_set_gate(35, (uint64_t)isr35, sel, flags);
+  idt_set_gate(36, (uint64_t)isr36, sel, flags);
+  idt_set_gate(37, (uint64_t)isr37, sel, flags);
+  idt_set_gate(38, (uint64_t)isr38, sel, flags);
+  idt_set_gate(39, (uint64_t)isr39, sel, flags);
+  idt_set_gate(40, (uint64_t)isr40, sel, flags);
+  idt_set_gate(41, (uint64_t)isr41, sel, flags);
+  idt_set_gate(42, (uint64_t)isr42, sel, flags);
+  idt_set_gate(43, (uint64_t)isr43, sel, flags);
+  idt_set_gate(44, (uint64_t)isr44, sel, flags);
+  idt_set_gate(45, (uint64_t)isr45, sel, flags);
+  idt_set_gate(46, (uint64_t)isr46, sel, flags);
+  idt_set_gate(47, (uint64_t)isr47, sel, flags);
 
   __asm__ volatile("lidt %0" : : "m"(idtp));
 }
