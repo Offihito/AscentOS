@@ -804,7 +804,11 @@ void shell_run(void) {
     cmd_buffer[0] = '\0';
     print_prompt();
 
+    console_set_cursor_visible(true);
+
     while (1) {
+        console_refresh_cursor();
+
         char c = 0;
         if (keyboard_has_char()) {
             c = keyboard_get_char();

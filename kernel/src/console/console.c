@@ -1,4 +1,5 @@
 #include "console.h"
+#include "../apic/lapic_timer.h"
 #include "../drivers/serial.h"
 #include "fb/framebuffer.h"
 #include "font/font.h"
@@ -7,8 +8,10 @@
 #include <stdint.h>
 
 static spinlock_t console_lock = SPINLOCK_INIT;
+static void console_set_cursor_visible_unlocked(bool visible);
+static void console_refresh_cursor_unlocked(void);
 
-#define BG_COLOR 0x001E1E2E
+#define BG_COLOR 0x00000000
 #define FG_COLOR 0x00CDD6F4
 
 typedef struct {
@@ -30,7 +33,9 @@ static uint32_t cursor_x;
 static uint32_t cursor_y;
 static uint32_t max_cols;
 static uint32_t max_rows;
-static bool cursor_visible = false;
+static bool cursor_logical_visible = false;
+static bool cursor_phys_on = false;
+static uint64_t last_blink_ms = 0;
 
 static void console_redraw(void) {
   fb_set_backbuffer_mode(true);
@@ -64,8 +69,14 @@ static void console_redraw(void) {
     }
   }
 
-  if (view_scroll_offset == 0 && cursor_visible) {
-    console_update_cursor(true);
+  if (view_scroll_offset == 0 && cursor_logical_visible && cursor_phys_on) {
+    uint32_t px = cursor_x * FONT_WIDTH;
+    uint32_t py = cursor_y * FONT_HEIGHT;
+    for (uint32_t y = FONT_HEIGHT - 3; y < FONT_HEIGHT; y++) {
+      for (uint32_t x = 0; x < FONT_WIDTH; x++) {
+        fb_put_pixel(px + x, py + y, FG_COLOR);
+      }
+    }
   }
 
   fb_swap_buffer();
@@ -149,10 +160,10 @@ static void draw_char(char c, uint32_t col, uint32_t row) {
 
 static void console_putchar_unlocked(char c) {
   serial_putchar(c);
-  bool was_visible = cursor_visible;
+  bool was_visible = cursor_logical_visible;
 
   if (was_visible && view_scroll_offset == 0) {
-    console_update_cursor(false);
+    console_set_cursor_visible_unlocked(false);
   }
 
   if (c == '\n') {
@@ -177,14 +188,14 @@ static void console_putchar_unlocked(char c) {
       }
     }
     if (was_visible && view_scroll_offset == 0)
-      console_update_cursor(true);
+      console_set_cursor_visible_unlocked(true);
     return;
   }
 
   if (c == '\r') {
     cursor_x = 0;
     if (was_visible && view_scroll_offset == 0)
-      console_update_cursor(true);
+      console_set_cursor_visible_unlocked(true);
     return;
   }
 
@@ -204,7 +215,7 @@ static void console_putchar_unlocked(char c) {
     if (view_scroll_offset == 0) {
       draw_char(' ', cursor_x, cursor_y);
       if (was_visible)
-        console_update_cursor(true);
+        console_set_cursor_visible_unlocked(true);
     }
     return;
   }
@@ -248,7 +259,7 @@ static void console_putchar_unlocked(char c) {
   }
 
   if (was_visible && view_scroll_offset == 0) {
-    console_update_cursor(true);
+    console_set_cursor_visible_unlocked(true);
   }
 }
 
@@ -258,9 +269,43 @@ void console_putchar(char c) {
   spinlock_release(&console_lock);
 }
 
-void console_update_cursor(bool visible) {
-  cursor_visible = visible;
+static void console_set_cursor_visible_unlocked(bool visible) {
+  cursor_logical_visible = visible;
   if (visible) {
+    cursor_phys_on = true;
+    last_blink_ms = lapic_timer_get_ms();
+    
+    uint32_t px = cursor_x * FONT_WIDTH;
+    uint32_t py = cursor_y * FONT_HEIGHT;
+    for (uint32_t y = FONT_HEIGHT - 3; y < FONT_HEIGHT; y++) {
+      for (uint32_t x = 0; x < FONT_WIDTH; x++) {
+        fb_put_pixel(px + x, py + y, FG_COLOR);
+      }
+    }
+  } else {
+    cursor_phys_on = false;
+    draw_char(' ', cursor_x, cursor_y);
+  }
+}
+
+void console_set_cursor_visible(bool visible) {
+  spinlock_acquire(&console_lock);
+  console_set_cursor_visible_unlocked(visible);
+  spinlock_release(&console_lock);
+}
+
+static void console_refresh_cursor_unlocked(void) {
+  if (!cursor_logical_visible || view_scroll_offset != 0)
+    return;
+
+  uint64_t now = lapic_timer_get_ms();
+  if (now - last_blink_ms < 500)
+    return;
+
+  last_blink_ms = now;
+  cursor_phys_on = !cursor_phys_on;
+
+  if (cursor_phys_on) {
     uint32_t px = cursor_x * FONT_WIDTH;
     uint32_t py = cursor_y * FONT_HEIGHT;
     for (uint32_t y = FONT_HEIGHT - 3; y < FONT_HEIGHT; y++) {
@@ -271,6 +316,12 @@ void console_update_cursor(bool visible) {
   } else {
     draw_char(' ', cursor_x, cursor_y);
   }
+}
+
+void console_refresh_cursor(void) {
+  spinlock_acquire(&console_lock);
+  console_refresh_cursor_unlocked();
+  spinlock_release(&console_lock);
 }
 
 void console_puts(const char *s) {

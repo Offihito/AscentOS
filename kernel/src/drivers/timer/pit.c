@@ -8,17 +8,9 @@
 #define PIT_DATA_PORT0 0x40
 
 static uint64_t pit_ticks = 0;
-static bool cursor_state = false;
-
 static void pit_callback(struct registers *regs) {
     (void)regs;
     pit_ticks++;
-
-    // Toggle cursor state every 50 ticks (usually 500ms if freq is 100Hz)
-    if (pit_ticks % 50 == 0) {
-        cursor_state = !cursor_state;
-        console_update_cursor(cursor_state);
-    }
 }
 
 void pit_init(uint32_t frequency) {

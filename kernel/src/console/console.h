@@ -8,7 +8,8 @@ void console_init(struct limine_framebuffer *framebuffer);
 void console_putchar(char c);
 void console_puts(const char *s);
 void console_clear(void);
-void console_update_cursor(bool visible);
+void console_set_cursor_visible(bool visible);
+void console_refresh_cursor(void);
 void console_scroll_view(int delta);
 
 #endif
