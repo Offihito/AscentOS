@@ -55,3 +55,52 @@ int vfs_mkdir(vfs_node_t *node, char *name, uint16_t permission) {
     }
     return -1;
 }
+
+int vfs_unlink(vfs_node_t *node, char *name) {
+    if ((node->flags & 0x07) == FS_DIRECTORY && node->unlink) {
+        return node->unlink(node, name);
+    }
+    return -1;
+}
+
+int vfs_rmdir(vfs_node_t *node, char *name) {
+    if ((node->flags & 0x07) == FS_DIRECTORY && node->rmdir) {
+        return node->rmdir(node, name);
+    }
+    return -1;
+}
+
+int vfs_readlink(vfs_node_t *node, char *buf, uint32_t size) {
+    if (node && node->readlink) {
+        return node->readlink(node, buf, size);
+    }
+    return -1;
+}
+
+int vfs_symlink(vfs_node_t *node, char *name, char *target) {
+    if ((node->flags & 0x07) == FS_DIRECTORY && node->symlink) {
+        return node->symlink(node, name, target);
+    }
+    return -1;
+}
+
+int vfs_rename(vfs_node_t *node, char *old_name, char *new_name) {
+    if ((node->flags & 0x07) == FS_DIRECTORY && node->rename) {
+        return node->rename(node, old_name, new_name);
+    }
+    return -1;
+}
+
+int vfs_chmod(vfs_node_t *node, uint16_t permission) {
+    if (node && node->chmod) {
+        return node->chmod(node, permission);
+    }
+    return -1;
+}
+
+int vfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid) {
+    if (node && node->chown) {
+        return node->chown(node, uid, gid);
+    }
+    return -1;
+}

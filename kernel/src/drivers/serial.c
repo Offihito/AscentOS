@@ -25,3 +25,13 @@ void serial_putchar(char c) {
     while (is_transmit_empty() == 0);
     outb(COM1, c);
 }
+
+int serial_received(void) {
+    return inb(COM1 + 5) & 1;
+}
+
+char serial_get_char(void) {
+    while (serial_received() == 0);
+    return inb(COM1);
+}
+

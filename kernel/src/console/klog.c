@@ -7,19 +7,13 @@ static spinlock_t klog_lock = SPINLOCK_INIT;
 
 void klog_putchar(char c) {
     spinlock_acquire(&klog_lock);
-    serial_putchar(c);
     console_putchar(c);
     spinlock_release(&klog_lock);
 }
 
 void klog_puts(const char *s) {
     spinlock_acquire(&klog_lock);
-    const char *orig = s;
-    while (*s) {
-        serial_putchar(*s);
-        s++;
-    }
-    console_puts(orig);
+    console_puts(s);
     spinlock_release(&klog_lock);
 }
 

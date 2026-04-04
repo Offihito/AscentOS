@@ -148,7 +148,9 @@ static void draw_char(char c, uint32_t col, uint32_t row) {
 }
 
 static void console_putchar_unlocked(char c) {
+  serial_putchar(c);
   bool was_visible = cursor_visible;
+
   if (was_visible && view_scroll_offset == 0) {
     console_update_cursor(false);
   }

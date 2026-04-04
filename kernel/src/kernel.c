@@ -19,6 +19,7 @@
 #include "drivers/storage/block.h"
 #include "fs/vfs.h"
 #include "fs/ramfs.h"
+#include "fs/ext2.h"
 #include "fb/framebuffer.h"
 #include "io/io.h"
 #include "mm/heap.h"
@@ -294,30 +295,16 @@ void kmain(void) {
     klog_puts("\n");
   }
 
-  klog_puts("[DIAG] Testing VFS /dev routing...\n");
-  vfs_node_t *dev_dir = vfs_finddir(fs_root, "dev");
-  if (dev_dir) {
-      vfs_node_t *sata0_node = vfs_finddir(dev_dir, "sata0");
-      if (sata0_node) {
-          uint8_t sec_buf[512] = {0};
-          // Read 512 bytes at offset 1024 (sector 2)
-          if (vfs_read(sata0_node, 1024, 512, sec_buf) == 512) {
-              klog_puts("     VFS Read on /dev/sata0 SUCCESSFUL! First bytes: ");
-              for (int b = 0; b < 8; b++) {
-                const char *hex = "0123456789ABCDEF";
-                char out[3] = { hex[(sec_buf[b] >> 4) & 0xF], hex[sec_buf[b] & 0xF], 0 };
-                klog_puts(out); klog_puts(" ");
-              }
-              klog_puts("\n");
-              if (sec_buf[56] == 0x53 && sec_buf[57] == 0xEF) {
-                klog_puts("     => EXT2 SUPERBLOCK VIA VFS AND RAMFS WORKS!\n");
-              }
-          } else {
-             klog_puts("     VFS Read FAILED!\n");
-          }
-      } else {
-          klog_puts("     /dev/sata0 not found in VFS!\n");
-      }
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Phase 7: Ext2 Filesystem
+  // ═══════════════════════════════════════════════════════════════════════
+  vfs_node_t *mnt_dir = vfs_finddir(fs_root, "mnt");
+  struct block_device *disk = block_get(0);
+  if (mnt_dir && disk) {
+      ext2_mount(disk, mnt_dir);
+  } else {
+      if (!disk)    klog_puts("[WARN] No block device found for ext2 mount.\n");
+      if (!mnt_dir) klog_puts("[WARN] /mnt not found in VFS.\n");
   }
 
   // ═══════════════════════════════════════════════════════════════════════

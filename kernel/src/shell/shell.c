@@ -10,13 +10,52 @@
 #include "console/klog.h"
 #include "smp/cpu.h"
 #include "drivers/storage/block.h"
+#include "drivers/serial.h"
 #include "fs/vfs.h"
+#include "fs/ext2.h"
 #include <stdint.h>
 
 #define CMD_BUFFER_SIZE 256
 
 static char cmd_buffer[CMD_BUFFER_SIZE];
 static int cmd_len = 0;
+
+// Resolve a path like "/mnt/docs/readme.txt" to a VFS node.
+// Walks each component separated by '/' using vfs_finddir.
+static vfs_node_t *vfs_resolve_path(const char *path) {
+    if (!path || !fs_root) return NULL;
+
+    vfs_node_t *current = fs_root;
+
+    // Skip leading slash
+    if (*path == '/') path++;
+    if (*path == '\0') return current;
+
+    // Work on a mutable copy
+    char buf[256];
+    int len = 0;
+    while (path[len] && len < 255) { buf[len] = path[len]; len++; }
+    buf[len] = '\0';
+
+    char *p = buf;
+    while (*p) {
+        // Skip multiple slashes
+        while (*p == '/') p++;
+        if (*p == '\0') break;
+
+        // Find end of component
+        char *start = p;
+        while (*p && *p != '/') p++;
+        char saved = *p;
+        *p = '\0';
+
+        current = vfs_finddir(current, start);
+        if (!current) return NULL;
+
+        *p = saved;
+    }
+    return current;
+}
 
 static void test_task_entry(void);
 
@@ -55,17 +94,30 @@ static void execute_command(char *cmd) {
 
     if (strcmp(cmd, "help") == 0) {
         console_puts("Available commands:\n");
-        console_puts("  help    - Show this help message\n");
-        console_puts("  clear   - Clear the console screen\n");
-        console_puts("  meminfo - Display memory utilization\n");
-        console_puts("  echo    - Echo arguments\n");
-        console_puts("  ps      - List running tasks\n");
-        console_puts("  kill    - Terminate a task by TID (e.g. kill 5)\n");
-        console_puts("  heaptest- Test kernel heap allocator\n");
-        console_puts("  locktest- Test atomic spinlock functionality\n");
-        console_puts("  uptime  - Show system uptime\n");
-        console_puts("  diskinfo- Show detected block devices\n");
-        console_puts("  readsect- Read and hex-dump a disk sector (e.g. readsect 0)\n");
+        console_puts("  help      - Show this help message\n");
+        console_puts("  clear     - Clear the console screen\n");
+        console_puts("  meminfo   - Display memory utilization\n");
+        console_puts("  echo      - Echo arguments\n");
+        console_puts("  ps        - List running tasks\n");
+        console_puts("  kill      - Terminate a task by TID (e.g. kill 5)\n");
+        console_puts("  heaptest  - Test kernel heap allocator\n");
+        console_puts("  locktest  - Test atomic spinlock functionality\n");
+        console_puts("  uptime    - Show system uptime\n");
+        console_puts("  diskinfo  - Show detected block devices\n");
+        console_puts("  readsect  - Read and hex-dump a disk sector (e.g. readsect 0)\n");
+        console_puts("  ls        - List directory contents (e.g. ls /mnt)\n");
+        console_puts("  cat       - Display file contents (e.g. cat /mnt/hello.txt)\n");
+        console_puts("  write     - Write text to file (e.g. write /mnt/file.txt hello world)\n");
+        console_puts("  touch     - Create an empty file (e.g. touch /mnt/new.txt)\n");
+        console_puts("  mkdir     - Create a directory (e.g. mkdir /mnt/mydir)\n");
+        console_puts("  rm        - Delete a file (e.g. rm /mnt/old.txt)\n");
+        console_puts("  rmdir     - Remove an empty directory (e.g. rmdir /mnt/mydir)\n");
+        console_puts("  ln        - Create a symlink (e.g. ln /mnt/link /mnt/target)\n");
+        console_puts("  readlink  - Read symlink target (e.g. readlink /mnt/link)\n");
+        console_puts("  stat      - Show file info (e.g. stat /mnt/file.txt)\n");
+        console_puts("  rename    - Rename a file (e.g. rename /mnt/old /mnt/new)\n");
+        console_puts("  chmod     - Change permissions (e.g. chmod 0777 /mnt/file.txt)\n");
+        console_puts("  chown     - Change owner/group (e.g. chown 1000:1000 /mnt/file.txt)\n");
     } else if (strcmp(cmd, "ps") == 0) {
         sched_print_tasks();
     } else if (strncmp(cmd, "kill ", 5) == 0) {
@@ -291,22 +343,16 @@ static void execute_command(char *cmd) {
                 }
             }
         }
-    } else if (strncmp(cmd, "ls ", 3) == 0) {
-        char *path = cmd + 3;
-        // Basic traversal logic for single directory depth testing
-        vfs_node_t *dir = fs_root;
-        if (strcmp(path, "/") != 0) {
-            // Very naive path lookup assuming "/name" format for testing
-            char *name = path[0] == '/' ? path + 1 : path;
-            dir = vfs_finddir(fs_root, name);
-        }
-        
+    } else if (strncmp(cmd, "ls ", 3) == 0 || strcmp(cmd, "ls") == 0) {
+        char *path = (strlen(cmd) > 3) ? cmd + 3 : "/";
+        vfs_node_t *dir = vfs_resolve_path(path);
+
         if (!dir) {
             console_puts("ls: cannot access '");
             console_puts(path);
             console_puts("': No such file or directory\n");
         } else if ((dir->flags & 0x07) != FS_DIRECTORY) {
-            console_puts("ls: cannot access '");
+            console_puts("ls: '");
             console_puts(path);
             console_puts("': Not a directory\n");
         } else {
@@ -320,51 +366,427 @@ static void execute_command(char *cmd) {
         }
     } else if (strncmp(cmd, "cat ", 4) == 0) {
         char *path = cmd + 4;
-        // Naive path lookup
-        vfs_node_t *dir = fs_root;
-        char *file_name = path;
-        if (strncmp(path, "/dev/", 5) == 0) {
-            dir = vfs_finddir(fs_root, "dev");
-            file_name = path + 5;
-        } else if (path[0] == '/') {
-            file_name = path + 1;
-        }
-        
-        if (!dir) {
-            console_puts("cat: directory not found\n");
+        vfs_node_t *file = vfs_resolve_path(path);
+
+        if (!file) {
+            console_puts("cat: ");
+            console_puts(path);
+            console_puts(": No such file\n");
+        } else if ((file->flags & 0x07) == FS_DIRECTORY) {
+            console_puts("cat: ");
+            console_puts(path);
+            console_puts(": Is a directory\n");
+        } else if ((file->flags & 0x07) == FS_SYMLINK) {
+            console_puts("cat: ");
+            console_puts(path);
+            console_puts(": Is a symbolic link (use readlink)\n");
         } else {
-            vfs_node_t *file = vfs_finddir(dir, file_name);
-            if (!file) {
-                console_puts("cat: ");
-                console_puts(path);
-                console_puts(": No such file\n");
-            } else if ((file->flags & 0x07) == FS_DIRECTORY) {
-                console_puts("cat: ");
-                console_puts(path);
-                console_puts(": Is a directory\n");
-            } else {
-                uint8_t buf[512];
-                uint32_t offset = 0;
-                uint32_t bytes;
-                uint32_t max_bytes = 1024; // Limit to 1KB for safety until we have Ext2/real files
-                while ((bytes = vfs_read(file, offset, sizeof(buf), buf)) > 0) {
-                    for (uint32_t j = 0; j < bytes; j++) {
-                        char c = (char)buf[j];
-                        if (c >= 32 && c <= 126) {
-                            console_putchar(c);
-                        } else if (c == '\n' || c == '\r' || c == '\t') {
-                            console_putchar(c);
-                        } else {
-                            console_putchar('.'); // Fallback for unprintable binary data
-                        }
-                    }
-                    offset += bytes;
-                    if (offset >= max_bytes) {
-                        console_puts("\n... (truncated for safety)\n");
-                        break;
+            uint8_t buf[512];
+            uint32_t offset = 0;
+            uint32_t bytes;
+            uint32_t max_bytes = 8192;
+            while ((bytes = vfs_read(file, offset, sizeof(buf), buf)) > 0) {
+                for (uint32_t j = 0; j < bytes; j++) {
+                    char c = (char)buf[j];
+                    if (c >= 32 && c <= 126) {
+                        console_putchar(c);
+                    } else if (c == '\n' || c == '\r' || c == '\t') {
+                        console_putchar(c);
+                    } else {
+                        console_putchar('.');
                     }
                 }
+                offset += bytes;
+                if (offset >= max_bytes) {
+                    console_puts("\n... (truncated at 8KB)\n");
+                    break;
+                }
+            }
+            console_puts("\n");
+        }
+    } else if (strncmp(cmd, "write ", 6) == 0) {
+        // Usage: write /mnt/file.txt content here
+        char *rest = cmd + 6;
+        // Find end of path (first space)
+        char *space = rest;
+        while (*space && *space != ' ') space++;
+        if (*space == '\0') {
+            console_puts("Usage: write <path> <content>\n");
+        } else {
+            *space = '\0';
+            char *filepath = rest;
+            char *content = space + 1;
+            uint32_t content_len = strlen(content);
+
+            vfs_node_t *file = vfs_resolve_path(filepath);
+
+            if (!file) {
+                // Try to create it: resolve parent, then create
+                // Find last '/' to get parent path and filename
+                char *last_slash = NULL;
+                for (char *p = filepath; *p; p++) {
+                    if (*p == '/') last_slash = p;
+                }
+                if (last_slash && last_slash != filepath) {
+                    *last_slash = '\0';
+                    char *parent_path = filepath;
+                    char *filename = last_slash + 1;
+                    vfs_node_t *parent = vfs_resolve_path(parent_path);
+                    if (parent) {
+                        if (vfs_create(parent, filename, 0644) == 0) {
+                            file = vfs_finddir(parent, filename);
+                        }
+                    }
+                    *last_slash = '/'; // Restore
+                } else if (last_slash == filepath) {
+                    // Path like /filename — create in root
+                    char *filename = filepath + 1;
+                    if (vfs_create(fs_root, filename, 0644) == 0) {
+                        file = vfs_finddir(fs_root, filename);
+                    }
+                }
+            }
+
+            if (!file) {
+                console_puts("write: cannot create or open '");
+                console_puts(rest);
+                console_puts("'\n");
+            } else {
+                uint32_t written = vfs_write(file, 0, content_len, (uint8_t *)content);
+                console_puts("Wrote ");
+                shell_print_uint64(written);
+                console_puts(" bytes.\n");
+            }
+        }
+    } else if (strncmp(cmd, "touch ", 6) == 0) {
+        char *filepath = cmd + 6;
+        // Find parent directory and filename
+        char *last_slash = NULL;
+        for (char *p = filepath; *p; p++) {
+            if (*p == '/') last_slash = p;
+        }
+        if (!last_slash) {
+            console_puts("Usage: touch <path> (e.g. touch /mnt/file.txt)\n");
+        } else {
+            *last_slash = '\0';
+            char *parent_path = (last_slash == filepath) ? "/" : filepath;
+            char *filename = last_slash + 1;
+            vfs_node_t *parent = vfs_resolve_path(parent_path);
+            *last_slash = '/'; // Restore
+            if (!parent) {
+                console_puts("touch: parent directory not found\n");
+            } else {
+                int ret = vfs_create(parent, filename, 0644);
+                if (ret == 0) {
+                    console_puts("Created: ");
+                    console_puts(filepath);
+                    console_puts("\n");
+                } else {
+                    console_puts("touch: failed (file may already exist)\n");
+                }
+            }
+        }
+    } else if (strncmp(cmd, "mkdir ", 6) == 0) {
+        char *dirpath = cmd + 6;
+        char *last_slash = NULL;
+        for (char *p = dirpath; *p; p++) {
+            if (*p == '/') last_slash = p;
+        }
+        if (!last_slash) {
+            console_puts("Usage: mkdir <path> (e.g. mkdir /mnt/mydir)\n");
+        } else {
+            *last_slash = '\0';
+            char *parent_path = (last_slash == dirpath) ? "/" : dirpath;
+            char *dirname = last_slash + 1;
+            vfs_node_t *parent = vfs_resolve_path(parent_path);
+            *last_slash = '/'; // Restore
+            if (!parent) {
+                console_puts("mkdir: parent directory not found\n");
+            } else {
+                int ret = vfs_mkdir(parent, dirname, 0755);
+                if (ret == 0) {
+                    console_puts("Created directory: ");
+                    console_puts(dirpath);
+                    console_puts("\n");
+                } else {
+                    console_puts("mkdir: failed (directory may already exist)\n");
+                }
+            }
+        }
+    } else if (strncmp(cmd, "rm ", 3) == 0) {
+        char *filepath = cmd + 3;
+        // Find parent directory and filename
+        char *last_slash = NULL;
+        for (char *p = filepath; *p; p++) {
+            if (*p == '/') last_slash = p;
+        }
+        if (!last_slash) {
+            console_puts("Usage: rm <path> (e.g. rm /mnt/file.txt)\n");
+        } else {
+            *last_slash = '\0';
+            char *parent_path = (last_slash == filepath) ? "/" : filepath;
+            char *filename = last_slash + 1;
+            vfs_node_t *parent = vfs_resolve_path(parent_path);
+            *last_slash = '/'; // Restore
+            if (!parent) {
+                console_puts("rm: parent directory not found\n");
+            } else {
+                int ret = vfs_unlink(parent, filename);
+                if (ret == 0) {
+                    console_puts("Removed: ");
+                    console_puts(filepath);
+                    console_puts("\n");
+                } else {
+                    console_puts("rm: failed (file not found or is a directory)\n");
+                }
+            }
+        }
+    } else if (strncmp(cmd, "rmdir ", 6) == 0) {
+        char *dirpath = cmd + 6;
+        char *last_slash = NULL;
+        for (char *p = dirpath; *p; p++) {
+            if (*p == '/') last_slash = p;
+        }
+        if (!last_slash) {
+            console_puts("Usage: rmdir <path> (e.g. rmdir /mnt/mydir)\n");
+        } else {
+            *last_slash = '\0';
+            char *parent_path = (last_slash == dirpath) ? "/" : dirpath;
+            char *dirname = last_slash + 1;
+            vfs_node_t *parent = vfs_resolve_path(parent_path);
+            *last_slash = '/'; // Restore
+            if (!parent) {
+                console_puts("rmdir: parent directory not found\n");
+            } else {
+                int ret = vfs_rmdir(parent, dirname);
+                if (ret == 0) {
+                    console_puts("Removed directory: ");
+                    console_puts(dirpath);
+                    console_puts("\n");
+                } else {
+                    console_puts("rmdir: failed (not found, not empty, or not a directory)\n");
+                }
+            }
+        }
+    } else if (strncmp(cmd, "ln ", 3) == 0) {
+        // Usage: ln /mnt/linkname /mnt/target
+        char *rest = cmd + 3;
+        // Find end of link path (first space)
+        char *space = rest;
+        while (*space && *space != ' ') space++;
+        if (*space == '\0') {
+            console_puts("Usage: ln <linkpath> <target>\n");
+        } else {
+            *space = '\0';
+            char *linkpath = rest;
+            char *target = space + 1;
+
+            // Resolve parent of link
+            char *last_slash = NULL;
+            for (char *p = linkpath; *p; p++) {
+                if (*p == '/') last_slash = p;
+            }
+            if (!last_slash) {
+                console_puts("Usage: ln <linkpath> <target>\n");
+            } else {
+                *last_slash = '\0';
+                char *parent_path = (last_slash == linkpath) ? "/" : linkpath;
+                char *linkname = last_slash + 1;
+                vfs_node_t *parent = vfs_resolve_path(parent_path);
+                *last_slash = '/'; // Restore
+                if (!parent) {
+                    console_puts("ln: parent directory not found\n");
+                } else {
+                    int ret = vfs_symlink(parent, linkname, target);
+                    if (ret == 0) {
+                        console_puts("Created symlink: ");
+                        console_puts(linkpath);
+                        console_puts(" -> ");
+                        console_puts(target);
+                        console_puts("\n");
+                    } else {
+                        console_puts("ln: failed (may already exist)\n");
+                    }
+                }
+            }
+        }
+    } else if (strncmp(cmd, "readlink ", 9) == 0) {
+        char *path = cmd + 9;
+        vfs_node_t *file = vfs_resolve_path(path);
+        if (!file) {
+            console_puts("readlink: ");
+            console_puts(path);
+            console_puts(": No such file\n");
+        } else {
+            char target_buf[256];
+            int ret = vfs_readlink(file, target_buf, sizeof(target_buf));
+            if (ret < 0) {
+                console_puts("readlink: ");
+                console_puts(path);
+                console_puts(": Not a symbolic link\n");
+            } else {
+                console_puts(target_buf);
                 console_puts("\n");
+            }
+        }
+    } else if (strncmp(cmd, "stat ", 5) == 0) {
+        char *path = cmd + 5;
+        vfs_node_t *file = vfs_resolve_path(path);
+        if (!file) {
+            console_puts("stat: ");
+            console_puts(path);
+            console_puts(": No such file\n");
+        } else {
+            console_puts("  File: ");
+            console_puts(path);
+            console_puts("\n");
+            console_puts("  Size: ");
+            shell_print_uint64(file->length);
+            console_puts(" bytes\n");
+            console_puts("  ModTime: ");
+            shell_print_uint64(file->mtime);
+            console_puts(" secs since boot\n");
+            console_puts("  Type: ");
+            uint32_t ftype = file->flags & 0x07;
+            if (ftype == FS_FILE) console_puts("regular file\n");
+            else if (ftype == FS_DIRECTORY) console_puts("directory\n");
+            else if (ftype == FS_SYMLINK) {
+                console_puts("symbolic link -> ");
+                char tbuf[256];
+                if (vfs_readlink(file, tbuf, sizeof(tbuf)) >= 0) {
+                    console_puts(tbuf);
+                }
+                console_puts("\n");
+            } else console_puts("other\n");
+            console_puts("  Inode: ");
+            shell_print_uint64(file->inode);
+            console_puts("\n");
+            console_puts("  Perms: 0");
+            // Print permissions in octal
+            uint32_t m = file->mask;
+            console_putchar('0' + ((m >> 9) & 7));
+            console_putchar('0' + ((m >> 6) & 7));
+            console_putchar('0' + ((m >> 3) & 7));
+            console_putchar('0' + (m & 7));
+            console_puts("\n");
+            console_puts("  UID: ");
+            shell_print_uint64(file->uid);
+            console_puts("  GID: ");
+            shell_print_uint64(file->gid);
+            console_puts("\n");
+        }
+    } else if (strncmp(cmd, "rename ", 7) == 0) {
+        char *rest = cmd + 7;
+        char *space = rest;
+        while (*space && *space != ' ') space++;
+        if (*space == '\0') {
+            console_puts("Usage: rename <old_path> <new_path>\n");
+        } else {
+            *space = '\0';
+            char *old_path = rest;
+            char *new_path = space + 1;
+
+            char *last_slash = NULL;
+            for (char *p = old_path; *p; p++) if (*p == '/') last_slash = p;
+            if (!last_slash) {
+                console_puts("rename: need absolute path (e.g. /mnt/...)\n");
+            } else {
+                *last_slash = '\0';
+                char *parent_path = (last_slash == old_path) ? "/" : old_path;
+                char *old_name = last_slash + 1;
+                vfs_node_t *parent = vfs_resolve_path(parent_path);
+
+                char *new_last_slash = NULL;
+                for (char *p = new_path; *p; p++) if (*p == '/') new_last_slash = p;
+                if (!new_last_slash) {
+                    console_puts("rename: need absolute new path\n");
+                } else {
+                    *new_last_slash = '\0';
+                    char *new_parent_path = (new_last_slash == new_path) ? "/" : new_path;
+                    char *new_name = new_last_slash + 1;
+                    
+                    if (strcmp(parent_path, new_parent_path) != 0) {
+                        console_puts("rename: cross-directory rename not supported yet\n");
+                    } else if (!parent) {
+                        console_puts("rename: parent directory not found\n");
+                    } else {
+                        if (vfs_rename(parent, old_name, new_name) == 0) {
+                            console_puts("Renamed ");
+                            *last_slash = '/'; // restore temporarily for printing
+                            console_puts(old_path);
+                            console_puts(" to ");
+                            *new_last_slash = '/'; // restore temporarily for printing
+                            console_puts(new_path);
+                            console_puts("\n");
+                            // slashes restored correctly
+                        } else {
+                            console_puts("rename failed\n");
+                        }
+                    }
+                    *new_last_slash = '/'; // Restore unconditionally
+                }
+                *last_slash = '/'; // Restore unconditionally
+            }
+        }
+    } else if (strncmp(cmd, "chmod ", 6) == 0) {
+        char *rest = cmd + 6;
+        char *space = rest;
+        while (*space && *space != ' ') space++;
+        if (*space == '\0') {
+            console_puts("Usage: chmod <octal_perms> <file>\n");
+        } else {
+            *space = '\0';
+            char *perms_str = rest;
+            char *path = space + 1;
+
+            uint32_t perms = 0;
+            for (int i = 0; perms_str[i]; i++) {
+                if (perms_str[i] >= '0' && perms_str[i] <= '7') {
+                    perms = (perms << 3) + (perms_str[i] - '0');
+                }
+            }
+
+            vfs_node_t *node = vfs_resolve_path(path);
+            if (!node) {
+                console_puts("chmod: file not found\n");
+            } else if (vfs_chmod(node, perms) == 0) {
+                console_puts("Permissions changed.\n");
+            } else {
+                console_puts("chmod failed.\n");
+            }
+        }
+    } else if (strncmp(cmd, "chown ", 6) == 0) {
+        char *rest = cmd + 6;
+        char *space = rest;
+        while (*space && *space != ' ') space++;
+        if (*space == '\0') {
+            console_puts("Usage: chown <uid>:<gid> <file>\n");
+        } else {
+            *space = '\0';
+            char *owner_str = rest;
+            char *path = space + 1;
+
+            char *colon = NULL;
+            for (char *p = owner_str; *p; p++) if (*p == ':') colon = p;
+            
+            uint32_t uid = 0, gid = 0;
+            if (colon) {
+                *colon = '\0';
+                uid = atoui(owner_str);
+                gid = atoui(colon + 1);
+                *colon = ':';
+            } else {
+                uid = atoui(owner_str);
+                gid = uid;
+            }
+
+            vfs_node_t *node = vfs_resolve_path(path);
+            if (!node) {
+                console_puts("chown: file not found\n");
+            } else if (vfs_chown(node, uid, gid) == 0) {
+                console_puts("Ownership changed.\n");
+            } else {
+                console_puts("chown failed.\n");
             }
         }
     } else {
@@ -383,7 +805,17 @@ void shell_run(void) {
     print_prompt();
 
     while (1) {
-        char c = keyboard_get_char();
+        char c = 0;
+        if (keyboard_has_char()) {
+            c = keyboard_get_char();
+        } else if (serial_received()) {
+            c = serial_get_char();
+        }
+
+        if (c == 0) {
+            sched_yield(); // Don't hog the CPU if no input
+            continue;
+        }
 
         if (c == (char)KEY_UP) {
             console_scroll_view(1);
@@ -393,20 +825,20 @@ void shell_run(void) {
             console_scroll_view(10);
         } else if (c == (char)KEY_PGDN) {
             console_scroll_view(-10);
-        } else if (c == '\n') {
+        } else if (c == '\r' || c == '\n') {
             console_putchar('\n');
             cmd_buffer[cmd_len] = '\0';
             execute_command(cmd_buffer);
             cmd_len = 0;
             cmd_buffer[0] = '\0';
             print_prompt();
-        } else if (c == '\b') {
+        } else if (c == '\b' || c == 0x7F) { // 0x7F is DEL, often used as backspace in serial terms
             if (cmd_len > 0) {
                 cmd_len--;
                 cmd_buffer[cmd_len] = '\0';
                 console_putchar('\b');
             }
-        } else if (c != 0) {
+        } else {
             if (cmd_len < CMD_BUFFER_SIZE - 1) {
                 cmd_buffer[cmd_len++] = c;
                 console_putchar(c);
@@ -414,6 +846,7 @@ void shell_run(void) {
         }
     }
 }
+
 
 static void test_task_entry(void) {
     while (1) {

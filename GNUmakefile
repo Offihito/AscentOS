@@ -37,10 +37,16 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		-boot d \
 		$(QEMUFLAGS)
 
-# Create a 64MB ext2 disk image for ATA testing
+# Create a 64MB ext2 disk image with sample files for testing
 disk.img:
 	dd if=/dev/zero of=disk.img bs=1M count=64
 	mkfs.ext2 -F disk.img
+	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
+	echo "This is a test document." > /tmp/ascentos_readme.txt
+	debugfs -w -R "write /tmp/ascentos_hello.txt hello.txt" disk.img
+	debugfs -w -R "mkdir docs" disk.img
+	debugfs -w -R "write /tmp/ascentos_readme.txt docs/readme.txt" disk.img
+	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
 
 edk2-ovmf:
 	curl -L https://github.com/osdev0/edk2-ovmf-nightly/releases/latest/download/edk2-ovmf.tar.gz | gunzip | tar -xf -

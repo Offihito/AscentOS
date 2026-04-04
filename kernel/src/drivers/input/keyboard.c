@@ -40,7 +40,12 @@ static void ring_buffer_push(char c) {
     }
 }
 
+bool keyboard_has_char(void) {
+    return kbd_head != kbd_tail;
+}
+
 char keyboard_get_char(void) {
+
     while (kbd_head == kbd_tail) {
         __asm__ volatile ("hlt"); // Yield CPU until interrupt fires
     }

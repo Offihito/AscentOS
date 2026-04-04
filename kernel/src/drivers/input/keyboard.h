@@ -1,10 +1,17 @@
 #ifndef KEYBOARD_H
 #define KEYBOARD_H
 
+#include <stdbool.h>
+
 void keyboard_init(void);
+
+// Returns true if there is a character in the keyboard buffer.
+bool keyboard_has_char(void);
+
 
 // Halts execution until a character is typed, then returns it.
 char keyboard_get_char(void);
+
 
 #define KEY_UP    0xE0
 #define KEY_DOWN  0xE1
