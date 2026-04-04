@@ -1,4 +1,4 @@
-#include "drivers/pit.h"
+#include "drivers/timer/pit.h"
 #include "cpu/isr.h"
 #include "io/io.h"
 #include "console/console.h"

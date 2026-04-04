@@ -1,0 +1,362 @@
+#include "drivers/storage/ahci.h"
+#include "drivers/storage/block.h"
+#include "drivers/pci/pci.h"
+#include "console/klog.h"
+#include "console/console.h"
+#include "mm/pmm.h"
+#include "mm/vmm.h"
+#include "lib/string.h"
+#include <stddef.h>
+
+#define ATA_CMD_READ_DMA_EX     0x25
+#define ATA_CMD_WRITE_DMA_EX    0x35
+#define ATA_CMD_IDENTIFY        0xEC
+
+// ── Private structures ──────────────────────────────────────────────────────
+
+struct ahci_drive {
+    ahci_port_t *port;
+    bool present;
+    uint64_t total_sectors;
+    char model[41];
+    struct block_device blkdev;
+};
+
+static ahci_hba_mem_t *hba;
+static struct ahci_drive ahci_drives[32];
+static int ahci_drive_count = 0;
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+static void print_uint64(uint64_t num) {
+    if (num == 0) { console_putchar('0'); return; }
+    char buf[20];
+    int i = 0;
+    while (num > 0) { buf[i++] = '0' + (num % 10); num /= 10; }
+    while (i > 0) { console_putchar(buf[--i]); }
+}
+
+// ── AHCI Control ────────────────────────────────────────────────────────────
+
+static int find_cmdslot(ahci_port_t *port) {
+    // If not set, bit isn't set in SACT and CI
+    uint32_t slots = (port->sact | port->ci);
+    // Hardcoded 32 slots limit
+    for (int i = 0; i < 32; i++) {
+        if ((slots & (1 << i)) == 0)
+            return i;
+    }
+    return -1;
+}
+
+static void stop_cmd(ahci_port_t *port) {
+    // Clear ST (Start)
+    port->cmd &= ~AHCI_CMD_ST;
+    // Clear FRE (FIS Receive Enable)
+    port->cmd &= ~AHCI_CMD_FRE;
+
+    // Wait until FR (FIS Receive Running) and CR (Command List Running) are cleared
+    while(1) {
+        if (port->cmd & AHCI_CMD_FR) continue;
+        if (port->cmd & AHCI_CMD_CR) continue;
+        break;
+    }
+}
+
+static void start_cmd(ahci_port_t *port) {
+    // Wait until CR (Command List Running) is cleared
+    while (port->cmd & AHCI_CMD_CR);
+
+    // Set FRE (FIS Receive Enable) and ST (Start)
+    port->cmd |= AHCI_CMD_FRE;
+    port->cmd |= AHCI_CMD_ST;
+}
+
+static void port_rebase(ahci_port_t *port) {
+    stop_cmd(port);
+
+    // Command list offset: 1K per port
+    void *phys_clb = pmm_alloc(); // alloc 1 page (4K) for simplicity
+    memset((void*)((uint64_t)phys_clb + pmm_get_hhdm_offset()), 0, 1024);
+    port->clb = (uint32_t)(uint64_t)phys_clb;
+    port->clbu = (uint32_t)((uint64_t)phys_clb >> 32);
+
+    // FIS offset: 256 bytes per port - just use the second KB of the same page
+    uint64_t phys_fb = (uint64_t)phys_clb + 1024;
+    memset((void*)(phys_fb + pmm_get_hhdm_offset()), 0, 256);
+    port->fb = (uint32_t)phys_fb;
+    port->fbu = (uint32_t)(phys_fb >> 32);
+
+    // Command table offset: 256 bytes per command table, 32 commands
+    // We need 256 * 32 = 8K per port. Alloc 2 pages.
+    void *phys_ctba_base = pmm_alloc_blocks(2);
+    memset((void*)((uint64_t)phys_ctba_base + pmm_get_hhdm_offset()), 0, 8192);
+
+    ahci_command_header_t *cmdheader = (ahci_command_header_t*)((uint64_t)phys_clb + pmm_get_hhdm_offset());
+    for (int i = 0; i < 32; i++) {
+        cmdheader[i].prdtl = 8; // Max 8 PRDT entries per command slot for our static struct size
+        uint64_t phys_ctba = (uint64_t)phys_ctba_base + (256 * i);
+        cmdheader[i].ctba = (uint32_t)phys_ctba;
+        cmdheader[i].ctbau = (uint32_t)(phys_ctba >> 32);
+    }
+
+    start_cmd(port);
+}
+
+// ── AHCI Command IO ─────────────────────────────────────────────────────────
+
+static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf, int is_write) {
+    // Clear pending interrupts
+    port->is = port->is;    
+
+    int slot = find_cmdslot(port);
+    if (slot == -1) return -1;
+
+    // Get HHDM VA of command list
+    uint64_t clb_addr = ((uint64_t)port->clbu << 32) | port->clb;
+    ahci_command_header_t *cmdheader = (ahci_command_header_t*)(clb_addr + pmm_get_hhdm_offset());
+    
+    // Command size (5 dwords in FIS)
+    cmdheader[slot].cfl = sizeof(fis_reg_h2d_t)/sizeof(uint32_t); 
+    cmdheader[slot].w = is_write ? 1 : 0;
+    
+    // One PRDT entry per page
+    cmdheader[slot].prdtl = 1;
+
+    // Get HHDM VA of command table
+    uint64_t ctba_addr = ((uint64_t)cmdheader[slot].ctbau << 32) | cmdheader[slot].ctba;
+    ahci_command_table_t *cmdtbl = (ahci_command_table_t*)(ctba_addr + pmm_get_hhdm_offset());
+    memset(cmdtbl, 0, sizeof(ahci_command_table_t));
+
+    // Fill PRDT (Assuming buf is physically contiguous for simplistic AHCI)
+    // In a real OS we'd walk the page tables and create PRDTs per 4K mapped physically.
+    // For shell 'readsect', the generic buffer is contiguous if < 4K.
+    
+    // Convert current buffer virtual address to physical address by subtracting HHDM.
+    // NOTE: This assumes buf is allocated in the HHDM allocator or linear map!
+    uint64_t buf_phys = (uint64_t)buf - pmm_get_hhdm_offset();
+    
+    cmdtbl->prdt_entry[0].dba = (uint32_t)buf_phys;
+    cmdtbl->prdt_entry[0].dbau = (uint32_t)(buf_phys >> 32);
+    cmdtbl->prdt_entry[0].dbc = (count * 512) - 1; // Byte count - 1
+    cmdtbl->prdt_entry[0].i = 1; // Interrupt on completion
+
+    // Setup FIS
+    fis_reg_h2d_t *cmdfis = (fis_reg_h2d_t*)(&cmdtbl->cfis);
+    cmdfis->fis_type = FIS_TYPE_REG_H2D;
+    cmdfis->c = 1; // Command
+    cmdfis->command = is_write ? ATA_CMD_WRITE_DMA_EX : ATA_CMD_READ_DMA_EX;
+
+    cmdfis->lba0 = (uint8_t)(lba & 0xFF);
+    cmdfis->lba1 = (uint8_t)((lba >> 8) & 0xFF);
+    cmdfis->lba2 = (uint8_t)((lba >> 16) & 0xFF);
+    cmdfis->device = 1 << 6; // LBA mode
+
+    cmdfis->lba3 = (uint8_t)((lba >> 24) & 0xFF);
+    cmdfis->lba4 = (uint8_t)((lba >> 32) & 0xFF);
+    cmdfis->lba5 = (uint8_t)((lba >> 40) & 0xFF);
+
+    cmdfis->countl = count & 0xFF;
+    cmdfis->counth = (count >> 8) & 0xFF;
+
+    // Issue command
+    while (port->tfd & (0x80 | 0x08)); // Wait until drive not busy or drq
+
+    port->ci = 1 << slot; 
+
+    // Wait for completion
+    while (1) {
+        // If the command issue bit clears, it's done
+        if ((port->ci & (1 << slot)) == 0) 
+            break;
+        if (port->is & (1 << 30)) { // Error
+            console_puts("[ERR] AHCI Disk Error during IO\n");
+            return -1;
+        }
+    }
+
+    // Check for error
+    if (port->is & (1 << 30)) {
+        console_puts("[ERR] AHCI Disk Error bit set\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int ahci_read(struct block_device *dev, uint64_t lba, uint32_t count, void *buf) {
+    struct ahci_drive *drive = (struct ahci_drive*)dev->driver_data;
+    return ahci_io(drive->port, lba, count, buf, 0);
+}
+
+static int ahci_write(struct block_device *dev, uint64_t lba, uint32_t count, const void *buf) {
+    struct ahci_drive *drive = (struct ahci_drive*)dev->driver_data;
+    // Cast away const for our naive physical address calculation
+    return ahci_io(drive->port, lba, count, (void*)buf, 1);
+}
+
+// ── Identify & Setup ────────────────────────────────────────────────────────
+
+static bool ahci_identify(ahci_port_t *port, struct ahci_drive *drive) {
+    int slot = find_cmdslot(port);
+    if (slot == -1) return false;
+
+    // Use page allocator for temp buffer (must be physical!)
+    void *phys_buf = pmm_alloc();
+    void *virt_buf = (void*)((uint64_t)phys_buf + pmm_get_hhdm_offset());
+    memset(virt_buf, 0, 4096);
+
+    uint64_t clb_addr = ((uint64_t)port->clbu << 32) | port->clb;
+    ahci_command_header_t *cmdheader = (ahci_command_header_t*)(clb_addr + pmm_get_hhdm_offset());
+    
+    cmdheader[slot].cfl = sizeof(fis_reg_h2d_t)/sizeof(uint32_t);
+    cmdheader[slot].w = 0;
+    cmdheader[slot].prdtl = 1;
+
+    uint64_t ctba_addr = ((uint64_t)cmdheader[slot].ctbau << 32) | cmdheader[slot].ctba;
+    ahci_command_table_t *cmdtbl = (ahci_command_table_t*)(ctba_addr + pmm_get_hhdm_offset());
+    memset(cmdtbl, 0, sizeof(ahci_command_table_t));
+
+    cmdtbl->prdt_entry[0].dba = (uint32_t)(uint64_t)phys_buf;
+    cmdtbl->prdt_entry[0].dbau = (uint32_t)((uint64_t)phys_buf >> 32);
+    cmdtbl->prdt_entry[0].dbc = 511; // 512 bytes
+    cmdtbl->prdt_entry[0].i = 1;
+
+    fis_reg_h2d_t *cmdfis = (fis_reg_h2d_t*)(&cmdtbl->cfis);
+    cmdfis->fis_type = FIS_TYPE_REG_H2D;
+    cmdfis->c = 1; 
+    cmdfis->command = ATA_CMD_IDENTIFY;
+
+    while (port->tfd & (0x80 | 0x08));
+
+    port->ci = 1 << slot;
+
+    while (1) {
+        if ((port->ci & (1 << slot)) == 0) break;
+        if (port->is & (1 << 30)) return false;
+    }
+
+    uint16_t *identify_data = (uint16_t*)virt_buf;
+
+    uint64_t lba48_sectors = (uint64_t)identify_data[100]
+                           | ((uint64_t)identify_data[101] << 16)
+                           | ((uint64_t)identify_data[102] << 32)
+                           | ((uint64_t)identify_data[103] << 48);
+
+    uint32_t lba28_sectors = (uint32_t)identify_data[60]
+                           | ((uint32_t)identify_data[61] << 16);
+
+    drive->total_sectors = lba48_sectors ? lba48_sectors : lba28_sectors;
+
+    for (int i = 0; i < 20; i++) {
+        drive->model[i * 2]     = (char)(identify_data[27 + i] >> 8);
+        drive->model[i * 2 + 1] = (char)(identify_data[27 + i] & 0xFF);
+    }
+    drive->model[40] = '\0';
+
+    for (int i = 39; i >= 0; i--) {
+        if (drive->model[i] == ' ') drive->model[i] = '\0';
+        else break;
+    }
+
+    pmm_free(phys_buf);
+    return true;
+}
+
+static void probe_port(ahci_port_t *port, int portno) {
+    uint32_t ssts = port->ssts;
+
+    uint8_t ipm = (ssts >> 8) & 0x0F;
+    uint8_t det = ssts & 0x0F;
+
+    if (det != AHCI_PORT_DET_PRESENT || ipm != AHCI_PORT_IPM_ACTIVE)
+        return; // Device not present or not active
+
+    // Check signature
+    if (port->sig == SATA_SIG_ATAPI) {
+        console_puts("     Port "); console_putchar('0' + portno); console_puts(": ATAPI drive found. Skipping.\n");
+    } else if (port->sig == SATA_SIG_SEMB) {
+        // Enclosure management
+    } else if (port->sig == SATA_SIG_PM) {
+        // Port multiplier
+    } else if (port->sig == SATA_SIG_ATA) {
+        console_puts("     Port "); console_putchar('0' + portno); console_puts(": SATA drive found.\n");
+        port_rebase(port);
+        
+        struct ahci_drive *drive = &ahci_drives[ahci_drive_count];
+        drive->port = port;
+        
+        if (ahci_identify(port, drive)) {
+            drive->present = true;
+            uint64_t size_mb = (drive->total_sectors * 512) / (1024 * 1024);
+
+            console_puts("     sata"); console_putchar('0' + ahci_drive_count); console_puts(": ");
+            console_puts(drive->model); console_puts(" (");
+            print_uint64(size_mb); console_puts(" MB, ");
+            print_uint64(drive->total_sectors); console_puts(" sectors)\n");
+
+            struct block_device *blk = &drive->blkdev;
+            blk->name[0] = 's'; blk->name[1] = 'a'; blk->name[2] = 't'; blk->name[3] = 'a';
+            blk->name[4] = '0' + ahci_drive_count; blk->name[5] = '\0';
+            blk->sector_size = 512;
+            blk->total_sectors = drive->total_sectors;
+            blk->read_sectors = ahci_read;
+            blk->write_sectors = ahci_write;
+            blk->driver_data = drive;
+
+            block_register(blk);
+            ahci_drive_count++;
+        }
+    }
+}
+
+// ── Initialization ──────────────────────────────────────────────────────────
+
+void ahci_init(void) {
+    ahci_drive_count = 0;
+    console_puts("[INFO] Searching for AHCI controller...\n");
+
+    struct pci_device *dev = pci_find_device(0x01, 0x06);
+    if (!dev) {
+        console_puts("[WARN] AHCI controller not found.\n");
+        return;
+    }
+
+    uint32_t abar = dev->bar[5]; 
+    if (abar == 0) {
+        console_puts("[ERR] AHCI BAR5 is zero.\n");
+        return;
+    }
+
+    // Mask bottom 13 bits to get physical address (bit 0 indicates Memory Space)
+    uint64_t phys_abar =abar & 0xFFFFFFF0;
+    
+    // Map ABAR (usually 4K or 8K)
+    uint64_t virt_abar = phys_abar + pmm_get_hhdm_offset();
+    vmm_map_page(vmm_get_active_pml4(), virt_abar, phys_abar, PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+    // Map an extra page just in case
+    vmm_map_page(vmm_get_active_pml4(), virt_abar + 0x1000, phys_abar + 0x1000, PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+
+    hba = (ahci_hba_mem_t*)virt_abar;
+
+    // Set GHC.AE (AHCI Enable)
+    hba->ghc |= (1 << 31);
+    
+    // Reset HBA?
+    // hba->ghc |= 1; // HR (HBA Reset) bit
+    // while (hba->ghc & 1); // Wait for reset to clear
+    // hba->ghc |= (1 << 31); // Ensure AE is set after reset
+
+    uint32_t pi = hba->pi;
+    for (int i = 0; i < 32; i++) {
+        if (pi & (1 << i)) {
+            probe_port(&hba->ports[i], i);
+        }
+    }
+    
+    if (ahci_drive_count == 0) {
+        console_puts("[WARN] No SATA drives successfully initialized.\n");
+    } else {
+        console_puts("[OK] AHCI: "); print_uint64(ahci_drive_count); console_puts(" drive(s) registered.\n");
+    }
+}

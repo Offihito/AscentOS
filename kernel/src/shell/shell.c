@@ -1,6 +1,6 @@
 #include "shell/shell.h"
 #include "console/console.h"
-#include "drivers/keyboard.h"
+#include "drivers/input/keyboard.h"
 #include "mm/pmm.h"
 #include "lib/string.h"
 #include "mm/heap.h"
@@ -9,6 +9,9 @@
 #include "sched/sched.h"
 #include "console/klog.h"
 #include "smp/cpu.h"
+#include "drivers/storage/block.h"
+#include "fs/vfs.h"
+#include <stdint.h>
 
 #define CMD_BUFFER_SIZE 256
 
@@ -61,6 +64,8 @@ static void execute_command(char *cmd) {
         console_puts("  heaptest- Test kernel heap allocator\n");
         console_puts("  locktest- Test atomic spinlock functionality\n");
         console_puts("  uptime  - Show system uptime\n");
+        console_puts("  diskinfo- Show detected block devices\n");
+        console_puts("  readsect- Read and hex-dump a disk sector (e.g. readsect 0)\n");
     } else if (strcmp(cmd, "ps") == 0) {
         sched_print_tasks();
     } else if (strncmp(cmd, "kill ", 5) == 0) {
@@ -223,6 +228,145 @@ static void execute_command(char *cmd) {
         console_puts("LAPIC ticks: ");
         shell_print_uint64(lapic_timer_get_ticks());
         console_puts("\n");
+    } else if (strcmp(cmd, "diskinfo") == 0) {
+        int count = block_count();
+        if (count == 0) {
+            console_puts("No block devices registered.\n");
+        } else {
+            console_puts("Block devices:\n");
+            for (int i = 0; i < count; i++) {
+                struct block_device *blk = block_get(i);
+                if (!blk) continue;
+                console_puts("  ");
+                console_puts(blk->name);
+                console_puts(": ");
+                shell_print_uint64((blk->total_sectors * blk->sector_size) / (1024 * 1024));
+                console_puts(" MB (");
+                shell_print_uint64(blk->total_sectors);
+                console_puts(" sectors x ");
+                shell_print_uint64(blk->sector_size);
+                console_puts(" bytes)\n");
+            }
+        }
+    } else if (strncmp(cmd, "readsect ", 9) == 0) {
+        uint64_t lba = (uint64_t)atoui(cmd + 9);
+        struct block_device *blk = block_get(0);
+        if (!blk) {
+            console_puts("No block device available.\n");
+        } else {
+            uint8_t sector_buf[512];
+            memset(sector_buf, 0, 512);
+            int ret = blk->read_sectors(blk, lba, 1, sector_buf);
+            if (ret < 0) {
+                console_puts("Read error!\n");
+            } else {
+                console_puts("Sector ");
+                shell_print_uint64(lba);
+                console_puts(" from ");
+                console_puts(blk->name);
+                console_puts(":\n");
+                // Hex dump: 16 bytes per line, 32 lines
+                const char *hex = "0123456789ABCDEF";
+                for (int row = 0; row < 32; row++) {
+                    // Print offset
+                    uint16_t off = (uint16_t)(row * 16);
+                    console_putchar(hex[(off >> 8) & 0xF]);
+                    console_putchar(hex[(off >> 4) & 0xF]);
+                    console_putchar(hex[off & 0xF]);
+                    console_puts(": ");
+                    // Hex values
+                    for (int col = 0; col < 16; col++) {
+                        uint8_t b = sector_buf[row * 16 + col];
+                        console_putchar(hex[(b >> 4) & 0xF]);
+                        console_putchar(hex[b & 0xF]);
+                        console_putchar(' ');
+                    }
+                    // ASCII
+                    console_puts(" |");
+                    for (int col = 0; col < 16; col++) {
+                        uint8_t b = sector_buf[row * 16 + col];
+                        console_putchar((b >= 0x20 && b < 0x7F) ? (char)b : '.');
+                    }
+                    console_puts("|\n");
+                }
+            }
+        }
+    } else if (strncmp(cmd, "ls ", 3) == 0) {
+        char *path = cmd + 3;
+        // Basic traversal logic for single directory depth testing
+        vfs_node_t *dir = fs_root;
+        if (strcmp(path, "/") != 0) {
+            // Very naive path lookup assuming "/name" format for testing
+            char *name = path[0] == '/' ? path + 1 : path;
+            dir = vfs_finddir(fs_root, name);
+        }
+        
+        if (!dir) {
+            console_puts("ls: cannot access '");
+            console_puts(path);
+            console_puts("': No such file or directory\n");
+        } else if ((dir->flags & 0x07) != FS_DIRECTORY) {
+            console_puts("ls: cannot access '");
+            console_puts(path);
+            console_puts("': Not a directory\n");
+        } else {
+            struct dirent *d;
+            uint32_t i = 0;
+            while ((d = vfs_readdir(dir, i++)) != 0) {
+                console_puts(d->name);
+                console_puts("  ");
+            }
+            console_puts("\n");
+        }
+    } else if (strncmp(cmd, "cat ", 4) == 0) {
+        char *path = cmd + 4;
+        // Naive path lookup
+        vfs_node_t *dir = fs_root;
+        char *file_name = path;
+        if (strncmp(path, "/dev/", 5) == 0) {
+            dir = vfs_finddir(fs_root, "dev");
+            file_name = path + 5;
+        } else if (path[0] == '/') {
+            file_name = path + 1;
+        }
+        
+        if (!dir) {
+            console_puts("cat: directory not found\n");
+        } else {
+            vfs_node_t *file = vfs_finddir(dir, file_name);
+            if (!file) {
+                console_puts("cat: ");
+                console_puts(path);
+                console_puts(": No such file\n");
+            } else if ((file->flags & 0x07) == FS_DIRECTORY) {
+                console_puts("cat: ");
+                console_puts(path);
+                console_puts(": Is a directory\n");
+            } else {
+                uint8_t buf[512];
+                uint32_t offset = 0;
+                uint32_t bytes;
+                uint32_t max_bytes = 1024; // Limit to 1KB for safety until we have Ext2/real files
+                while ((bytes = vfs_read(file, offset, sizeof(buf), buf)) > 0) {
+                    for (uint32_t j = 0; j < bytes; j++) {
+                        char c = (char)buf[j];
+                        if (c >= 32 && c <= 126) {
+                            console_putchar(c);
+                        } else if (c == '\n' || c == '\r' || c == '\t') {
+                            console_putchar(c);
+                        } else {
+                            console_putchar('.'); // Fallback for unprintable binary data
+                        }
+                    }
+                    offset += bytes;
+                    if (offset >= max_bytes) {
+                        console_puts("\n... (truncated for safety)\n");
+                        break;
+                    }
+                }
+                console_puts("\n");
+            }
+        }
     } else {
         console_puts("Unknown command. Type 'help' for available commands.\n");
     }
@@ -241,7 +385,15 @@ void shell_run(void) {
     while (1) {
         char c = keyboard_get_char();
 
-        if (c == '\n') {
+        if (c == (char)KEY_UP) {
+            console_scroll_view(1);
+        } else if (c == (char)KEY_DOWN) {
+            console_scroll_view(-1);
+        } else if (c == (char)KEY_PGUP) {
+            console_scroll_view(10);
+        } else if (c == (char)KEY_PGDN) {
+            console_scroll_view(-10);
+        } else if (c == '\n') {
             console_putchar('\n');
             cmd_buffer[cmd_len] = '\0';
             execute_command(cmd_buffer);

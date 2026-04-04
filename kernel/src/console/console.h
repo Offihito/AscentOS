@@ -9,5 +9,6 @@ void console_putchar(char c);
 void console_puts(const char *s);
 void console_clear(void);
 void console_update_cursor(bool visible);
+void console_scroll_view(int delta);
 
 #endif

@@ -5,7 +5,7 @@
 #include "console/console.h"
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
-#include "drivers/pit.h"
+#include "drivers/timer/pit.h"
 #include "lib/string.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"

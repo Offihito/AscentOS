@@ -1,4 +1,4 @@
-#include "drivers/keyboard.h"
+#include "drivers/input/keyboard.h"
 #include "cpu/isr.h"
 #include "io/io.h"
 #include "console/console.h"
@@ -10,8 +10,8 @@ const char scancode_to_char[] = {
     '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
     0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 
     0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, 
-    '*', 0, ' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-    '-', 0, 0, 0, '+', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    '*', 0, ' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, KEY_UP, KEY_PGUP, 
+    '-', KEY_LEFT, 0, KEY_RIGHT, '+', 0, KEY_DOWN, KEY_PGDN, 0, 0, 0, 0, 0, 0, 0, 0
 };
 
 const char scancode_to_char_shift[] = {
@@ -19,8 +19,8 @@ const char scancode_to_char_shift[] = {
     '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n',
     0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 
     0, '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, 
-    '*', 0, ' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-    '-', 0, 0, 0, '+', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    '*', 0, ' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, KEY_UP, KEY_PGUP, 
+    '-', KEY_LEFT, 0, KEY_RIGHT, '+', 0, KEY_DOWN, KEY_PGDN, 0, 0, 0, 0, 0, 0, 0, 0
 };
 
 #define KBD_BUFFER_SIZE 256

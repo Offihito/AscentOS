@@ -6,4 +6,11 @@ void keyboard_init(void);
 // Halts execution until a character is typed, then returns it.
 char keyboard_get_char(void);
 
+#define KEY_UP    0xE0
+#define KEY_DOWN  0xE1
+#define KEY_LEFT  0xE2
+#define KEY_RIGHT 0xE3
+#define KEY_PGUP  0xE4
+#define KEY_PGDN  0xE5
+
 #endif

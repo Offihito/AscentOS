@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <limine.h>
+#include <stdbool.h>
 
 void fb_init(struct limine_framebuffer *framebuffer);
 void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color);
@@ -12,5 +13,11 @@ uint32_t fb_get_width(void);
 uint32_t fb_get_height(void);
 void *fb_get_base(void);
 uint32_t fb_get_pitch(void);
+
+void fb_set_backbuffer_mode(bool enabled);
+void fb_swap_buffer(void);
+void fb_copy_to_backbuffer(void); // For keeping backbuffer in sync when drawing directly
+
+void fb_register_vfs(void);
 
 #endif

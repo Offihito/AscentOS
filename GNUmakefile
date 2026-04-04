@@ -18,22 +18,29 @@ all: $(IMAGE_NAME).iso
 run: run-$(ARCH)
 
 .PHONY: run-x86_64
-run-x86_64: edk2-ovmf $(IMAGE_NAME).iso
+run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 	qemu-system-$(ARCH) \
 		-M q35 \
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
 		-cdrom $(IMAGE_NAME).iso \
+		-hda disk.img \
 		-smp 4 \
 		-serial stdio \
 		$(QEMUFLAGS)
 
 .PHONY: run-bios
-run-bios: $(IMAGE_NAME).iso
+run-bios: $(IMAGE_NAME).iso disk.img
 	qemu-system-$(ARCH) \
 		-M q35 \
 		-cdrom $(IMAGE_NAME).iso \
+		-hda disk.img \
 		-boot d \
 		$(QEMUFLAGS)
+
+# Create a 64MB ext2 disk image for ATA testing
+disk.img:
+	dd if=/dev/zero of=disk.img bs=1M count=64
+	mkfs.ext2 -F disk.img
 
 edk2-ovmf:
 	curl -L https://github.com/osdev0/edk2-ovmf-nightly/releases/latest/download/edk2-ovmf.tar.gz | gunzip | tar -xf -
@@ -75,6 +82,10 @@ $(IMAGE_NAME).iso: limine/limine kernel
 clean:
 	$(MAKE) -C kernel clean
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
+
+.PHONY: clean-disk
+clean-disk:
+	rm -f disk.img
 
 .PHONY: distclean
 distclean:
