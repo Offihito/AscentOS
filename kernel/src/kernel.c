@@ -1,19 +1,24 @@
 #include "console/console.h"
+#include "console/klog.h"
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
 #include "cpu/isr.h"
 #include "acpi/acpi.h"
 #include "apic/lapic.h"
+#include "apic/lapic_timer.h"
 #include "apic/ioapic.h"
 #include "smp/cpu.h"
 #include "cpu/pic.h"
 #include "drivers/keyboard.h"
 #include "drivers/pit.h"
+#include "drivers/serial.h"
 #include "io/io.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
 #include "shell/shell.h"
+#include "smp/cpu.h"
+#include "sched/sched.h"
 #include <limine.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -66,23 +71,7 @@ static void halt(void) {
   }
 }
 
-static void print_uint64(uint64_t num) {
-  if (num == 0) {
-    console_puts("0");
-    return;
-  }
-  char buf[20];
-  int i = 0;
-  while (num > 0) {
-    buf[i++] = '0' + (num % 10);
-    num /= 10;
-  }
-  while (i > 0) {
-    i--;
-    char str[2] = {buf[i], '\0'};
-    console_puts(str);
-  }
-}
+
 
 void kmain(void) {
   if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision)) {
@@ -95,19 +84,20 @@ void kmain(void) {
   }
 
   struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+  serial_init();
   console_init(fb);
 
   if (paging_mode_request.response != NULL) {
     if (paging_mode_request.response->mode == LIMINE_PAGING_MODE_X86_64_4LVL) {
-      console_puts("[OK] Limine Paging Mode: 4-level (x86_64)\n");
+      klog_puts("[OK] Limine Paging Mode: 4-level (x86_64)\n");
     } else if (paging_mode_request.response->mode ==
                LIMINE_PAGING_MODE_X86_64_5LVL) {
-      console_puts("[OK] Limine Paging Mode: 5-level (x86_64)\n");
+      klog_puts("[OK] Limine Paging Mode: 5-level (x86_64)\n");
     } else {
-      console_puts("[OK] Limine Paging Mode: Unknown\n");
+      klog_puts("[OK] Limine Paging Mode: Unknown\n");
     }
   } else {
-    console_puts("[WARN] Paging mode response not provided by Limine.\n");
+    klog_puts("[WARN] Paging mode response not provided by Limine.\n");
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -124,7 +114,7 @@ void kmain(void) {
   outb(0xA1, 0xFF); // mask everything on slave PIC
 
   pit_init(100);
-  console_puts("[OK] Legacy PIC Remapped and PIT 100Hz started.\n");
+  klog_puts("[OK] Legacy PIC Remapped and PIT 100Hz started.\n");
 
   keyboard_init();
   __asm__ volatile("sti"); // Enable hardware interrupts!
@@ -133,33 +123,33 @@ void kmain(void) {
   //  Phase 3: Memory management
   // ═══════════════════════════════════════════════════════════════════════
   if (memmap_request.response == NULL || hhdm_request.response == NULL) {
-    console_puts(
+    klog_puts(
         "[ERR] Missing Limine memory map or HHDM responses. Halting.\n");
     halt();
   }
 
   pmm_init(memmap_request.response, hhdm_request.response->offset);
 
-  console_puts("[OK] Physical Memory Manager (PMM) Initialized.\n");
-  console_puts("     Total RAM:  ");
-  print_uint64(pmm_get_total_memory() / (1024 * 1024));
-  console_puts(" MB\n");
+  klog_puts("[OK] Physical Memory Manager (PMM) Initialized.\n");
+  klog_puts("     Total RAM:  ");
+  klog_uint64(pmm_get_total_memory() / (1024 * 1024));
+  klog_puts(" MB\n");
 
-  console_puts("     Usable RAM: ");
-  print_uint64(pmm_get_usable_memory() / (1024 * 1024));
-  console_puts(" MB\n\n");
+  klog_puts("     Usable RAM: ");
+  klog_uint64(pmm_get_usable_memory() / (1024 * 1024));
+  klog_puts(" MB\n\n");
 
-  console_puts("[OK] Reclaiming Limine Bootloader Memory...\n");
+  klog_puts("[OK] Reclaiming Limine Bootloader Memory...\n");
   pmm_reclaim_bootloader();
-  console_puts("     Optimized Usable RAM: ");
-  print_uint64(pmm_get_usable_memory() / (1024 * 1024));
-  console_puts(" MB\n\n");
+  klog_puts("     Optimized Usable RAM: ");
+  klog_uint64(pmm_get_usable_memory() / (1024 * 1024));
+  klog_puts(" MB\n\n");
 
-  console_puts("[OK] Initializing Virtual Memory Manager (VMM)...\n");
+  klog_puts("[OK] Initializing Virtual Memory Manager (VMM)...\n");
   vmm_init();
-  console_puts("     Active CR3 Page Map hooked.\n");
+  klog_puts("     Active CR3 Page Map hooked.\n");
 
-  console_puts("[OK] Testing VMM mapping... (0xCAFEBABE000)\n");
+  klog_puts("[OK] Testing VMM mapping... (0xCAFEBABE000)\n");
   void *test_phys = pmm_alloc();
   if (test_phys) {
     uint64_t vaddr = 0xCAFEBABE000;
@@ -170,9 +160,9 @@ void kmain(void) {
     *test_ptr = 0x1337BEEF; // If this page faults, the mapping failed!
 
     if (*test_ptr == 0x1337BEEF) {
-      console_puts("     VMM custom mapping test SUCCESSFUL!\n");
+      klog_puts("     VMM custom mapping test SUCCESSFUL!\n");
     } else {
-      console_puts("     VMM custom mapping test FAILED!\n");
+      klog_puts("     VMM custom mapping test FAILED!\n");
     }
   }
 
@@ -192,14 +182,14 @@ void kmain(void) {
   uint32_t ioapic_base = acpi_get_ioapic_base();
 
   if (lapic_base && ioapic_base) {
-    console_puts("\n[INFO] Switching to APIC interrupt mode...\n");
+    klog_puts("\n[INFO] Switching to APIC interrupt mode...\n");
 
     // Disable interrupts during the transition
     __asm__ volatile("cli");
 
     // ── 5a. Disable the legacy 8259 PIC ─────────────────────────────────
     pic_disable();
-    console_puts("[OK] Legacy 8259 PIC disabled.\n");
+    klog_puts("[OK] Legacy 8259 PIC disabled.\n");
 
     // ── 5b. Initialize the Local APIC ───────────────────────────────────
     lapic_init((uint64_t)lapic_base);
@@ -212,24 +202,24 @@ void kmain(void) {
     uint16_t pit_flags = 0;
     acpi_get_irq_override(0, &pit_gsi, &pit_flags);
     ioapic_route_irq((uint8_t)pit_gsi, 32, (uint8_t)lapic_get_id(), pit_flags);
-    console_puts("[OK] PIT routed: GSI ");
+    klog_puts("[OK] PIT routed: GSI ");
     {
       char c = '0' + (char)pit_gsi;
-      console_putchar(c);
+      klog_putchar(c);
     }
-    console_puts(" -> Vector 32\n");
+    klog_puts(" -> Vector 32\n");
 
     // ── 5e. Route Keyboard (IRQ 1) through the I/O APIC ────────────────
     uint32_t kbd_gsi = 1;
     uint16_t kbd_flags = 0;
     acpi_get_irq_override(1, &kbd_gsi, &kbd_flags);
     ioapic_route_irq((uint8_t)kbd_gsi, 33, (uint8_t)lapic_get_id(), kbd_flags);
-    console_puts("[OK] Keyboard routed: GSI ");
+    klog_puts("[OK] Keyboard routed: GSI ");
     {
       char c = '0' + (char)kbd_gsi;
-      console_putchar(c);
+      klog_putchar(c);
     }
-    console_puts(" -> Vector 33\n");
+    klog_puts(" -> Vector 33\n");
 
     // ── 5f. Switch ISR EOI routing to LAPIC ─────────────────────────────
     isr_set_apic_mode(true);
@@ -237,21 +227,27 @@ void kmain(void) {
     // Re-enable interrupts — now handled through the APIC path
     __asm__ volatile("sti");
 
-    console_puts("[OK] APIC interrupt mode ACTIVE.\n\n");
+    klog_puts("[OK] APIC interrupt mode ACTIVE.\n\n");
+
+    // ── 5g. Start the LAPIC timer (calibrates against PIT) ──────────────
+    lapic_timer_init();
   } else {
-    console_puts(
+    klog_puts(
         "[WARN] APIC hardware not detected — staying with legacy PIC.\n\n");
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 5.5: SMP initialization (wake up APs)
+  //  Phase 5.5: Multitasking & SMP initialization
   // ═══════════════════════════════════════════════════════════════════════
   cpu_init();
+
+  klog_puts("[INFO] Initializing Scheduler...\n");
+  sched_init();
 
   // ═══════════════════════════════════════════════════════════════════════
   //  Phase 6: Kernel heap
   // ═══════════════════════════════════════════════════════════════════════
-  console_puts("[OK] Initializing Kernel Heap...\n");
+  klog_puts("[OK] Initializing Kernel Heap...\n");
   heap_init();
   char *heap_test = kmalloc(64);
   if (heap_test) {
@@ -262,16 +258,16 @@ void kmain(void) {
       i++;
     }
     heap_test[i] = '\0';
-    console_puts(heap_test);
+    klog_puts(heap_test);
     kfree(heap_test);
   } else {
-    console_puts("     Heap allocation FAILED!\n");
+    klog_puts("     Heap allocation FAILED!\n");
   }
 
   // ═══════════════════════════════════════════════════════════════════════
   //  Phase 7: Interactive shell
   // ═══════════════════════════════════════════════════════════════════════
-  console_puts("\nKernel initialization complete. Starting shell...\n");
+  klog_puts("\nKernel initialization complete. Starting shell...\n");
   shell_init();
   shell_run();
 }

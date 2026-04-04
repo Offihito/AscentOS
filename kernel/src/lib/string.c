@@ -40,3 +40,12 @@ void *memcpy(void *dest, const void *src, size_t n) {
     }
     return dest;
 }
+
+uint32_t atoui(const char *s) {
+    uint32_t res = 0;
+    while (*s >= '0' && *s <= '9') {
+        res = res * 10 + (*s - '0');
+        s++;
+    }
+    return res;
+}

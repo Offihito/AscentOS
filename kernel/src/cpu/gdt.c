@@ -36,3 +36,8 @@ void gdt_init(void) {
 
     gdt_flush((uint64_t)&gp);
 }
+
+void gdt_load_ap(void) {
+    // Load the already built main GDT for Application Processors.
+    gdt_flush((uint64_t)&gp);
+}

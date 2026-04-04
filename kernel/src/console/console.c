@@ -3,6 +3,7 @@
 #include "font/font.h"
 #include <stdint.h>
 #include <stddef.h>
+#include "../drivers/serial.h"
 #include "lock/spinlock.h"
 
 static spinlock_t console_lock = SPINLOCK_INIT;

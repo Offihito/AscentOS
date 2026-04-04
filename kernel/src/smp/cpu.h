@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "../lock/spinlock.h"
+
+// Forward declaration
+struct thread;
 
 // ── Limits ───────────────────────────────────────────────────────────────────
 #define MAX_CPUS        64
@@ -26,6 +30,11 @@ struct cpu_info {
     uint64_t        stack_top;  // top of this CPU's kernel stack
     uint64_t        kernel_cr3; // page table root (shared early on)
     uint64_t        ticks;      // per-CPU tick counter (for future scheduler)
+    
+    // -- Task Scheduling --
+    struct thread   *current_thread;
+    struct thread   *runqueue;
+    spinlock_t      queue_lock;
     uint8_t         reserved[16];
 } __attribute__((packed));
 

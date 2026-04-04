@@ -66,6 +66,9 @@ ISR_NOERRCODE 45
 ISR_NOERRCODE 46
 ISR_NOERRCODE 47
 
+; LAPIC timer interrupt vector
+ISR_NOERRCODE 48
+
 ; LAPIC spurious interrupt vector
 ISR_NOERRCODE 255
 
