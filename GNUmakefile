@@ -61,8 +61,13 @@ limine/limine:
 		LDFLAGS="$(HOST_LDFLAGS)" \
 		LIBS="$(HOST_LIBS)"
 
+.PHONY: setup
+setup:
+	chmod +x bootstrap.sh
+	./bootstrap.sh
+
 .PHONY: kernel
-kernel:
+kernel: setup
 	$(MAKE) -C kernel
 
 $(IMAGE_NAME).iso: limine/limine kernel
@@ -97,3 +102,4 @@ clean-disk:
 distclean:
 	$(MAKE) -C kernel distclean
 	rm -rf iso_root *.iso *.hdd limine edk2-ovmf
+
