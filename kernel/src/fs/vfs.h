@@ -1,79 +1,85 @@
 #ifndef FS_VFS_H
 #define FS_VFS_H
 
-#include <stdint.h>
-#include <stddef.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
-#define FS_FILE        0x01
-#define FS_DIRECTORY   0x02
-#define FS_CHARDEV     0x03
-#define FS_BLOCKDEV    0x04
-#define FS_PIPE        0x05
-#define FS_SYMLINK     0x06
-#define FS_MOUNTPOINT  0x08 
+#define FS_FILE 0x01
+#define FS_DIRECTORY 0x02
+#define FS_CHARDEV 0x03
+#define FS_BLOCKDEV 0x04
+#define FS_PIPE 0x05
+#define FS_SYMLINK 0x06
+#define FS_MOUNTPOINT 0x08
 
 struct vfs_node;
 struct dirent {
-    char name[128];
-    uint32_t ino;
+  char name[128];
+  uint32_t ino;
 };
 
-typedef uint32_t (*read_type_t)(struct vfs_node*, uint32_t, uint32_t, uint8_t*);
-typedef uint32_t (*write_type_t)(struct vfs_node*, uint32_t, uint32_t, uint8_t*);
-typedef void (*open_type_t)(struct vfs_node*);
-typedef void (*close_type_t)(struct vfs_node*);
-typedef struct dirent *(*readdir_type_t)(struct vfs_node*, uint32_t);
-typedef struct vfs_node *(*finddir_type_t)(struct vfs_node*, char *name);
-typedef int (*create_type_t)(struct vfs_node*, char *name, uint16_t permission);
-typedef int (*mkdir_type_t)(struct vfs_node*, char *name, uint16_t permission);
-typedef int (*unlink_type_t)(struct vfs_node*, char *name);
-typedef int (*rmdir_type_t)(struct vfs_node*, char *name);
-typedef int (*readlink_type_t)(struct vfs_node*, char *buf, uint32_t size);
-typedef int (*symlink_type_t)(struct vfs_node*, char *name, char *target);
-typedef int (*rename_type_t)(struct vfs_node*, char *old_name, char *new_name);
-typedef int (*chmod_type_t)(struct vfs_node*, uint16_t permission);
-typedef int (*chown_type_t)(struct vfs_node*, uint32_t uid, uint32_t gid);
+typedef uint32_t (*read_type_t)(struct vfs_node *, uint32_t, uint32_t,
+                                uint8_t *);
+typedef uint32_t (*write_type_t)(struct vfs_node *, uint32_t, uint32_t,
+                                 uint8_t *);
+typedef void (*open_type_t)(struct vfs_node *);
+typedef void (*close_type_t)(struct vfs_node *);
+typedef struct dirent *(*readdir_type_t)(struct vfs_node *, uint32_t);
+typedef struct vfs_node *(*finddir_type_t)(struct vfs_node *, char *name);
+typedef int (*create_type_t)(struct vfs_node *, char *name,
+                             uint16_t permission);
+typedef int (*mkdir_type_t)(struct vfs_node *, char *name, uint16_t permission);
+typedef int (*unlink_type_t)(struct vfs_node *, char *name);
+typedef int (*rmdir_type_t)(struct vfs_node *, char *name);
+typedef int (*readlink_type_t)(struct vfs_node *, char *buf, uint32_t size);
+typedef int (*symlink_type_t)(struct vfs_node *, char *name, char *target);
+typedef int (*rename_type_t)(struct vfs_node *, char *old_name, char *new_name);
+typedef int (*chmod_type_t)(struct vfs_node *, uint16_t permission);
+typedef int (*chown_type_t)(struct vfs_node *, uint32_t uid, uint32_t gid);
 
 typedef struct vfs_node {
-    char name[128];
-    uint32_t mask;      // Permissions
-    uint32_t uid;
-    uint32_t gid;
-    uint32_t flags;     // Node type
-    uint32_t inode;
-    uint32_t length;    // Size of file
-    uint32_t impl;      // Implementation-defined
-    void *device;       // Optional binding to driver block device or ramfs specific struct
+  char name[128];
+  uint32_t mask; // Permissions
+  uint32_t uid;
+  uint32_t gid;
+  uint32_t flags; // Node type
+  uint32_t inode;
+  uint32_t length; // Size of file
+  uint32_t impl;   // Implementation-defined
+  void *device;    // Optional binding to driver block device or ramfs specific
+                   // struct
 
-    uint32_t atime;     // Access time
-    uint32_t mtime;     // Modification time
-    uint32_t ctime;     // Creation time
+  uint32_t atime; // Access time
+  uint32_t mtime; // Modification time
+  uint32_t ctime; // Creation time
 
-    read_type_t read;
-    write_type_t write;
-    open_type_t open;
-    close_type_t close;
-    readdir_type_t readdir;
-    finddir_type_t finddir;
-    create_type_t create;
-    mkdir_type_t mkdir;
-    unlink_type_t unlink;
-    rmdir_type_t rmdir;
-    readlink_type_t readlink;
-    symlink_type_t symlink;
-    rename_type_t rename;
-    chmod_type_t chmod;
-    chown_type_t chown;
-    
-    struct vfs_node *ptr; // Used by mountpoints and symlinks
+  read_type_t read;
+  write_type_t write;
+  open_type_t open;
+  close_type_t close;
+  readdir_type_t readdir;
+  finddir_type_t finddir;
+  create_type_t create;
+  mkdir_type_t mkdir;
+  unlink_type_t unlink;
+  rmdir_type_t rmdir;
+  readlink_type_t readlink;
+  symlink_type_t symlink;
+  rename_type_t rename;
+  chmod_type_t chmod;
+  chown_type_t chown;
+
+  struct vfs_node *ptr; // Used by mountpoints and symlinks
 } vfs_node_t;
 
 extern vfs_node_t *fs_root;
 
 // Standard API wrapper functions
-uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
-uint32_t vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size, uint8_t *buffer);
+uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
+                  uint8_t *buffer);
+uint32_t vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
+                   uint8_t *buffer);
 void vfs_open(vfs_node_t *node);
 void vfs_close(vfs_node_t *node);
 struct dirent *vfs_readdir(vfs_node_t *node, uint32_t index);

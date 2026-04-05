@@ -43,7 +43,7 @@ static uint64_t *get_next_level(uint64_t *current_level, size_t index, bool allo
         new_table_virt[i] = 0;
     }
     
-    // Link it with default RW permissions. User permission is granted if the entire chain has it.
+    // Link it. User/RW permission is granted if the entire chain has it.
     current_level[index] = ((uint64_t)new_table_phys) | PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_USER;
     
     return new_table_virt;
@@ -60,12 +60,18 @@ void vmm_map_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
 
     uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4);
 
+    // Ensure propagation of User and RW flags to higher levels if requested
+    uint64_t propagate_flags = flags & (PAGE_FLAG_USER | PAGE_FLAG_RW);
+
+    pml4_virt[pml4_index] |= propagate_flags;
     uint64_t *pdpt_virt = get_next_level(pml4_virt, pml4_index, true);
     if (!pdpt_virt) goto unlock;
 
+    pdpt_virt[pdpt_index] |= propagate_flags;
     uint64_t *pd_virt = get_next_level(pdpt_virt, pdpt_index, true);
     if (!pd_virt) goto unlock;
 
+    pd_virt[pd_index] |= propagate_flags;
     uint64_t *pt_virt = get_next_level(pd_virt, pd_index, true);
     if (!pt_virt) goto unlock;
 

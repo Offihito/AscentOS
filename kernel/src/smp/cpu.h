@@ -35,7 +35,8 @@ struct cpu_info {
     struct thread   *current_thread;
     struct thread   *runqueue;
     spinlock_t      queue_lock;
-    uint8_t         reserved[16];
+    uint64_t        scratch_rsp;
+    uint64_t        reserved;
 } __attribute__((packed));
 
 // ── Public API ───────────────────────────────────────────────────────────────

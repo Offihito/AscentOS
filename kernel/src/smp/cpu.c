@@ -69,6 +69,7 @@ static inline uint64_t rdmsr(uint32_t msr) {
 // ── Set GS base for the current CPU ─────────────────────────────────────────
 static void cpu_set_gs_base(struct cpu_info *info) {
   wrmsr(MSR_GS_BASE, (uint64_t)info);
+  wrmsr(MSR_KERNEL_GS_BASE, (uint64_t)info);
 }
 
 // ── Allocate a kernel stack (returns HHDM virtual address of top) ────────────

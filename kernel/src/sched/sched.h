@@ -51,4 +51,8 @@ void sched_enqueue_thread(struct thread *t);
 void sched_print_tasks(void);
 bool sched_terminate_thread(uint32_t tid);
 
+// Userspace Management
+#include <stdbool.h>
+bool process_exec(const char *path);
+
 #endif

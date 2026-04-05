@@ -1,38 +1,35 @@
-#include <limine.h>
-#include <stdint.h>
-#include <stddef.h>
+#include "acpi/acpi.h"
+#include "apic/ioapic.h"
+#include "apic/lapic.h"
+#include "apic/lapic_timer.h"
 #include "console/console.h"
 #include "console/klog.h"
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
 #include "cpu/isr.h"
-#include "acpi/acpi.h"
-#include "apic/lapic.h"
-#include "apic/lapic_timer.h"
-#include "apic/ioapic.h"
-#include "smp/cpu.h"
 #include "cpu/pic.h"
 #include "drivers/input/keyboard.h"
-#include "drivers/timer/pit.h"
+#include "drivers/pci/pci.h"
 #include "drivers/serial.h"
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/block.h"
-#include "fs/vfs.h"
-#include "fs/ramfs.h"
-#include "fs/ext2.h"
+#include "drivers/timer/pit.h"
 #include "fb/framebuffer.h"
+#include "fs/ext2.h"
+#include "fs/ramfs.h"
+#include "fs/vfs.h"
 #include "io/io.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "sched/sched.h"
 #include "shell/shell.h"
 #include "smp/cpu.h"
-#include "sched/sched.h"
-#include "drivers/pci/pci.h"
+#include "syscalls/syscall.h"
 #include <limine.h>
-#include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 __attribute__((used,
                section(".limine_requests_start"))) static volatile uint64_t
@@ -81,8 +78,6 @@ static void halt(void) {
   }
 }
 
-
-
 void kmain(void) {
   if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision)) {
     halt();
@@ -115,6 +110,7 @@ void kmain(void) {
   // ═══════════════════════════════════════════════════════════════════════
   gdt_init();
   idt_init();
+  syscall_init();
 
   // ═══════════════════════════════════════════════════════════════════════
   //  Phase 2: Legacy PIC — used temporarily until APIC takes over
@@ -133,8 +129,7 @@ void kmain(void) {
   //  Phase 3: Memory management
   // ═══════════════════════════════════════════════════════════════════════
   if (memmap_request.response == NULL || hhdm_request.response == NULL) {
-    klog_puts(
-        "[ERR] Missing Limine memory map or HHDM responses. Halting.\n");
+    klog_puts("[ERR] Missing Limine memory map or HHDM responses. Halting.\n");
     halt();
   }
 
@@ -289,7 +284,8 @@ void kmain(void) {
   klog_puts("[DIAG] Available Block Devices (via Block API):\n");
   for (int i = 0; i < devs; i++) {
     struct block_device *dev = block_get(i);
-    if (!dev) continue;
+    if (!dev)
+      continue;
     klog_puts("   > ");
     klog_puts(dev->name);
     klog_puts("\n");
@@ -301,10 +297,12 @@ void kmain(void) {
   vfs_node_t *mnt_dir = vfs_finddir(fs_root, "mnt");
   struct block_device *disk = block_get(0);
   if (mnt_dir && disk) {
-      ext2_mount(disk, mnt_dir);
+    ext2_mount(disk, mnt_dir);
   } else {
-      if (!disk)    klog_puts("[WARN] No block device found for ext2 mount.\n");
-      if (!mnt_dir) klog_puts("[WARN] /mnt not found in VFS.\n");
+    if (!disk)
+      klog_puts("[WARN] No block device found for ext2 mount.\n");
+    if (!mnt_dir)
+      klog_puts("[WARN] /mnt not found in VFS.\n");
   }
 
   // ═══════════════════════════════════════════════════════════════════════
