@@ -38,7 +38,10 @@ void lapic_timer_handler(struct registers *regs) {
     lapic_write(LAPIC_EOI, 0);
 
     // Call the scheduler. Every core handles its own preemption.
-    sched_tick(regs);
+    // Safety check: only yield if we have a valid cpu structure and a thread to switch from.
+    if (cpu && cpu->current_thread) {
+        sched_tick(regs);
+    }
 }
 
 // ── PIT polling sleep for calibration ────────────────────────────────────────

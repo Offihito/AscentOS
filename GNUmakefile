@@ -38,7 +38,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img:
+disk.img: userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf
 	dd if=/dev/zero of=disk.img bs=1M count=64
 	mkfs.ext2 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
@@ -46,6 +46,10 @@ disk.img:
 	debugfs -w -R "write /tmp/ascentos_hello.txt hello.txt" disk.img
 	debugfs -w -R "mkdir docs" disk.img
 	debugfs -w -R "write /tmp/ascentos_readme.txt docs/readme.txt" disk.img
+	debugfs -w -R "write userland/test.elf test.elf" disk.img
+	debugfs -w -R "write userland/test_mmap.elf test_mmap.elf" disk.img
+	debugfs -w -R "write userland/test_arch_prctl.elf test_arch_prctl.elf" disk.img
+	debugfs -w -R "write userland/test_io.elf test_io.elf" disk.img
 	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
 
 edk2-ovmf:
@@ -103,3 +107,15 @@ distclean:
 	$(MAKE) -C kernel distclean
 	rm -rf iso_root *.iso *.hdd limine edk2-ovmf
 
+# ── Userland test programs ──────────────────────────────────────────────────
+userland/test_mmap.elf: userland/test_mmap.asm
+	nasm -f elf64 userland/test_mmap.asm -o userland/test_mmap.o
+	ld -o userland/test_mmap.elf userland/test_mmap.o
+
+userland/test_arch_prctl.elf: userland/test_arch_prctl.asm
+	nasm -f elf64 userland/test_arch_prctl.asm -o userland/test_arch_prctl.o
+	ld -o userland/test_arch_prctl.elf userland/test_arch_prctl.o
+
+userland/test_io.elf: userland/test_io.asm
+	nasm -f elf64 userland/test_io.asm -o userland/test_io.o
+	ld -o userland/test_io.elf userland/test_io.o

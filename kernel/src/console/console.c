@@ -3,6 +3,7 @@
 #include "../drivers/serial.h"
 #include "fb/framebuffer.h"
 #include "font/font.h"
+#include "lib/string.h"
 #include "lock/spinlock.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -120,11 +121,8 @@ static void scroll_up(void) {
   uint8_t *dst = (uint8_t *)base;
   uint8_t *src = (uint8_t *)base + (FONT_HEIGHT * pitch);
 
-  // Use a slightly faster copy if possible, though manual byte copy is safest
-  // for now
-  for (uint64_t i = 0; i < bytes_to_copy; i++) {
-    dst[i] = src[i];
-  }
+  // Use optimized memcpy for the shift
+  memcpy(dst, src, bytes_to_copy);
 
   fb_fill_rect(0, fb_h - FONT_HEIGHT, fb_w, FONT_HEIGHT, BG_COLOR);
 
@@ -160,11 +158,6 @@ static void draw_char(char c, uint32_t col, uint32_t row) {
 
 static void console_putchar_unlocked(char c) {
   serial_putchar(c);
-  bool was_visible = cursor_logical_visible;
-
-  if (was_visible && view_scroll_offset == 0) {
-    console_set_cursor_visible_unlocked(false);
-  }
 
   if (c == '\n') {
     cursor_x = 0;
@@ -187,15 +180,11 @@ static void console_putchar_unlocked(char c) {
           view_scroll_offset = HISTORY_MAX - max_rows;
       }
     }
-    if (was_visible && view_scroll_offset == 0)
-      console_set_cursor_visible_unlocked(true);
     return;
   }
 
   if (c == '\r') {
     cursor_x = 0;
-    if (was_visible && view_scroll_offset == 0)
-      console_set_cursor_visible_unlocked(true);
     return;
   }
 
@@ -214,8 +203,6 @@ static void console_putchar_unlocked(char c) {
 
     if (view_scroll_offset == 0) {
       draw_char(' ', cursor_x, cursor_y);
-      if (was_visible)
-        console_set_cursor_visible_unlocked(true);
     }
     return;
   }
@@ -257,10 +244,6 @@ static void console_putchar_unlocked(char c) {
       }
     }
   }
-
-  if (was_visible && view_scroll_offset == 0) {
-    console_set_cursor_visible_unlocked(true);
-  }
 }
 
 void console_putchar(char c) {
@@ -274,7 +257,7 @@ static void console_set_cursor_visible_unlocked(bool visible) {
   if (visible) {
     cursor_phys_on = true;
     last_blink_ms = lapic_timer_get_ms();
-    
+
     uint32_t px = cursor_x * FONT_WIDTH;
     uint32_t py = cursor_y * FONT_HEIGHT;
     for (uint32_t y = FONT_HEIGHT - 3; y < FONT_HEIGHT; y++) {
@@ -326,9 +309,20 @@ void console_refresh_cursor(void) {
 
 void console_puts(const char *s) {
   spinlock_acquire(&console_lock);
+
+  bool was_visible = cursor_logical_visible;
+  if (was_visible && view_scroll_offset == 0) {
+    console_set_cursor_visible_unlocked(false);
+  }
+
   while (*s) {
     console_putchar_unlocked(*s++);
   }
+
+  if (was_visible && view_scroll_offset == 0) {
+    console_set_cursor_visible_unlocked(true);
+  }
+
   spinlock_release(&console_lock);
 }
 

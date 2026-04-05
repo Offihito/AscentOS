@@ -186,6 +186,14 @@ void kmain(void) {
   uint32_t lapic_base = acpi_get_lapic_base();
   uint32_t ioapic_base = acpi_get_ioapic_base();
 
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Phase 5: Multitasking & CPU Initialization
+  // ═══════════════════════════════════════════════════════════════════════
+  cpu_init();
+
+  klog_puts("[INFO] Initializing Scheduler...\n");
+  sched_init();
+
   if (lapic_base && ioapic_base) {
     klog_puts("\n[INFO] Switching to APIC interrupt mode...\n");
 
@@ -234,20 +242,17 @@ void kmain(void) {
 
     klog_puts("[OK] APIC interrupt mode ACTIVE.\n\n");
 
-    // ── 5g. Start the LAPIC timer (calibrates against PIT) ──────────────
+    // ── 5h. Start the LAPIC timer (calibrates against PIT) ──────────────
     lapic_timer_init();
+
+    // ── 5i. Wake up Application Processors ──────────────────────────────
+    // This is done AFTER lapic_timer_init because APs need the calibrated
+    // ticks_per_ms value to initialize their own timers.
+    cpu_init_aps();
   } else {
     klog_puts(
         "[WARN] APIC hardware not detected — staying with legacy PIC.\n\n");
   }
-
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 5.5: Multitasking & SMP initialization
-  // ═══════════════════════════════════════════════════════════════════════
-  cpu_init();
-
-  klog_puts("[INFO] Initializing Scheduler...\n");
-  sched_init();
 
   // ═══════════════════════════════════════════════════════════════════════
   //  Phase 6: Kernel heap

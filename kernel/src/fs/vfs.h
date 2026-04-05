@@ -84,6 +84,7 @@ void vfs_open(vfs_node_t *node);
 void vfs_close(vfs_node_t *node);
 struct dirent *vfs_readdir(vfs_node_t *node, uint32_t index);
 vfs_node_t *vfs_finddir(vfs_node_t *node, char *name);
+vfs_node_t *vfs_resolve_path(const char *path);
 int vfs_create(vfs_node_t *node, char *name, uint16_t permission);
 int vfs_mkdir(vfs_node_t *node, char *name, uint16_t permission);
 int vfs_unlink(vfs_node_t *node, char *name);

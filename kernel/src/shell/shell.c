@@ -20,52 +20,7 @@
 static char cmd_buffer[CMD_BUFFER_SIZE];
 static int cmd_len = 0;
 
-// Resolve a path like "/mnt/docs/readme.txt" to a VFS node.
-// Walks each component separated by '/' using vfs_finddir.
-static vfs_node_t *vfs_resolve_path(const char *path) {
-  if (!path || !fs_root)
-    return NULL;
 
-  vfs_node_t *current = fs_root;
-
-  // Skip leading slash
-  if (*path == '/')
-    path++;
-  if (*path == '\0')
-    return current;
-
-  // Work on a mutable copy
-  char buf[256];
-  int len = 0;
-  while (path[len] && len < 255) {
-    buf[len] = path[len];
-    len++;
-  }
-  buf[len] = '\0';
-
-  char *p = buf;
-  while (*p) {
-    // Skip multiple slashes
-    while (*p == '/')
-      p++;
-    if (*p == '\0')
-      break;
-
-    // Find end of component
-    char *start = p;
-    while (*p && *p != '/')
-      p++;
-    char saved = *p;
-    *p = '\0';
-
-    current = vfs_finddir(current, start);
-    if (!current)
-      return NULL;
-
-    *p = saved;
-  }
-  return current;
-}
 
 static void test_task_entry(void);
 

@@ -217,6 +217,8 @@ void cpu_init(void) {
   }
 
   // ── Step 5: Set GS base for the BSP ─────────────────────────────────
+  // We do this EARLY in cpu_init so that any early interrupts or code that
+  // depends on cpu_get_current() (e.g. loggers or the early scheduler) works.
   cpu_set_gs_base(&cpus[0]);
 
   // ── Report ──────────────────────────────────────────────────────────
@@ -249,9 +251,15 @@ void cpu_init(void) {
     console_puts("[ERR] GS base verification FAILED!\n");
   }
 
+}
+
+void cpu_init_aps(void) {
   // ── Step 7: Wake up the Application Processors ──────────────────────
   if (cpu_count > 1) {
     console_puts("[INFO] Waking up Application Processors...\n");
+
+    uint64_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
 
     uint64_t tramp_phys = 0x8000;
     uint64_t tramp_virt = tramp_phys + pmm_get_hhdm_offset();

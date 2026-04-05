@@ -4,6 +4,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../cpu/isr.h"
+#include "../fs/vfs.h"
+
+#define MAX_FDS 32
 
 typedef enum {
     THREAD_RUNNING = 0,
@@ -31,6 +34,8 @@ struct thread {
     uint64_t stack_size;
     thread_state_t state;
     uint64_t wakeup_ticks;
+    vfs_node_t *fds[MAX_FDS];
+    uint64_t fd_offsets[MAX_FDS]; // Track seek offset per file descriptor
     struct thread *next;
 };
 

@@ -45,6 +45,10 @@ struct cpu_info {
 // acpi_init() so that physical memory can be allocated and APIC IDs are known.
 void cpu_init(void);
 
+// Wakes up all Application Processors (APs) discovered during cpu_init.
+// Must be called after lapic_timer_init() so that APs can calibrate their timers.
+void cpu_init_aps(void);
+
 // Returns a pointer to the calling CPU's cpu_info (read from GS base).
 struct cpu_info *cpu_get_current(void);
 

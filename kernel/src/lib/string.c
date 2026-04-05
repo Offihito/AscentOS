@@ -43,8 +43,28 @@ char *strncpy(char *dest, const char *src, size_t n) {
 
 void *memset(void *s, int c, size_t n) {
     unsigned char *p = s;
+    uint8_t b = (uint8_t)c;
+    
+    // Fill lead-in bytes to align to 8-byte boundary
+    while (n > 0 && ((uintptr_t)p & 7) != 0) {
+        *p++ = b;
+        n--;
+    }
+    
+    if (n >= 8) {
+        uint64_t val64 = (uint64_t)b | ((uint64_t)b << 8) | ((uint64_t)b << 16) | ((uint64_t)b << 24);
+        val64 |= (val64 << 32);
+        
+        uint64_t *p64 = (uint64_t *)p;
+        while (n >= 8) {
+            *p64++ = val64;
+            n -= 8;
+        }
+        p = (unsigned char *)p64;
+    }
+    
     while (n--) {
-        *p++ = (unsigned char)c;
+        *p++ = b;
     }
     return s;
 }
@@ -52,9 +72,34 @@ void *memset(void *s, int c, size_t n) {
 void *memcpy(void *dest, const void *src, size_t n) {
     unsigned char *d = dest;
     const unsigned char *s = src;
+    
+    // If n is small or alignment is difficult, just byte copy
+    if (n < 16 || (((uintptr_t)d & 7) != ((uintptr_t)s & 7))) {
+        while (n--) {
+            *d++ = *s++;
+        }
+        return dest;
+    }
+    
+    // Align to 8-byte boundary
+    while (n > 0 && ((uintptr_t)d & 7) != 0) {
+        *d++ = *s++;
+        n--;
+    }
+    
+    uint64_t *d64 = (uint64_t *)d;
+    const uint64_t *s64 = (const uint64_t *)s;
+    while (n >= 8) {
+        *d64++ = *s64++;
+        n -= 8;
+    }
+    
+    d = (unsigned char *)d64;
+    s = (const unsigned char *)s64;
     while (n--) {
         *d++ = *s++;
     }
+    
     return dest;
 }
 

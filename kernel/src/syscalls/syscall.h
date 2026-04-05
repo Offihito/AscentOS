@@ -14,10 +14,16 @@
 // ── Syscall Numbers (Linux x86_64 ABI) ──────────────────────────────────────
 #define SYS_READ    0
 #define SYS_WRITE   1
+#define SYS_OPEN    2
 #define SYS_CLOSE   3
+#define SYS_LSEEK   8
+#define SYS_MMAP    9
+#define SYS_MUNMAP 11
+#define SYS_BRK    12
 #define SYS_EXIT   60
+#define SYS_ARCH_PRCTL 158
 
-#define MAX_SYSCALL 61
+#define MAX_SYSCALL 159
 
 // ── Syscall handler type ────────────────────────────────────────────────────
 typedef uint64_t (*syscall_handler_t)(uint64_t, uint64_t, uint64_t,
@@ -29,6 +35,8 @@ void syscall_register(int num, syscall_handler_t handler);
 // ── Subsystem registration (called from syscall_init) ───────────────────────
 void syscall_register_io(void);
 void syscall_register_process(void);
+void syscall_register_mm(void);
+void syscall_register_arch(void);
 
 // ── Core init (MSRs + calls subsystem registrations) ────────────────────────
 void syscall_init(void);
