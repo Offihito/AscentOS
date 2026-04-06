@@ -5,14 +5,9 @@
 
 extern void syscall_entry(void);
 
-// ── Register state pushed by syscall_entry.asm ──────────────────────────────
-struct syscall_regs {
-  uint64_t rdi, rsi, rdx, r10, r8, r9, rax, rbx, rbp, r12, r13, r14, r15;
-  uint64_t rip, rflags, rsp;
-} __attribute__((packed));
-
-// ── Syscall dispatch table ──────────────────────────────────────────────────
-static syscall_handler_t syscall_table[MAX_SYSCALL] = {0};
+// ── Syscall dispatch tables ─────────────────────────────────────────────────
+static syscall_handler_t     syscall_table[MAX_SYSCALL]     = {0};
+static syscall_raw_handler_t raw_syscall_table[MAX_SYSCALL] = {0};
 
 void syscall_register(int num, syscall_handler_t handler) {
   if (num >= 0 && num < MAX_SYSCALL) {
@@ -20,9 +15,30 @@ void syscall_register(int num, syscall_handler_t handler) {
   }
 }
 
+void syscall_register_raw(int num, syscall_raw_handler_t handler) {
+  if (num >= 0 && num < MAX_SYSCALL) {
+    raw_syscall_table[num] = handler;
+  }
+}
+
 // ── Dispatcher (called from syscall_entry.asm) ──────────────────────────────
 void syscall_dispatcher(struct syscall_regs *regs) {
-  if (regs->rax >= MAX_SYSCALL || !syscall_table[regs->rax]) {
+  if (regs->rax >= MAX_SYSCALL) {
+    klog_puts("\n[SYSCALL] Unimplemented syscall: ");
+    klog_uint64(regs->rax);
+    klog_puts("\n");
+    regs->rax = (uint64_t)-1; // ENOSYS
+    return;
+  }
+
+  // Check raw handlers first (e.g. fork needs the full register frame)
+  if (raw_syscall_table[regs->rax]) {
+    syscall_raw_handler_t raw_handler = raw_syscall_table[regs->rax];
+    regs->rax = raw_handler(regs);
+    return;
+  }
+
+  if (!syscall_table[regs->rax]) {
     klog_puts("\n[SYSCALL] Unimplemented syscall: ");
     klog_uint64(regs->rax);
     klog_puts("\n");

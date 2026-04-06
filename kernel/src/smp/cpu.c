@@ -3,6 +3,8 @@
 #include "apic/lapic.h"
 #include "apic/lapic_timer.h"
 #include "console/console.h"
+#include "console/klog.h"
+#include "cpu/features.h"
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
 #include "drivers/timer/pit.h"
@@ -121,6 +123,7 @@ void ap_main(void) {
   // This must be done FIRST because gdt_flush zeroes data segments like GS,
   // and we depend on the 64-bit code segment for subsequent interrupt handling.
   gdt_load_ap();
+  cpu_features_init();
 
   // 1. Setup GS base using the pointer passed by the BSP
   cpu_set_gs_base((struct cpu_info *)starting_cpu);
@@ -270,8 +273,10 @@ void cpu_init_aps(void) {
 
     // Identity-map the 0x8000 page in the active PML4 so the AP safely
     // transitions PAGING -> 64-bit Long Mode
-    vmm_map_page(vmm_get_active_pml4(), tramp_phys, tramp_phys,
-                 PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+    if (!vmm_map_page(vmm_get_active_pml4(), tramp_phys, tramp_phys,
+                     PAGE_FLAG_RW | PAGE_FLAG_PRESENT)) {
+        klog_puts("[SMP] Warning: Failed to map trampoline page\n");
+    }
 
     // Find offsets to modify the trampoline variables natively
     uint64_t cr3_offset = trampoline_data_cr3 - trampoline_start;

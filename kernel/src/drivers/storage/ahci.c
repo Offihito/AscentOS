@@ -333,9 +333,13 @@ void ahci_init(void) {
     
     // Map ABAR (usually 4K or 8K)
     uint64_t virt_abar = phys_abar + pmm_get_hhdm_offset();
-    vmm_map_page(vmm_get_active_pml4(), virt_abar, phys_abar, PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+    if (!vmm_map_page(vmm_get_active_pml4(), virt_abar, phys_abar, PAGE_FLAG_RW | PAGE_FLAG_PRESENT)) {
+        klog_puts("[AHCI] Warning: Failed to map ABAR page\n");
+    }
     // Map an extra page just in case
-    vmm_map_page(vmm_get_active_pml4(), virt_abar + 0x1000, phys_abar + 0x1000, PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+    if (!vmm_map_page(vmm_get_active_pml4(), virt_abar + 0x1000, phys_abar + 0x1000, PAGE_FLAG_RW | PAGE_FLAG_PRESENT)) {
+        klog_puts("[AHCI] Warning: Failed to map ABAR extra page\n");
+    }
 
     hba = (ahci_hba_mem_t*)virt_abar;
 

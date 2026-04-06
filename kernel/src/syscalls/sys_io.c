@@ -57,27 +57,80 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count,
   return bytes_read;
 }
 
-static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count,
-                           uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a3; (void)a4; (void)a5;
+// Shared by write / writev
+static int64_t fd_write(int fd, const void *buf, size_t count) {
   const char *str = (const char *)buf;
 
-  // Fallback map 1 and 2 to console if not properly mapped.
   if (fd == 1 || fd == 2) {
-    for (uint64_t i = 0; i < count; i++) {
-        console_putchar(str[i]);
+    for (size_t i = 0; i < count; i++) {
+      console_putchar(str[i]);
     }
-    return count;
+    return (int64_t)count;
   }
 
   struct thread *t = sched_get_current();
-  if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return -9; // EBADF
 
   vfs_node_t *node = t->fds[fd];
-  uint32_t bytes_written = vfs_write(node, t->fd_offsets[fd], count, (uint8_t *)buf);
+  uint32_t bytes_written =
+      vfs_write(node, t->fd_offsets[fd], count, (uint8_t *)buf);
   t->fd_offsets[fd] += bytes_written;
+  return (int64_t)bytes_written;
+}
 
-  return bytes_written;
+static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  int64_t r = fd_write((int)fd, (const void *)buf, (size_t)count);
+  return (uint64_t)r;
+}
+
+struct user_iovec {
+  uint64_t iov_base;
+  uint64_t iov_len;
+};
+
+static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
+                           uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (iovcnt == 0)
+    return 0;
+  if (iovcnt > 1024)
+    return (uint64_t)-22; // EINVAL
+
+  struct user_iovec *iov = (struct user_iovec *)iov_u;
+  size_t total = 0;
+
+  for (uint64_t i = 0; i < iovcnt; i++) {
+    uint64_t base = iov[i].iov_base;
+    uint64_t len = iov[i].iov_len;
+    if (len == 0)
+      continue;
+    int64_t w = fd_write((int)fd, (const void *)base, (size_t)len);
+    if (w < 0)
+      return (uint64_t)w;
+    total += (size_t)w;
+    if ((size_t)w != len)
+      break;
+  }
+  return total;
+}
+
+static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)fd;
+  (void)request;
+  (void)arg;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  // musl probes the console; we have no tty ioctls yet
+  return (uint64_t)-25; // ENOTTY
 }
 
 static uint64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence,
@@ -120,9 +173,11 @@ static uint64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2,
 }
 
 void syscall_register_io(void) {
-  syscall_register(SYS_READ,  sys_read);
+  syscall_register(SYS_READ, sys_read);
   syscall_register(SYS_WRITE, sys_write);
-  syscall_register(SYS_OPEN,  sys_open);
+  syscall_register(SYS_WRITEV, sys_writev);
+  syscall_register(SYS_IOCTL, sys_ioctl);
+  syscall_register(SYS_OPEN, sys_open);
   syscall_register(SYS_CLOSE, sys_close);
   syscall_register(SYS_LSEEK, sys_lseek);
 }

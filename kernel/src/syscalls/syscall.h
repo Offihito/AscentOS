@@ -12,25 +12,48 @@
 #define IA32_EFER_SCE 0x01
 
 // ── Syscall Numbers (Linux x86_64 ABI) ──────────────────────────────────────
-#define SYS_READ    0
-#define SYS_WRITE   1
-#define SYS_OPEN    2
-#define SYS_CLOSE   3
-#define SYS_LSEEK   8
-#define SYS_MMAP    9
-#define SYS_MUNMAP 11
-#define SYS_BRK    12
-#define SYS_EXIT   60
+#define SYS_READ       0
+#define SYS_WRITE      1
+#define SYS_OPEN       2
+#define SYS_CLOSE      3
+#define SYS_LSEEK      8
+#define SYS_MMAP       9
+#define SYS_MUNMAP    11
+#define SYS_IOCTL     16
+#define SYS_WRITEV    20
+#define SYS_BRK       12
+#define SYS_GETPID    39
+#define SYS_FORK      57
+#define SYS_EXECVE    59
+#define SYS_EXIT      60
+#define SYS_WAIT4     61
+#define SYS_FCNTL     72
 #define SYS_ARCH_PRCTL 158
+#define SYS_SET_TID_ADDRESS 218
+#define SYS_EXIT_GROUP 231
 
-#define MAX_SYSCALL 159
+#define MAX_SYSCALL 256
 
-// ── Syscall handler type ────────────────────────────────────────────────────
+// ── Register state pushed by syscall_entry.asm ──────────────────────────────
+struct syscall_regs {
+  uint64_t rdi, rsi, rdx, r10, r8, r9, rax, rbx, rbp, r12, r13, r14, r15;
+  uint64_t rip, rflags, rsp;
+} __attribute__((packed));
+
+// ── Syscall handler types ───────────────────────────────────────────────────
+// Standard handler: receives the 6 argument registers, returns result in rax.
 typedef uint64_t (*syscall_handler_t)(uint64_t, uint64_t, uint64_t,
                                       uint64_t, uint64_t, uint64_t);
 
+// Raw handler: receives the full saved register frame.  Used by syscalls
+// that need access to the caller's RIP/RSP/RFLAGS (e.g. fork).
+typedef uint64_t (*syscall_raw_handler_t)(struct syscall_regs *regs);
+
 // ── Register a single syscall handler ───────────────────────────────────────
 void syscall_register(int num, syscall_handler_t handler);
+
+// ── Register a raw syscall handler (receives full register frame) ───────────
+void syscall_register_raw(int num, syscall_raw_handler_t handler);
 
 // ── Subsystem registration (called from syscall_init) ───────────────────────
 void syscall_register_io(void);

@@ -12,6 +12,9 @@
 static uint32_t next_tid = 1;
 static spinlock_t tid_lock = SPINLOCK_INIT;
 
+// Global list of all threads (for wait4)
+struct thread *global_thread_list = NULL;
+
 extern void switch_context(uint64_t *old_sp, uint64_t new_sp);
 extern void thread_stub(void); // Defined in switch.asm
 
@@ -29,6 +32,14 @@ void sched_init(void) {
         idle_thread->tid = 0;
         idle_thread->state = THREAD_RUNNING;
         idle_thread->next = idle_thread; // Circular queue
+        
+        idle_thread->stack_size = CPU_STACK_SIZE;
+        idle_thread->stack_base = cpu->stack_top - CPU_STACK_SIZE;
+        
+        // Idle threads have no parent
+        idle_thread->parent = NULL;
+        idle_thread->global_next = global_thread_list;
+        global_thread_list = idle_thread;
 
         cpu->current_thread = idle_thread;
         cpu->runqueue = idle_thread;
@@ -51,27 +62,25 @@ static void thread_exit(void) {
 
 #define THREAD_STACK_SIZE 8192
 
-void sched_enqueue_thread(struct thread *t) {
-    // Basic Load Balancing: Round-Robin among available CPUs
-    static uint32_t next_cpu = 0;
+void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
+    struct cpu_info *target_cpu = explicit_cpu;
     
-    spinlock_acquire(&tid_lock);
-    uint32_t target_cpu_id = next_cpu;
-    next_cpu = (next_cpu + 1) % cpu_get_count();
-    spinlock_release(&tid_lock);
+    if (!target_cpu) {
+        // Basic Load Balancing: Round-Robin among available CPUs
+        static uint32_t next_cpu = 0;
+        
+        spinlock_acquire(&tid_lock);
+        uint32_t target_cpu_id = next_cpu;
+        next_cpu = (next_cpu + 1) % cpu_get_count();
+        spinlock_release(&tid_lock);
 
-    struct cpu_info *target_cpu = cpu_get_info(target_cpu_id);
+        target_cpu = cpu_get_info(target_cpu_id);
+    }
     
-    // Fallback just in case standard cpu_count/info is offline
+    // Fallback just in case
     if (!target_cpu || target_cpu->status == CPU_STATUS_OFFLINE) {
         target_cpu = cpu_get_bsp();
     }
-
-    klog_puts("[SCHED] Enqueuing thread ");
-    klog_uint64(t->tid);
-    klog_puts(" to CPU ");
-    klog_uint64(target_cpu->cpu_id);
-    klog_puts("\n");
 
     spinlock_acquire(&target_cpu->queue_lock);
     
@@ -90,7 +99,7 @@ void sched_enqueue_thread(struct thread *t) {
     spinlock_release(&target_cpu->queue_lock);
 }
 
-struct thread *sched_create_kernel_thread(void (*entry)(void)) {
+struct thread *sched_create_kernel_thread(void (*entry)(void), struct cpu_info *explicit_cpu) {
     // Allocate thread struct
     struct thread *t = kmalloc(sizeof(struct thread));
     if(!t) return NULL;
@@ -99,7 +108,12 @@ struct thread *sched_create_kernel_thread(void (*entry)(void)) {
     
     spinlock_acquire(&tid_lock);
     t->tid = next_tid++;
+    t->global_next = global_thread_list;
+    global_thread_list = t;
     spinlock_release(&tid_lock);
+    
+    // Set parent to the thread that called create
+    t->parent = sched_get_current();
     
     t->state = THREAD_READY;
     t->stack_size = THREAD_STACK_SIZE;
@@ -132,7 +146,7 @@ struct thread *sched_create_kernel_thread(void (*entry)(void)) {
     t->rsp = stack_top;
     
     // Balance and add to a CPU's runqueue
-    sched_enqueue_thread(t);
+    sched_enqueue_thread(t, explicit_cpu);
     
     return t;
 }
@@ -165,6 +179,17 @@ void sched_yield(void) {
         }
         next_t->state = THREAD_RUNNING;
         cpu->current_thread = next_t;
+        
+        cpu->stack_top = next_t->stack_base + next_t->stack_size;
+        extern void tss_set_rsp0(uint64_t rsp0);
+        tss_set_rsp0(cpu->stack_top);
+        
+        uint64_t target_cr3 = next_t->cr3 ? next_t->cr3 : cpu->kernel_cr3;
+        uint64_t current_cr3;
+        __asm__ volatile("mov %%cr3, %0" : "=r"(current_cr3));
+        if (target_cr3 != current_cr3) {
+            __asm__ volatile("mov %0, %%cr3" :: "r"(target_cr3) : "memory");
+        }
         
         spinlock_release(&cpu->queue_lock);
         switch_context(&prev->rsp, next_t->rsp);
@@ -225,7 +250,9 @@ void sched_print_tasks(void) {
                     case THREAD_RUNNING: console_puts("RUNNING   "); break;
                     case THREAD_READY:   console_puts("READY     "); break;
                     case THREAD_BLOCKED: console_puts("BLOCKED   "); break;
+                    case THREAD_SLEEPING:console_puts("SLEEPING  "); break;
                     case THREAD_DEAD:    console_puts("DEAD      "); break;
+                    case THREAD_ZOMBIE:  console_puts("ZOMBIE    "); break;
                 }
 
                 // RSP (Hex)

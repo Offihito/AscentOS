@@ -4,6 +4,7 @@
 #include "apic/lapic_timer.h"
 #include "console/console.h"
 #include "console/klog.h"
+#include "cpu/features.h"
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
 #include "cpu/isr.h"
@@ -109,6 +110,7 @@ void kmain(void) {
   //  Phase 1: CPU descriptor tables
   // ═══════════════════════════════════════════════════════════════════════
   gdt_init();
+  cpu_features_init();
   idt_init();
   syscall_init();
 
@@ -158,16 +160,18 @@ void kmain(void) {
   void *test_phys = pmm_alloc();
   if (test_phys) {
     uint64_t vaddr = 0xCAFEBABE000;
-    vmm_map_page(vmm_get_active_pml4(), vaddr, (uint64_t)test_phys,
-                 PAGE_FLAG_RW | PAGE_FLAG_USER);
-
-    volatile uint64_t *test_ptr = (volatile uint64_t *)vaddr;
-    *test_ptr = 0x1337BEEF; // If this page faults, the mapping failed!
-
-    if (*test_ptr == 0x1337BEEF) {
-      klog_puts("     VMM custom mapping test SUCCESSFUL!\n");
+    if (!vmm_map_page(vmm_get_active_pml4(), vaddr, (uint64_t)test_phys,
+                     PAGE_FLAG_RW | PAGE_FLAG_USER)) {
+      klog_puts("[ERROR] vmm_map_page test failed\n");
     } else {
-      klog_puts("     VMM custom mapping test FAILED!\n");
+      volatile uint64_t *test_ptr = (volatile uint64_t *)vaddr;
+      *test_ptr = 0x1337BEEF; // If this page faults, the mapping failed!
+
+      if (*test_ptr == 0x1337BEEF) {
+        klog_puts("     VMM custom mapping test SUCCESSFUL!\n");
+      } else {
+        klog_puts("     VMM custom mapping test FAILED!\n");
+      }
     }
   }
 

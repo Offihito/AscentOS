@@ -94,7 +94,8 @@ static void execute_command(char *cmd) {
     console_puts("  test_ring3_phase1 - Verify GDT and TSS initialization\n");
     console_puts("  test_ring3_phase2 - Verify Syscall MSR initialization\n");
     console_puts("  test_ring3_phase3 - Verify Syscall translation layer\n");
-    console_puts("  exec      - Execute an ELF file (e.g. exec /mnt/test.elf)\n");
+    console_puts(
+        "  exec      - Execute an ELF (e.g. exec /mnt/hello_musl.elf)\n");
   } else if (strcmp(cmd, "ps") == 0) {
     sched_print_tasks();
   } else if (strncmp(cmd, "kill ", 5) == 0) {
@@ -123,7 +124,7 @@ static void execute_command(char *cmd) {
     console_puts("\n");
   } else if (strcmp(cmd, "test-task") == 0) {
     for (int i = 0; i < 4; i++) {
-      sched_create_kernel_thread(test_task_entry);
+      sched_create_kernel_thread(test_task_entry, NULL);
     }
     console_puts("Spawned 4 test tasks across SMP cores!\n");
   } else if (strcmp(cmd, "heaptest") == 0) {

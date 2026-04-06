@@ -11,6 +11,12 @@ HOST_CPPFLAGS :=
 HOST_LDFLAGS :=
 HOST_LIBS :=
 
+# musl static sysroot (see scripts/musl-toolchain.sh). Built automatically for hello_musl / disk.img / run.
+MUSL_TOOLCHAIN_BIN := $(CURDIR)/toolchain/x86_64-linux-musl/bin
+MUSL_SYSROOT := $(CURDIR)/toolchain/musl-sysroot
+MUSL_LIBC := $(MUSL_SYSROOT)/lib/libc.a
+MUSL_CC ?= x86_64-linux-musl-gcc
+
 .PHONY: all
 all: $(IMAGE_NAME).iso
 
@@ -26,6 +32,7 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-hda disk.img \
 		-smp 4 \
 		-serial stdio \
+		-audiodev none,id=none \
 		$(QEMUFLAGS)
 
 .PHONY: run-bios
@@ -38,7 +45,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf
+disk.img: userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf
 	dd if=/dev/zero of=disk.img bs=1M count=64
 	mkfs.ext2 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
@@ -46,10 +53,13 @@ disk.img: userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.e
 	debugfs -w -R "write /tmp/ascentos_hello.txt hello.txt" disk.img
 	debugfs -w -R "mkdir docs" disk.img
 	debugfs -w -R "write /tmp/ascentos_readme.txt docs/readme.txt" disk.img
-	debugfs -w -R "write userland/test.elf test.elf" disk.img
 	debugfs -w -R "write userland/test_mmap.elf test_mmap.elf" disk.img
 	debugfs -w -R "write userland/test_arch_prctl.elf test_arch_prctl.elf" disk.img
 	debugfs -w -R "write userland/test_io.elf test_io.elf" disk.img
+	debugfs -w -R "write userland/test_fork.elf test_fork.elf" disk.img
+	debugfs -w -R "write userland/test_execve.elf test_execve.elf" disk.img
+	debugfs -w -R "write userland/test_wait_exec.elf test_wait_exec.elf" disk.img
+	debugfs -w -R "write userland/hello.elf hello.elf" disk.img
 	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
 
 edk2-ovmf:
@@ -94,20 +104,38 @@ $(IMAGE_NAME).iso: limine/limine kernel
 	rm -rf iso_root
 
 .PHONY: clean
-clean:
+clean: clean-musl
 	$(MAKE) -C kernel clean
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
+
+.PHONY: clean-musl
+clean-musl:
+	rm -rf build/musl-1.2.5 build/musl-cross-make
+	rm -rf toolchain/musl-sysroot toolchain/x86_64-linux-musl
+	rm -f userland/hello.elf
 
 .PHONY: clean-disk
 clean-disk:
 	rm -f disk.img
 
 .PHONY: distclean
-distclean:
+distclean: clean-musl
 	$(MAKE) -C kernel distclean
 	rm -rf iso_root *.iso *.hdd limine edk2-ovmf
 
 # ── Userland test programs ──────────────────────────────────────────────────
+$(MUSL_LIBC):
+	chmod +x scripts/musl-toolchain.sh
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" ./scripts/musl-toolchain.sh
+
+.PHONY: musl-toolchain
+musl-toolchain: $(MUSL_LIBC)
+
+userland/hello.elf: userland/hello.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) -static -O2 -Wall -Wextra \
+		-I$(MUSL_SYSROOT)/include -L$(MUSL_SYSROOT)/lib \
+		userland/hello.c -o userland/hello.elf
+
 userland/test_mmap.elf: userland/test_mmap.asm
 	nasm -f elf64 userland/test_mmap.asm -o userland/test_mmap.o
 	ld -o userland/test_mmap.elf userland/test_mmap.o
@@ -119,3 +147,15 @@ userland/test_arch_prctl.elf: userland/test_arch_prctl.asm
 userland/test_io.elf: userland/test_io.asm
 	nasm -f elf64 userland/test_io.asm -o userland/test_io.o
 	ld -o userland/test_io.elf userland/test_io.o
+
+userland/test_fork.elf: userland/test_fork.asm
+	nasm -f elf64 userland/test_fork.asm -o userland/test_fork.o
+	ld -o userland/test_fork.elf userland/test_fork.o
+
+userland/test_execve.elf: userland/test_execve.asm
+	nasm -f elf64 userland/test_execve.asm -o userland/test_execve.o
+	ld -o userland/test_execve.elf userland/test_execve.o
+
+userland/test_wait_exec.elf: userland/test_wait_exec.asm
+	nasm -f elf64 userland/test_wait_exec.asm -o userland/test_wait_exec.o
+	ld -o userland/test_wait_exec.elf userland/test_wait_exec.o

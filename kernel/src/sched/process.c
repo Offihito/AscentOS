@@ -82,14 +82,14 @@ static __attribute__((noreturn)) void process_jump_usermode(uint64_t rip,
 
 #define PAGE_SIZE 4096
 
-bool process_exec(const char *path) {
-  klog_puts("[PROC] Attempting to load ELF: ");
-  klog_puts(path);
-  klog_puts("\n");
-
+bool elf_load(const char *path, uint64_t *pml4, uint64_t *out_entry) {
+  // Reset brk state for this new process
+  process_brk_base = 0;
+  process_brk_current = 0;
+  
   vfs_node_t *file = vfs_resolve_path(path);
   if (!file) {
-    klog_puts("[PROC] Exec failed: File not found.\n");
+    klog_puts("[PROC] ELF load failed: File not found.\n");
     return false;
   }
 
@@ -110,11 +110,9 @@ bool process_exec(const char *path) {
 
   // We only support 64-bit EXEs
   if (ehdr.e_ident[4] != 2) { // 2 = 64-bit
-    klog_puts("[PROC] Exec failed: Not a 64-bit ELF.\n");
+    klog_puts("[PROC] ELF load failed: Not a 64-bit ELF.\n");
     return false;
   }
-
-  uint64_t *pml4 = vmm_get_active_pml4();
 
   // Read Program Headers
   for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
@@ -135,6 +133,13 @@ bool process_exec(const char *path) {
       // Track uppermost loaded address for brk base.
       uint64_t seg_end = vaddr + memsz;
       if (seg_end > process_brk_base) {
+          klog_puts("[PROC] PT_LOAD segment: vaddr=");
+          klog_uint64(vaddr);
+          klog_puts(" memsz=");
+          klog_uint64(memsz);
+          klog_puts(" seg_end=");
+          klog_uint64(seg_end);
+          klog_puts("\n");
           process_brk_base = seg_end;
       }
 
@@ -150,22 +155,34 @@ bool process_exec(const char *path) {
         }
 
         // Add USER, RW and PRESENT flags
-        vmm_map_page(pml4, page, (uint64_t)phys,
-                     PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+        if (!vmm_map_page(pml4, page, (uint64_t)phys,
+                         PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT)) {
+            klog_puts("[PROC] Exec failed: vmm_map_page failed\n");
+            return false;
+        }
 
-        // Zero the page initially
-        memset((void *)page, 0, PAGE_SIZE);
+        // Zero via kernel-accessible HHDM address, not user virtual address
+        void *kernel_virt = (void *)((uint64_t)phys + pmm_get_hhdm_offset());
+        memset(kernel_virt, 0, PAGE_SIZE);
       }
 
       // Read the binary data into the mapped segment
       if (filesz > 0) {
-        vfs_read(file, file_offset, filesz, (uint8_t *)vaddr);
+        uint32_t bytes_read = vfs_read(file, file_offset, filesz, (uint8_t *)vaddr);
+        if (bytes_read != filesz) {
+            klog_puts("[PROC] Exec failed: vfs_read short read (got ");
+            klog_uint64(bytes_read);
+            klog_puts(", expected ");
+            klog_uint64(filesz);
+            klog_puts(")\n");
+            return false;
+        }
       }
     }
   }
 
-  // Setup a User Stack at a high virtual address (e.g. 0x00007FFFF0000000)
-  uint64_t stack_top = 0x00007FFFF0000000;
+  // User stack: [stack_top - stack_size, stack_top); stack_top is unmapped (guard).
+  uint64_t stack_top = ASCENTOS_USER_STACK_TOP;
   uint64_t stack_size = 4 * PAGE_SIZE; // 16 KB stack
   uint64_t stack_bottom = stack_top - stack_size;
 
@@ -173,20 +190,78 @@ bool process_exec(const char *path) {
     void *phys = pmm_alloc();
     if (!phys)
       return false;
-    vmm_map_page(pml4, page, (uint64_t)phys,
-                 PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+    if (!vmm_map_page(pml4, page, (uint64_t)phys,
+                     PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT)) {
+        klog_puts("[PROC] Exec failed: vmm_map_page stack failed\n");
+        return false;
+    }
   }
 
   // Page-align the brk base upward and set current brk.
+  klog_puts("[PROC] Before brk alignment: process_brk_base=");
+  klog_uint64(process_brk_base);
+  klog_puts("\n");
   process_brk_base = (process_brk_base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+  klog_puts("[PROC] After brk alignment: process_brk_base=");
+  klog_uint64(process_brk_base);
+  klog_puts("\n");
   process_brk_current = process_brk_base;
     
   // Reset the mmap bump allocator for this new process.
   mm_reset_mmap_state();
     
+  if (out_entry) *out_entry = ehdr.e_entry;
+
+  return true;
+}
+
+uint64_t process_build_initial_stack(uint64_t stack_top, const char *path) {
+  size_t path_len = strlen(path);
+  uint64_t path_addr = stack_top - (path_len + 1);
+  memcpy((void *)path_addr, path, path_len + 1);
+
+  uint64_t *stack = (uint64_t *)path_addr;
+  stack = (uint64_t *)((uint64_t)stack & ~0xFULL);
+
+  // SysV x86_64 process entry: argc, argv..., NULL, envp..., NULL, auxv..., (0,0)
+  *(--stack) = 0; // AT_NULL value
+  *(--stack) = 0; // AT_NULL type
+  *(--stack) = 0; // end envp
+  *(--stack) = 0; // end argv
+  *(--stack) = path_addr; // argv[0]
+  *(--stack) = 1;          // argc
+
+  return (uint64_t)stack;
+}
+
+bool process_exec(const char *path) {
+  klog_puts("[PROC] Attempting to execute: ");
+  klog_puts(path);
+  klog_puts("\n");
+
+  size_t path_len = strlen(path);
+  char *path_copy = kmalloc(path_len + 1);
+  if (!path_copy) {
+    klog_puts("[PROC] exec: kmalloc path failed\n");
+    return false;
+  }
+  memcpy(path_copy, path, path_len + 1);
+
+  uint64_t *pml4 = vmm_get_active_pml4();
+  uint64_t entry_point = 0;
+
+  if (!elf_load(path_copy, pml4, &entry_point)) {
+    kfree(path_copy);
+    return false;
+  }
+
   klog_puts("[PROC] ELF mapped successfully. Jumping to Ring 3 (RIP: ");
-  klog_uint64(ehdr.e_entry);
+  klog_uint64(entry_point);
   klog_puts(")\n");
+
+  uint64_t user_rsp =
+      process_build_initial_stack(ASCENTOS_USER_STACK_TOP, path_copy);
+  kfree(path_copy);
 
   // Initialize File Descriptors for the main thread
   struct thread *current_thread = sched_get_current();
@@ -220,5 +295,5 @@ bool process_exec(const char *path) {
   }
 
   // Issue the jump to userspace (does not return normally)
-  process_jump_usermode(ehdr.e_entry, stack_top);
+  process_jump_usermode(entry_point, user_rsp);
 }

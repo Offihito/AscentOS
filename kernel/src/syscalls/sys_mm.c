@@ -100,11 +100,21 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
             return MAP_FAILED;
         }
 
-        vmm_map_page(pml4, vaddr + i * PAGE_SIZE, (uint64_t)phys, page_flags);
+        if (!vmm_map_page(pml4, vaddr + i * PAGE_SIZE, (uint64_t)phys, page_flags)) {
+            klog_puts("[MMAP] Error: vmm_map_page failed\n");
+            return MAP_FAILED;
+        }
     }
 
-    // Zero the mapped region (anonymous mappings must be zero-filled).
-    memset((void *)vaddr, 0, aligned_len);
+    // Zero the mapped region (anonymous mappings must be zero-filled) via HHDM
+    // We can't memset the user-space vaddr directly from kernel code
+    for (uint64_t i = 0; i < num_pages; i++) {
+        uint64_t phys = vmm_virt_to_phys(pml4, vaddr + i * PAGE_SIZE);
+        if (phys) {
+            void *kernel_virt = (void *)(phys + pmm_get_hhdm_offset());
+            memset(kernel_virt, 0, PAGE_SIZE);
+        }
+    }
 
     klog_puts("[MMAP] Mapped ");
     klog_uint64(aligned_len);
@@ -174,16 +184,63 @@ static uint64_t sys_brk(uint64_t addr, uint64_t a1, uint64_t a2,
         uint64_t old_end_page = PAGE_ALIGN_UP(process_brk_current);
         uint64_t new_end_page = PAGE_ALIGN_UP(addr);
 
+        klog_puts("[BRK] Expanding. process_brk_current=");
+        klog_uint64(process_brk_current);
+        klog_puts(" process_brk_base=");
+        klog_uint64(process_brk_base);
+        klog_puts(" old_end_page=");
+        klog_uint64(old_end_page);
+        klog_puts(" new_end_page=");
+        klog_uint64(new_end_page);
+        klog_puts("\n");
+
+        klog_puts("[BRK] Expanding from ");
+        klog_uint64(process_brk_current);
+        klog_puts(" to ");
+        klog_uint64(addr);
+        klog_puts(" (pages ");
+        klog_uint64(old_end_page);
+        klog_puts(" -> ");
+        klog_uint64(new_end_page);
+        klog_puts(")\n");
+
         for (uint64_t page = old_end_page; page < new_end_page; page += PAGE_SIZE) {
+            // Check if page is already allocated (might be part of ELF segment)
+            uint64_t existing_phys = vmm_virt_to_phys(pml4, page);
+            if (existing_phys != 0) {
+                klog_puts("[BRK] Page ");
+                klog_uint64(page);
+                klog_puts(" already mapped to phys ");
+                klog_uint64(existing_phys);
+                klog_puts(", skipping\n");
+                continue;
+            }
+            
             void *phys = pmm_alloc();
             if (!phys) {
                 // OOM: return current break (failure to expand).
-                klog_puts("[BRK] OOM, cannot expand\n");
+                klog_puts("[BRK] OOM, cannot expand at page ");
+                klog_uint64(page);
+                klog_puts("\n");
                 return process_brk_current;
             }
-            vmm_map_page(pml4, page, (uint64_t)phys,
-                         PAGE_FLAG_PRESENT | PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_NX);
-            memset((void *)page, 0, PAGE_SIZE);
+            klog_puts("[BRK] Allocating page ");
+            klog_uint64(page);
+            klog_puts(" -> phys ");
+            klog_uint64((uint64_t)phys);
+            klog_puts("\n");
+            
+            if (!vmm_map_page(pml4, page, (uint64_t)phys,
+                             PAGE_FLAG_PRESENT | PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_NX)) {
+                klog_puts("[BRK] Error: vmm_map_page failed for page ");
+                klog_uint64(page);
+                klog_puts("\n");
+                return process_brk_current;
+            }
+            
+            // Zero via kernel-accessible HHDM address, not user virtual address
+            void *kernel_virt = (void *)((uint64_t)phys + pmm_get_hhdm_offset());
+            memset(kernel_virt, 0, PAGE_SIZE);
         }
 
         process_brk_current = addr;
