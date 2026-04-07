@@ -1,7 +1,9 @@
 #include "isr.h"
 #include "../console/console.h"
+#include "../mm/vmm.h"
 #include "pic.h"
 #include "apic/lapic.h"
+#include "msr.h"
 
 const char *exception_messages[] = {"Division By Zero",
                                     "Debug",
@@ -41,6 +43,46 @@ static void print_hex(uint64_t value) {
   console_puts("0x");
   for (int i = 15; i >= 0; i--) {
     console_putchar(hex_chars[(value >> (i * 4)) & 0xF]);
+  }
+}
+
+static void print_gp_error_details(uint64_t err_code) {
+  console_puts("GP_ERR_DETAILS: ");
+  if (err_code == 0) {
+    console_puts("none (not selector-related)\n");
+    return;
+  }
+
+  console_puts("ext=");
+  print_hex(err_code & 0x1);
+  console_puts(" tbl=");
+  print_hex((err_code >> 1) & 0x3);
+  console_puts(" selector_index=");
+  print_hex((err_code >> 3) & 0x1FFF);
+  console_puts("\n");
+}
+
+static void print_reg_line(const char *name, uint64_t value) {
+  console_puts(name);
+  console_puts(": ");
+  print_hex(value);
+  console_puts("\n");
+}
+
+static void print_user_stack_words(uint64_t user_rsp, int words) {
+  uint64_t *pml4 = vmm_get_active_pml4();
+  console_puts("USER_STACK_TOP:\n");
+  for (int i = 0; i < words; i++) {
+    uint64_t addr = user_rsp + ((uint64_t)i * sizeof(uint64_t));
+    console_puts("  [");
+    print_hex(addr);
+    console_puts("] = ");
+    if (vmm_virt_to_phys(pml4, addr) == 0) {
+      console_puts("<unmapped>\n");
+      continue;
+    }
+    print_hex(*(volatile uint64_t *)addr);
+    console_puts("\n");
   }
 }
 
@@ -123,6 +165,37 @@ void isr_handler(struct registers *regs) {
   console_puts("CS:     ");
   print_hex(regs->cs);
   console_puts("\n");
+  console_puts("SS:     ");
+  print_hex(regs->ss);
+  console_puts("\n");
+
+  print_reg_line("RAX", regs->rax);
+  print_reg_line("RBX", regs->rbx);
+  print_reg_line("RCX", regs->rcx);
+  print_reg_line("RDX", regs->rdx);
+  print_reg_line("RSI", regs->rsi);
+  print_reg_line("RDI", regs->rdi);
+  print_reg_line("RBP", regs->rbp);
+  print_reg_line("R8", regs->r8);
+  print_reg_line("R9", regs->r9);
+  print_reg_line("R10", regs->r10);
+  print_reg_line("R11", regs->r11);
+  print_reg_line("R12", regs->r12);
+  print_reg_line("R13", regs->r13);
+  print_reg_line("R14", regs->r14);
+  print_reg_line("R15", regs->r15);
+
+  if (regs->int_no == 13) {
+    print_gp_error_details(regs->err_code);
+    if ((regs->cs & 0x3) == 0x3) {
+      print_user_stack_words(regs->rsp, 4);
+    }
+  }
+
+  console_puts("\nTLS/MSR STATE:\n");
+  print_reg_line("IA32_FS_BASE", rdmsr(0xC0000100));
+  print_reg_line("IA32_GS_BASE", rdmsr(0xC0000101));
+  print_reg_line("IA32_KERNEL_GS_BASE", rdmsr(0xC0000102));
 
   if (regs->int_no == 14) {
     uint64_t cr2;

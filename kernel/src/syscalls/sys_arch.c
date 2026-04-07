@@ -2,6 +2,7 @@
 #include "syscall.h"
 #include "../cpu/msr.h"
 #include "../console/klog.h"
+#include "../apic/lapic_timer.h"
 #include <stdint.h>
 
 // ── arch_prctl sub-commands (Linux x86_64) ──────────────────────────────────
@@ -15,6 +16,12 @@
 #define IA32_GS_BASE        0xC0000101
 #define IA32_KERNEL_GS_BASE 0xC0000102
 
+static int is_canonical_user_addr(uint64_t addr) {
+    uint64_t sign = (addr >> 47) & 1ULL;
+    uint64_t upper = addr >> 48;
+    return (sign == 0) ? (upper == 0) : (upper == 0xFFFF);
+}
+
 // ── sys_arch_prctl ──────────────────────────────────────────────────────────
 // Linux ABI: arch_prctl(code, addr)
 //   rdi = code, rsi = addr
@@ -24,6 +31,12 @@ static uint64_t sys_arch_prctl(uint64_t code, uint64_t addr, uint64_t a2,
 
     switch (code) {
     case ARCH_SET_FS:
+        if (!is_canonical_user_addr(addr)) {
+            klog_puts("[ARCH_PRCTL] Reject non-canonical SET_FS = ");
+            klog_uint64(addr);
+            klog_puts("\n");
+            return (uint64_t)-22; // -EINVAL
+        }
         wrmsr(IA32_FS_BASE, addr);
         klog_puts("[ARCH_PRCTL] SET_FS = ");
         klog_uint64(addr);
@@ -38,6 +51,12 @@ static uint64_t sys_arch_prctl(uint64_t code, uint64_t addr, uint64_t a2,
         return 0;
 
     case ARCH_SET_GS:
+        if (!is_canonical_user_addr(addr)) {
+            klog_puts("[ARCH_PRCTL] Reject non-canonical SET_GS = ");
+            klog_uint64(addr);
+            klog_puts("\n");
+            return (uint64_t)-22; // -EINVAL
+        }
         // For user GS, we write to KERNEL_GS_BASE (swapgs swaps it in/out).
         // After sysret + swapgs, this becomes the active GS for userspace.
         wrmsr(IA32_KERNEL_GS_BASE, addr);
@@ -60,6 +79,30 @@ static uint64_t sys_arch_prctl(uint64_t code, uint64_t addr, uint64_t a2,
     }
 }
 
+static uint64_t sys_clock_gettime(uint64_t clk_id, uint64_t tp_ptr,
+                                   uint64_t a2, uint64_t a3,
+                                   uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+
+    if (!tp_ptr) return (uint64_t)-14; // EFAULT
+
+    uint64_t ms = lapic_timer_get_ms();
+    uint64_t sec = ms / 1000;
+    uint64_t nsec = (ms % 1000) * 1000000ULL;
+
+    // CLOCK_REALTIME and CLOCK_MONOTONIC both return uptime-like time here.
+    switch (clk_id) {
+    case 0: // CLOCK_REALTIME
+    case 1: // CLOCK_MONOTONIC
+        ((uint64_t *)tp_ptr)[0] = sec;
+        ((uint64_t *)tp_ptr)[1] = nsec;
+        return 0;
+    default:
+        return (uint64_t)-22; // EINVAL
+    }
+}
+
 void syscall_register_arch(void) {
     syscall_register(SYS_ARCH_PRCTL, sys_arch_prctl);
+    syscall_register(SYS_CLOCK_GETTIME, sys_clock_gettime);
 }

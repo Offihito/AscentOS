@@ -95,7 +95,8 @@ static void execute_command(char *cmd) {
     console_puts("  test_ring3_phase2 - Verify Syscall MSR initialization\n");
     console_puts("  test_ring3_phase3 - Verify Syscall translation layer\n");
     console_puts(
-        "  exec      - Execute an ELF (e.g. exec /mnt/hello_musl.elf)\n");
+        "  exec      - Execute an ELF (e.g. exec /mnt/hello_musl.elf [args...])\n");
+    console_puts("  kilo      - Launch the kilo text editor\n");
   } else if (strcmp(cmd, "ps") == 0) {
     sched_print_tasks();
   } else if (strncmp(cmd, "kill ", 5) == 0) {
@@ -881,9 +882,30 @@ static void execute_command(char *cmd) {
       console_puts("  -> FAIL: Syscall return corrupted.\n");
     }
   } else if (strncmp(cmd, "exec ", 5) == 0) {
-    char *path = cmd + 5;
-    if (!process_exec(path)) {
-      console_puts("exec failed.\n");
+    char *args_str = cmd + 5;
+    // Simple parsing
+    const char *argv[10];
+    int argc = 0;
+    char *p = args_str;
+    while (*p && argc < 9) {
+      while (*p == ' ') p++;
+      if (!*p) break;
+      argv[argc++] = p;
+      while (*p && *p != ' ') p++;
+      if (*p) *p++ = 0;
+    }
+    argv[argc] = NULL;
+    if (argc > 0) {
+      if (!process_exec_argv((const char **)argv)) {
+        console_puts("exec failed.\n");
+      }
+    } else {
+      console_puts("exec: no command\n");
+    }
+  } else if (strcmp(cmd, "kilo") == 0) {
+    const char *argv[] = {"/mnt/kilo.elf", NULL};
+    if (!process_exec_argv(argv)) {
+      console_puts("kilo exec failed.\n");
     }
   } else {
     console_puts("Unknown command. Type 'help' for available commands.\n");

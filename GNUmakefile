@@ -16,6 +16,8 @@ MUSL_TOOLCHAIN_BIN := $(CURDIR)/toolchain/x86_64-linux-musl/bin
 MUSL_SYSROOT := $(CURDIR)/toolchain/musl-sysroot
 MUSL_LIBC := $(MUSL_SYSROOT)/lib/libc.a
 MUSL_CC ?= x86_64-linux-musl-gcc
+MUSL_USER_CFLAGS := -static -O2 -Wall -Wextra -fno-stack-protector \
+	-I$(MUSL_SYSROOT)/include -L$(MUSL_SYSROOT)/lib
 
 .PHONY: all
 all: $(IMAGE_NAME).iso
@@ -45,11 +47,12 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf
+disk.img: userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf
 	dd if=/dev/zero of=disk.img bs=1M count=64
 	mkfs.ext2 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
 	echo "This is a test document." > /tmp/ascentos_readme.txt
+	debugfs -w -R "cd /" -R "mkdir tmp" disk.img
 	debugfs -w -R "write /tmp/ascentos_hello.txt hello.txt" disk.img
 	debugfs -w -R "mkdir docs" disk.img
 	debugfs -w -R "write /tmp/ascentos_readme.txt docs/readme.txt" disk.img
@@ -59,6 +62,12 @@ disk.img: userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf
 	debugfs -w -R "write userland/test_fork.elf test_fork.elf" disk.img
 	debugfs -w -R "write userland/test_execve.elf test_execve.elf" disk.img
 	debugfs -w -R "write userland/test_wait_exec.elf test_wait_exec.elf" disk.img
+	debugfs -w -R "write userland/test_syscalls.elf test_syscalls.elf" disk.img
+	debugfs -w -R "write userland/test_ioctl.elf test_ioctl.elf" disk.img
+	debugfs -w -R "write userland/test_kilo_syscalls.elf test_kilo_syscalls.elf" disk.img
+	debugfs -w -R "write userland/test_kilo_asm.elf test_kilo_asm.elf" disk.img
+	debugfs -w -R "write userland/kilo.elf kilo.elf" disk.img
+	debugfs -w -R "write userland/test_args.elf test_args.elf" disk.img
 	debugfs -w -R "write userland/hello.elf hello.elf" disk.img
 	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
 
@@ -112,7 +121,7 @@ clean: clean-musl
 clean-musl:
 	rm -rf build/musl-1.2.5 build/musl-cross-make
 	rm -rf toolchain/musl-sysroot toolchain/x86_64-linux-musl
-	rm -f userland/hello.elf
+	rm -f userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/kilo.c
 
 .PHONY: clean-disk
 clean-disk:
@@ -132,8 +141,7 @@ $(MUSL_LIBC):
 musl-toolchain: $(MUSL_LIBC)
 
 userland/hello.elf: userland/hello.c $(MUSL_LIBC)
-	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) -static -O2 -Wall -Wextra \
-		-I$(MUSL_SYSROOT)/include -L$(MUSL_SYSROOT)/lib \
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/hello.c -o userland/hello.elf
 
 userland/test_mmap.elf: userland/test_mmap.asm
@@ -159,3 +167,30 @@ userland/test_execve.elf: userland/test_execve.asm
 userland/test_wait_exec.elf: userland/test_wait_exec.asm
 	nasm -f elf64 userland/test_wait_exec.asm -o userland/test_wait_exec.o
 	ld -o userland/test_wait_exec.elf userland/test_wait_exec.o
+
+userland/test_syscalls.elf: userland/test_syscalls.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_syscalls.c -o userland/test_syscalls.elf
+
+userland/test_ioctl.elf: userland/test_ioctl.asm
+	nasm -f elf64 userland/test_ioctl.asm -o userland/test_ioctl.o
+	ld -o userland/test_ioctl.elf userland/test_ioctl.o
+
+userland/test_kilo_syscalls.elf: userland/test_kilo_syscalls.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_kilo_syscalls.c -o userland/test_kilo_syscalls.elf
+
+userland/test_kilo_asm.elf: userland/test_kilo_asm.asm
+	nasm -f elf64 userland/test_kilo_asm.asm -o userland/test_kilo_asm.o
+	ld -o userland/test_kilo_asm.elf userland/test_kilo_asm.o
+
+userland/kilo.c:
+	curl -L https://raw.githubusercontent.com/antirez/kilo/master/kilo.c -o userland/kilo.c
+
+userland/kilo.elf: userland/kilo.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/kilo.c -o userland/kilo.elf
+
+userland/test_args.elf: userland/test_args.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_args.c -o userland/test_args.elf

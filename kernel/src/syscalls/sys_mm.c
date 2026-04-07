@@ -66,15 +66,18 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     uint64_t num_pages = aligned_len / PAGE_SIZE;
 
     // Determine the virtual address to use.
+    // Linux treats non-MAP_FIXED addr as a hint, not a hard requirement.
+    // For now we ignore hints to avoid accidental overlap/corruption.
     uint64_t vaddr;
-    if ((flags & MAP_FIXED) && addr != 0) {
-        // MAP_FIXED: use exact address (must be page-aligned).
-        vaddr = PAGE_ALIGN_DOWN(addr);
-    } else if (addr != 0) {
-        // Hint provided: try to use it (page-align it).
+    if (flags & MAP_FIXED) {
+        if (addr == 0) {
+            klog_puts("[MMAP] Error: MAP_FIXED with null addr\n");
+            return MAP_FAILED;
+        }
+        // MAP_FIXED: use exact page-aligned address.
         vaddr = PAGE_ALIGN_DOWN(addr);
     } else {
-        // No hint: pick from our bump allocator.
+        // Non-fixed: always allocate from our dedicated mmap region.
         vaddr = mmap_next_addr;
         if (vaddr + aligned_len > MMAP_REGION_LIMIT) {
             klog_puts("[MMAP] Error: mmap region exhausted\n");

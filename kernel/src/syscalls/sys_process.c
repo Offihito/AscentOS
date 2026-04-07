@@ -33,6 +33,11 @@ static void process_do_exit(uint64_t status) {
   klog_uint64(status);
   klog_puts("\n");
 
+  // If tid_address was set via set_tid_address, clear it (set to 0) to signal exit
+  if (current && current->tid_address) {
+    *current->tid_address = 0;
+  }
+
   if (current && current->is_forked_child) {
     __asm__ volatile("mov $0x10, %%ax\n"
                      "mov %%ax, %%ds\n"
@@ -78,16 +83,21 @@ sys_exit_group(uint64_t status, uint64_t a1, uint64_t a2, uint64_t a3,
 
 static uint64_t sys_set_tid_address(uint64_t tidptr, uint64_t a1, uint64_t a2,
                                     uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)tidptr;
   (void)a1;
   (void)a2;
   (void)a3;
   (void)a4;
   (void)a5;
   struct thread *current = sched_get_current();
-  if (current)
-    return current->tid;
-  return 0;
+  if (!current)
+    return 0;
+  
+  // Store the pointer to the user-space TID variable
+  // This is used by musl/glibc for thread exit notification
+  current->tid_address = (uint64_t *)tidptr;
+  
+  // Return the current thread's ID
+  return current->tid;
 }
 
 // ── sys_getpid ──────────────────────────────────────────────────────────────
@@ -163,7 +173,9 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
 
 // ── sys_execve ──────────────────────────────────────────────────────────────
 static uint64_t sys_execve(struct syscall_regs *regs) {
-  const char *user_path = (const char *)regs->rdi;
+  const char **user_argv = (const char **)regs->rsi;
+  const char **user_envp = (const char **)regs->rdx;
+  const char *user_path = user_argv && user_argv[0] ? user_argv[0] : (const char *)regs->rdi;
   
   if (!user_path) return (uint64_t)-14; // EFAULT
 
@@ -204,7 +216,7 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   }
 
   // We are now safely loaded into the new address space!
-  uint64_t user_rsp = process_build_initial_stack(ASCENTOS_USER_STACK_TOP, path);
+  uint64_t user_rsp = process_build_initial_stack(ASCENTOS_USER_STACK_TOP, NULL, user_argv, user_envp);
 
   klog_puts("[EXECVE] Success, returning to user space at ");
   klog_uint64(entry_point);

@@ -40,9 +40,11 @@ struct thread {
     uint64_t fd_offsets[MAX_FDS]; // Track seek offset per file descriptor
     uint64_t cr3;                 // Per-process page table (0 = inherited/kernel)
     bool is_forked_child;         // True for forked children (affects sys_exit)
+    bool is_idle;                 // True for idle thread (cannot be terminated)
     void *fork_ctx;               // Saved register state for child entry
     struct thread *parent;        // Pointer to parent thread (for wait4)
     int exit_status;              // Status code when exiting (for wait4)
+    uint64_t *tid_address;        // Pointer to user-space TID for set_tid_address
     struct thread *global_next;   // Used to link all threads together
     struct thread *next;          // Used for runqueue / blocked queue
 };
@@ -69,8 +71,8 @@ bool sched_terminate_thread(uint32_t tid);
 #include <stdbool.h>
 bool elf_load(const char *path, uint64_t *pml4, uint64_t *out_entry);
 // Linux-style stack: path string near top, then auxv/envp/argv/argc; RSP points at argc.
-uint64_t process_build_initial_stack(uint64_t stack_top, const char *path);
-bool process_exec(const char *path);
+uint64_t process_build_initial_stack(uint64_t stack_top, const char *path, const char **argv, const char **envp);
+bool process_exec_argv(const char **argv);
 
 #define ASCENTOS_USER_STACK_TOP 0x00007FFFF0000000ULL
 

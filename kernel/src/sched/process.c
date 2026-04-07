@@ -8,6 +8,7 @@
 #include "../mm/vmm.h"
 #include "../smp/cpu.h"
 #include "../syscalls/syscall.h"
+#include "../console/console.h"
 #include "elf.h"
 #include "sched.h"
 
@@ -215,68 +216,101 @@ bool elf_load(const char *path, uint64_t *pml4, uint64_t *out_entry) {
   return true;
 }
 
-uint64_t process_build_initial_stack(uint64_t stack_top, const char *path) {
-  size_t path_len = strlen(path);
-  uint64_t path_addr = stack_top - (path_len + 1);
-  memcpy((void *)path_addr, path, path_len + 1);
+uint64_t process_build_initial_stack(uint64_t stack_top, const char *path, const char **argv, const char **envp) {
+  if (!argv) {
+    const char *temp_argv[2] = {path, NULL};
+    argv = temp_argv;
+  }
 
-  uint64_t *stack = (uint64_t *)path_addr;
+  int argc = 0;
+  if (argv) while (argv[argc]) argc++;
+
+  int envc = 0;
+  if (envp) while (envp[envc]) envc++;
+
+  // Calculate total size
+  size_t total_size = 0;
+  for (int i = 0; i < argc; i++) total_size += strlen(argv[i]) + 1;
+  for (int i = 0; i < envc; i++) total_size += strlen(envp[i]) + 1;
+
+  uint64_t string_area = stack_top - total_size;
+  string_area &= ~0xFULL;
+
+  // Copy strings
+  uint64_t current = string_area;
+  uint64_t argv_ptrs[argc];
+  for (int i = 0; i < argc; i++) {
+    size_t len = strlen(argv[i]) + 1;
+    memcpy((void *)current, argv[i], len);
+    argv_ptrs[i] = current;
+    current += len;
+  }
+
+  uint64_t envp_ptrs[envc];
+  for (int i = 0; i < envc; i++) {
+    size_t len = strlen(envp[i]) + 1;
+    memcpy((void *)current, envp[i], len);
+    envp_ptrs[i] = current;
+    current += len;
+  }
+
+  // Build stack
+  uint64_t *stack = (uint64_t *)current;
   stack = (uint64_t *)((uint64_t)stack & ~0xFULL);
 
-  // SysV x86_64 process entry: argc, argv..., NULL, envp..., NULL, auxv..., (0,0)
-  *(--stack) = 0; // AT_NULL value
-  *(--stack) = 0; // AT_NULL type
-  *(--stack) = 0; // end envp
-  *(--stack) = 0; // end argv
-  *(--stack) = path_addr; // argv[0]
-  *(--stack) = 1;          // argc
+  *--stack = 0; // AT_NULL
+  *--stack = 0;
+  *--stack = 0; // end envp
+  for (int i = envc - 1; i >= 0; i--) *--stack = envp_ptrs[i];
+  *--stack = 0; // end argv
+  for (int i = argc - 1; i >= 0; i--) *--stack = argv_ptrs[i];
+  *--stack = (uint64_t)argc;
 
   return (uint64_t)stack;
 }
 
-bool process_exec(const char *path) {
+bool process_exec_argv(const char **argv) {
+  if (!argv || !argv[0]) return false;
+
   klog_puts("[PROC] Attempting to execute: ");
-  klog_puts(path);
+  klog_puts(argv[0]);
   klog_puts("\n");
 
-  size_t path_len = strlen(path);
-  char *path_copy = kmalloc(path_len + 1);
-  if (!path_copy) {
-    klog_puts("[PROC] exec: kmalloc path failed\n");
-    return false;
-  }
-  memcpy(path_copy, path, path_len + 1);
-
   uint64_t *pml4 = vmm_get_active_pml4();
+
   uint64_t entry_point = 0;
 
-  if (!elf_load(path_copy, pml4, &entry_point)) {
-    kfree(path_copy);
+  if (!elf_load(argv[0], pml4, &entry_point)) {
+
     return false;
+
   }
 
   klog_puts("[PROC] ELF mapped successfully. Jumping to Ring 3 (RIP: ");
   klog_uint64(entry_point);
   klog_puts(")\n");
 
-  uint64_t user_rsp =
-      process_build_initial_stack(ASCENTOS_USER_STACK_TOP, path_copy);
-  kfree(path_copy);
+  uint64_t user_rsp = process_build_initial_stack(ASCENTOS_USER_STACK_TOP, NULL, (const char **)argv, NULL);
 
   // Initialize File Descriptors for the main thread
   struct thread *current_thread = sched_get_current();
   if (current_thread) {
-      // 0 = stdin, 1 = stdout, 2 = stderr. 
+      // 0 = stdin, 1 = stdout, 2 = stderr.
       // We map them all to the system console for now.
       vfs_node_t *console_node = vfs_resolve_path("/dev/console");
       current_thread->fds[0] = console_node;
       current_thread->fds[1] = console_node;
       current_thread->fds[2] = console_node;
-      
+      current_thread->fd_offsets[0] = 0;
+      current_thread->fd_offsets[1] = 0;
+      current_thread->fd_offsets[2] = 0;
+
       for (int i = 3; i < MAX_FDS; i++) {
           current_thread->fds[i] = NULL;
       }
   }
+
+  console_clear();
 
   // Set the TSS rsp0 to the kernel stack for hardware interrupts
   tss_set_rsp0(cpu_get_current()->stack_top);

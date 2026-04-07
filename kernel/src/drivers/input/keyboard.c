@@ -7,7 +7,7 @@
 
 const char scancode_to_char[] = {
     0,  27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', 
-    '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
+    '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\r',
     0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 
     0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, 
     '*', 0, ' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, KEY_UP, KEY_PGUP, 
@@ -16,7 +16,7 @@ const char scancode_to_char[] = {
 
 const char scancode_to_char_shift[] = {
     0,  27, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b', 
-    '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n',
+    '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\r',
     0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 
     0, '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, 
     '*', 0, ' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, KEY_UP, KEY_PGUP, 
@@ -30,7 +30,10 @@ static volatile uint32_t kbd_tail = 0;
 
 static bool left_shift = false;
 static bool right_shift = false;
+static bool left_ctrl = false;
+static bool right_ctrl = false;
 static bool caps_lock = false;
+static bool extended_scancode = false;
 
 static void ring_buffer_push(char c) {
     uint32_t next = (kbd_head + 1) % KBD_BUFFER_SIZE;
@@ -40,6 +43,14 @@ static void ring_buffer_push(char c) {
     }
 }
 
+void keyboard_push_bytes(const char *bytes, uint32_t len) {
+    __asm__ volatile("cli");
+    for (uint32_t i = 0; i < len; i++) {
+        ring_buffer_push(bytes[i]);
+    }
+    __asm__ volatile("sti");
+}
+
 bool keyboard_has_char(void) {
     return kbd_head != kbd_tail;
 }
@@ -47,7 +58,7 @@ bool keyboard_has_char(void) {
 char keyboard_get_char(void) {
 
     while (kbd_head == kbd_tail) {
-        __asm__ volatile ("hlt"); // Yield CPU until interrupt fires
+        __asm__ volatile ("sti; hlt; cli"); // Enable interrupts while waiting
     }
     char c = kbd_buffer[kbd_tail];
     kbd_tail = (kbd_tail + 1) % KBD_BUFFER_SIZE;
@@ -56,12 +67,64 @@ char keyboard_get_char(void) {
 
 static void keyboard_callback(struct registers *regs) {
     (void)regs;
-    uint8_t scancode = inb(0x60);
-    if (scancode == 0) return;
+    uint8_t code = inb(0x60);
+    if (code == 0) return;
 
-    bool release = (scancode & 0x80) != 0;
-    scancode &= 0x7F;
+    bool release = (code & 0x80) != 0;
+    uint8_t scancode = code & 0x7F;
 
+    if (code == 0xE0) {
+        extended_scancode = true;
+        return;
+    }
+
+    if (extended_scancode) {
+        extended_scancode = false;
+
+        if (scancode == 0x1D) {
+            right_ctrl = !release;
+            return;
+        }
+
+        if (release) {
+            return; // Ignore extended key releases for normal keys
+        }
+
+        int c = 0;
+        switch (scancode) {
+            case 0x48: c = KEY_UP; break;
+            case 0x50: c = KEY_DOWN; break;
+            case 0x4B: c = KEY_LEFT; break;
+            case 0x4D: c = KEY_RIGHT; break;
+            case 0x49: c = KEY_PGUP; break;
+            case 0x51: c = KEY_PGDN; break;
+            default: break;
+        }
+        if (c) {
+            if (c == KEY_UP) {
+                const char seq[] = {'\x1B','[','A'};
+                keyboard_push_bytes(seq, 3);
+            } else if (c == KEY_DOWN) {
+                const char seq[] = {'\x1B','[','B'};
+                keyboard_push_bytes(seq, 3);
+            } else if (c == KEY_LEFT) {
+                const char seq[] = {'\x1B','[','D'};
+                keyboard_push_bytes(seq, 3);
+            } else if (c == KEY_RIGHT) {
+                const char seq[] = {'\x1B','[','C'};
+                keyboard_push_bytes(seq, 3);
+            } else if (c == KEY_PGUP) {
+                const char seq[] = {'\x1B','[','5','~'};
+                keyboard_push_bytes(seq, 4);
+            } else if (c == KEY_PGDN) {
+                const char seq[] = {'\x1B','[','6','~'};
+                keyboard_push_bytes(seq, 4);
+            }
+        }
+        return;
+    }
+
+    if (scancode == 0x1D) { left_ctrl = !release; return; }
     if (scancode == 0x2A) { left_shift = !release; return; }
     if (scancode == 0x36) { right_shift = !release; return; }
     if (scancode == 0x3A && !release) { caps_lock = !caps_lock; return; }
@@ -78,14 +141,53 @@ static void keyboard_callback(struct registers *regs) {
             c = scancode_to_char[scancode];
         }
         
-        // Handle Caps Lock (flips cases)
-        if (caps_lock) {
+        if (left_ctrl || right_ctrl) {
+            if (c >= 'a' && c <= 'z') {
+                c = c - 'a' + 1;
+            } else if (c >= 'A' && c <= 'Z') {
+                c = c - 'A' + 1;
+            }
+        } else if (caps_lock) {
             if (c >= 'a' && c <= 'z') c -= 32;
             else if (c >= 'A' && c <= 'Z') c += 32;
         }
         
         if (c != 0) {
-            ring_buffer_push(c);
+            switch ((unsigned char)c) {
+                case KEY_UP: {
+                    const char seq[] = {'\x1B','[','A'};
+                    keyboard_push_bytes(seq, 3);
+                    break;
+                }
+                case KEY_DOWN: {
+                    const char seq[] = {'\x1B','[','B'};
+                    keyboard_push_bytes(seq, 3);
+                    break;
+                }
+                case KEY_LEFT: {
+                    const char seq[] = {'\x1B','[','D'};
+                    keyboard_push_bytes(seq, 3);
+                    break;
+                }
+                case KEY_RIGHT: {
+                    const char seq[] = {'\x1B','[','C'};
+                    keyboard_push_bytes(seq, 3);
+                    break;
+                }
+                case KEY_PGUP: {
+                    const char seq[] = {'\x1B','[','5','~'};
+                    keyboard_push_bytes(seq, 4);
+                    break;
+                }
+                case KEY_PGDN: {
+                    const char seq[] = {'\x1B','[','6','~'};
+                    keyboard_push_bytes(seq, 4);
+                    break;
+                }
+                default:
+                    ring_buffer_push(c);
+                    break;
+            }
         }
     }
 }
@@ -95,5 +197,4 @@ void keyboard_init(void) {
         inb(0x60);
     }
     register_interrupt_handler(33, keyboard_callback);
-    console_puts("[OK] PS/2 Keyboard Driver Initialized on IRQ 1.\n");
 }

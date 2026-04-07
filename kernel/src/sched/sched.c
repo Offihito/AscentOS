@@ -29,7 +29,11 @@ void sched_init(void) {
         // Create the idle thread for this specific CPU
         struct thread *idle_thread = kmalloc(sizeof(struct thread));
         memset(idle_thread, 0, sizeof(struct thread));
-        idle_thread->tid = 0;
+        // Assign a proper TID to the idle thread (don't use 0)
+        spinlock_acquire(&tid_lock);
+        idle_thread->tid = next_tid++;
+        spinlock_release(&tid_lock);
+        idle_thread->is_idle = true;
         idle_thread->state = THREAD_RUNNING;
         idle_thread->next = idle_thread; // Circular queue
         
@@ -274,8 +278,9 @@ void sched_print_tasks(void) {
 }
 
 bool sched_terminate_thread(uint32_t tid) {
-    if (tid == 0) return false; // Cannot kill idle thread
-
+    // Cannot kill idle threads
+    // (We check by TID since we'll search for the thread by TID first)
+    
     for (uint32_t i = 0; i < cpu_get_count(); i++) {
         struct cpu_info *cpu = cpu_get_info(i);
         if (!cpu || cpu->status == CPU_STATUS_OFFLINE) continue;
@@ -286,7 +291,7 @@ bool sched_terminate_thread(uint32_t tid) {
         struct thread *curr = first;
         if (curr) {
             do {
-                if (curr->tid == tid) {
+                if (curr->tid == tid && !curr->is_idle) {
                     curr->state = THREAD_DEAD;
                     spinlock_release(&cpu->queue_lock);
                     __asm__ volatile("sti");

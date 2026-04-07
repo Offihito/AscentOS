@@ -19,9 +19,12 @@
 #define SYS_LSEEK      8
 #define SYS_MMAP       9
 #define SYS_MUNMAP    11
+#define SYS_BRK       12
+#define SYS_RT_SIGACTION 13
 #define SYS_IOCTL     16
 #define SYS_WRITEV    20
-#define SYS_BRK       12
+#define SYS_FTRUNCATE 77
+#define SYS_RT_SIGPROCMASK 14
 #define SYS_GETPID    39
 #define SYS_FORK      57
 #define SYS_EXECVE    59
@@ -29,6 +32,7 @@
 #define SYS_WAIT4     61
 #define SYS_FCNTL     72
 #define SYS_ARCH_PRCTL 158
+#define SYS_CLOCK_GETTIME 228
 #define SYS_SET_TID_ADDRESS 218
 #define SYS_EXIT_GROUP 231
 
@@ -60,6 +64,7 @@ void syscall_register_io(void);
 void syscall_register_process(void);
 void syscall_register_mm(void);
 void syscall_register_arch(void);
+void syscall_register_signal(void);
 
 // ── Core init (MSRs + calls subsystem registrations) ────────────────────────
 void syscall_init(void);
