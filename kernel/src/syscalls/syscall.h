@@ -16,6 +16,8 @@
 #define SYS_WRITE      1
 #define SYS_OPEN       2
 #define SYS_CLOSE      3
+#define SYS_STAT       4
+#define SYS_FSTAT      5
 #define SYS_LSEEK      8
 #define SYS_MMAP       9
 #define SYS_MUNMAP    11
@@ -23,6 +25,7 @@
 #define SYS_RT_SIGACTION 13
 #define SYS_IOCTL     16
 #define SYS_WRITEV    20
+#define SYS_NANOSLEEP 35
 #define SYS_FTRUNCATE 77
 #define SYS_RT_SIGPROCMASK 14
 #define SYS_GETPID    39
@@ -33,6 +36,7 @@
 #define SYS_FCNTL     72
 #define SYS_ARCH_PRCTL 158
 #define SYS_CLOCK_GETTIME 228
+#define SYS_GETDENTS64 217
 #define SYS_SET_TID_ADDRESS 218
 #define SYS_EXIT_GROUP 231
 

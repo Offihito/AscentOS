@@ -102,7 +102,34 @@ static uint64_t sys_clock_gettime(uint64_t clk_id, uint64_t tp_ptr,
     }
 }
 
+// nanosleep(req, rem) - sleep for specified time
+// req and rem are pointers to struct timespec { tv_sec, tv_nsec }
+static uint64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr,
+                              uint64_t a2, uint64_t a3,
+                              uint64_t a4, uint64_t a5) {
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)rem_ptr;
+
+    if (!req_ptr) return (uint64_t)-14; // EFAULT
+
+    uint64_t *req = (uint64_t *)req_ptr;
+    uint64_t sec = req[0];
+    uint64_t nsec = req[1];
+
+    // Convert to milliseconds
+    uint64_t total_ms = sec * 1000 + nsec / 1000000;
+    if (total_ms == 0 && nsec > 0) total_ms = 1; // Minimum 1ms
+
+    // Busy-wait sleep using LAPIC timer with interrupts enabled
+    uint64_t start = lapic_timer_get_ms();
+    while ((lapic_timer_get_ms() - start) < total_ms) {
+        __asm__ volatile("sti; pause"); // Enable interrupts and pause
+    }
+
+    return 0;
+}
+
 void syscall_register_arch(void) {
     syscall_register(SYS_ARCH_PRCTL, sys_arch_prctl);
     syscall_register(SYS_CLOCK_GETTIME, sys_clock_gettime);
+    syscall_register(SYS_NANOSLEEP, sys_nanosleep);
 }

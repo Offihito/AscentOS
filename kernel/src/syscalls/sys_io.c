@@ -33,6 +33,30 @@ typedef struct {
 #define F_GETFL 3
 #define F_SETFL 4
 
+// ── Linux x86_64 stat structure (matches musl struct stat) ────────────────────
+struct kstat {
+  uint64_t st_dev;      // Device
+  uint64_t st_ino;      // Inode
+  uint64_t st_nlink;    // Number of hard links
+
+  uint32_t st_mode;     // Mode (file type + permissions)
+  uint32_t st_uid;     // User ID
+  uint32_t st_gid;     // Group ID
+  uint32_t __pad0;     // Padding
+  uint64_t st_rdev;     // Device ID (if special file)
+  int64_t  st_size;     // Total size in bytes
+  int64_t  st_blksize;  // Block size for filesystem I/O
+  int64_t  st_blocks;   // Number of 512B blocks allocated
+
+  int64_t  st_atim_sec;   // Access time seconds
+  int64_t  st_atim_nsec;  // Access time nanoseconds
+  int64_t  st_mtim_sec;   // Modification time seconds
+  int64_t  st_mtim_nsec;  // Modification time nanoseconds
+  int64_t  st_ctim_sec;   // Status change time seconds
+  int64_t  st_ctim_nsec;  // Status change time nanoseconds
+  int64_t  __unused[3];   // Unused padding
+};
+
 typedef unsigned int  tcflag_t;
 typedef unsigned char cc_t;
 typedef unsigned int  speed_t;
@@ -348,14 +372,169 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg,
   }
 }
 
+// ── Fill kstat from vfs_node ────────────────────────────────────────────────
+static void fill_kstat(struct kstat *ks, vfs_node_t *node) {
+  ks->st_dev     = 0;  // No device numbers yet
+  ks->st_ino     = (uint64_t)node->inode;
+  ks->st_nlink   = 1;  // No hard link tracking yet
+
+  // Convert vfs flags to mode
+  uint32_t mode = node->mask & 0777;  // Permission bits
+  switch (node->flags & 0xFF) {
+    case FS_FILE:      mode |= 0100000; break; // S_IFREG
+    case FS_DIRECTORY: mode |= 0040000; break; // S_IFDIR
+    case FS_CHARDEV:   mode |= 0020000; break; // S_IFCHR
+    case FS_BLOCKDEV:  mode |= 0060000; break; // S_IFBLK
+    case FS_SYMLINK:   mode |= 0120000; break; // S_IFLNK
+    default:           mode |= 0100000; break; // Default to regular file
+  }
+  ks->st_mode    = mode;
+  ks->st_uid     = node->uid;
+  ks->st_gid     = node->gid;
+  ks->__pad0     = 0;
+  ks->st_rdev    = 0;
+  ks->st_size    = (int64_t)node->length;
+  ks->st_blksize = 4096;  // Reasonable default
+  ks->st_blocks  = ((int64_t)node->length + 511) / 512;
+
+  ks->st_atim_sec  = (int64_t)node->atime;
+  ks->st_atim_nsec = 0;
+  ks->st_mtim_sec  = (int64_t)node->mtime;
+  ks->st_mtim_nsec = 0;
+  ks->st_ctim_sec  = (int64_t)node->ctime;
+  ks->st_ctim_nsec = 0;
+  ks->__unused[0] = 0;
+  ks->__unused[1] = 0;
+  ks->__unused[2] = 0;
+}
+
+// ── sys_stat: stat(path, statbuf) ────────────────────────────────────────────
+static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr,
+                         uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  const char *path = (const char *)path_ptr;
+  struct kstat *ks = (struct kstat *)statbuf_ptr;
+
+  if (!path || !ks) return (uint64_t)-14; // EFAULT
+
+  vfs_node_t *node = vfs_resolve_path(path);
+  if (!node) {
+    klog_puts("[SYSCALL] sys_stat: not found: ");
+    klog_puts(path);
+    klog_puts("\n");
+    return (uint64_t)-2; // ENOENT
+  }
+
+  fill_kstat(ks, node);
+  return 0;
+}
+
+// ── sys_fstat: fstat(fd, statbuf) ─────────────────────────────────────────────
+static uint64_t sys_fstat(uint64_t fd, uint64_t statbuf_ptr,
+                          uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  struct kstat *ks = (struct kstat *)statbuf_ptr;
+
+  if (!ks) return (uint64_t)-14; // EFAULT
+
+  struct thread *t = sched_get_current();
+  if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
+
+  vfs_node_t *node = t->fds[fd];
+  fill_kstat(ks, node);
+  return 0;
+}
+
+// Linux getdents64 structure (binary compatible with musl/glibc)
+struct linux_dirent64 {
+  uint64_t d_ino;     // Inode number
+  uint64_t d_off;     // Offset to next entry
+  uint16_t d_reclen;  // Size of this dirent
+  uint8_t  d_type;    // File type (DT_REG, DT_DIR, etc.)
+  char     d_name[];  // Filename (null-terminated)
+};
+
+// DT_* constants from Linux dirent.h
+#define DT_UNKNOWN  0
+#define DT_FIFO     1
+#define DT_CHR      2
+#define DT_DIR      4
+#define DT_BLK      6
+#define DT_REG      8
+#define DT_LNK     10
+#define DT_SOCK    12
+
+// getdents64(fd, dirp, count) - read directory entries
+static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
+                               uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3; (void)a4; (void)a5;
+  struct thread *t = sched_get_current();
+  if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
+
+  vfs_node_t *node = t->fds[fd];
+  if ((node->flags & 0xFF) != FS_DIRECTORY) return (uint64_t)-20; // ENOTDIR
+
+  uint8_t *buf = (uint8_t *)dirp;
+  if (!buf) return (uint64_t)-14; // EFAULT
+
+  size_t written = 0;
+  uint32_t index = t->fd_offsets[fd]; // Start from saved position
+
+  while (1) {
+    struct dirent *de = vfs_readdir(node, index);
+    if (!de) break; // No more entries
+
+    size_t name_len = strlen(de->name);
+    size_t entry_size = sizeof(struct linux_dirent64) + name_len + 1;
+    entry_size = (entry_size + 7) & ~7; // Align to 8 bytes
+
+    if (written + entry_size > count) {
+      // Buffer full - return what we have, don't advance index
+      break;
+    }
+
+    struct linux_dirent64 *entry = (struct linux_dirent64 *)(buf + written);
+    entry->d_ino = de->ino;
+    entry->d_off = (uint64_t)(index + 1);
+    entry->d_reclen = (uint16_t)entry_size;
+
+    // Determine file type from VFS node
+    vfs_node_t *child = vfs_finddir(node, de->name);
+    if (child) {
+      switch (child->flags & 0xFF) {
+        case FS_FILE:      entry->d_type = DT_REG; break;
+        case FS_DIRECTORY: entry->d_type = DT_DIR; break;
+        case FS_CHARDEV:   entry->d_type = DT_CHR; break;
+        case FS_BLOCKDEV:  entry->d_type = DT_BLK; break;
+        case FS_SYMLINK:   entry->d_type = DT_LNK; break;
+        default:          entry->d_type = DT_UNKNOWN; break;
+      }
+    } else {
+      entry->d_type = DT_UNKNOWN;
+    }
+
+    strcpy(entry->d_name, de->name);
+    written += entry_size;
+    index++;
+  }
+
+  // Update saved position for next call
+  t->fd_offsets[fd] = index;
+
+  return written;
+}
+
 void syscall_register_io(void) {
-  syscall_register(SYS_READ,      sys_read);
-  syscall_register(SYS_WRITE,     sys_write);
-  syscall_register(SYS_WRITEV,    sys_writev);
-  syscall_register(SYS_IOCTL,     sys_ioctl);
-  syscall_register(SYS_OPEN,      sys_open);
-  syscall_register(SYS_CLOSE,     sys_close);
-  syscall_register(SYS_LSEEK,     sys_lseek);
-  syscall_register(SYS_FTRUNCATE, sys_ftruncate);
-  syscall_register(SYS_FCNTL,     sys_fcntl);
+  syscall_register(SYS_READ,       sys_read);
+  syscall_register(SYS_WRITE,      sys_write);
+  syscall_register(SYS_WRITEV,     sys_writev);
+  syscall_register(SYS_IOCTL,      sys_ioctl);
+  syscall_register(SYS_OPEN,       sys_open);
+  syscall_register(SYS_CLOSE,      sys_close);
+  syscall_register(SYS_LSEEK,      sys_lseek);
+  syscall_register(SYS_FTRUNCATE,  sys_ftruncate);
+  syscall_register(SYS_FCNTL,      sys_fcntl);
+  syscall_register(SYS_STAT,       sys_stat);
+  syscall_register(SYS_FSTAT,      sys_fstat);
+  syscall_register(SYS_GETDENTS64, sys_getdents64);
 }

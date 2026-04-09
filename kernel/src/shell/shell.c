@@ -20,8 +20,6 @@
 static char cmd_buffer[CMD_BUFFER_SIZE];
 static int cmd_len = 0;
 
-
-
 static void test_task_entry(void);
 
 static void shell_print_uint64(uint64_t num) {
@@ -94,8 +92,8 @@ static void execute_command(char *cmd) {
     console_puts("  test_ring3_phase1 - Verify GDT and TSS initialization\n");
     console_puts("  test_ring3_phase2 - Verify Syscall MSR initialization\n");
     console_puts("  test_ring3_phase3 - Verify Syscall translation layer\n");
-    console_puts(
-        "  exec      - Execute an ELF (e.g. exec /mnt/hello_musl.elf [args...])\n");
+    console_puts("  exec      - Execute an ELF (e.g. exec /mnt/hello_musl.elf "
+                 "[args...])\n");
     console_puts("  kilo      - Launch the kilo text editor\n");
   } else if (strcmp(cmd, "ps") == 0) {
     sched_print_tasks();
@@ -888,11 +886,15 @@ static void execute_command(char *cmd) {
     int argc = 0;
     char *p = args_str;
     while (*p && argc < 9) {
-      while (*p == ' ') p++;
-      if (!*p) break;
+      while (*p == ' ')
+        p++;
+      if (!*p)
+        break;
       argv[argc++] = p;
-      while (*p && *p != ' ') p++;
-      if (*p) *p++ = 0;
+      while (*p && *p != ' ')
+        p++;
+      if (*p)
+        *p++ = 0;
     }
     argv[argc] = NULL;
     if (argc > 0) {
@@ -902,10 +904,18 @@ static void execute_command(char *cmd) {
     } else {
       console_puts("exec: no command\n");
     }
-  } else if (strcmp(cmd, "kilo") == 0) {
-    const char *argv[] = {"/mnt/kilo.elf", NULL};
-    if (!process_exec_argv(argv)) {
-      console_puts("kilo exec failed.\n");
+  } else if (strncmp(cmd, "kilo", 4) == 0) {
+    // Usage: kilo <filename>  (e.g. kilo /mnt/test.txt)
+    char *filename = cmd + 4;
+    while (*filename == ' ') filename++;  // skip spaces
+    
+    if (*filename == '\0') {
+      console_puts("Usage: kilo <filename> (e.g. kilo /mnt/test.txt)\n");
+    } else {
+      const char *argv[] = {"/mnt/kilo.elf", filename, NULL};
+      if (!process_exec_argv(argv)) {
+        console_puts("kilo exec failed.\n");
+      }
     }
   } else {
     console_puts("Unknown command. Type 'help' for available commands.\n");

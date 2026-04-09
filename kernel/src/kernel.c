@@ -161,7 +161,7 @@ void kmain(void) {
   if (test_phys) {
     uint64_t vaddr = 0xCAFEBABE000;
     if (!vmm_map_page(vmm_get_active_pml4(), vaddr, (uint64_t)test_phys,
-                     PAGE_FLAG_RW | PAGE_FLAG_USER)) {
+                      PAGE_FLAG_RW | PAGE_FLAG_USER)) {
       klog_puts("[ERROR] vmm_map_page test failed\n");
     } else {
       volatile uint64_t *test_ptr = (volatile uint64_t *)vaddr;

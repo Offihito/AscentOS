@@ -51,9 +51,8 @@ static uint32_t fb_vfs_write(struct vfs_node *node, uint32_t offset,
   if (offset + size > fb_size)
     size = fb_size - offset;
 
-  uint8_t *dst =
-      backbuffer_enabled ? (uint8_t *)backbuffer : (uint8_t *)fb->address;
-  memcpy(dst + offset, buffer, size);
+  // Write directly to framebuffer, bypass backbuffer to avoid console interference
+  memcpy((uint8_t *)fb->address + offset, buffer, size);
 
   return size;
 }
@@ -86,8 +85,10 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
   (void)offset;
   if (size == 0) return 0;
 
+  // Non-blocking: return 0 if no input available
+  if (!keyboard_has_char()) return 0;
+
   uint32_t count = 0;
-  buffer[count++] = keyboard_get_char();
   while (count < size && keyboard_has_char())
     buffer[count++] = keyboard_get_char();
 

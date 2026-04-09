@@ -236,12 +236,18 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path, const
   uint64_t string_area = stack_top - total_size;
   string_area &= ~0xFULL;
 
-  // Copy strings
+  // Get HHDM offset for kernel access to user memory
+  uint64_t hhdm = pmm_get_hhdm_offset();
+
+  // Copy strings using HHDM to access the physical memory
   uint64_t current = string_area;
   uint64_t argv_ptrs[argc];
   for (int i = 0; i < argc; i++) {
     size_t len = strlen(argv[i]) + 1;
-    memcpy((void *)current, argv[i], len);
+    // Translate user VA to kernel VA via VMM, then copy
+    uint64_t phys = vmm_virt_to_phys(vmm_get_active_pml4(), current);
+    void *kernel_virt = (void *)(phys + hhdm);
+    memcpy(kernel_virt, argv[i], len);
     argv_ptrs[i] = current;
     current += len;
   }
@@ -249,24 +255,41 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path, const
   uint64_t envp_ptrs[envc];
   for (int i = 0; i < envc; i++) {
     size_t len = strlen(envp[i]) + 1;
-    memcpy((void *)current, envp[i], len);
+    uint64_t phys = vmm_virt_to_phys(vmm_get_active_pml4(), current);
+    void *kernel_virt = (void *)(phys + hhdm);
+    memcpy(kernel_virt, envp[i], len);
     envp_ptrs[i] = current;
     current += len;
   }
 
-  // Build stack
-  uint64_t *stack = (uint64_t *)current;
-  stack = (uint64_t *)((uint64_t)stack & ~0xFULL);
+  // Build stack - need to write through HHDM as well
+  uint64_t stack_ptr = current;
+  stack_ptr &= ~0xFULL;
+  
+  // Calculate stack entries in a temporary buffer, then copy to user stack
+  // We need to write: argc, argv ptrs, 0, envp ptrs, 0, AT_NULL (two zeros)
+  uint64_t stack_entries[argc + envc + 4]; // argc + argv + null + envp + null + 2 auxv
+  int idx = 0;
+  
+  stack_entries[idx++] = (uint64_t)argc;
+  for (int i = 0; i < argc; i++) stack_entries[idx++] = argv_ptrs[i];
+  stack_entries[idx++] = 0; // end argv
+  for (int i = 0; i < envc; i++) stack_entries[idx++] = envp_ptrs[i];
+  stack_entries[idx++] = 0; // end envp
+  stack_entries[idx++] = 0; // AT_NULL
+  stack_entries[idx++] = 0;
+  
+  // Calculate where the final stack pointer will be
+  size_t stack_bytes = idx * sizeof(uint64_t);
+  uint64_t final_sp = stack_ptr - stack_bytes;
+  final_sp &= ~0xFULL;
+  
+  // Copy the stack entries through HHDM
+  uint64_t phys = vmm_virt_to_phys(vmm_get_active_pml4(), final_sp);
+  void *kernel_virt = (void *)(phys + hhdm);
+  memcpy(kernel_virt, stack_entries, stack_bytes);
 
-  *--stack = 0; // AT_NULL
-  *--stack = 0;
-  *--stack = 0; // end envp
-  for (int i = envc - 1; i >= 0; i--) *--stack = envp_ptrs[i];
-  *--stack = 0; // end argv
-  for (int i = argc - 1; i >= 0; i--) *--stack = argv_ptrs[i];
-  *--stack = (uint64_t)argc;
-
-  return (uint64_t)stack;
+  return final_sp;
 }
 
 bool process_exec_argv(const char **argv) {
