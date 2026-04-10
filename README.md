@@ -31,6 +31,7 @@ To build and run AscentOS, you will need the following dependencies installed on
 - `xorriso` (for creating the bootable ISO)
 - `curl`, `tar`, `gunzip` (for downloading dependencies like Limine and OVMF)
 - `e2fsprogs` (specifically `mkfs.ext2` and `debugfs` for generating disk images)
+- `rustc` and `cargo` (for building the kria-lang port)
 
 ## Building and Running
 
@@ -53,11 +54,20 @@ The project includes a robust `Makefile` for automated builds, disk image creati
    make run-bios
    ```
 
+## Ported Software
+
+- **Kria Programming Language** - A custom programming language with bytecode VM execution, ported from [kria-lang](https://github.com/Piotriox/kria-lang). Built as a static binary using Rust and musl libc for Linux x86_64 binary compatibility.
+  - Build: `make kria`
+  - Included on disk image: `kria.elf` (interpreter) and `test.krx` (sample program)
+  - Usage on AscentOS: `./kria.elf program.krx`
+
 ## Directory Structure
 
 - `kernel/` - The core operating system source code.
   - `src/` - C source files and subsystems (acpi, apic, fs, mm, sched, shell, smp, etc.).
   - `linker-scripts/` - Custom linker script for the x86_64 kernel.
+- `userland/` - User-space programs compiled with musl libc.
+  - `kria-lang/` - Kria programming language source (Rust).
 - `limine.conf` - Configuration file for the Limine bootloader.
 - `GNUmakefile` - The main build script orchestrating the Limine download, kernel build, disk image generation, and QEMU execution.
 

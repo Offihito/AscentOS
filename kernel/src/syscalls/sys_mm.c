@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 // ── Linux mmap constants ────────────────────────────────────────────────────
+#define PROT_NONE   0x0
 #define PROT_READ   0x1
 #define PROT_WRITE  0x2
 #define PROT_EXEC   0x4
@@ -272,11 +273,52 @@ static uint64_t sys_brk(uint64_t addr, uint64_t a1, uint64_t a2,
     return process_brk_current;
 }
 
+// ── sys_mprotect ────────────────────────────────────────────────────────────
+// Linux ABI: mprotect(addr, len, prot)
+//   rdi = addr, rsi = len, rdx = prot
+static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
+                              uint64_t a3, uint64_t a4, uint64_t a5) {
+    (void)a3; (void)a4; (void)a5;
+    
+    // addr must be page-aligned
+    if (addr & (PAGE_SIZE - 1)) {
+        return (uint64_t)-22; // EINVAL
+    }
+    
+    if (len == 0) {
+        return 0; // Success (nothing to do)
+    }
+    
+    uint64_t aligned_len = PAGE_ALIGN_UP(len);
+    uint64_t num_pages = aligned_len / PAGE_SIZE;
+    uint64_t *pml4 = vmm_get_active_pml4();
+    uint64_t new_flags = build_page_flags(prot);
+    
+    for (uint64_t i = 0; i < num_pages; i++) {
+        uint64_t va = addr + i * PAGE_SIZE;
+        uint64_t phys = vmm_virt_to_phys(pml4, va);
+        
+        if (phys == 0) {
+            // Page not mapped - skip it (Linux allows this)
+            continue;
+        }
+        
+        // Remap with new protection flags
+        vmm_unmap_page(pml4, va);
+        if (!vmm_map_page(pml4, va, phys, new_flags)) {
+            return (uint64_t)-12; // ENOMEM
+        }
+    }
+    
+    return 0; // Success
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 void syscall_register_mm(void) {
-    syscall_register(SYS_MMAP,   sys_mmap);
-    syscall_register(SYS_MUNMAP, sys_munmap);
-    syscall_register(SYS_BRK,    sys_brk);
+    syscall_register(SYS_MMAP,     sys_mmap);
+    syscall_register(SYS_MUNMAP,   sys_munmap);
+    syscall_register(SYS_BRK,      sys_brk);
+    syscall_register(SYS_MPROTECT, sys_mprotect);
 }
 
 // ── Reset mmap state (called from process_exec on new process load) ─────────
