@@ -59,7 +59,7 @@ The project includes a robust `Makefile` for automated builds, disk image creati
 - **Kria Programming Language** - A custom programming language with bytecode VM execution, ported from [kria-lang](https://github.com/Piotriox/kria-lang). Built as a static binary using Rust and musl libc for Linux x86_64 binary compatibility.
   - Build: `make kria`
   - Included on disk image: `kria.elf` (interpreter) and `test.krx` (sample program)
-  - Usage on AscentOS: `./kria.elf program.krx`
+  - Usage on AscentOS: `exec /mnt/kria.elf /mnt/program.krx`
 
 ## Directory Structure
 
