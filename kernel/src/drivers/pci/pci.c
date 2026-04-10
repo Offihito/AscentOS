@@ -152,6 +152,21 @@ struct pci_device *pci_find_device(uint8_t class_code, uint8_t subclass) {
     return NULL;
 }
 
+struct pci_device *pci_find_device_by_id(uint16_t vendor_id, uint16_t device_id) {
+    for (uint32_t i = 0; i < device_count; i++) {
+        if (devices[i].vendor_id == vendor_id && devices[i].device_id == device_id) {
+            return &devices[i];
+        }
+    }
+    return NULL;
+}
+
+void pci_enable_bus_mastering(struct pci_device *dev) {
+    uint32_t cmd = pci_config_read32(dev->bus, dev->slot, dev->func, 0x04);
+    cmd |= (1 << 2);  // Set Bus Master bit
+    pci_config_write32(dev->bus, dev->slot, dev->func, 0x04, cmd);
+}
+
 uint32_t pci_get_device_count(void) {
     return device_count;
 }

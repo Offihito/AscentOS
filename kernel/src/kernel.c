@@ -10,6 +10,7 @@
 #include "cpu/isr.h"
 #include "cpu/pic.h"
 #include "drivers/input/keyboard.h"
+#include "drivers/net/rtl8139.h"
 #include "drivers/pci/pci.h"
 #include "drivers/serial.h"
 #include "drivers/storage/ahci.h"
@@ -23,6 +24,7 @@
 #include "mm/heap.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "net/net.h"
 #include "sched/sched.h"
 #include "shell/shell.h"
 #include "smp/cpu.h"
@@ -288,6 +290,8 @@ void kmain(void) {
 
   pci_init();
   ahci_init();
+  rtl8139_init();
+  net_init();
 
   int devs = block_count();
   klog_puts("[DIAG] Available Block Devices (via Block API):\n");

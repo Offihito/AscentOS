@@ -3,6 +3,7 @@
 #include "console/console.h"
 #include "console/klog.h"
 #include "drivers/input/keyboard.h"
+#include "drivers/net/rtl8139.h"
 #include "drivers/serial.h"
 #include "drivers/storage/block.h"
 #include "fs/ext2.h"
@@ -11,6 +12,9 @@
 #include "lock/spinlock.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
+#include "net/arp.h"
+#include "net/net.h"
+#include "net/netif.h"
 #include "sched/sched.h"
 #include "smp/cpu.h"
 #include <stdint.h>
@@ -95,6 +99,11 @@ static void execute_command(char *cmd) {
     console_puts("  exec      - Execute an ELF (e.g. exec /mnt/hello_musl.elf "
                  "[args...])\n");
     console_puts("  kilo      - Launch the kilo text editor\n");
+    console_puts("  netinfo   - Show NIC status and MAC address\n");
+    console_puts("  ifconfig  - Show network interface configuration\n");
+    console_puts("  arp       - Display ARP cache table\n");
+    console_puts(
+        "  arping    - Send ARP request (e.g. arping 10.0.2.2)\n");
   } else if (strcmp(cmd, "ps") == 0) {
     sched_print_tasks();
   } else if (strncmp(cmd, "kill ", 5) == 0) {
@@ -915,6 +924,155 @@ static void execute_command(char *cmd) {
       const char *argv[] = {"/mnt/kilo.elf", filename, NULL};
       if (!process_exec_argv(argv)) {
         console_puts("kilo exec failed.\n");
+      }
+    }
+  } else if (strcmp(cmd, "netinfo") == 0) {
+    if (!rtl8139_is_present()) {
+      console_puts("No RTL8139 NIC detected.\n");
+    } else {
+      const uint8_t *mac = rtl8139_get_mac();
+      const char *hex = "0123456789ABCDEF";
+      console_puts("RTL8139 Network Interface\n");
+      console_puts("  MAC Address: ");
+      for (int i = 0; i < 6; i++) {
+        console_putchar(hex[(mac[i] >> 4) & 0xF]);
+        console_putchar(hex[mac[i] & 0xF]);
+        if (i < 5) console_putchar(':');
+      }
+      console_puts("\n  Link: ");
+      console_puts(rtl8139_link_up() ? "UP" : "DOWN");
+      console_puts("\n  I/O Base: 0x");
+      uint16_t iobase = rtl8139_get_iobase();
+      console_putchar(hex[(iobase >> 12) & 0xF]);
+      console_putchar(hex[(iobase >> 8) & 0xF]);
+      console_putchar(hex[(iobase >> 4) & 0xF]);
+      console_putchar(hex[iobase & 0xF]);
+      console_puts("\n  IRQ: ");
+      shell_print_uint64(rtl8139_get_irq());
+      console_puts("\n");
+    }
+  } else if (strcmp(cmd, "ifconfig") == 0) {
+    netif_t *nif = netif_get();
+    if (!nif->up) {
+      console_puts("Network interface is down.\n");
+    } else {
+      const char *hex = "0123456789ABCDEF";
+      console_puts("eth0:\n");
+      console_puts("  MAC: ");
+      for (int i = 0; i < 6; i++) {
+        console_putchar(hex[(nif->mac[i] >> 4) & 0xF]);
+        console_putchar(hex[nif->mac[i] & 0xF]);
+        if (i < 5) console_putchar(':');
+      }
+      console_puts("\n  IP:      ");
+      shell_print_uint64((nif->ip >> 24) & 0xFF);
+      console_putchar('.');
+      shell_print_uint64((nif->ip >> 16) & 0xFF);
+      console_putchar('.');
+      shell_print_uint64((nif->ip >> 8) & 0xFF);
+      console_putchar('.');
+      shell_print_uint64(nif->ip & 0xFF);
+      console_puts("\n  Gateway: ");
+      shell_print_uint64((nif->gateway >> 24) & 0xFF);
+      console_putchar('.');
+      shell_print_uint64((nif->gateway >> 16) & 0xFF);
+      console_putchar('.');
+      shell_print_uint64((nif->gateway >> 8) & 0xFF);
+      console_putchar('.');
+      shell_print_uint64(nif->gateway & 0xFF);
+      console_puts("\n  Netmask: ");
+      shell_print_uint64((nif->netmask >> 24) & 0xFF);
+      console_putchar('.');
+      shell_print_uint64((nif->netmask >> 16) & 0xFF);
+      console_putchar('.');
+      shell_print_uint64((nif->netmask >> 8) & 0xFF);
+      console_putchar('.');
+      shell_print_uint64(nif->netmask & 0xFF);
+      console_puts("\n  Status:  UP\n");
+    }
+  } else if (strcmp(cmd, "arp") == 0) {
+    int count = 0;
+    const arp_entry_t *table = arp_get_table(&count);
+    const char *hex = "0123456789ABCDEF";
+    int found = 0;
+    console_puts("ARP Cache:\n");
+    for (int i = 0; i < count; i++) {
+      if (!table[i].valid) continue;
+      found++;
+      console_puts("  ");
+      shell_print_uint64((table[i].ip >> 24) & 0xFF);
+      console_putchar('.');
+      shell_print_uint64((table[i].ip >> 16) & 0xFF);
+      console_putchar('.');
+      shell_print_uint64((table[i].ip >> 8) & 0xFF);
+      console_putchar('.');
+      shell_print_uint64(table[i].ip & 0xFF);
+      console_puts(" -> ");
+      for (int j = 0; j < 6; j++) {
+        console_putchar(hex[(table[i].mac[j] >> 4) & 0xF]);
+        console_putchar(hex[table[i].mac[j] & 0xF]);
+        if (j < 5) console_putchar(':');
+      }
+      console_putchar('\n');
+    }
+    if (!found) {
+      console_puts("  (empty)\n");
+    }
+  } else if (strncmp(cmd, "arping ", 7) == 0) {
+    // Parse dotted-decimal IP: arping 10.0.2.2
+    char *ip_str = cmd + 7;
+    uint32_t octets[4] = {0};
+    int octet_idx = 0;
+    for (char *p = ip_str; *p && octet_idx < 4; p++) {
+      if (*p >= '0' && *p <= '9') {
+        octets[octet_idx] = octets[octet_idx] * 10 + (*p - '0');
+      } else if (*p == '.') {
+        octet_idx++;
+      }
+    }
+    if (octet_idx == 3) {
+      // Final octet was set but no trailing dot
+    }
+    uint32_t target_ip = (octets[0] << 24) | (octets[1] << 16) |
+                         (octets[2] << 8)  | octets[3];
+
+    console_puts("ARPING ");
+    shell_print_uint64(octets[0]); console_putchar('.');
+    shell_print_uint64(octets[1]); console_putchar('.');
+    shell_print_uint64(octets[2]); console_putchar('.');
+    shell_print_uint64(octets[3]);
+    console_puts("...\n");
+
+    if (arp_send_request(target_ip) < 0) {
+      console_puts("Failed to send ARP request.\n");
+    } else {
+      // Poll for a reply (up to ~2 seconds)
+      const char *hex = "0123456789ABCDEF";
+      bool got_reply = false;
+      for (int attempt = 0; attempt < 200000; attempt++) {
+        net_poll();  // Process any queued packets
+        const arp_entry_t *entry = arp_lookup(target_ip);
+        if (entry) {
+          console_puts("Reply from ");
+          shell_print_uint64(octets[0]); console_putchar('.');
+          shell_print_uint64(octets[1]); console_putchar('.');
+          shell_print_uint64(octets[2]); console_putchar('.');
+          shell_print_uint64(octets[3]);
+          console_puts(" [MAC: ");
+          for (int j = 0; j < 6; j++) {
+            console_putchar(hex[(entry->mac[j] >> 4) & 0xF]);
+            console_putchar(hex[entry->mac[j] & 0xF]);
+            if (j < 5) console_putchar(':');
+          }
+          console_puts("]\n");
+          got_reply = true;
+          break;
+        }
+        // Small delay between polls
+        for (volatile int d = 0; d < 100; d++) { }
+      }
+      if (!got_reply) {
+        console_puts("Timeout: no ARP reply received.\n");
       }
     }
   } else {

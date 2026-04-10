@@ -34,6 +34,12 @@ void pci_init(void);
 // Find a device by class/subclass. Returns NULL if not found.
 struct pci_device *pci_find_device(uint8_t class_code, uint8_t subclass);
 
+// Find a device by vendor/device ID. Returns NULL if not found.
+struct pci_device *pci_find_device_by_id(uint16_t vendor_id, uint16_t device_id);
+
+// Enable PCI bus-mastering for a device (required for DMA).
+void pci_enable_bus_mastering(struct pci_device *dev);
+
 // Get the number of discovered devices
 uint32_t pci_get_device_count(void);
 

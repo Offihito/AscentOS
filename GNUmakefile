@@ -35,6 +35,8 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-smp 4 \
 		-serial stdio \
 		-audiodev none,id=none \
+		-device rtl8139,netdev=net0 \
+		-netdev user,id=net0 \
 		$(QEMUFLAGS)
 
 .PHONY: run-bios
