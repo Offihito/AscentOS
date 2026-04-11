@@ -49,7 +49,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/pong.elf userland/kria.elf
+disk.img: userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/kria.elf
 	dd if=/dev/zero of=disk.img bs=1M count=64
 	mkfs.ext2 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
@@ -74,6 +74,8 @@ disk.img: userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf
 	debugfs -w -R "write userland/test_stat.elf test_stat.elf" disk.img
 	debugfs -w -R "write userland/ls.elf ls.elf" disk.img
 	debugfs -w -R "write userland/pong.elf pong.elf" disk.img
+	debugfs -w -R "write userland/raycast.elf raycast.elf" disk.img
+	debugfs -w -R "write userland/test_mmap_shared_private.elf test_mmap_shared_private.elf" disk.img
 	debugfs -w -R "write userland/kria.elf kria.elf" disk.img
 	debugfs -w -R "write userland/kria-lang/test.krx test.krx" disk.img
 	debugfs -w -R "write userland/hello.krx hello.krx" disk.img
@@ -129,7 +131,7 @@ clean: clean-musl
 clean-musl:
 	rm -rf build/musl-1.2.5 build/musl-cross-make
 	rm -rf toolchain/musl-sysroot toolchain/x86_64-linux-musl
-	rm -f userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/kilo.c userland/kria.elf
+	rm -f userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/kilo.c userland/test_mmap_shared_private.elf userland/kria.elf
 	rm -rf userland/kria-lang/target
 
 .PHONY: clean-disk
@@ -209,6 +211,10 @@ userland/test_stat.elf: userland/test_stat.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_stat.c -o userland/test_stat.elf
 
+userland/test_mmap_shared_private.elf: userland/test_mmap_shared_private.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_mmap_shared_private.c -o userland/test_mmap_shared_private.elf
+
 userland/ls.elf: userland/ls.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/ls.c -o userland/ls.elf
@@ -216,6 +222,10 @@ userland/ls.elf: userland/ls.c $(MUSL_LIBC)
 userland/pong.elf: userland/pong.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/pong.c -o userland/pong.elf
+
+userland/raycast.elf: userland/raycast.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/raycast.c -lm -o userland/raycast.elf
 
 # Kria programming language (Rust-based, compiled with musl for static linking)
 userland/kria-lang:

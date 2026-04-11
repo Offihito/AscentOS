@@ -2,8 +2,10 @@
 #include "syscall.h"
 #include "../mm/vmm.h"
 #include "../mm/pmm.h"
+#include "../mm/vma.h"
 #include "../lib/string.h"
 #include "../console/klog.h"
+#include "../sched/sched.h"
 #include <stdint.h>
 
 // ── Linux mmap constants ────────────────────────────────────────────────────
@@ -53,7 +55,21 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
                           uint64_t flags, uint64_t fd, uint64_t offset) {
     (void)fd; (void)offset;
 
-    // We only support anonymous private mappings for now.
+    // Validate flags: must have exactly one of MAP_SHARED or MAP_PRIVATE
+    bool is_shared = (flags & MAP_SHARED) != 0;
+    bool is_private = (flags & MAP_PRIVATE) != 0;
+    
+    if (!is_shared && !is_private) {
+        klog_puts("[MMAP] Error: Must specify MAP_SHARED or MAP_PRIVATE\n");
+        return MAP_FAILED;
+    }
+    
+    if (is_shared && is_private) {
+        klog_puts("[MMAP] Error: Cannot specify both MAP_SHARED and MAP_PRIVATE\n");
+        return MAP_FAILED;
+    }
+    
+    // We only support anonymous mappings for now
     if (!(flags & MAP_ANONYMOUS)) {
         klog_puts("[MMAP] Error: Only MAP_ANONYMOUS supported\n");
         return MAP_FAILED;
@@ -120,11 +136,21 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         }
     }
 
+    // Register the mapping in the VMA list
+    struct thread *current = sched_get_current();
+    if (current) {
+        int vma_idx = vma_add(&current->vmas, vaddr, vaddr + aligned_len, prot, flags, -1, 0);
+        if (vma_idx < 0) {
+            klog_puts("[MMAP] Warning: Failed to register VMA\n");
+            // Continue anyway - mapping is valid
+        }
+    }
+
     klog_puts("[MMAP] Mapped ");
     klog_uint64(aligned_len);
     klog_puts(" bytes at ");
     klog_uint64(vaddr);
-    klog_puts("\n");
+    klog_puts(is_shared ? " (SHARED)\n" : " (PRIVATE)\n");
 
     return vaddr;
 }
@@ -149,18 +175,40 @@ static uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2,
     uint64_t num_pages = aligned_len / PAGE_SIZE;
     uint64_t *pml4 = vmm_get_active_pml4();
 
+    // Get VMA for this region to check if it's shared
+    struct thread *current = sched_get_current();
+    bool is_shared = false;
+    if (current) {
+        struct vma *vma = vma_find(&current->vmas, addr);
+        if (vma && (vma->flags & MAP_SHARED)) {
+            is_shared = true;
+        }
+    }
+
     for (uint64_t i = 0; i < num_pages; i++) {
         uint64_t va = addr + i * PAGE_SIZE;
-        // TODO: Recover physical frame and pmm_free() it.
-        // Requires a vmm_virt_to_phys() lookup, which we don't have yet.
+        uint64_t phys = vmm_virt_to_phys(pml4, va);
+        
+        if (phys != 0) {
+            // For private mappings, free the physical page
+            // For shared mappings, we don't free here (would need refcounting)
+            if (!is_shared) {
+                pmm_free((void *)phys);
+            }
+        }
         vmm_unmap_page(pml4, va);
+    }
+
+    // Remove from VMA list
+    if (current) {
+        vma_remove(&current->vmas, addr, addr + aligned_len);
     }
 
     klog_puts("[MUNMAP] Unmapped ");
     klog_uint64(aligned_len);
     klog_puts(" bytes at ");
     klog_uint64(addr);
-    klog_puts("\n");
+    klog_puts(is_shared ? " (SHARED)\n" : " (PRIVATE)\n");
 
     return 0;
 }

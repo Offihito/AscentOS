@@ -320,6 +320,34 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     console_termios = *term;
     return 0;
   }
+  case 0x5470: { // KBDSCANMODE_GET
+    int *mode = (int *)arg;
+    if (!mode) return (uint64_t)-14;
+    extern bool keyboard_is_scancode_mode(void);
+    *mode = keyboard_is_scancode_mode() ? 1 : 0;
+    return 0;
+  }
+  case 0x5471: { // KBDSCANMODE_SET
+    int mode = (int)arg;
+    extern void keyboard_set_scancode_mode(bool enabled);
+    keyboard_set_scancode_mode(mode != 0);
+    return 0;
+  }
+  case 0x5472: { // KBDSCANCODE_READ
+    // Scancode event structure: {scancode(1), is_extended(1), is_release(1)}
+    unsigned char *event = (unsigned char *)arg;
+    if (!event) return (uint64_t)-14;
+    
+    extern bool keyboard_has_scancode(void);
+    extern bool keyboard_get_scancode(void *event_ptr);
+    
+    if (keyboard_has_scancode()) {
+      if (keyboard_get_scancode((void *)event)) {
+        return 1; // 1 scancode event read
+      }
+    }
+    return 0; // No scancode available (would block in non-blocking mode)
+  }
   default:
     return (uint64_t)-25; // ENOTTY
   }

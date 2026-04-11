@@ -1,4 +1,5 @@
 #include "drivers/input/keyboard.h"
+#include "drivers/input/scancode.h"
 #include "cpu/isr.h"
 #include "io/io.h"
 #include "console/console.h"
@@ -28,6 +29,13 @@ static char kbd_buffer[KBD_BUFFER_SIZE];
 static volatile uint32_t kbd_head = 0;
 static volatile uint32_t kbd_tail = 0;
 
+// Scancode event buffer
+#define SCANCODE_BUFFER_SIZE 256
+static scancode_event_t scancode_buffer[SCANCODE_BUFFER_SIZE];
+static volatile uint32_t scancode_head = 0;
+static volatile uint32_t scancode_tail = 0;
+static volatile bool scancode_mode_enabled = false;
+
 static bool left_shift = false;
 static bool right_shift = false;
 static bool left_ctrl = false;
@@ -40,6 +48,16 @@ static void ring_buffer_push(char c) {
     if (next != kbd_tail) {
         kbd_buffer[kbd_head] = c;
         kbd_head = next;
+    }
+}
+
+static void scancode_buffer_push(uint8_t scancode, uint8_t is_extended, uint8_t is_release) {
+    uint32_t next = (scancode_head + 1) % SCANCODE_BUFFER_SIZE;
+    if (next != scancode_tail) {
+        scancode_buffer[scancode_head].scancode = scancode;
+        scancode_buffer[scancode_head].is_extended = is_extended;
+        scancode_buffer[scancode_head].is_release = is_release;
+        scancode_head = next;
     }
 }
 
@@ -65,6 +83,30 @@ char keyboard_get_char(void) {
     return c;
 }
 
+// Scancode mode functions
+bool keyboard_has_scancode(void) {
+    return scancode_head != scancode_tail;
+}
+
+bool keyboard_get_scancode(scancode_event_t *event) {
+    if (!event) return false;
+    if (scancode_head == scancode_tail) return false;
+    
+    *event = scancode_buffer[scancode_tail];
+    scancode_tail = (scancode_tail + 1) % SCANCODE_BUFFER_SIZE;
+    return true;
+}
+
+void keyboard_set_scancode_mode(bool enabled) {
+    __asm__ volatile("cli");
+    scancode_mode_enabled = enabled;
+    __asm__ volatile("sti");
+}
+
+bool keyboard_is_scancode_mode(void) {
+    return scancode_mode_enabled;
+}
+
 static void keyboard_callback(struct registers *regs) {
     (void)regs;
     uint8_t code = inb(0x60);
@@ -72,6 +114,27 @@ static void keyboard_callback(struct registers *regs) {
 
     bool release = (code & 0x80) != 0;
     uint8_t scancode = code & 0x7F;
+
+    // In scancode mode, capture all raw scancodes
+    if (scancode_mode_enabled) {
+        if (code == 0xE0) {
+            extended_scancode = true;
+            return;
+        }
+
+        if (extended_scancode) {
+            extended_scancode = false;
+            scancode_buffer_push(scancode, 1, release ? 1 : 0);
+        } else {
+            scancode_buffer_push(scancode, 0, release ? 1 : 0);
+        }
+        
+        // Still update modifier keys for tracking
+        if (scancode == 0x1D) { left_ctrl = !release; }
+        else if (scancode == 0x2A) { left_shift = !release; }
+        else if (scancode == 0x36) { right_shift = !release; }
+        return;
+    }
 
     if (code == 0xE0) {
         extended_scancode = true;

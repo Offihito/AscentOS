@@ -7,6 +7,7 @@
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
+#include "../mm/vma.h"
 #include "../sched/sched.h"
 #include "../smp/cpu.h"
 #include <stdint.h>
@@ -271,9 +272,12 @@ static uint64_t sys_fork(struct syscall_regs *regs) {
 
   // 1. Get current parent state
   uint64_t *parent_pml4_phys = vmm_get_active_pml4();
+  struct thread *parent = sched_get_current();
 
-  // 2. Clone the user address space (deep copy of user pages, shared kernel)
-  uint64_t child_cr3 = vmm_clone_user_mappings(parent_pml4_phys);
+  // 2. Clone the user address space with VMA awareness
+  //    Shared mappings share physical pages, private mappings get copied
+  uint64_t child_cr3 = vmm_clone_user_mappings_vma(parent_pml4_phys, 
+                                                    parent ? &parent->vmas : NULL);
   if (child_cr3 == 0) {
     klog_puts("[FORK] Failed: could not clone address space\n");
     return (uint64_t)(-12); // -ENOMEM
@@ -309,19 +313,20 @@ static uint64_t sys_fork(struct syscall_regs *regs) {
   child->fork_ctx = child_regs;
 
   // 6. Copy file descriptors from parent to child
-  struct thread *parent = sched_get_current();
   if (parent) {
     for (int i = 0; i < MAX_FDS; i++) {
       child->fds[i] = parent->fds[i];
       child->fd_offsets[i] = parent->fd_offsets[i];
     }
+    // 7. Copy VMA list from parent to child
+    vma_list_clone(&child->vmas, &parent->vmas);
   }
 
   klog_puts("[FORK] Child created with PID ");
   klog_uint64(child->tid);
   klog_puts("\n");
 
-  // 7. Return child PID to parent
+  // 8. Return child PID to parent
   return child->tid;
 }
 

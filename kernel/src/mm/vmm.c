@@ -1,5 +1,6 @@
 #include "mm/vmm.h"
 #include "mm/pmm.h"
+#include "mm/vma.h"
 #include "console/klog.h"
 #include <stdint.h>
 #include <stddef.h>
@@ -250,6 +251,134 @@ uint64_t vmm_clone_user_mappings(uint64_t *src_pml4_phys) {
         if (!child_new_phys) {
             // OOM — we should free what we allocated, but for simplicity
             // just fail. A real OS would roll back.
+            spinlock_release(&vmm_lock);
+            return 0;
+        }
+
+        new_pml4_virt[i] = ((uint64_t)child_new_phys & PAGE_MASK) |
+                           (src_pml4_virt[i] & ~PAGE_MASK);
+    }
+
+    // Shallow-copy kernel higher-half entries (256-511): share the same
+    // kernel page tables between parent and child.
+    for (size_t i = 256; i < 512; i++) {
+        new_pml4_virt[i] = src_pml4_virt[i];
+    }
+
+    spinlock_release(&vmm_lock);
+    return (uint64_t)new_pml4_phys;
+}
+
+// Helper to check if a virtual address is in a shared VMA
+static bool is_shared_vma(struct vma_list *vmas, uint64_t vaddr) {
+    if (!vmas) return false;
+    struct vma *vma = vma_find(vmas, vaddr);
+    if (vma && (vma->flags & MAP_SHARED)) {
+        return true;
+    }
+    return false;
+}
+
+// Clone table with VMA awareness - shared pages are not copied
+static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
+                                  size_t start, size_t end, 
+                                  struct vma_list *vmas, uint64_t base_addr) {
+    void *new_table_phys = pmm_alloc();
+    if (!new_table_phys) return NULL;
+
+    uint64_t *new_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)new_table_phys);
+    uint64_t *src_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)src_table_phys);
+
+    // Zero the new table first
+    for (size_t i = 0; i < 512; i++) {
+        new_virt[i] = 0;
+    }
+
+    for (size_t i = start; i < end; i++) {
+        if (!(src_virt[i] & PAGE_FLAG_PRESENT)) continue;
+        if (!(src_virt[i] & PAGE_FLAG_USER)) continue; // Ignore kernel mappings
+
+        if (level == 1) {
+            // Leaf level: calculate the virtual address for this page
+            uint64_t page_vaddr = base_addr | (i << 12);
+            
+            // Check if this page is in a shared VMA
+            if (is_shared_vma(vmas, page_vaddr)) {
+                // Shared mapping: just copy the PTE (share the physical page)
+                new_virt[i] = src_virt[i];
+            } else {
+                // Private mapping: allocate a fresh physical page and copy content
+                void *new_page_phys = pmm_alloc();
+                if (!new_page_phys) return NULL; // OOM
+
+                uint8_t *dst = (uint8_t *)PHYS_TO_VIRT((uint64_t)new_page_phys);
+                uint8_t *src = (uint8_t *)PHYS_TO_VIRT(src_virt[i] & PAGE_MASK);
+
+                // Copy page content using 64-bit words for speed
+                uint64_t *dst64 = (uint64_t *)dst;
+                uint64_t *src64 = (uint64_t *)src;
+                for (size_t w = 0; w < 512; w++) {
+                    dst64[w] = src64[w];
+                }
+
+                // Preserve flags from original PTE
+                new_virt[i] = ((uint64_t)new_page_phys & PAGE_MASK) |
+                              (src_virt[i] & ~PAGE_MASK);
+            }
+        } else {
+            // Intermediate level: calculate base address for recursion
+            uint64_t child_base = base_addr;
+            int shift = 12 + 9 * (level - 1);
+            child_base |= ((uint64_t)i << shift);
+            
+            // Recurse
+            uint64_t *child_src_phys = (uint64_t *)(src_virt[i] & PAGE_MASK);
+            uint64_t *child_new_phys = clone_table_vma(child_src_phys, level - 1,
+                                                        0, 512, vmas, child_base);
+            if (!child_new_phys) return NULL; // OOM
+
+            // Preserve flags from original entry
+            new_virt[i] = ((uint64_t)child_new_phys & PAGE_MASK) |
+                          (src_virt[i] & ~PAGE_MASK);
+        }
+    }
+
+    return (uint64_t *)new_table_phys; // Return physical address
+}
+
+uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys, struct vma_list *vmas) {
+    spinlock_acquire(&vmm_lock);
+
+    // Allocate a new PML4
+    void *new_pml4_phys = pmm_alloc();
+    if (!new_pml4_phys) {
+        spinlock_release(&vmm_lock);
+        return 0;
+    }
+
+    uint64_t *new_pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)new_pml4_phys);
+    uint64_t *src_pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)src_pml4_phys);
+
+    // Zero the new PML4
+    for (size_t i = 0; i < 512; i++) {
+        new_pml4_virt[i] = 0;
+    }
+
+    // Clone user-space entries (0-255) with VMA awareness
+    for (size_t i = 0; i < 256; i++) {
+        if (!(src_pml4_virt[i] & PAGE_FLAG_PRESENT)) continue;
+        if (!(src_pml4_virt[i] & PAGE_FLAG_USER)) continue; // Ignore kernel mappings
+
+        // Calculate base virtual address for this PML4 entry
+        uint64_t base_addr = (uint64_t)i << 39;
+        // Sign-extend if bit 47 is set (canonical address)
+        if (base_addr & (1ULL << 47)) {
+            base_addr |= 0xFFFF000000000000ULL;
+        }
+
+        uint64_t *child_src_phys = (uint64_t *)(src_pml4_virt[i] & PAGE_MASK);
+        uint64_t *child_new_phys = clone_table_vma(child_src_phys, 3, 0, 512, vmas, base_addr);
+        if (!child_new_phys) {
             spinlock_release(&vmm_lock);
             return 0;
         }

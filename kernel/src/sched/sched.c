@@ -109,6 +109,7 @@ struct thread *sched_create_kernel_thread(void (*entry)(void), struct cpu_info *
     if(!t) return NULL;
     
     memset(t, 0, sizeof(struct thread));
+    vma_list_init(&t->vmas);
     
     spinlock_acquire(&tid_lock);
     t->tid = next_tid++;

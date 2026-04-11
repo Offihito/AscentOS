@@ -37,6 +37,13 @@ uint64_t vmm_virt_to_phys(uint64_t *pml4, uint64_t virtual_addr);
 // new PML4, or 0 on failure.
 uint64_t vmm_clone_user_mappings(uint64_t *src_pml4_phys);
 
+// Clone user-space page mappings with VMA awareness.
+// Shared mappings (MAP_SHARED) share physical pages between parent and child.
+// Private mappings (MAP_PRIVATE) get deep-copied (child gets its own pages).
+// Returns the *physical* address of the new PML4, or 0 on failure.
+struct vma_list;
+uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys, struct vma_list *vmas);
+
 // Create a new blank address space (shallow copy of kernel-space only)
 uint64_t *vmm_create_pml4(void);
 

@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "drivers/input/scancode.h"
 
 void keyboard_init(void);
 
@@ -14,6 +15,11 @@ void keyboard_push_bytes(const char *bytes, uint32_t len);
 // Halts execution until a character is typed, then returns it.
 char keyboard_get_char(void);
 
+// Scancode mode functions
+bool keyboard_has_scancode(void);
+bool keyboard_get_scancode(scancode_event_t *event);
+void keyboard_set_scancode_mode(bool enabled);
+bool keyboard_is_scancode_mode(void);
 
 #define KEY_UP    0xE0
 #define KEY_DOWN  0xE1

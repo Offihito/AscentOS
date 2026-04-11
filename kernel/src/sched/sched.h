@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include "../cpu/isr.h"
 #include "../fs/vfs.h"
+#include "../mm/vma.h"
 
 #define MAX_FDS 32
 
@@ -47,6 +48,7 @@ struct thread {
     uint64_t *tid_address;        // Pointer to user-space TID for set_tid_address
     struct thread *global_next;   // Used to link all threads together
     struct thread *next;          // Used for runqueue / blocked queue
+    struct vma_list vmas;         // Virtual memory areas for this process
 };
 
 void sched_init(void);
