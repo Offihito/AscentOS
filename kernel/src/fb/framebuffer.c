@@ -9,6 +9,37 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// ── Device Node Registry ────────────────────────────────────────────────────
+// Keeps track of character device nodes so they persist across lookups
+#define MAX_DEVICES 16
+
+typedef struct {
+  char name[64];
+  vfs_node_t *node;
+} device_entry_t;
+
+static device_entry_t device_registry[MAX_DEVICES];
+static int device_count = 0;
+
+// Register a device node in the registry
+void fb_register_device_node(const char *name, vfs_node_t *node) {
+  if (device_count >= MAX_DEVICES) return;
+  strncpy(device_registry[device_count].name, name, 63);
+  device_registry[device_count].name[63] = '\0';
+  device_registry[device_count].node = node;
+  device_count++;
+}
+
+// Look up a device in the registry
+vfs_node_t *fb_lookup_device(const char *name) {
+  for (int i = 0; i < device_count; i++) {
+    if (strcmp(device_registry[i].name, name) == 0) {
+      return device_registry[i].node;
+    }
+  }
+  return NULL;
+}
+
 static struct limine_framebuffer *fb;
 static void *backbuffer = 0;
 static bool backbuffer_enabled = false;
@@ -105,6 +136,63 @@ static uint32_t console_vfs_write(struct vfs_node *node, uint32_t offset,
   return size;
 }
 
+// /dev/null - discard all writes, return EOF on read
+static uint32_t null_vfs_read(struct vfs_node *node, uint32_t offset,
+                              uint32_t size, uint8_t *buffer) {
+  (void)node; (void)offset; (void)size; (void)buffer;
+  return 0; // EOF
+}
+
+static uint32_t null_vfs_write(struct vfs_node *node, uint32_t offset,
+                               uint32_t size, uint8_t *buffer) {
+  (void)node; (void)offset; (void)buffer;
+  return size; // Discard but report success
+}
+
+// /dev/zero - return zeros on read, discard writes
+static uint32_t zero_vfs_read(struct vfs_node *node, uint32_t offset,
+                              uint32_t size, uint8_t *buffer) {
+  (void)node; (void)offset;
+  memset(buffer, 0, size);
+  return size;
+}
+
+static uint32_t zero_vfs_write(struct vfs_node *node, uint32_t offset,
+                               uint32_t size, uint8_t *buffer) {
+  (void)node; (void)offset; (void)buffer;
+  return size; // Discard but report success
+}
+
+// ── Helper for device registration ──────────────────────────────────────────
+// Character devices are always created as virtual in-memory nodes, not persisted to ext2
+static void setup_chardev(vfs_node_t *dev_dir, const char *name, 
+                         uint32_t (*read_fn)(struct vfs_node *, uint32_t, uint32_t, uint8_t *),
+                         uint32_t (*write_fn)(struct vfs_node *, uint32_t, uint32_t, uint8_t *),
+                         void (*open_fn)(struct vfs_node *), void (*close_fn)(struct vfs_node *),
+                         void *device, uint32_t length) {
+  (void)dev_dir; // Not needed - we use the device registry
+  
+  // Create virtual device node
+  vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
+  if (!node) return;
+  
+  memset(node, 0, sizeof(vfs_node_t));
+  strcpy(node->name, name);
+  node->flags  = FS_CHARDEV;
+  node->mask   = 0666;
+  node->length = length;
+  node->device = device;
+  node->read   = read_fn;
+  node->write  = write_fn;
+  node->open   = open_fn;
+  node->close  = close_fn;
+  
+  // Register in device registry for persistent lookups
+  // This ensures device callbacks are always available,
+  // avoiding issues with filesystem lookups
+  fb_register_device_node(name, node);
+}
+
 // ── Registration ─────────────────────────────────────────────────────────────
 
 void fb_register_vfs(void) {
@@ -113,34 +201,47 @@ void fb_register_vfs(void) {
   vfs_node_t *dev_dir = vfs_finddir(fs_root, "dev");
   if (!dev_dir) return;
 
-  // /dev/fb0
+  // /dev/fb0 - special handling for framebuffer size
   vfs_node_t *fb_node = kmalloc(sizeof(vfs_node_t));
-  memset(fb_node, 0, sizeof(vfs_node_t));
-  fb_node->name[0] = 'f';
-  fb_node->name[1] = 'b';
-  fb_node->name[2] = '0';
-  fb_node->name[3] = '\0';
-  fb_node->flags   = FS_CHARDEV;
-  fb_node->mask    = 0666;
-  fb_node->length  = fb->height * fb->pitch;
-  fb_node->device  = fb;
-  fb_node->read    = fb_vfs_read;
-  fb_node->write   = fb_vfs_write;
-  ramfs_mount_node(dev_dir, fb_node);
+  if (fb_node) {
+    memset(fb_node, 0, sizeof(vfs_node_t));
+    strcpy(fb_node->name, "fb0");
+    fb_node->flags  = FS_CHARDEV;
+    fb_node->mask   = 0666;
+    fb_node->length = fb->height * fb->pitch;
+    fb_node->device = fb;
+    fb_node->read   = fb_vfs_read;
+    fb_node->write  = fb_vfs_write;
+    
+    // Register in device registry (no filesystem manipulation needed)
+    fb_register_device_node("fb0", fb_node);
+  }
 
   // /dev/console
-  vfs_node_t *console_node = kmalloc(sizeof(vfs_node_t));
-  memset(console_node, 0, sizeof(vfs_node_t));
-  strcpy(console_node->name, "console");
-  console_node->flags  = FS_CHARDEV;
-  console_node->mask   = 0666;
-  console_node->length = 0;
-  console_node->device = NULL;
-  console_node->read   = console_vfs_read;
-  console_node->write  = console_vfs_write;
-  console_node->open   = console_vfs_open;
-  console_node->close  = console_vfs_close;
-  ramfs_mount_node(dev_dir, console_node);
+  setup_chardev(dev_dir, "console", console_vfs_read, console_vfs_write, 
+                console_vfs_open, console_vfs_close, 0, 0);
+
+  // /dev/stdin
+  setup_chardev(dev_dir, "stdin", console_vfs_read, 0, 
+                console_vfs_open, console_vfs_close, 0, 0);
+
+  // /dev/stdout
+  setup_chardev(dev_dir, "stdout", 0, console_vfs_write, 
+                console_vfs_open, console_vfs_close, 0, 0);
+
+  // /dev/stderr
+  setup_chardev(dev_dir, "stderr", 0, console_vfs_write, 
+                console_vfs_open, console_vfs_close, 0, 0);
+
+  // /dev/null
+  setup_chardev(dev_dir, "null", null_vfs_read, null_vfs_write, 
+                0, 0, 0, 0);
+
+  // /dev/zero
+  setup_chardev(dev_dir, "zero", zero_vfs_read, zero_vfs_write, 
+                0, 0, 0, 0);
+
+  // Note: don't free dev_dir - it still points to a valid VFS node
 }
 
 // ── Direct drawing primitives ─────────────────────────────────────────────────

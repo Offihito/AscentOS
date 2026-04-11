@@ -223,9 +223,9 @@ void ramfs_init(void) {
 
   fs_root = root;
 
-  // Automatically create /dev and /mnt and /tmp
+  // Automatically create /dev and /tmp for early boot
+  // (ext2 will provide the real /dev and /tmp after mounting)
   ramfs_mkdir(fs_root, "dev", 0755);
-  ramfs_mkdir(fs_root, "mnt", 0755);
   ramfs_mkdir(fs_root, "tmp", 0777);
 }
 

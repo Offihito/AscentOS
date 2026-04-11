@@ -101,7 +101,18 @@ static uint64_t sys_open(uint64_t path_ptr, uint64_t flags, uint64_t mode,
   int fd = alloc_fd(t);
   if (fd < 0) return (uint64_t)-24; // EMFILE
 
-  vfs_node_t *node = vfs_resolve_path(path);
+  // Check if this is a device file path (/dev/...)
+  vfs_node_t *node = NULL;
+  if (strncmp(path, "/dev/", 5) == 0) {
+    // Try to get from device registry first
+    node = fb_lookup_device(path + 5); // Skip "/dev/"
+  }
+  
+  // Fall back to normal VFS path resolution
+  if (!node) {
+    node = vfs_resolve_path(path);
+  }
+  
   if (!node) {
     if (flags & O_CREAT) {
       char parent_path[128];

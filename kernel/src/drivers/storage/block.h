@@ -24,4 +24,8 @@ struct block_device *block_get(int index);
 // Get the number of registered block devices.
 int block_count(void);
 
+// Re-register all devices to the current /dev directory.
+// Call this after mounting a new root filesystem.
+void block_repopulate_devices(void);
+
 #endif

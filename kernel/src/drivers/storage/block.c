@@ -54,3 +54,41 @@ struct block_device *block_get(int index) {
 int block_count(void) {
     return num_devices;
 }
+
+void block_repopulate_devices(void) {
+    if (!fs_root) return;
+    
+    vfs_node_t *dev_dir = vfs_finddir(fs_root, "dev");
+    if (!dev_dir) return;
+    
+    // Re-register all devices to the new /dev
+    for (int i = 0; i < num_devices; i++) {
+        struct block_device *dev = registered[i];
+        if (!dev) continue;
+        
+        vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
+        if (!node) continue;
+        memset(node, 0, sizeof(vfs_node_t));
+        strncpy(node->name, dev->name, 127);
+        node->flags = FS_BLOCKDEV;
+        node->mask = 0600;
+        node->length = dev->total_sectors * (dev->sector_size ? dev->sector_size : 512);
+        node->device = dev;
+        node->read = block_vfs_read;
+        
+        // Use vfs_create if available (ext2), otherwise ramfs_mount_node
+        if (dev_dir->create) {
+            dev_dir->create(dev_dir, dev->name, 0600);
+            vfs_node_t *new_node = vfs_finddir(dev_dir, dev->name);
+            if (new_node) {
+                new_node->flags = FS_BLOCKDEV;
+                new_node->device = dev;
+                new_node->read = block_vfs_read;
+                new_node->length = node->length;
+            }
+            kfree(node);
+        } else {
+            ramfs_mount_node(dev_dir, node);
+        }
+    }
+}

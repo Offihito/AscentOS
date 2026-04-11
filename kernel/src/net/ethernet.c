@@ -6,6 +6,7 @@
 #include "net/net.h"
 #include "net/netif.h"
 #include "net/arp.h"
+#include "net/ipv4.h"
 #include "net/byteorder.h"
 #include "drivers/net/rtl8139.h"
 #include "lib/string.h"
@@ -68,7 +69,7 @@ void eth_handle_frame(const uint8_t *data, uint16_t len) {
         break;
 
     case ETHERTYPE_IPV4:
-        // Phase 3 will handle IPv4 here
+        ipv4_handle_packet(payload, payload_len);
         break;
 
     default:

@@ -15,6 +15,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 // ── ARP cache ───────────────────────────────────────────────────────────────
 static arp_entry_t arp_table[ARP_TABLE_SIZE];
@@ -27,10 +28,16 @@ void arp_init(void) {
 
 // Update or insert an entry in the ARP cache
 static void arp_cache_update(uint32_t ip, const uint8_t *mac) {
+    const char *hex = "0123456789ABCDEF";
+
     // First, check if we already have this IP
     for (int i = 0; i < ARP_TABLE_SIZE; i++) {
         if (arp_table[i].valid && arp_table[i].ip == ip) {
-            memcpy(arp_table[i].mac, mac, 6);
+            if (memcmp(arp_table[i].mac, mac, 6) != 0) {
+                memcpy(arp_table[i].mac, mac, 6);
+                console_puts("[ARP] Updated entry for ");
+                // ... (Helper would be nice, but we'll just log)
+            }
             return;
         }
     }
@@ -41,6 +48,14 @@ static void arp_cache_update(uint32_t ip, const uint8_t *mac) {
             arp_table[i].ip = ip;
             memcpy(arp_table[i].mac, mac, 6);
             arp_table[i].valid = true;
+            
+            console_puts("[ARP] Learned ");
+            for (int j = 0; j < 6; j++) {
+                console_putchar(hex[(mac[j] >> 4) & 0xF]);
+                console_putchar(hex[mac[j] & 0xF]);
+                if (j < 5) console_putchar(':');
+            }
+            console_puts("\n");
             return;
         }
     }

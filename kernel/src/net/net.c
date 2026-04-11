@@ -6,6 +6,9 @@
 #include "net/netif.h"
 #include "net/ethernet.h"
 #include "net/arp.h"
+#include "net/udp.h"
+#include "net/tcp.h"
+#include "net/dhcp.h"
 #include "drivers/net/rtl8139.h"
 #include "console/console.h"
 #include "lib/string.h"
@@ -85,14 +88,24 @@ void net_init(void) {
         memcpy(g_netif.mac, mac, 6);
     }
 
-    // Configure with QEMU user-mode networking defaults:
-    //   Subnet:  10.0.2.0/24
-    //   Gateway: 10.0.2.2
-    //   Our IP:  10.0.2.15
-    netif_configure(IP4(10, 0, 2, 15), IP4(10, 0, 2, 2), IP4(255, 255, 255, 0));
+    // Start with empty IP configuration
+    netif_configure(0, 0, 0);
 
     // Initialize ARP subsystem
     arp_init();
+    
+    // Initialize UDP subsystem
+    udp_init();
 
-    console_puts("[OK] Network stack initialized (IP 10.0.2.15).\n");
+    // Initialize TCP subsystem
+    tcp_init();
+
+    // Initialize DHCP and negotiate
+    dhcp_init();
+    if (!dhcp_negotiate()) {
+        console_puts("[DHCP] Falling back to static IP 10.0.2.15.\n");
+        netif_configure(IP4(10, 0, 2, 15), IP4(10, 0, 2, 2), IP4(255, 255, 255, 0));
+    }
+
+    console_puts("[OK] Network stack initialized.\n");
 }

@@ -9,6 +9,7 @@
 #include "../smp/cpu.h"
 #include "../syscalls/syscall.h"
 #include "../console/console.h"
+#include "../fb/framebuffer.h"
 #include "elf.h"
 #include "sched.h"
 
@@ -319,8 +320,12 @@ bool process_exec_argv(const char **argv) {
   struct thread *current_thread = sched_get_current();
   if (current_thread) {
       // 0 = stdin, 1 = stdout, 2 = stderr.
-      // We map them all to the system console for now.
-      vfs_node_t *console_node = vfs_resolve_path("/dev/console");
+      // First try to get the console from the device registry (preferred)
+      vfs_node_t *console_node = fb_lookup_device("console");
+      // Fall back to VFS lookup if not in registry
+      if (!console_node) {
+        console_node = vfs_resolve_path("/dev/console");
+      }
       current_thread->fds[0] = console_node;
       current_thread->fds[1] = console_node;
       current_thread->fds[2] = console_node;

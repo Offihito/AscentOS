@@ -304,18 +304,32 @@ void kmain(void) {
     klog_puts("\n");
   }
 
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 7: Ext2 Filesystem
-  // ═══════════════════════════════════════════════════════════════════════
-  vfs_node_t *mnt_dir = vfs_finddir(fs_root, "mnt");
+  // Mount ext2 as root filesystem
   struct block_device *disk = block_get(0);
-  if (mnt_dir && disk) {
-    ext2_mount(disk, mnt_dir);
+  if (disk) {
+    if (ext2_mount_root(disk) == 0) {
+      // Create /dev and /tmp on ext2 if they don't exist
+      vfs_node_t *dev_dir = vfs_finddir(fs_root, "dev");
+      if (!dev_dir) {
+        vfs_mkdir(fs_root, "dev", 0755);
+        dev_dir = vfs_finddir(fs_root, "dev");
+      } else {
+        kfree(dev_dir);
+        dev_dir = vfs_finddir(fs_root, "dev");
+      }
+      vfs_node_t *tmp_dir = vfs_finddir(fs_root, "tmp");
+      if (!tmp_dir) {
+        vfs_mkdir(fs_root, "tmp", 0777);
+      } else {
+        kfree(tmp_dir);
+      }
+      // Re-register block devices to the new /dev
+      block_repopulate_devices();
+      // Re-register framebuffer and console devices
+      fb_register_vfs();
+    }
   } else {
-    if (!disk)
-      klog_puts("[WARN] No block device found for ext2 mount.\n");
-    if (!mnt_dir)
-      klog_puts("[WARN] /mnt not found in VFS.\n");
+    klog_puts("[WARN] No block device found for ext2 root mount.\n");
   }
 
   // ═══════════════════════════════════════════════════════════════════════

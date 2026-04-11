@@ -4,6 +4,7 @@
 #include <limine.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include "../fs/vfs.h"
 
 void fb_init(struct limine_framebuffer *framebuffer);
 void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color);
@@ -21,5 +22,6 @@ void fb_copy_to_backbuffer(
     void); // For keeping backbuffer in sync when drawing directly
 
 void fb_register_vfs(void);
+vfs_node_t *fb_lookup_device(const char *name);
 
 #endif

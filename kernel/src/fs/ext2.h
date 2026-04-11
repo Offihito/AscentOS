@@ -133,4 +133,8 @@ typedef struct {
 // Returns 0 on success, -1 on failure.
 int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint);
 
+// Mount ext2 as the root filesystem, replacing the current fs_root.
+// Returns 0 on success, -1 on failure.
+int ext2_mount_root(struct block_device *dev);
+
 #endif
