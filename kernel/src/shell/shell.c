@@ -4,6 +4,7 @@
 #include "console/klog.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/net/rtl8139.h"
+#include "drivers/pcspeaker.h"
 #include "drivers/serial.h"
 #include "drivers/storage/block.h"
 #include "fs/ext2.h"
@@ -79,6 +80,7 @@ static void execute_command(char *cmd) {
     console_puts("  clear     - Clear the console screen\n");
     console_puts("  meminfo   - Display memory utilization\n");
     console_puts("  echo      - Echo arguments\n");
+    console_puts("  beep      - Play a test beep sound\n");
     console_puts("  ps        - List running tasks\n");
     console_puts("  kill      - Terminate a task by TID (e.g. kill 5)\n");
     console_puts("  heaptest  - Test kernel heap allocator\n");
@@ -146,6 +148,11 @@ static void execute_command(char *cmd) {
   } else if (strncmp(cmd, "echo ", 5) == 0) {
     console_puts(cmd + 5);
     console_puts("\n");
+  } else if (strcmp(cmd, "beep") == 0) {
+    console_puts("Beep!\n");
+    pcspeaker_play_sound(1000);
+    lapic_timer_sleep(200);
+    pcspeaker_nosound();
   } else if (strcmp(cmd, "test-task") == 0) {
     for (int i = 0; i < 4; i++) {
       sched_create_kernel_thread(test_task_entry, NULL);

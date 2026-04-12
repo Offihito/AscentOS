@@ -22,6 +22,7 @@ void fb_copy_to_backbuffer(
     void); // For keeping backbuffer in sync when drawing directly
 
 void fb_register_vfs(void);
+void fb_register_device_node(const char *name, vfs_node_t *node);
 vfs_node_t *fb_lookup_device(const char *name);
 
 #endif

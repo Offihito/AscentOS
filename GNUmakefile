@@ -28,29 +28,31 @@ run: run-$(ARCH)
 .PHONY: run-x86_64
 run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 	qemu-system-$(ARCH) \
-		-M q35 \
+		-M q35,pcspk-audiodev=snd0 \
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
 		-cdrom $(IMAGE_NAME).iso \
 		-hda disk.img \
 		-smp 4 \
 		-serial stdio \
-		-audiodev none,id=none \
+		-audiodev pa,id=snd0 \
 		-device rtl8139,netdev=net0 \
+		-device sb16,audiodev=snd0 \
 		-netdev user,id=net0 \
 		$(QEMUFLAGS)
 
 .PHONY: run-bios
 run-bios: $(IMAGE_NAME).iso disk.img
 	qemu-system-$(ARCH) \
-		-M q35 \
+		-M q35,pcspk-audiodev=snd0 \
 		-cdrom $(IMAGE_NAME).iso \
 		-hda disk.img \
 		-boot d \
+		-audiodev pa,id=snd0 \
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/kria.elf
-	dd if=/dev/zero of=disk.img bs=1M count=64
+disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/kria.elf
+	dd if=/dev/zero of=disk.img bs=1M count=256
 	mkfs.ext2 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
 	echo "This is a test document." > /tmp/ascentos_readme.txt
@@ -77,6 +79,14 @@ disk.img: userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf
 	debugfs -w -R "write userland/raycast.elf raycast.elf" disk.img
 	debugfs -w -R "write userland/test_mmap_shared_private.elf test_mmap_shared_private.elf" disk.img
 	debugfs -w -R "write userland/kria.elf kria.elf" disk.img
+	debugfs -w -R "write userland/playwav.elf playwav.elf" disk.img
+	debugfs -w -R "write userland/showbmp.elf showbmp.elf" disk.img
+	debugfs -w -R "write test.wav test.wav" disk.img
+	debugfs -w -R "write test.bmp test.bmp" disk.img
+	debugfs -w -R "write terry.bmp terry.bmp" disk.img
+	debugfs -w -R "write terry.wav terry.wav" disk.img
+	debugfs -w -R "write charliekirk.wav charliekirk.wav" disk.img
+	debugfs -w -R "write charliekir.wav mc952.wav" disk.img
 	debugfs -w -R "write userland/kria-lang/test.krx test.krx" disk.img
 	debugfs -w -R "write userland/hello.krx hello.krx" disk.img
 	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
@@ -131,7 +141,7 @@ clean: clean-musl
 clean-musl:
 	rm -rf build/musl-1.2.5 build/musl-cross-make
 	rm -rf toolchain/musl-sysroot toolchain/x86_64-linux-musl
-	rm -f userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/kilo.c userland/test_mmap_shared_private.elf userland/kria.elf
+	rm -f userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/kilo.c userland/test_mmap_shared_private.elf userland/playwav.elf userland/kria.elf
 	rm -rf userland/kria-lang/target
 
 .PHONY: clean-disk
@@ -227,6 +237,14 @@ userland/raycast.elf: userland/raycast.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/raycast.c -lm -o userland/raycast.elf
 
+userland/playwav.elf: userland/playwav.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/playwav.c -o userland/playwav.elf
+
+userland/showbmp.elf: userland/showbmp.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/showbmp.c -o userland/showbmp.elf
+
 # Kria programming language (Rust-based, compiled with musl for static linking)
 userland/kria-lang:
 	rm -rf userland/kria-lang
@@ -241,3 +259,6 @@ userland/kria.elf: userland/kria-lang
 
 .PHONY: kria
 kria: userland/kria.elf
+
+test.wav:
+	python3 gen_wav.py

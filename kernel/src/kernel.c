@@ -16,10 +16,12 @@
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/block.h"
 #include "drivers/timer/pit.h"
+#include "drivers/sb16.h"
 #include "fb/framebuffer.h"
 #include "fs/ext2.h"
 #include "fs/ramfs.h"
 #include "fs/vfs.h"
+#include "drivers/sb16.h"
 #include "io/io.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
@@ -287,11 +289,13 @@ void kmain(void) {
   klog_puts("[OK] Initializing RamFS & Virtual Filesystem (VFS)...\n");
   ramfs_init();
   fb_register_vfs();
+  sb16_register_vfs();
 
   pci_init();
   ahci_init();
   rtl8139_init();
   net_init();
+  sb16_init();
 
   int devs = block_count();
   klog_puts("[DIAG] Available Block Devices (via Block API):\n");
@@ -327,6 +331,7 @@ void kmain(void) {
       block_repopulate_devices();
       // Re-register framebuffer and console devices
       fb_register_vfs();
+      sb16_register_vfs();
     }
   } else {
     klog_puts("[WARN] No block device found for ext2 root mount.\n");

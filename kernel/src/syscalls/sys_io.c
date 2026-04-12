@@ -8,6 +8,7 @@
 #include "../fb/framebuffer.h"
 #include "../font/font.h"
 #include "../console/console.h"
+#include "../drivers/sb16.h"
 #include <stdint.h>
 
 typedef struct {
@@ -20,6 +21,16 @@ typedef struct {
 #define TCSETSW    0x5403
 #define TCSETSF    0x5404
 #define TIOCGWINSZ 0x5413
+
+// OSS /dev/dsp ioctls
+#define SNDCTL_DSP_RESET    0x00005000
+#define SNDCTL_DSP_SPEED    0xC0045002
+#define SNDCTL_DSP_STEREO   0xC0045003
+#define SNDCTL_DSP_SETFMT   0xC0045005
+#define SNDCTL_DSP_CHANNELS 0xC0045006
+
+#define AFMT_U8     0x00000008
+#define AFMT_S16_LE 0x00000010
 
 #define O_RDONLY 0
 #define O_WRONLY 1
@@ -293,10 +304,10 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
   bool is_console_fd = (fd <= 2);
   if (!is_console_fd) {
     if (!t->fds[fd]) return (uint64_t)-9;
-    if (t->fds[fd]->flags != FS_CHARDEV) return (uint64_t)-25; // ENOTTY
+    if ((t->fds[fd]->flags & 0xFF) != FS_CHARDEV) return (uint64_t)-25; // ENOTTY
   }
 
-  switch (request) {
+  switch ((uint32_t)request) {
   case TIOCGWINSZ: {
     struct winsize *ws = (struct winsize *)arg;
     if (!ws) return (uint64_t)-14; // EFAULT
@@ -347,6 +358,35 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
       }
     }
     return 0; // No scancode available (would block in non-blocking mode)
+  }
+  case SNDCTL_DSP_SPEED: {
+    uint32_t *rate = (uint32_t *)arg;
+    if (!rate) return (uint64_t)-14;
+    sb16_set_format(*rate, sb16_get_channels(), sb16_get_bits());
+    *rate = sb16_get_sample_rate();
+    return 0;
+  }
+  case SNDCTL_DSP_STEREO: {
+    int *stereo = (int *)arg;
+    if (!stereo) return (uint64_t)-14;
+    sb16_set_format(sb16_get_sample_rate(), (*stereo ? 2 : 1), sb16_get_bits());
+    *stereo = (sb16_get_channels() == 2);
+    return 0;
+  }
+  case SNDCTL_DSP_CHANNELS: {
+    int *ch = (int *)arg;
+    if (!ch) return (uint64_t)-14;
+    sb16_set_format(sb16_get_sample_rate(), (uint8_t)*ch, sb16_get_bits());
+    *ch = sb16_get_channels();
+    return 0;
+  }
+  case SNDCTL_DSP_SETFMT: {
+    int *fmt = (int *)arg;
+    if (!fmt) return (uint64_t)-14;
+    uint8_t bits = (*fmt == AFMT_S16_LE) ? 16 : 8;
+    sb16_set_format(sb16_get_sample_rate(), sb16_get_channels(), bits);
+    *fmt = (sb16_get_bits() == 16) ? AFMT_S16_LE : AFMT_U8;
+    return 0;
   }
   default:
     return (uint64_t)-25; // ENOTTY
