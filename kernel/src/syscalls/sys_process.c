@@ -318,8 +318,9 @@ static uint64_t sys_fork(struct syscall_regs *regs) {
       child->fds[i] = parent->fds[i];
       child->fd_offsets[i] = parent->fd_offsets[i];
     }
-    // 7. Copy VMA list from parent to child
+    // 7. Copy VMA list and cwd from parent to child
     vma_list_clone(&child->vmas, &parent->vmas);
+    memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
   }
 
   klog_puts("[FORK] Child created with PID ");

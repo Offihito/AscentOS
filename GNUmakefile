@@ -51,7 +51,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/kria.elf
+disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/kria.elf userland/doom.elf
 	dd if=/dev/zero of=disk.img bs=1M count=256
 	mkfs.ext2 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
@@ -89,6 +89,8 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/t
 	debugfs -w -R "write charliekir.wav mc952.wav" disk.img
 	debugfs -w -R "write userland/kria-lang/test.krx test.krx" disk.img
 	debugfs -w -R "write userland/hello.krx hello.krx" disk.img
+	debugfs -w -R "write userland/doom.elf doom.elf" disk.img
+	debugfs -w -R "write doomu.wad doom1.wad" disk.img
 	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
 
 edk2-ovmf:
@@ -133,7 +135,7 @@ $(IMAGE_NAME).iso: limine/limine kernel
 	rm -rf iso_root
 
 .PHONY: clean
-clean: clean-musl
+clean: clean-musl clean-doom
 	$(MAKE) -C kernel clean
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
 
@@ -149,7 +151,7 @@ clean-disk:
 	rm -f disk.img
 
 .PHONY: distclean
-distclean: clean-musl
+distclean: clean-musl clean-doom
 	$(MAKE) -C kernel distclean
 	rm -rf iso_root *.iso *.hdd limine edk2-ovmf
 	rm -rf userland/kria-lang
@@ -262,3 +264,18 @@ kria: userland/kria.elf
 
 test.wav:
 	python3 gen_wav.py
+
+# ── DOOM (doomgeneric) ──────────────────────────────────────────────────────
+.PHONY: doom
+doom: userland/doom.elf
+
+userland/doom.elf: $(MUSL_LIBC)
+	$(MAKE) -C doomgeneric/doomgeneric -f Makefile.ascentos \
+		MUSL_CC="$(MUSL_CC)" \
+		MUSL_SYSROOT="$(MUSL_SYSROOT)"
+	cp doomgeneric/doomgeneric/doom.elf userland/doom.elf
+
+.PHONY: clean-doom
+clean-doom:
+	$(MAKE) -C doomgeneric/doomgeneric -f Makefile.ascentos clean
+	rm -f userland/doom.elf

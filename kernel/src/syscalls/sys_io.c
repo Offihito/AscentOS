@@ -8,7 +8,7 @@
 #include "../fb/framebuffer.h"
 #include "../font/font.h"
 #include "../console/console.h"
-#include "../drivers/sb16.h"
+#include "../drivers/audio/sb16.h"
 #include <stdint.h>
 
 typedef struct {
@@ -674,19 +674,160 @@ static uint64_t sys_getrandom(uint64_t buf_ptr, uint64_t buflen, uint64_t flags,
   return written;
 }
 
+// ── sys_mkdir: mkdir(pathname, mode) — syscall 83 ──────────────────────────
+static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  const char *path = (const char *)pathname;
+  if (!path) return (uint64_t)-14; // EFAULT
+
+  // Split path into parent directory + new dir name
+  char parent_path[128];
+  char dir_name[128];
+  size_t len = strlen(path);
+  if (len == 0 || len >= sizeof(dir_name))
+    return (uint64_t)-14;
+
+  const char *slash = 0;
+  for (const char *p = path; *p; p++)
+    if (*p == '/') slash = p;
+
+  vfs_node_t *parent = fs_root;
+  if (slash) {
+    size_t parent_len = (size_t)(slash - path);
+    if (parent_len == 0) {
+      parent = fs_root;
+    } else {
+      if (parent_len >= sizeof(parent_path)) return (uint64_t)-14;
+      for (size_t i = 0; i < parent_len; i++)
+        parent_path[i] = path[i];
+      parent_path[parent_len] = '\0';
+      parent = vfs_resolve_path(parent_path);
+    }
+    size_t dlen = strlen(slash + 1);
+    if (dlen == 0 || dlen >= sizeof(dir_name)) return (uint64_t)-22; // EINVAL
+    strcpy(dir_name, slash + 1);
+  } else {
+    strcpy(dir_name, path);
+  }
+
+  if (!parent || (parent->flags & 0x07) != FS_DIRECTORY)
+    return (uint64_t)-20; // ENOTDIR
+
+  if (vfs_mkdir(parent, dir_name, (uint16_t)mode) != 0)
+    return (uint64_t)-17; // EEXIST
+
+  return 0;
+}
+
+// ── sys_readv: readv(fd, iov, iovcnt) — syscall 19 ──────────────────────────
+static uint64_t sys_readv(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3; (void)a4; (void)a5;
+  if (iovcnt == 0)   return 0;
+  if (iovcnt > 1024) return (uint64_t)-22; // EINVAL
+
+  struct user_iovec *iov = (struct user_iovec *)iov_u;
+  size_t total = 0;
+
+  for (uint64_t i = 0; i < iovcnt; i++) {
+    uint64_t base = iov[i].iov_base;
+    uint64_t len  = iov[i].iov_len;
+    if (len == 0) continue;
+
+    // Reuse sys_read logic
+    struct thread *t = sched_get_current();
+    if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
+
+    vfs_node_t *node = t->fds[fd];
+    uint32_t bytes_read = vfs_read(node, t->fd_offsets[fd], len, (uint8_t *)base);
+    t->fd_offsets[fd] += bytes_read;
+    total += bytes_read;
+    if (bytes_read < len) break; // Short read
+  }
+  return total;
+}
+
+// ── sys_pipe2: pipe2(pipefd, flags) — syscall 293 ────────────────────────────
+static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)flags; (void)a2; (void)a3; (void)a4; (void)a5;
+  int *pipefd = (int *)pipefd_ptr;
+  if (!pipefd) return (uint64_t)-14; // EFAULT
+
+  struct thread *t = sched_get_current();
+  if (!t) return (uint64_t)-1;
+
+  // Allocate two file descriptors
+  int fd_read = alloc_fd(t);
+  if (fd_read < 0) return (uint64_t)-24; // EMFILE
+
+  int fd_write = alloc_fd(t);
+  if (fd_write < 0) {
+    t->fds[fd_read] = NULL;
+    return (uint64_t)-24; // EMFILE
+  }
+
+  // Create a pipe node in ramfs under /tmp (or use a simple buffer approach)
+  // For now, create a ramfs pipe file as the backing store
+  // Generate a unique pipe name
+  static uint32_t pipe_counter = 0;
+  char pipe_name[32];
+  // Manual snprintf replacement (kernel is freestanding)
+  {
+    uint32_t n = pipe_counter++;
+    strcpy(pipe_name, "pipe");
+    char *p = pipe_name + 4;
+    if (n == 0) { *p++ = '0'; }
+    else {
+      char tmp[11]; int i = 0;
+      while (n > 0) { tmp[i++] = '0' + (n % 10); n /= 10; }
+      while (i > 0) { *p++ = tmp[--i]; }
+    }
+    *p = '\0';
+  }
+
+  // Find /tmp or fall back to root
+  vfs_node_t *parent = vfs_resolve_path("/tmp");
+  if (!parent) parent = fs_root;
+
+  // Create the pipe file
+  if (vfs_create(parent, pipe_name, 0666) != 0)
+    return (uint64_t)-12; // ENOMEM
+
+  vfs_node_t *pipe_node = vfs_finddir(parent, pipe_name);
+  if (!pipe_node) return (uint64_t)-12;
+
+  vfs_open(pipe_node);
+
+  // Both fds point to the same node; read offset and write offset tracked separately
+  t->fds[fd_read]  = pipe_node;
+  t->fd_offsets[fd_read]  = 0;
+  t->fds[fd_write] = pipe_node;
+  t->fd_offsets[fd_write] = 0;
+
+  pipefd[0] = fd_read;
+  pipefd[1] = fd_write;
+
+  return 0;
+}
+
 void syscall_register_io(void) {
   syscall_register(SYS_READ,       sys_read);
   syscall_register(SYS_WRITE,      sys_write);
+  syscall_register(SYS_READV,      sys_readv);
   syscall_register(SYS_WRITEV,     sys_writev);
   syscall_register(SYS_IOCTL,      sys_ioctl);
   syscall_register(SYS_OPEN,       sys_open);
   syscall_register(SYS_CLOSE,      sys_close);
   syscall_register(SYS_LSEEK,      sys_lseek);
+  syscall_register(SYS_MKDIR,      sys_mkdir);
   syscall_register(SYS_FTRUNCATE,  sys_ftruncate);
   syscall_register(SYS_FCNTL,      sys_fcntl);
   syscall_register(SYS_STAT,       sys_stat);
   syscall_register(SYS_FSTAT,      sys_fstat);
   syscall_register(SYS_GETDENTS64, sys_getdents64);
   syscall_register(SYS_POLL,       sys_poll);
+  syscall_register(SYS_PIPE2,      sys_pipe2);
   syscall_register(SYS_GETRANDOM,  sys_getrandom);
 }

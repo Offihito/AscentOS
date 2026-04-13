@@ -4,7 +4,7 @@
 #include "console/klog.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/net/rtl8139.h"
-#include "drivers/pcspeaker.h"
+#include "drivers/audio/pcspeaker.h"
 #include "drivers/serial.h"
 #include "drivers/storage/block.h"
 #include "fs/ext2.h"

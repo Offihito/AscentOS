@@ -48,6 +48,7 @@ struct thread {
     uint64_t *tid_address;        // Pointer to user-space TID for set_tid_address
     struct thread *global_next;   // Used to link all threads together
     struct thread *next;          // Used for runqueue / blocked queue
+    char cwd_path[256];           // Current working directory
     struct vma_list vmas;         // Virtual memory areas for this process
 };
 

@@ -12,7 +12,8 @@
 #define MAP_ANONYMOUS 0x20
 
 // Maximum number of VMAs per process
-#define VMA_MAX_REGIONS 64
+// DOOM requires many mappings for WAD data, sounds, textures, etc.
+#define VMA_MAX_REGIONS 256
 
 // VMA structure - tracks a memory mapping region
 struct vma {

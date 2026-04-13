@@ -40,6 +40,8 @@ static bool left_shift = false;
 static bool right_shift = false;
 static bool left_ctrl = false;
 static bool right_ctrl = false;
+static bool left_alt = false;
+static bool right_alt = false;
 static bool caps_lock = false;
 static bool extended_scancode = false;
 
@@ -100,6 +102,7 @@ bool keyboard_get_scancode(scancode_event_t *event) {
 void keyboard_set_scancode_mode(bool enabled) {
     __asm__ volatile("cli");
     scancode_mode_enabled = enabled;
+    extended_scancode = false;  // Reset state to avoid corrupting next key
     __asm__ volatile("sti");
 }
 
@@ -122,17 +125,20 @@ static void keyboard_callback(struct registers *regs) {
             return;
         }
 
+        // Push to buffer FIRST before any early returns
         if (extended_scancode) {
             extended_scancode = false;
             scancode_buffer_push(scancode, 1, release ? 1 : 0);
+            // Track extended modifiers (right ctrl, right alt)
+            if (scancode == 0x1D) { right_ctrl = !release; }
+            else if (scancode == 0x38) { right_alt = !release; }
         } else {
             scancode_buffer_push(scancode, 0, release ? 1 : 0);
+            // Track non-extended modifiers
+            if (scancode == 0x1D) { left_ctrl = !release; }
+            else if (scancode == 0x2A) { left_shift = !release; }
+            else if (scancode == 0x36) { right_shift = !release; }
         }
-        
-        // Still update modifier keys for tracking
-        if (scancode == 0x1D) { left_ctrl = !release; }
-        else if (scancode == 0x2A) { left_shift = !release; }
-        else if (scancode == 0x36) { right_shift = !release; }
         return;
     }
 
@@ -190,6 +196,7 @@ static void keyboard_callback(struct registers *regs) {
     if (scancode == 0x1D) { left_ctrl = !release; return; }
     if (scancode == 0x2A) { left_shift = !release; return; }
     if (scancode == 0x36) { right_shift = !release; return; }
+    if (scancode == 0x38) { left_alt = !release; return; }
     if (scancode == 0x3A && !release) { caps_lock = !caps_lock; return; }
 
     if (release) return;

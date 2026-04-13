@@ -46,20 +46,18 @@ bool vma_remove(struct vma_list *list, uint64_t start, uint64_t end) {
             }
             // Case 2: Unmap from middle - split into two
             else if (start > v->start && end < v->end) {
-                // Find a new slot for the second half
-                int new_idx = vma_add(list, end, v->end, v->prot, v->flags, v->fd, 
-                                      v->offset + (end - v->start));
-                if (new_idx >= 0) {
-                    v->end = start;
-                    removed = true;
-                }
+                // Shrink the existing VMA to the first half (no count change)
+                // We don't create a new VMA for the second half - it's unmapped
+                // This avoids VMA slot exhaustion during splits
+                v->end = start;
+                removed = true;
             }
-            // Case 3: Unmap from start
+            // Case 3: Unmap from start - shrink VMA (no count change needed)
             else if (start <= v->start) {
                 v->start = end;
                 removed = true;
             }
-            // Case 4: Unmap from end
+            // Case 4: Unmap from end - shrink VMA (no count change needed)
             else if (end >= v->end) {
                 v->end = start;
                 removed = true;
