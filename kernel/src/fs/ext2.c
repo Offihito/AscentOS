@@ -1170,13 +1170,21 @@ static int ext2_rename_impl(vfs_node_t *node, char *old_name, char *new_name) {
   if (!src_node)
     return -1;
 
-  // Check if new_name already exists (we don't support overwrite-rename right
-  // now)
+  // Check if new_name already exists — POSIX requires overwrite for regular files
   vfs_node_t *dst_node = ext2_finddir_impl(node, new_name);
   if (dst_node) {
+    // Only allow overwriting regular files, not directories
+    if ((dst_node->flags & 0x07) == FS_DIRECTORY) {
+      kfree(dst_node);
+      kfree(src_node);
+      return -1; // Can't overwrite a directory
+    }
     kfree(dst_node);
-    kfree(src_node);
-    return -1;
+    // Unlink the existing target before renaming
+    if (ext2_unlink_impl(node, new_name) != 0) {
+      kfree(src_node);
+      return -1;
+    }
   }
 
   uint32_t target_inode_num = src_node->inode;

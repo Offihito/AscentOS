@@ -50,6 +50,7 @@ struct thread {
     struct thread *next;          // Used for runqueue / blocked queue
     char cwd_path[256];           // Current working directory
     struct vma_list vmas;         // Virtual memory areas for this process
+    uint64_t fs_base;             // User FS_BASE (TLS) — inherited across fork
 };
 
 void sched_init(void);

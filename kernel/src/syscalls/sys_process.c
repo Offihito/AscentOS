@@ -12,6 +12,53 @@
 #include "../smp/cpu.h"
 #include <stdint.h>
 
+// ── Path Normalization ──────────────────────────────────────────────────────
+static void path_normalize(const char *base, const char *rel, char *out) {
+    char temp[512] = {0};
+    
+    // If relative path starts with '/', it replaces base entirely
+    if (rel[0] == '/') {
+        strcpy(temp, rel);
+    } else {
+        strcpy(temp, base);
+        if (temp[strlen(temp) - 1] != '/') strcat(temp, "/");
+        strcat(temp, rel);
+    }
+
+    // Collapse elements
+    char collapsed[256][128];
+    int count = 0;
+    
+    char *p = temp;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        
+        char elem[128] = {0};
+        int i = 0;
+        while (*p && *p != '/' && i < 127) {
+            elem[i++] = *p++;
+        }
+        elem[i] = '\0';
+        
+        if (strcmp(elem, ".") == 0) {
+            continue;
+        } else if (strcmp(elem, "..") == 0) {
+            if (count > 0) count--;
+        } else {
+            strcpy(collapsed[count++], elem);
+        }
+    }
+    
+    // Rebuild out path
+    out[0] = '\0';
+    for (int i = 0; i < count; i++) {
+        strcat(out, "/");
+        strcat(out, collapsed[i]);
+    }
+    if (count == 0) strcpy(out, "/");
+}
+
 // Defined in process.c — the saved kernel context from before entering Ring 3
 typedef uint64_t kernel_jmp_buf[8];
 extern kernel_jmp_buf process_return_ctx;
@@ -112,7 +159,49 @@ static uint64_t sys_getpid(uint64_t a0, uint64_t a1, uint64_t a2,
   }
   return 0;
 }
+// ── sys_getcwd ──────────────────────────────────────────────────────────────
+static uint64_t sys_getcwd(uint64_t buf_ptr, uint64_t size, uint64_t a2,
+                           uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  char *buf = (char *)buf_ptr;
+  if (!buf) return (uint64_t)-14; // EFAULT
 
+  struct thread *current = sched_get_current();
+  if (!current) return (uint64_t)-1;
+
+  size_t len = strlen(current->cwd_path) + 1;
+  if (size < len) return (uint64_t)-34; // ERANGE
+
+  memcpy(buf, current->cwd_path, len);
+  return len; // Linux getcwd syscall returns length of copied bytes
+}
+
+// ── sys_chdir ───────────────────────────────────────────────────────────────
+static uint64_t sys_chdir(uint64_t path_ptr, uint64_t a1, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+  const char *path = (const char *)path_ptr;
+  if (!path) return (uint64_t)-14; // EFAULT
+
+  struct thread *current = sched_get_current();
+  if (!current) return (uint64_t)-1;
+
+  char new_path[256];
+  path_normalize(current->cwd_path, path, new_path);
+
+  // Validate the directory exists!
+  // Note: we want an absolute lookup here
+  vfs_node_t *node = vfs_resolve_path_at(fs_root, new_path);
+  if (!node) return (uint64_t)-2; // ENOENT
+  
+  if ((node->flags & 0xFF) != FS_DIRECTORY) return (uint64_t)-20; // ENOTDIR
+
+  // If validation passes, update thread
+  strncpy(current->cwd_path, new_path, 255);
+  current->cwd_path[255] = '\0';
+  
+  return 0; // Success
+}
 // ── sys_wait4 ───────────────────────────────────────────────────────────────
 extern struct thread *global_thread_list; // From sched.c
 
@@ -258,9 +347,9 @@ static void fork_child_entry(void) {
   // kernel stack.
   tss_set_rsp0(cpu_get_current()->stack_top);
 
-  // Reset user TLS bases to 0 (child starts with clean TLS)
+  // Restore user TLS bases — child inherits parent's FS_BASE (musl needs TLS)
   wrmsr(IA32_KERNEL_GS_BASE, 0);
-  wrmsr(IA32_FS_BASE, 0);
+  wrmsr(IA32_FS_BASE, self->fs_base);
 
   // Jump to userspace — this never returns
   fork_return_to_userspace(child_regs);
@@ -318,9 +407,10 @@ static uint64_t sys_fork(struct syscall_regs *regs) {
       child->fds[i] = parent->fds[i];
       child->fd_offsets[i] = parent->fd_offsets[i];
     }
-    // 7. Copy VMA list and cwd from parent to child
+    // 7. Copy VMA list, cwd, and TLS base from parent to child
     vma_list_clone(&child->vmas, &parent->vmas);
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
+    child->fs_base = parent->fs_base;
   }
 
   klog_puts("[FORK] Child created with PID ");
@@ -331,6 +421,32 @@ static uint64_t sys_fork(struct syscall_regs *regs) {
   return child->tid;
 }
 
+// ── sys_uname ─────────────────────────────────────────────────────────────
+struct utsname {
+    char sysname[65];
+    char nodename[65];
+    char release[65];
+    char version[65];
+    char machine[65];
+    char domainname[65];
+};
+
+static uint64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+  struct utsname *buf = (struct utsname *)buf_ptr;
+  if (!buf) return (uint64_t)-14; // EFAULT
+  
+  strcpy(buf->sysname, "AscentOS");
+  strcpy(buf->nodename, "ascentos");
+  strcpy(buf->release, "0.1");
+  strcpy(buf->version, "1.0");
+  strcpy(buf->machine, "x86_64");
+  strcpy(buf->domainname, "");
+  
+  return 0;
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 void syscall_register_process(void) {
   syscall_register(SYS_EXIT, sys_exit);
@@ -338,6 +454,9 @@ void syscall_register_process(void) {
   syscall_register(SYS_SET_TID_ADDRESS, sys_set_tid_address);
   syscall_register(SYS_GETPID, sys_getpid);
   syscall_register(SYS_WAIT4, sys_wait4);
+  syscall_register(SYS_UNAME, sys_uname);
+  syscall_register(SYS_GETCWD, sys_getcwd);
+  syscall_register(SYS_CHDIR, sys_chdir);
   syscall_register_raw(SYS_FORK, sys_fork);
   syscall_register_raw(SYS_EXECVE, sys_execve);
 }

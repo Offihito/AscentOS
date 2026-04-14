@@ -44,6 +44,13 @@ char *strncpy(char *dest, const char *src, size_t n) {
   return dest;
 }
 
+char *strcat(char *dest, const char *src) {
+  char *ptr = dest;
+  while (*ptr) ptr++;
+  while ((*ptr++ = *src++));
+  return dest;
+}
+
 void *memset(void *s, int c, size_t n) {
   unsigned char *p = s;
   uint8_t b = (uint8_t)c;

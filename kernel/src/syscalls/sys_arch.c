@@ -3,6 +3,7 @@
 #include "../cpu/msr.h"
 #include "../console/klog.h"
 #include "../apic/lapic_timer.h"
+#include "../sched/sched.h"
 #include <stdint.h>
 
 // ── arch_prctl sub-commands (Linux x86_64) ──────────────────────────────────
@@ -38,6 +39,11 @@ static uint64_t sys_arch_prctl(uint64_t code, uint64_t addr, uint64_t a2,
             return (uint64_t)-22; // -EINVAL
         }
         wrmsr(IA32_FS_BASE, addr);
+        {
+            extern struct thread *sched_get_current(void);
+            struct thread *cur = sched_get_current();
+            if (cur) cur->fs_base = addr;
+        }
         klog_puts("[ARCH_PRCTL] SET_FS = ");
         klog_uint64(addr);
         klog_puts("\n");

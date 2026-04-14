@@ -5,7 +5,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
-
+#include <sys/syscall.h>
+#include <time.h>
 // OSS /dev/dsp ioctls
 #define SNDCTL_DSP_SPEED    0xC0045002
 #define SNDCTL_DSP_STEREO   0xC0045003
@@ -125,8 +126,23 @@ int main(int argc, char *argv[]) {
 
     int bytes_read;
     while ((bytes_read = read(fd, buffer, chunk_size)) > 0) {
-        if (write(dsp_fd, buffer, bytes_read) != bytes_read) {
-            printf("playwav: write to /dev/dsp failed\n");
+        int total_written = 0;
+        while (total_written < bytes_read) {
+            int written = write(dsp_fd, buffer + total_written, bytes_read - total_written);
+            if (written < 0) {
+                printf("playwav: write to /dev/dsp failed\n");
+                break;
+            }
+            if (written == 0) {
+                struct timespec ts;
+                ts.tv_sec = 0;
+                ts.tv_nsec = 10000000; // 10ms
+                syscall(SYS_nanosleep, &ts, NULL);
+            } else {
+                total_written += written;
+            }
+        }
+        if (total_written < bytes_read) {
             break;
         }
     }

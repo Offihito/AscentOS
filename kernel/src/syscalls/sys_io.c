@@ -3,6 +3,7 @@
 #include "console/klog.h"
 #include "sched/sched.h"
 #include "fs/vfs.h"
+#include "fs/ramfs.h"
 #include "mm/heap.h"
 #include "lib/string.h"
 #include "../fb/framebuffer.h"
@@ -43,6 +44,8 @@ typedef struct {
 
 #define F_GETFL 3
 #define F_SETFL 4
+
+#define AT_FDCWD -100
 
 // ── Linux x86_64 stat structure (matches musl struct stat) ────────────────────
 struct kstat {
@@ -100,10 +103,7 @@ static int alloc_fd(struct thread *t) {
   return -1; // ENFILE
 }
 
-static uint64_t sys_open(uint64_t path_ptr, uint64_t flags, uint64_t mode,
-                         uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a3; (void)a4; (void)a5;
-  const char *path = (const char *)path_ptr;
+static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags, uint64_t mode) {
   if (!path) return (uint64_t)-14; // EFAULT
 
   struct thread *t = sched_get_current();
@@ -112,16 +112,28 @@ static uint64_t sys_open(uint64_t path_ptr, uint64_t flags, uint64_t mode,
   int fd = alloc_fd(t);
   if (fd < 0) return (uint64_t)-24; // EMFILE
 
+  vfs_node_t *base_dir = fs_root;
+  if (path[0] != '/') {
+    if (dirfd == AT_FDCWD) {
+       base_dir = vfs_resolve_path_at(fs_root, t->cwd_path);
+       if (!base_dir) base_dir = fs_root; // Fallback
+    } else {
+       if (dirfd < 0 || dirfd >= MAX_FDS || !t->fds[dirfd]) return (uint64_t)-9; // EBADF
+       base_dir = t->fds[dirfd];
+       if ((base_dir->flags & 0xFF) != FS_DIRECTORY) return (uint64_t)-20; // ENOTDIR
+    }
+  }
+
   // Check if this is a device file path (/dev/...)
   vfs_node_t *node = NULL;
   if (strncmp(path, "/dev/", 5) == 0) {
     // Try to get from device registry first
-    node = fb_lookup_device(path + 5); // Skip "/dev/"
+    node = fb_lookup_device((char *)path + 5); // Skip "/dev/"
   }
   
   // Fall back to normal VFS path resolution
   if (!node) {
-    node = vfs_resolve_path(path);
+    node = vfs_resolve_path_at(base_dir, path);
   }
   
   if (!node) {
@@ -136,7 +148,7 @@ static uint64_t sys_open(uint64_t path_ptr, uint64_t flags, uint64_t mode,
       for (const char *p = path; *p; p++)
         if (*p == '/') slash = p;
 
-      vfs_node_t *parent = fs_root;
+      vfs_node_t *parent = base_dir;
       if (slash) {
         size_t parent_len = (size_t)(slash - path);
         if (parent_len == 0) {
@@ -147,7 +159,7 @@ static uint64_t sys_open(uint64_t path_ptr, uint64_t flags, uint64_t mode,
           for (size_t i = 0; i < parent_len; i++)
             parent_path[i] = path[i];
           parent_path[parent_len] = '\0';
-          parent = vfs_resolve_path(parent_path);
+          parent = vfs_resolve_path_at(base_dir, parent_path);
         }
         size_t file_len = strlen(slash + 1);
         if (file_len >= sizeof(file_name)) return (uint64_t)-14;
@@ -160,6 +172,9 @@ static uint64_t sys_open(uint64_t path_ptr, uint64_t flags, uint64_t mode,
 
       if (!parent || (parent->flags & 0x07) != FS_DIRECTORY)
         return (uint64_t)-20; // ENOTDIR
+
+      // Umask equivalent (simplified)
+      mode = mode & ~0022; // Basic default umask
 
       if (vfs_create(parent, file_name, (uint16_t)mode) != 0)
         return (uint64_t)-17; // EEXIST or generic error
@@ -182,6 +197,12 @@ static uint64_t sys_open(uint64_t path_ptr, uint64_t flags, uint64_t mode,
   t->fd_offsets[fd] = 0;
 
   return fd;
+}
+
+static uint64_t sys_open(uint64_t path_ptr, uint64_t flags, uint64_t mode,
+                         uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3; (void)a4; (void)a5;
+  return do_sys_open(AT_FDCWD, (const char *)path_ptr, flags, mode);
 }
 
 static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count,
@@ -496,7 +517,14 @@ static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr,
 
   if (!path || !ks) return (uint64_t)-14; // EFAULT
 
-  vfs_node_t *node = vfs_resolve_path(path);
+  struct thread *t = sched_get_current();
+  vfs_node_t *cwd_node = fs_root;
+  if (t && t->cwd_path[0]) {
+    cwd_node = vfs_resolve_path_at(fs_root, t->cwd_path);
+    if (!cwd_node) cwd_node = fs_root;
+  }
+  
+  vfs_node_t *node = vfs_resolve_path_at(cwd_node, path);
   if (!node) {
     klog_puts("[SYSCALL] sys_stat: not found: ");
     klog_puts(path);
@@ -761,6 +789,7 @@ static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
   // Allocate two file descriptors
   int fd_read = alloc_fd(t);
   if (fd_read < 0) return (uint64_t)-24; // EMFILE
+  t->fds[fd_read] = (void *)-1; // Reserve it
 
   int fd_write = alloc_fd(t);
   if (fd_write < 0) {
@@ -768,48 +797,310 @@ static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
     return (uint64_t)-24; // EMFILE
   }
 
-  // Create a pipe node in ramfs under /tmp (or use a simple buffer approach)
-  // For now, create a ramfs pipe file as the backing store
-  // Generate a unique pipe name
-  static uint32_t pipe_counter = 0;
-  char pipe_name[32];
-  // Manual snprintf replacement (kernel is freestanding)
-  {
-    uint32_t n = pipe_counter++;
-    strcpy(pipe_name, "pipe");
-    char *p = pipe_name + 4;
-    if (n == 0) { *p++ = '0'; }
-    else {
-      char tmp[11]; int i = 0;
-      while (n > 0) { tmp[i++] = '0' + (n % 10); n /= 10; }
-      while (i > 0) { *p++ = tmp[--i]; }
-    }
-    *p = '\0';
-  }
-
-  // Find /tmp or fall back to root
-  vfs_node_t *parent = vfs_resolve_path("/tmp");
-  if (!parent) parent = fs_root;
-
-  // Create the pipe file
-  if (vfs_create(parent, pipe_name, 0666) != 0)
+  // Build pipe buffer node directly in kernel heap (avoids ext2 create issues)
+  vfs_node_t *pipe_node = kmalloc(sizeof(vfs_node_t));
+  if (!pipe_node) {
+    t->fds[fd_read] = NULL;
     return (uint64_t)-12; // ENOMEM
+  }
+  memset(pipe_node, 0, sizeof(vfs_node_t));
 
-  vfs_node_t *pipe_node = vfs_finddir(parent, pipe_name);
-  if (!pipe_node) return (uint64_t)-12;
+  ramfs_file_t *pipe_buf = kmalloc(sizeof(ramfs_file_t));
+  if (!pipe_buf) {
+    kfree(pipe_node);
+    t->fds[fd_read] = NULL;
+    return (uint64_t)-12;
+  }
+  pipe_buf->data = NULL;
+  pipe_buf->capacity = 0;
 
-  vfs_open(pipe_node);
+  pipe_node->flags = FS_FILE;
+  pipe_node->device = pipe_buf;
+  pipe_node->length = 0;
+  pipe_node->read = ramfs_read;
+  pipe_node->write = ramfs_write;
 
   // Both fds point to the same node; read offset and write offset tracked separately
   t->fds[fd_read]  = pipe_node;
-  t->fd_offsets[fd_read]  = 0;
   t->fds[fd_write] = pipe_node;
+  t->fd_offsets[fd_read]  = 0;
   t->fd_offsets[fd_write] = 0;
 
   pipefd[0] = fd_read;
   pipefd[1] = fd_write;
 
   return 0;
+}
+
+// ── sys_pipe: pipe(pipefd) — syscall 22 ──────────────────────────────────────
+static uint64_t sys_pipe(uint64_t pipefd_ptr, uint64_t a1, uint64_t a2,
+                         uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a1;
+  return sys_pipe2(pipefd_ptr, 0, a2, a3, a4, a5);
+}
+
+// ── sys_access: access(pathname, mode) — syscall 21 ──────────────────────────
+static uint64_t sys_access(uint64_t pathname_ptr, uint64_t mode, uint64_t a2,
+                           uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)mode; (void)a2; (void)a3; (void)a4; (void)a5;
+  const char *path = (const char *)pathname_ptr;
+  if (!path) return (uint64_t)-14; // EFAULT
+
+  vfs_node_t *node = NULL;
+  if (strncmp(path, "/dev/", 5) == 0) {
+    node = fb_lookup_device((char *)path + 5);
+  }
+  
+  if (!node) {
+    struct thread *t = sched_get_current();
+    vfs_node_t *cwd_node = fs_root;
+    if (t && t->cwd_path[0]) {
+      cwd_node = vfs_resolve_path_at(fs_root, t->cwd_path);
+      if (!cwd_node) cwd_node = fs_root;
+    }
+    node = vfs_resolve_path_at(cwd_node, path);
+  }
+  
+  if (!node) {
+    return (uint64_t)-2; // ENOENT
+  }
+
+  // POSIX mode check.
+  // mode bits: F_OK = 0, X_OK = 1, W_OK = 2, R_OK = 4.
+  // node->mask contains unix permissions (e.g. 0777).
+  // We check globally against all mask bits (owner, group, other) since we lack user contexts.
+  if (mode != 0) {
+    bool can_read = (node->mask & 0444) != 0;
+    bool can_write = (node->mask & 0222) != 0;
+    bool can_exec = (node->mask & 0111) != 0;
+    
+    if ((mode & 4) && !can_read) return (uint64_t)-13; // EACCES
+    if ((mode & 2) && !can_write) return (uint64_t)-13; // EACCES
+    if ((mode & 1) && !can_exec) return (uint64_t)-13; // EACCES
+  }
+
+  return 0;
+}
+
+// ── sys_newfstatat: fstatat(dirfd, pathname, statbuf, flags) — syscall 262 ──
+#define AT_EMPTY_PATH 0x1000
+
+static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
+                               uint64_t statbuf_ptr, uint64_t flags,
+                               uint64_t a4, uint64_t a5) {
+  (void)a4; (void)a5;
+  const char *path = (const char *)pathname_ptr;
+  struct kstat *ks = (struct kstat *)statbuf_ptr;
+
+  if (!ks) return (uint64_t)-14; // EFAULT
+
+  struct thread *t = sched_get_current();
+  if (!t) return (uint64_t)-1;
+
+  // AT_EMPTY_PATH with empty string: behave like fstat(dirfd)
+  if ((flags & AT_EMPTY_PATH) && path && path[0] == '\0') {
+    if ((int)dirfd < 0 || dirfd >= MAX_FDS || !t->fds[dirfd])
+      return (uint64_t)-9; // EBADF
+    fill_kstat(ks, t->fds[dirfd]);
+    return 0;
+  }
+
+  if (!path) return (uint64_t)-14; // EFAULT
+
+  // Resolve the base directory
+  vfs_node_t *base_dir = fs_root;
+  if (path[0] != '/') {
+    if ((int)dirfd == AT_FDCWD) {
+      // Use thread CWD
+      if (t->cwd_path[0]) {
+        base_dir = vfs_resolve_path_at(fs_root, t->cwd_path);
+        if (!base_dir) base_dir = fs_root;
+      }
+    } else {
+      if ((int)dirfd < 0 || dirfd >= MAX_FDS || !t->fds[dirfd])
+        return (uint64_t)-9; // EBADF
+      base_dir = t->fds[dirfd];
+      if ((base_dir->flags & 0xFF) != FS_DIRECTORY)
+        return (uint64_t)-20; // ENOTDIR
+    }
+  }
+
+  vfs_node_t *node = vfs_resolve_path_at(base_dir, path);
+  if (!node) {
+    return (uint64_t)-2; // ENOENT
+  }
+
+  fill_kstat(ks, node);
+  return 0;
+}
+
+// ── sys_openat: openat(dirfd, pathname, flags, mode) — syscall 257 ──────────
+static uint64_t sys_openat(uint64_t dirfd, uint64_t pathname_ptr, uint64_t flags,
+                           uint64_t mode, uint64_t a4, uint64_t a5) {
+  (void)a4; (void)a5;
+  return do_sys_open((int)dirfd, (const char *)pathname_ptr, flags, mode);
+}
+
+// ── Helper: split path into parent dir + basename ───────────────────────────
+// Returns the parent VFS node and writes the basename into 'name_out'.
+// Returns NULL on failure.
+static vfs_node_t *resolve_parent_and_name(const char *path, char *name_out,
+                                           size_t name_size) {
+  if (!path || !name_out || name_size == 0)
+    return NULL;
+
+  size_t len = strlen(path);
+  if (len == 0 || len >= 256)
+    return NULL;
+
+  struct thread *t = sched_get_current();
+  vfs_node_t *base = fs_root;
+  if (t && path[0] != '/' && t->cwd_path[0]) {
+    base = vfs_resolve_path_at(fs_root, t->cwd_path);
+    if (!base) base = fs_root;
+  }
+
+  // Find last slash
+  const char *last_slash = NULL;
+  for (const char *p = path; *p; p++)
+    if (*p == '/') last_slash = p;
+
+  vfs_node_t *parent;
+  const char *basename;
+
+  if (last_slash) {
+    size_t parent_len = (size_t)(last_slash - path);
+    if (parent_len == 0) {
+      parent = fs_root;
+    } else {
+      char parent_path[256];
+      if (parent_len >= sizeof(parent_path))
+        return NULL;
+      memcpy(parent_path, path, parent_len);
+      parent_path[parent_len] = '\0';
+      parent = vfs_resolve_path_at(base, parent_path);
+    }
+    basename = last_slash + 1;
+  } else {
+    parent = base;
+    basename = path;
+  }
+
+  if (!parent || (parent->flags & 0x07) != FS_DIRECTORY)
+    return NULL;
+
+  size_t blen = strlen(basename);
+  if (blen == 0 || blen >= name_size)
+    return NULL;
+
+  strcpy(name_out, basename);
+  return parent;
+}
+
+// ── sys_unlink: unlink(pathname) — syscall 87 ────────────────────────────────
+static uint64_t sys_unlink(uint64_t pathname_ptr, uint64_t a1, uint64_t a2,
+                           uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+  const char *path = (const char *)pathname_ptr;
+  if (!path) return (uint64_t)-14; // EFAULT
+
+  char name[128];
+  vfs_node_t *parent = resolve_parent_and_name(path, name, sizeof(name));
+  if (!parent) return (uint64_t)-2; // ENOENT
+
+  // Check that the target exists and is not a directory
+  vfs_node_t *target = vfs_finddir(parent, name);
+  if (!target) return (uint64_t)-2; // ENOENT
+  if ((target->flags & 0x07) == FS_DIRECTORY) return (uint64_t)-21; // EISDIR
+
+  // Invalidate any open fds pointing to this node
+  struct thread *t = sched_get_current();
+  if (t) {
+    for (int i = 0; i < MAX_FDS; i++) {
+      if (t->fds[i] == target) {
+        t->fds[i] = NULL;
+        t->fd_offsets[i] = 0;
+      }
+    }
+  }
+
+  int ret = vfs_unlink(parent, name);
+  if (ret != 0) return (uint64_t)-1; // Generic error
+
+  return 0;
+}
+
+// ── sys_rename: rename(oldpath, newpath) — syscall 82 ────────────────────────
+static uint64_t sys_rename(uint64_t oldpath_ptr, uint64_t newpath_ptr,
+                           uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  const char *oldpath = (const char *)oldpath_ptr;
+  const char *newpath = (const char *)newpath_ptr;
+  if (!oldpath || !newpath) return (uint64_t)-14; // EFAULT
+
+  char old_name[128], new_name[128];
+  vfs_node_t *old_parent = resolve_parent_and_name(oldpath, old_name, sizeof(old_name));
+  vfs_node_t *new_parent = resolve_parent_and_name(newpath, new_name, sizeof(new_name));
+
+  if (!old_parent) return (uint64_t)-2; // ENOENT (source path invalid)
+  if (!new_parent) return (uint64_t)-2; // ENOENT (dest path invalid)
+
+  // Check source exists
+  vfs_node_t *source = vfs_finddir(old_parent, old_name);
+  if (!source) return (uint64_t)-2; // ENOENT
+
+  // Same directory rename (most common case, and what TCC uses)
+  // Compare by inode, not pointer — ext2 finddir allocates new nodes per lookup
+  if (old_parent == new_parent ||
+      old_parent->inode == new_parent->inode) {
+    int ret = vfs_rename(old_parent, old_name, new_name);
+    if (ret != 0) return (uint64_t)-1;
+    return 0;
+  }
+
+  // Cross-directory rename is not supported in this simple VFS
+  return (uint64_t)-18; // EXDEV
+}
+
+// ── sys_readlink: readlink(pathname, buf, bufsiz) — syscall 89 ───────────────
+static uint64_t sys_readlink(uint64_t pathname_ptr, uint64_t buf_ptr,
+                             uint64_t bufsiz, uint64_t a3, uint64_t a4,
+                             uint64_t a5) {
+  (void)a3; (void)a4; (void)a5;
+  const char *path = (const char *)pathname_ptr;
+  char *buf = (char *)buf_ptr;
+  if (!path || !buf) return (uint64_t)-14; // EFAULT
+  if (bufsiz == 0) return (uint64_t)-22; // EINVAL
+
+  // Special case: /proc/self/exe — TCC and other tools read this
+  if (strcmp(path, "/proc/self/exe") == 0) {
+    // We don't track per-thread executable paths yet, so return a generic path
+    const char *exe_path = "/init";
+    size_t len = strlen(exe_path);
+    if (len > bufsiz) len = bufsiz;
+    memcpy(buf, exe_path, len);
+    return len; // readlink returns bytes written, NOT null-terminated
+  }
+
+  // Resolve the symlink node
+  struct thread *t = sched_get_current();
+  vfs_node_t *base = fs_root;
+  if (t && path[0] != '/' && t->cwd_path[0]) {
+    base = vfs_resolve_path_at(fs_root, t->cwd_path);
+    if (!base) base = fs_root;
+  }
+
+  vfs_node_t *node = vfs_resolve_path_at(base, path);
+  if (!node) return (uint64_t)-2; // ENOENT
+
+  // Must be a symlink
+  if ((node->flags & 0xFF) != FS_SYMLINK)
+    return (uint64_t)-22; // EINVAL — not a symlink
+
+  int ret = vfs_readlink(node, buf, (uint32_t)bufsiz);
+  if (ret < 0) return (uint64_t)-22; // EINVAL
+
+  return (uint64_t)ret;
 }
 
 void syscall_register_io(void) {
@@ -828,6 +1119,13 @@ void syscall_register_io(void) {
   syscall_register(SYS_FSTAT,      sys_fstat);
   syscall_register(SYS_GETDENTS64, sys_getdents64);
   syscall_register(SYS_POLL,       sys_poll);
+  syscall_register(SYS_PIPE,       sys_pipe);
   syscall_register(SYS_PIPE2,      sys_pipe2);
   syscall_register(SYS_GETRANDOM,  sys_getrandom);
+  syscall_register(SYS_ACCESS,     sys_access);
+  syscall_register(SYS_OPENAT,     sys_openat);
+  syscall_register(SYS_NEWFSTATAT, sys_newfstatat);
+  syscall_register(SYS_UNLINK,     sys_unlink);
+  syscall_register(SYS_RENAME,     sys_rename);
+  syscall_register(SYS_READLINK,   sys_readlink);
 }

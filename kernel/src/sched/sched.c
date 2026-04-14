@@ -29,6 +29,7 @@ void sched_init(void) {
         // Create the idle thread for this specific CPU
         struct thread *idle_thread = kmalloc(sizeof(struct thread));
         memset(idle_thread, 0, sizeof(struct thread));
+        idle_thread->cwd_path[0] = '/';
         // Assign a proper TID to the idle thread (don't use 0)
         spinlock_acquire(&tid_lock);
         idle_thread->tid = next_tid++;

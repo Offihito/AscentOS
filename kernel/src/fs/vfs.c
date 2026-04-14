@@ -107,32 +107,33 @@ int vfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid) {
   return -1;
 }
 
-vfs_node_t *vfs_resolve_path(const char *path) {
-  if (!path || !fs_root)
-    return 0;
-  vfs_node_t *current = fs_root;
-
-  // Skip leading slash
-  if (*path == '/')
-    path++;
-  if (*path == '\0')
-    return current;
+vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
+  if (!path || !fs_root) return 0;
+  
+  vfs_node_t *current = dir;
+  
+  if (path[0] == '/') {
+     current = fs_root;
+     while (*path == '/') path++;
+  } else if (!current) {
+     current = fs_root; // Fallback similarly if dir is null
+  }
+  
+  if (*path == '\0') return current;
 
   char comp[128];
   const char *p = path;
 
   while (*p) {
     int i = 0;
+    // Skip extra slashes in the middle
+    while (*p == '/') p++;
+    if (*p == '\0') break;
+
     while (*p && *p != '/' && i < 127) {
       comp[i++] = *p++;
     }
     comp[i] = '\0';
-
-    while (*p == '/')
-      p++; // Skip extra slashes
-
-    if (i == 0)
-      continue;
 
     current = vfs_finddir(current, comp);
     if (!current) {
@@ -140,4 +141,8 @@ vfs_node_t *vfs_resolve_path(const char *path) {
     }
   }
   return current;
+}
+
+vfs_node_t *vfs_resolve_path(const char *path) {
+  return vfs_resolve_path_at(fs_root, path);
 }
