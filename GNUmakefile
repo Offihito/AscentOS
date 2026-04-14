@@ -153,7 +153,7 @@ clean-disk:
 .PHONY: distclean
 distclean: clean-musl clean-doom
 	$(MAKE) -C kernel distclean
-	rm -rf iso_root *.iso *.hdd limine edk2-ovmf
+	rm -rf iso_root *.iso *.hdd limine edk2-ovmf doomgeneric
 	rm -rf userland/kria-lang
 
 # ── Userland test programs ──────────────────────────────────────────────────
@@ -269,13 +269,15 @@ test.wav:
 .PHONY: doom
 doom: userland/doom.elf
 
-userland/doom.elf: $(MUSL_LIBC)
-	$(MAKE) -C doomgeneric/doomgeneric -f Makefile.ascentos \
+doomgeneric:
+	rm -rf doomgeneric
+	git clone https://github.com/ozkl/doomgeneric.git --depth=1
+
+userland/doom.elf: doomgeneric $(MUSL_LIBC)
+	$(MAKE) -C userland -f Makefile.ascentos \
 		MUSL_CC="$(MUSL_CC)" \
 		MUSL_SYSROOT="$(MUSL_SYSROOT)"
-	cp doomgeneric/doomgeneric/doom.elf userland/doom.elf
 
 .PHONY: clean-doom
 clean-doom:
-	$(MAKE) -C doomgeneric/doomgeneric -f Makefile.ascentos clean
-	rm -f userland/doom.elf
+	$(MAKE) -C userland -f Makefile.ascentos clean
