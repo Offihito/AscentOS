@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <stdbool.h>
 #include <time.h>
 #include <sys/syscall.h>
@@ -17,15 +18,83 @@
 
 // ── Framebuffer ────────────────────────────────────────────────────────────
 static int fb_fd = -1;
-static uint8_t *fb_backbuffer = NULL;
+static uint32_t *fb_mmap = NULL;      // Direct mmap of framebuffer (zero-copy)
 static uint32_t fb_width = 0;
 static uint32_t fb_height = 0;
-static uint32_t fb_pitch = 0;
+static uint32_t fb_pitch = 0;         // Bytes per row (width * 4)
 static uint32_t fb_bpp = 32;
 
 // Centering offset for DOOM's 640×400 output
 static uint32_t fb_x_offset = 0;
 static uint32_t fb_y_offset = 0;
+
+// FPS counter state
+static uint32_t fps_frame_count = 0;
+static uint32_t fps_last_time = 0;
+static uint32_t fps_current = 0;
+
+// 3x5 pixel digit font (bitmask for each row)
+static const uint8_t digit_font[10][5] = {
+    {0xE, 0xA, 0xA, 0xA, 0xE}, // 0
+    {0x4, 0xC, 0x4, 0x4, 0xE}, // 1
+    {0xE, 0x2, 0xE, 0x8, 0xE}, // 2
+    {0xE, 0x2, 0xE, 0x2, 0xE}, // 3
+    {0xA, 0xA, 0xE, 0x2, 0x2}, // 4
+    {0xE, 0x8, 0xE, 0x2, 0xE}, // 5
+    {0xE, 0x8, 0xE, 0xA, 0xE}, // 6
+    {0xE, 0x2, 0x2, 0x2, 0x2}, // 7
+    {0xE, 0xA, 0xE, 0xA, 0xE}, // 8
+    {0xE, 0xA, 0xE, 0x2, 0xE}, // 9
+};
+
+// Draw a single digit at position (x,y) with scale and color
+static void draw_digit(uint32_t x, uint32_t y, int digit, int scale, uint32_t color) {
+    if (digit < 0 || digit > 9) return;
+    const uint8_t *glyph = digit_font[digit];
+    for (int row = 0; row < 5; row++) {
+        uint8_t bits = glyph[row];
+        for (int col = 0; col < 3; col++) {
+            if (bits & (1 << (2 - col))) {
+                for (int sy = 0; sy < scale; sy++) {
+                    for (int sx = 0; sx < scale; sx++) {
+                        uint32_t px = x + col * scale + sx;
+                        uint32_t py = y + row * scale + sy;
+                        if (px < fb_width && py < fb_height) {
+                            fb_mmap[py * (fb_pitch / 4) + px] = color;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Draw FPS number at top-right corner
+static void draw_fps(void) {
+    uint32_t fps = fps_current;
+    if (fps > 999) fps = 999;  // Cap display
+    int scale = 2;
+    int digit_w = 3 * scale + 1;  // 3px wide + 1px spacing
+    uint32_t color = 0xFFFFFFFF;  // White
+
+    // Position at top-right with margin
+    uint32_t start_x = fb_width - 10 - digit_w * 3;
+    uint32_t start_y = 10;
+
+    // Draw digits right to left
+    int len = 0;
+    uint32_t tmp = fps;
+    if (tmp == 0) {
+        draw_digit(start_x, start_y, 0, scale, color);
+        return;
+    }
+    while (tmp > 0 && len < 3) {
+        int d = tmp % 10;
+        tmp /= 10;
+        draw_digit(start_x + digit_w * (2 - len), start_y, d, scale, color);
+        len++;
+    }
+}
 
 // ── Keyboard (scancode interface) ──────────────────────────────────────────
 #define KBDSCANMODE_SET   0x5471
@@ -219,14 +288,18 @@ void DG_Init(void) {
     if (fb_height >= DOOMGENERIC_RESY)
         fb_y_offset = (fb_height - DOOMGENERIC_RESY) / 2;
 
-    // Allocate backbuffer (full screen, cleared to black)
+    // ── mmap framebuffer for zero-copy direct access ──────────────────────────
+    // This eliminates all write() syscalls per frame, giving huge speedup.
     size_t fb_size = (size_t)fb_pitch * fb_height;
-    fb_backbuffer = (uint8_t *)malloc(fb_size);
-    if (!fb_backbuffer) {
-        printf("DOOM: Cannot allocate framebuffer backbuffer (%zu bytes)\n", fb_size);
+    fb_mmap = (uint32_t *)mmap(NULL, fb_size, PROT_READ | PROT_WRITE,
+                               MAP_SHARED, fb_fd, 0);
+    if (fb_mmap == MAP_FAILED) {
+        printf("DOOM: Cannot mmap framebuffer (%zu bytes)\n", fb_size);
         exit(1);
     }
-    memset(fb_backbuffer, 0, fb_size);
+
+    // Clear framebuffer to black
+    memset(fb_mmap, 0, fb_size);
 
     printf("DOOM: Framebuffer %ux%u (pitch=%u), DOOM centered at (%u,%u)\n",
            fb_width, fb_height, fb_pitch, fb_x_offset, fb_y_offset);
@@ -256,18 +329,34 @@ static void handleKeyInput(void) {
 
 // ── DG_DrawFrame ───────────────────────────────────────────────────────────
 void DG_DrawFrame(void) {
-    if (!fb_backbuffer) return;
+    if (!fb_mmap) return;
 
-    // Write DOOM rows directly from DG_ScreenBuffer to /dev/fb0
-    // Skips the full-screen memset and backbuffer intermediate copy.
-    // I/O reduced from fb_width*fb_height*4 to 640*400*4 per frame.
-    size_t row_bytes = DOOMGENERIC_RESX * (fb_bpp / 8);
+    // ── Zero-copy blit: write directly to mmap'd framebuffer ──────────────────
+    // No syscalls per frame! Just a simple memcpy per row.
+    // Source: DG_ScreenBuffer (640x400 = DOOMGENERIC_RESX x DOOMGENERIC_RESY)
+    // Dest:   fb_mmap at centered offset
+    
+    uint32_t *src = (uint32_t *)DG_ScreenBuffer;
+    
     for (int y = 0; y < DOOMGENERIC_RESY; y++) {
-        off_t offset = (off_t)((y + fb_y_offset) * fb_pitch +
-                               fb_x_offset * (fb_bpp / 8));
-        lseek(fb_fd, offset, SEEK_SET);
-        write(fb_fd, (uint8_t *)DG_ScreenBuffer + y * row_bytes, row_bytes);
+        uint32_t *dest_row = fb_mmap + (y + fb_y_offset) * (fb_pitch / 4) + fb_x_offset;
+        uint32_t *src_row  = src + y * DOOMGENERIC_RESX;
+        
+        // Copy one row (320 pixels = DOOMGENERIC_RESX)
+        for (int x = 0; x < DOOMGENERIC_RESX; x++) {
+            dest_row[x] = src_row[x];
+        }
     }
+
+    // ── FPS counter ────────────────────────────────────────────────────────
+    fps_frame_count++;
+    uint32_t now = DG_GetTicksMs();
+    if (now - fps_last_time >= 1000) {
+        fps_current = fps_frame_count;
+        fps_frame_count = 0;
+        fps_last_time = now;
+    }
+    draw_fps();
 
     // Process keyboard input
     handleKeyInput();

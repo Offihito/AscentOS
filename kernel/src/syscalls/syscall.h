@@ -83,4 +83,7 @@ void syscall_register_media(void);
 // ── Core init (MSRs + calls subsystem registrations) ────────────────────────
 void syscall_init(void);
 
+// Allocate virtual address range from mmap region (for device mmap handlers)
+uint64_t mm_alloc_mmap_region(uint64_t length);
+
 #endif

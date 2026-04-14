@@ -6,7 +6,10 @@
 #include "../lib/string.h"
 #include "../console/klog.h"
 #include "../sched/sched.h"
+#include "../fs/vfs.h"
 #include <stdint.h>
+
+// MAX_FDS is defined in sched.h
 
 // ── Linux mmap constants ────────────────────────────────────────────────────
 #define PROT_NONE   0x0
@@ -53,7 +56,7 @@ static uint64_t build_page_flags(uint64_t prot) {
 //   rdi = addr (hint), rsi = length, rdx = prot, r10 = flags, r8 = fd, r9 = offset
 static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
                           uint64_t flags, uint64_t fd, uint64_t offset) {
-    (void)fd; (void)offset;
+    (void)offset;
 
     // Validate flags: must have exactly one of MAP_SHARED or MAP_PRIVATE
     bool is_shared = (flags & MAP_SHARED) != 0;
@@ -68,10 +71,40 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         klog_puts("[MMAP] Error: Cannot specify both MAP_SHARED and MAP_PRIVATE\n");
         return MAP_FAILED;
     }
-    
-    // We only support anonymous mappings for now
+
+    // ── File-backed mapping (fd != -1) ─────────────────────────────────────────
+    // If fd is valid, delegate to the device's mmap handler
+    if (!(flags & MAP_ANONYMOUS) && (int64_t)fd != -1) {
+        struct thread *t = sched_get_current();
+        if (!t || fd >= MAX_FDS || !t->fds[fd]) {
+            klog_puts("[MMAP] Error: invalid fd for file-backed mapping\n");
+            return MAP_FAILED;
+        }
+        
+        vfs_node_t *node = t->fds[fd];
+        if (!node->mmap) {
+            klog_puts("[MMAP] Error: device does not support mmap\n");
+            return MAP_FAILED;
+        }
+        
+        // Call device-specific mmap handler
+        uint64_t result = node->mmap(node, length, prot, flags);
+        
+        // Register in VMA list if successful
+        if (result != MAP_FAILED && result != (uint64_t)-1) {
+            uint64_t aligned_len = PAGE_ALIGN_UP(length);
+            int vma_idx = vma_add(&t->vmas, result, result + aligned_len, prot, flags, (int)fd, 0);
+            if (vma_idx < 0) {
+                klog_puts("[MMAP] Warning: Failed to register VMA for file mapping\n");
+            }
+        }
+        
+        return result;
+    }
+
+    // ── Anonymous mapping (MAP_ANONYMOUS) ─────────────────────────────────────
     if (!(flags & MAP_ANONYMOUS)) {
-        klog_puts("[MMAP] Error: Only MAP_ANONYMOUS supported\n");
+        klog_puts("[MMAP] Error: non-anonymous mapping requires valid fd\n");
         return MAP_FAILED;
     }
 
@@ -372,4 +405,20 @@ void syscall_register_mm(void) {
 // ── Reset mmap state (called from process_exec on new process load) ─────────
 void mm_reset_mmap_state(void) {
     mmap_next_addr = MMAP_REGION_BASE;
+}
+
+// ── Allocate virtual address range from mmap region (for device mmap handlers) --
+// Returns the base virtual address, or 0 on failure.
+uint64_t mm_alloc_mmap_region(uint64_t length) {
+    if (length == 0) return 0;
+    
+    uint64_t aligned_len = PAGE_ALIGN_UP(length);
+    
+    if (mmap_next_addr + aligned_len > MMAP_REGION_LIMIT) {
+        return 0;  // Region exhausted
+    }
+    
+    uint64_t vaddr = mmap_next_addr;
+    mmap_next_addr = vaddr + aligned_len;
+    return vaddr;
 }

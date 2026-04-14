@@ -3,8 +3,12 @@
 #include "../fs/ramfs.h"
 #include "../fs/vfs.h"
 #include "../mm/heap.h"
+#include "../mm/vmm.h"
+#include "../mm/pmm.h"
 #include "../console/console.h"
+#include "../console/klog.h"
 #include "../drivers/input/keyboard.h"
+#include "../syscalls/syscall.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -86,6 +90,78 @@ static uint32_t fb_vfs_write(struct vfs_node *node, uint32_t offset,
   memcpy((uint8_t *)fb->address + offset, buffer, size);
 
   return size;
+}
+
+// ── Framebuffer mmap: map physical fb memory directly into user space ─────────
+// This allows apps like Doom to write directly without syscalls per frame.
+#define FB_MMAP_PROT_READ   0x1
+#define FB_MMAP_PROT_WRITE  0x2
+#define FB_MMAP_PROT_EXEC   0x4
+#define FB_MMAP_MAP_SHARED  0x01
+#define FB_MMAP_MAP_PRIVATE 0x02
+
+static uint64_t fb_vfs_mmap(struct vfs_node *node, uint64_t length, uint64_t prot, uint64_t flags) {
+  (void)node;
+  if (!fb) return (uint64_t)-1;  // MAP_FAILED
+
+  uint32_t fb_size = fb->height * fb->pitch;
+  
+  // Length must not exceed framebuffer size
+  if (length == 0 || length > fb_size) {
+    klog_puts("[FB_MMAP] Error: invalid length\n");
+    return (uint64_t)-1;
+  }
+
+  // Must be shared mapping for direct framebuffer access
+  if (!(flags & FB_MMAP_MAP_SHARED)) {
+    klog_puts("[FB_MMAP] Error: only MAP_SHARED supported for framebuffer\n");
+    return (uint64_t)-1;
+  }
+
+  // Allocate a virtual address range in user space
+  // Use the mmap bump allocator from sys_mm.c
+  #define PAGE_SIZE 4096
+  #define PAGE_ALIGN_UP(x)   (((x) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1))
+  
+  uint64_t aligned_len = PAGE_ALIGN_UP(length);
+  uint64_t vaddr = mm_alloc_mmap_region(aligned_len);
+  if (vaddr == 0) {
+    klog_puts("[FB_MMAP] Error: mmap region exhausted\n");
+    return (uint64_t)-1;
+  }
+
+  // Build page flags from prot
+  uint64_t page_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER;
+  if (prot & FB_MMAP_PROT_WRITE)
+    page_flags |= PAGE_FLAG_RW;
+  if (!(prot & FB_MMAP_PROT_EXEC))
+    page_flags |= PAGE_FLAG_NX;
+
+  // Map each page of the framebuffer directly (physical -> user virtual)
+  // fb->address from Limine is a virtual address in HHDM - convert to physical
+  uint64_t *pml4 = vmm_get_active_pml4();
+  uint64_t fb_phys = (uint64_t)fb->address - pmm_get_hhdm_offset();
+  uint64_t num_pages = aligned_len / PAGE_SIZE;
+
+  for (uint64_t i = 0; i < num_pages; i++) {
+    uint64_t phys_page = fb_phys + i * PAGE_SIZE;
+    uint64_t virt_page = vaddr + i * PAGE_SIZE;
+    
+    if (!vmm_map_page(pml4, virt_page, phys_page, page_flags)) {
+      klog_puts("[FB_MMAP] Error: vmm_map_page failed\n");
+      return (uint64_t)-1;
+    }
+  }
+
+  klog_puts("[FB_MMAP] Mapped framebuffer ");
+  klog_uint64(aligned_len);
+  klog_puts(" bytes at ");
+  klog_uint64(vaddr);
+  klog_puts(" (phys ");
+  klog_uint64(fb_phys);
+  klog_puts(")\n");
+
+  return vaddr;
 }
 
 static uint32_t fb_vfs_read(struct vfs_node *node, uint32_t offset,
@@ -212,7 +288,8 @@ void fb_register_vfs(void) {
     fb_node->device = fb;
     fb_node->read   = fb_vfs_read;
     fb_node->write  = fb_vfs_write;
-    
+    fb_node->mmap   = fb_vfs_mmap;
+
     // Register in device registry (no filesystem manipulation needed)
     fb_register_device_node("fb0", fb_node);
   }

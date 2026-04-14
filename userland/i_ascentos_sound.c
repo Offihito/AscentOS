@@ -41,13 +41,9 @@ typedef struct {
 
     // Playback state
     int playing;
-    int position;
+    int position;    // Output sample playback position
     int volume;      // 0-127
     int sep;         // 0-254 (stereo separation)
-
-    // Resampled output buffer (8-bit mono → 16-bit stereo for /dev/dsp)
-    int16_t *resampled;
-    int resampled_len;
 } channel_t;
 
 static channel_t channels[MAX_CHANNELS];
@@ -65,13 +61,13 @@ static void dsp_write_chunk(const void *data, int len) {
 #define OUTPUT_SAMPLERATE 22050
 #define OUTPUT_CHANNELS   2
 #define OUTPUT_BITS       16
-#define OUTPUT_CHUNK_SAMPLES 1024
+#define OUTPUT_CHUNK_SAMPLES 630
 #define OUTPUT_CHUNK_BYTES (OUTPUT_CHUNK_SAMPLES * OUTPUT_CHANNELS * (OUTPUT_BITS / 8))
 
 // Ring buffer for non-blocking audio (holds ~200ms of audio)
 #define RING_BUFFER_SIZE (OUTPUT_SAMPLERATE * OUTPUT_CHANNELS * sizeof(int16_t) / 5)
 
-static int16_t mix_buffer[OUTPUT_CHUNK_SAMPLES * OUTPUT_CHANNELS];
+static int32_t mix_buffer[OUTPUT_CHUNK_SAMPLES * OUTPUT_CHANNELS];
 static uint8_t ring_buffer[RING_BUFFER_SIZE];
 static int ring_read_pos = 0;
 static int ring_write_pos = 0;
@@ -159,12 +155,6 @@ static void I_AscentOS_ShutdownSound(void) {
         close(dsp_fd);
         dsp_fd = -1;
     }
-    for (int i = 0; i < MAX_CHANNELS; i++) {
-        if (channels[i].resampled) {
-            free(channels[i].resampled);
-            channels[i].resampled = NULL;
-        }
-    }
 }
 
 // ── Get the lump index for a sound effect ──────────────────────────────────
@@ -174,52 +164,7 @@ static int I_AscentOS_GetSfxLumpNum(sfxinfo_t *sfxinfo) {
     return W_GetNumForName(namebuf);
 }
 
-// ── Resample a sound from its native rate to the output rate ────────────────
-// Input: 8-bit unsigned mono at `in_rate`
-// Output: 16-bit signed stereo at OUTPUT_SAMPLERATE
-static void resample_sound(channel_t *ch) {
-    if (ch->data == NULL || ch->length <= 0) {
-        ch->resampled = NULL;
-        ch->resampled_len = 0;
-        return;
-    }
-
-    // Calculate output length
-    double ratio = (double)OUTPUT_SAMPLERATE / (double)ch->sample_rate;
-    int out_samples = (int)(ch->length * ratio);
-    if (out_samples <= 0) {
-        ch->resampled = NULL;
-        ch->resampled_len = 0;
-        return;
-    }
-
-    // Allocate stereo 16-bit output
-    ch->resampled = (int16_t *)malloc(out_samples * OUTPUT_CHANNELS * sizeof(int16_t));
-    if (!ch->resampled) {
-        ch->resampled_len = 0;
-        return;
-    }
-    ch->resampled_len = out_samples * OUTPUT_CHANNELS * sizeof(int16_t);
-
-    // Volume scale (0-127 → 0.0-1.0)
-    double vol_scale = ch->volume / 127.0;
-
-    // Stereo separation: sep 0 = full left, 128 = center, 254 = full right
-    double left_scale  = vol_scale * (1.0 - (double)ch->sep / 254.0);
-    double right_scale = vol_scale * ((double)ch->sep / 254.0);
-
-    // Nearest-neighbor resample with 8-bit unsigned → 16-bit signed stereo
-    for (int i = 0; i < out_samples; i++) {
-        int src_idx = (int)(i / ratio);
-        if (src_idx >= ch->length) src_idx = ch->length - 1;
-
-        // Convert unsigned 8-bit (0-255, center=128) to signed 16-bit
-        int16_t sample = (int16_t)((ch->data[src_idx] - 128) * 256);
-
-        ch->resampled[i * 2]     = (int16_t)(sample * left_scale);   // left
-        ch->resampled[i * 2 + 1] = (int16_t)(sample * right_scale);  // right
-    }
-}
+// Dynamic resampling is now done directly during mixing.
 
 // ── Add data to ring buffer ────────────────────────────────────────────────
 static void ring_buffer_write(const uint8_t *data, int len) {
@@ -293,31 +238,38 @@ static void I_AscentOS_UpdateSound(void) {
         if (!channels[i].playing) continue;
         active_channels++;
 
-        int16_t *src = channels[i].resampled;
-        int src_bytes = channels[i].resampled_len;
-        int pos = channels[i].position;
+        int pos = channels[i].position; // current output sample index
 
-        // Mix this channel into the mix buffer
+        // Convert parameters to scale
+        double vol_scale = channels[i].volume / 127.0;
+        double left_scale  = vol_scale * (1.0 - (double)channels[i].sep / 254.0);
+        double right_scale = vol_scale * ((double)channels[i].sep / 254.0);
+        int l_fact = (int)(left_scale * 256);
+        int r_fact = (int)(right_scale * 256);
+
         int samples_to_mix = OUTPUT_CHUNK_SAMPLES;
-        int remaining = (src_bytes - pos) / (int)sizeof(int16_t);
-        if (remaining < samples_to_mix * OUTPUT_CHANNELS) {
-            // Sound will finish this chunk
-            samples_to_mix = remaining / OUTPUT_CHANNELS;
-            if (samples_to_mix <= 0) {
-                channels[i].playing = 0;
-                continue;
-            }
-        }
-
+        uint32_t s_rate = channels[i].sample_rate;
+        
+        uint32_t src_pos = ((uint64_t)pos * s_rate) / OUTPUT_SAMPLERATE;
+        uint32_t src_frac = ((uint64_t)pos * s_rate) % OUTPUT_SAMPLERATE;
+        
         for (int s = 0; s < samples_to_mix; s++) {
-            mix_buffer[s * 2]     += src[(pos / 2) + s * 2];
-            mix_buffer[s * 2 + 1] += src[(pos / 2) + s * 2 + 1];
-        }
-
-        channels[i].position += samples_to_mix * OUTPUT_CHANNELS * sizeof(int16_t);
-
-        if (channels[i].position >= src_bytes) {
-            channels[i].playing = 0;
+            if (src_pos >= (uint32_t)channels[i].length) {
+                channels[i].playing = 0;
+                break;
+            }
+            
+            int raw_sample = ((int)channels[i].data[src_pos] - 128); // -128 to 127
+            
+            mix_buffer[s * 2]     += (int32_t)(raw_sample * l_fact);
+            mix_buffer[s * 2 + 1] += (int32_t)(raw_sample * r_fact);
+            
+            src_frac += s_rate;
+            while (src_frac >= OUTPUT_SAMPLERATE) {
+                src_frac -= OUTPUT_SAMPLERATE;
+                src_pos++;
+            }
+            channels[i].position++;
         }
     }
 
@@ -349,7 +301,14 @@ static void I_AscentOS_UpdateSound(void) {
     }
 
     // Always push mixed audio to ring buffer (even if no active channels - outputs silence)
-    ring_buffer_write((uint8_t *)mix_buffer, OUTPUT_CHUNK_BYTES);
+    int16_t final_buffer[OUTPUT_CHUNK_SAMPLES * OUTPUT_CHANNELS];
+    for (int i = 0; i < OUTPUT_CHUNK_SAMPLES * OUTPUT_CHANNELS; i++) {
+        int32_t val = mix_buffer[i];
+        if (val > 32767) val = 32767;
+        if (val < -32768) val = -32768;
+        final_buffer[i] = (int16_t)val;
+    }
+    ring_buffer_write((uint8_t *)final_buffer, OUTPUT_CHUNK_BYTES);
 }
 
 // ── Update sound params (volume/separation) ────────────────────────────────
@@ -357,24 +316,11 @@ static void I_AscentOS_UpdateSoundParams(int channel, int vol, int sep) {
     if (channel < 0 || channel >= MAX_CHANNELS) return;
     channels[channel].volume = vol;
     channels[channel].sep = sep;
-
-    // Re-resample with new volume/sep if the sound is playing
-    if (channels[channel].playing) {
-        int saved_pos = channels[channel].position;
-        resample_sound(&channels[channel]);
-        channels[channel].position = saved_pos;
-    }
 }
 
 // ── Start a sound ──────────────────────────────────────────────────────────
 static int I_AscentOS_StartSound(sfxinfo_t *sfxinfo, int channel, int vol, int sep) {
     if (channel < 0 || channel >= MAX_CHANNELS) return -1;
-
-    // Free old resampled data
-    if (channels[channel].resampled) {
-        free(channels[channel].resampled);
-        channels[channel].resampled = NULL;
-    }
 
     // Load the sound lump
     int lumpnum = I_AscentOS_GetSfxLumpNum(sfxinfo);
@@ -402,9 +348,6 @@ static int I_AscentOS_StartSound(sfxinfo_t *sfxinfo, int channel, int vol, int s
     channels[channel].sep = sep;
     channels[channel].position = 0;
     channels[channel].playing = 1;
-
-    // Resample to output format
-    resample_sound(&channels[channel]);
 
     return channel;
 }
@@ -522,6 +465,35 @@ typedef struct __attribute__((packed)) {
 #define MUS_CTRL_SUSTAIN       8
 #define MUS_CTRL_SOFT_PEDAL    9
 
+// Precomputed tables for performance
+#define SINE_TABLE_SIZE 1024
+static double fast_sine_table[SINE_TABLE_SIZE];
+static double fast_freq_table[128];
+static int tables_initialized = 0;
+
+static unsigned int synth_seed = 1;
+static inline int fast_rand(void) {
+    synth_seed = synth_seed * 1103515245 + 12345;
+    return (unsigned int)(synth_seed / 65536) % 32768;
+}
+
+static inline double fast_sin(double phase) {
+    if (!tables_initialized) {
+        for (int i = 0; i < SINE_TABLE_SIZE; i++) {
+            fast_sine_table[i] = sin(2.0 * M_PI * ((double)i / SINE_TABLE_SIZE));
+        }
+        for (int i = 0; i < 128; i++) {
+            fast_freq_table[i] = 440.0 * pow(2.0, (i - 69) / 12.0);
+        }
+        tables_initialized = 1;
+    }
+    double p = phase - (int)phase;
+    if (p < 0.0) p += 1.0;
+    int idx = (int)(p * SINE_TABLE_SIZE);
+    if (idx >= SINE_TABLE_SIZE) idx = SINE_TABLE_SIZE - 1;
+    return fast_sine_table[idx];
+}
+
 // Generate one sample for a note with continuous phase tracking
 static int16_t synthesize_one_sample(mus_channel_t *ch, int note_idx) {
     if (!ch->notes[note_idx].active || ch->volume == 0) return 0;
@@ -569,17 +541,17 @@ static int16_t synthesize_one_sample(mus_channel_t *ch, int note_idx) {
             sample = (phase < 0.5) ? (4.0 * phase - 1.0) : (3.0 - 4.0 * phase);
             break;
         case 1:  // Chromatic percussion - sine + harmonics
-            sample = sin(2.0 * M_PI * phase) + 0.3 * sin(4.0 * M_PI * phase);
+            sample = fast_sin(phase) + 0.3 * fast_sin(phase * 2.0);
             break;
         case 2:  // Organ - sine with harmonics
-            sample = sin(2.0 * M_PI * phase) + 0.5 * sin(4.0 * M_PI * phase) 
-                   + 0.25 * sin(6.0 * M_PI * phase) + 0.125 * sin(8.0 * M_PI * phase);
+            sample = fast_sin(phase) + 0.5 * fast_sin(phase * 2.0) 
+                   + 0.25 * fast_sin(phase * 3.0) + 0.125 * fast_sin(phase * 4.0);
             break;
         case 3:  // Guitar - sawtooth-ish
             sample = 2.0 * phase - 1.0;
             break;
         case 4:  // Bass - sine with slight distortion
-            sample = sin(2.0 * M_PI * phase);
+            sample = fast_sin(phase);
             if (sample > 0.5) sample = 0.5;
             if (sample < -0.5) sample = -0.5;
             break;
@@ -587,7 +559,7 @@ static int16_t synthesize_one_sample(mus_channel_t *ch, int note_idx) {
             sample = (2.0 * phase - 1.0) * 0.7;
             break;
         case 6:  // Ensemble - multiple sines
-            sample = sin(2.0 * M_PI * phase) * 0.6 + sin(2.0 * M_PI * phase * 1.01) * 0.4;
+            sample = fast_sin(phase) * 0.6 + fast_sin(phase * 1.01) * 0.4;
             break;
         case 7:  // Brass - square-ish
             sample = (phase < 0.5) ? 0.7 : -0.7;
@@ -596,24 +568,24 @@ static int16_t synthesize_one_sample(mus_channel_t *ch, int note_idx) {
             sample = (phase < 0.5) ? 0.5 : -0.5;
             break;
         case 9:  // Pipe - pure sine
-            sample = sin(2.0 * M_PI * phase);
+            sample = fast_sin(phase);
             break;
         case 10: // Synth lead - varied
-            sample = sin(2.0 * M_PI * phase) + 0.3 * (2.0 * phase - 1.0);
+            sample = fast_sin(phase) + 0.3 * (2.0 * phase - 1.0);
             break;
         case 11: // Synth pad - soft harmonics
-            sample = sin(2.0 * M_PI * phase) * 0.5 + sin(4.0 * M_PI * phase) * 0.3 
-                   + sin(6.0 * M_PI * phase) * 0.2;
+            sample = fast_sin(phase) * 0.5 + fast_sin(phase * 2.0) * 0.3 
+                   + fast_sin(phase * 3.0) * 0.2;
             break;
         case 12: // Synth effects - noise-ish
-            sample = sin(2.0 * M_PI * phase) + 0.2 * ((double)rand() / RAND_MAX - 0.5);
+            sample = fast_sin(phase) + 0.2 * ((double)fast_rand() / 32768.0 - 0.5);
             break;
         case 13: // Ethnic - triangle with vibrato
             sample = (phase < 0.5) ? (4.0 * phase - 1.0) : (3.0 - 4.0 * phase);
             break;
         case 14: // Percussive - noise burst
             if (note_age < OUTPUT_SAMPLERATE / 100) {
-                sample = ((double)rand() / RAND_MAX - 0.5) * 2.0;
+                sample = ((double)fast_rand() / 32768.0 - 0.5) * 2.0;
             } else {
                 sample = 0;
             }
@@ -621,18 +593,18 @@ static int16_t synthesize_one_sample(mus_channel_t *ch, int note_idx) {
         case 15: // Sound effects / drums
             if (ch->instrument == 128) {  // drum channel
                 if (note < 40) {  // bass drum
-                    sample = sin(2.0 * M_PI * phase * 2.0) * (1.0 - (note_age % 1000) / 1000.0);
+                    sample = fast_sin(phase * 2.0) * (1.0 - (note_age % 1000) / 1000.0);
                 } else if (note < 50) {  // snare
-                    sample = ((double)rand() / RAND_MAX - 0.5) * (1.0 - (note_age % 500) / 500.0);
+                    sample = ((double)fast_rand() / 32768.0 - 0.5) * (1.0 - (note_age % 500) / 500.0);
                 } else {  // hi-hat
-                    sample = ((double)rand() / RAND_MAX - 0.5) * 0.5;
+                    sample = ((double)fast_rand() / 32768.0 - 0.5) * 0.5;
                 }
             } else {
-                sample = sin(2.0 * M_PI * phase);
+                sample = fast_sin(phase);
             }
             break;
         default:
-            sample = sin(2.0 * M_PI * phase);
+            sample = fast_sin(phase);
     }
     
     // Advance phase for next sample
@@ -787,7 +759,10 @@ static int parse_mus_event(void) {
                 music.channels[midi_channel].notes[slot].in_release = 0;
                 music.channels[midi_channel].notes[slot].release_envelope = 0.0;
                 // Calculate phase increment: freq / sample_rate
-                double freq = 440.0 * pow(2.0, (note - 69) / 12.0);
+                double freq = 440.0;
+                if (note >= 0 && note < 128) {
+                    freq = fast_freq_table[note];
+                }
                 music.channels[midi_channel].notes[slot].phase_inc = freq / OUTPUT_SAMPLERATE;
             }
             break;
@@ -896,6 +871,9 @@ static void update_music(void) {
 // ── Music API implementation ────────────────────────────────────────────────
 
 boolean I_AscentOS_InitMusic(void) {
+    // Ensure tables are initialized
+    fast_sin(0.0);
+
     memset(&music, 0, sizeof(music));
     music.volume = 127;  // full volume; callers use SetMusicVolume to adjust
     music.sample_buffer = (int16_t *)malloc(SAMPLE_BUFFER_SIZE * OUTPUT_CHANNELS * sizeof(int16_t));

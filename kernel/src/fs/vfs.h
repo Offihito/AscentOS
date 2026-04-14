@@ -37,6 +37,7 @@ typedef int (*symlink_type_t)(struct vfs_node *, char *name, char *target);
 typedef int (*rename_type_t)(struct vfs_node *, char *old_name, char *new_name);
 typedef int (*chmod_type_t)(struct vfs_node *, uint16_t permission);
 typedef int (*chown_type_t)(struct vfs_node *, uint32_t uid, uint32_t gid);
+typedef uint64_t (*mmap_type_t)(struct vfs_node *, uint64_t length, uint64_t prot, uint64_t flags);
 
 typedef struct vfs_node {
   char name[128];
@@ -69,6 +70,7 @@ typedef struct vfs_node {
   rename_type_t rename;
   chmod_type_t chmod;
   chown_type_t chown;
+  mmap_type_t mmap;  // Device-specific mmap handler
 
   struct vfs_node *ptr; // Used by mountpoints and symlinks
 } vfs_node_t;

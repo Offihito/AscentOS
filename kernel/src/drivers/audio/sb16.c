@@ -60,6 +60,8 @@ static uint8_t dsp_read(void) {
 
 // ── ISR ─────────────────────────────────────────────────────────────────────
 
+static void sb16_pump_audio(void);
+
 static void sb16_isr(struct registers *regs) {
     (void)regs;
     if (sb16_active_16bit) {
@@ -73,6 +75,8 @@ static void sb16_isr(struct registers *regs) {
     (void)inb(MIXER_DATA);
 
     sb16_irq_fired = 1;
+    
+    sb16_pump_audio();
 }
 
 // ── DMA buffer allocation ───────────────────────────────────────────────────
@@ -214,7 +218,39 @@ uint32_t sb16_get_sample_rate(void) { return dsp_sample_rate; }
 uint8_t  sb16_get_channels(void)    { return dsp_channels; }
 uint8_t  sb16_get_bits(void)        { return dsp_bits; }
 
-// ── VFS write callback for /dev/dsp ─────────────────────────────────────────
+#define SB16_RING_SIZE 65536
+static uint8_t sb16_ring[SB16_RING_SIZE];
+static volatile uint32_t ring_head = 0;
+static volatile uint32_t ring_tail = 0;
+static volatile uint32_t ring_count = 0;
+static volatile bool sb16_is_playing = false;
+
+static void sb16_pump_audio(void) {
+    if (ring_count == 0) {
+        sb16_is_playing = false;
+        return;
+    }
+
+    uint32_t chunk = ring_count;
+    if (chunk > 2048) chunk = 2048; // Try smaller chunk to reduce latency (2048 bytes = ~46ms)
+
+    // Read from ring buffer, handling wrap
+    uint32_t unread1 = SB16_RING_SIZE - ring_tail;
+    if (chunk <= unread1) {
+        memcpy(sb16_dma_buf, sb16_ring + ring_tail, chunk);
+        ring_tail = (ring_tail + chunk) % SB16_RING_SIZE;
+    } else {
+        memcpy(sb16_dma_buf, sb16_ring + ring_tail, unread1);
+        uint32_t rem = chunk - unread1;
+        memcpy(sb16_dma_buf + unread1, sb16_ring, rem);
+        ring_tail = rem;
+    }
+    ring_count -= chunk;
+
+    sb16_is_playing = true;
+    sb16_play_chunk((uint32_t)sb16_dma_phys, chunk,
+                    (uint16_t)dsp_sample_rate, dsp_channels, dsp_bits);
+}
 
 static uint32_t dsp_vfs_write(struct vfs_node *node, uint32_t offset,
                                uint32_t size, uint8_t *buffer) {
@@ -222,21 +258,39 @@ static uint32_t dsp_vfs_write(struct vfs_node *node, uint32_t offset,
     if (!sb16_present || !buffer || size == 0) return 0;
     if (ensure_dma_buffer() != 0) return 0;
 
+    uint32_t to_write = size;
     uint32_t written = 0;
-    while (written < size) {
-        uint32_t chunk = size - written;
-        if (chunk > 8192) chunk = 8192; // Match 8KB reference chunk size
-
-        memcpy(sb16_dma_buf, buffer + written, chunk);
-        sb16_play_chunk((uint32_t)sb16_dma_phys, chunk,
-                        (uint16_t)dsp_sample_rate, dsp_channels, dsp_bits);
-
-        // Block until DMA transfer completes
-        while (!sb16_irq_fired) {
-            sched_yield();
+    while (to_write > 0) {
+        asm volatile("cli");
+        uint32_t space = SB16_RING_SIZE - ring_count;
+        
+        if (space == 0) {
+            asm volatile("sti");
+            // Ring buffer full. Do not block, just return.
+            break;
         }
 
+        uint32_t chunk = to_write < space ? to_write : space;
+
+        uint32_t space1 = SB16_RING_SIZE - ring_head;
+        if (chunk <= space1) {
+            memcpy(sb16_ring + ring_head, buffer + written, chunk);
+            ring_head = (ring_head + chunk) % SB16_RING_SIZE;
+        } else {
+            memcpy(sb16_ring + ring_head, buffer + written, space1);
+            uint32_t rem = chunk - space1;
+            memcpy(sb16_ring, buffer + written + space1, rem);
+            ring_head = rem;
+        }
+        ring_count += chunk;
+
+        if (!sb16_is_playing) {
+            sb16_pump_audio();
+        }
+        asm volatile("sti");
+
         written += chunk;
+        to_write -= chunk;
     }
     return written;
 }

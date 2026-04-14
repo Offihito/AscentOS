@@ -1,5 +1,5 @@
-#ifndef SCANCODE_H
-#define SCANCODE_H
+#ifndef SCANCODE_H_GUARD
+#define SCANCODE_H_GUARD
 
 #include <stdint.h>
 
@@ -111,4 +111,4 @@ typedef struct {
     uint8_t is_release;    // 1 if this is a key release, 0 for key press
 } scancode_event_t;
 
-#endif // SCANCODE_H
+#endif // SCANCODE_H_GUARD
