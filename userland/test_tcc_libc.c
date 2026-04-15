@@ -1,15 +1,3 @@
-/*
- * test_tcc_libc.c - Test program for TCC on AscentOS using musl libc
- * 
- * This uses standard libc (musl) - the recommended way to use TCC.
- * 
- * Compile with TCC:
- *   tcc -o test_tcc_libc test_tcc_libc.c
- * 
- * Run on AscentOS:
- *   ./test_tcc_libc
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

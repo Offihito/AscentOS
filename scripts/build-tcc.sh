@@ -116,18 +116,13 @@ build_tcc() {
         fi
     done
 
-    # TCC tries lib*.so first unless -static is passed. On AscentOS we ship
-    # static musl runtime archives, so provide GNU ld script shims that map
-    # libc.so/libm.so lookups to libc.a/libm.a.
-    cat > "$TCC_INSTALL/lib/tcc/lib/libc.so" << 'EOF'
-/* GNU ld script */
-GROUP ( libc.a )
-EOF
+    # Rebuild crt1.o from our custom assembly source if available
+    TCC_CRT1_SRC="$ROOT_DIR/toolchain/tcc-crt1.S"
+    if [ -f "$TCC_CRT1_SRC" ]; then
+        echo "Building TCC-compatible crt1.o from custom source..."
+        "$CC" -c -nostdlib -fno-pic -fno-pie -o "$TCC_INSTALL/lib/tcc/lib/crt1.o" "$TCC_CRT1_SRC"
+    fi
 
-    cat > "$TCC_INSTALL/lib/tcc/lib/libm.so" << 'EOF'
-/* GNU ld script */
-GROUP ( libm.a )
-EOF
     
     # Configure options:
     # --config-musl: configure for musl libc (key for proper builds)

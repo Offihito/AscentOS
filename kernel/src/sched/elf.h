@@ -45,4 +45,32 @@ typedef struct {
 #define PF_W 2
 #define PF_R 4
 
+// ── ELF Auxiliary Vector Types (for initial user stack) ─────────────────────
+#define AT_NULL   0   // End of auxiliary vector
+#define AT_PHDR   3   // Program headers virtual address
+#define AT_PHENT  4   // Size of program header entry
+#define AT_PHNUM  5   // Number of program headers
+#define AT_PAGESZ 6   // System page size
+#define AT_ENTRY  9   // Entry point of program
+#define AT_UID   11   // Real UID
+#define AT_EUID  12   // Effective UID
+#define AT_GID   13   // Real GID
+#define AT_EGID  14   // Effective GID
+#define AT_PLATFORM 15 // Platform string
+#define AT_HWCAP  16  // Hardware capabilities
+#define AT_CLKTCK 17  // Clock frequency
+#define AT_SECURE 23  // Secure mode (suid)
+#define AT_BASE   7   // Base address of interpreter
+#define AT_FLAGS  8   // Flags
+#define AT_RANDOM 25  // Address of 16 random bytes
+#define AT_EXECFN 31  // Executable filename string address
+
+// ── ELF metadata passed from loader to stack builder ────────────────────────
+typedef struct {
+  uint64_t entry;     // e_entry
+  uint64_t phdr;      // virtual address of program headers
+  uint16_t phentsize; // e_phentsize
+  uint16_t phnum;     // e_phnum
+} elf_info_t;
+
 #endif

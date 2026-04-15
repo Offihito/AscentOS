@@ -51,7 +51,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf
+disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/test_tcc_libc.c
 	dd if=/dev/zero of=disk.img bs=1M count=256
 	mkfs.ext2 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
@@ -75,6 +75,7 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/t
 	debugfs -w -R "write userland/hello.elf hello.elf" disk.img
 	debugfs -w -R "write userland/test_stat.elf test_stat.elf" disk.img
 	debugfs -w -R "write userland/ls.elf ls.elf" disk.img
+	debugfs -w -R "write userland/readelf.elf readelf.elf" disk.img
 	debugfs -w -R "write userland/pong.elf pong.elf" disk.img
 	debugfs -w -R "write userland/raycast.elf raycast.elf" disk.img
 	debugfs -w -R "write userland/test_mmap_shared_private.elf test_mmap_shared_private.elf" disk.img
@@ -87,6 +88,9 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/t
 	debugfs -w -R "write userland/test_sys_cwd.elf test_sys_cwd.elf" disk.img
 	debugfs -w -R "write userland/test_newfstatat.elf test_newfstatat.elf" disk.img
 	debugfs -w -R "write userland/test_unlink_rename.elf test_unlink_rename.elf" disk.img
+	debugfs -w -R "write userland/test_tcc_libc.c test_tcc_libc.c" disk.img
+	debugfs -w -R "write userland/test.s test.s" disk.img
+	debugfs -w -R "write userland/standalone.s standalone.s" disk.img
 	debugfs -w -R "write test.wav test.wav" disk.img
 	debugfs -w -R "write test.bmp test.bmp" disk.img
 	debugfs -w -R "write terry.bmp terry.bmp" disk.img
@@ -98,6 +102,16 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/t
 	debugfs -w -R "write userland/doom.elf doom.elf" disk.img
 	debugfs -w -R "write doomu.wad doom1.wad" disk.img
 	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
+	@if [ -d toolchain/musl-sysroot/opt/tcc ]; then \
+		echo "Installing TCC into disk image..."; \
+		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/opt/tcc opt/tcc; \
+		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/bin/tcc tcc.elf" disk.img; \
+		debugfs -w -R "write toolchain/musl-sysroot/lib/libc.a libc.a" disk.img; \
+		debugfs -w -R "write toolchain/musl-sysroot/lib/crt1.o crt1.o" disk.img; \
+		debugfs -w -R "write toolchain/musl-sysroot/lib/crti.o crti.o" disk.img; \
+		debugfs -w -R "write toolchain/musl-sysroot/lib/crtn.o crtn.o" disk.img; \
+		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/lib/tcc/libtcc1.a libtcc1.a" disk.img; \
+	fi
 
 edk2-ovmf:
 	curl -L https://github.com/osdev0/edk2-ovmf-nightly/releases/latest/download/edk2-ovmf.tar.gz | gunzip | tar -xf -
@@ -149,7 +163,7 @@ clean: clean-musl clean-doom
 clean-musl:
 	rm -rf build/musl-1.2.5 build/musl-cross-make
 	rm -rf toolchain/musl-sysroot toolchain/x86_64-linux-musl
-	rm -f userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/kilo.c userland/test_mmap_shared_private.elf userland/playwav.elf userland/kria.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf
+	rm -f userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/kilo.c userland/test_mmap_shared_private.elf userland/playwav.elf userland/kria.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/ls.elf userland/readelf.elf
 	rm -rf userland/kria-lang/target
 
 .PHONY: clean-disk
@@ -236,6 +250,10 @@ userland/test_mmap_shared_private.elf: userland/test_mmap_shared_private.c $(MUS
 userland/ls.elf: userland/ls.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/ls.c -o userland/ls.elf
+
+userland/readelf.elf: userland/readelf.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/readelf.c -o userland/readelf.elf
 
 userland/pong.elf: userland/pong.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
