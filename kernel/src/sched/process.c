@@ -240,9 +240,18 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path, const
   // Get HHDM offset for kernel access to user memory
   uint64_t hhdm = pmm_get_hhdm_offset();
 
+  size_t argv_ptr_count = (argc > 0) ? (size_t)argc : 1;
+  size_t envp_ptr_count = (envc > 0) ? (size_t)envc : 1;
+  uint64_t *argv_ptrs = kmalloc(argv_ptr_count * sizeof(uint64_t));
+  uint64_t *envp_ptrs = kmalloc(envp_ptr_count * sizeof(uint64_t));
+  if (!argv_ptrs || !envp_ptrs) {
+    if (argv_ptrs) kfree(argv_ptrs);
+    if (envp_ptrs) kfree(envp_ptrs);
+    return 0;
+  }
+
   // Copy strings using HHDM to access the physical memory
   uint64_t current = string_area;
-  uint64_t argv_ptrs[argc];
   for (int i = 0; i < argc; i++) {
     size_t len = strlen(argv[i]) + 1;
     // Translate user VA to kernel VA via VMM, then copy
@@ -253,7 +262,6 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path, const
     current += len;
   }
 
-  uint64_t envp_ptrs[envc];
   for (int i = 0; i < envc; i++) {
     size_t len = strlen(envp[i]) + 1;
     uint64_t phys = vmm_virt_to_phys(vmm_get_active_pml4(), current);
@@ -263,13 +271,18 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path, const
     current += len;
   }
 
-  // Build stack - need to write through HHDM as well
-  uint64_t stack_ptr = current;
-  stack_ptr &= ~0xFULL;
+  // Build stack below copied strings to avoid overlap corruption.
+  uint64_t stack_ptr = string_area;
   
-  // Calculate stack entries in a temporary buffer, then copy to user stack
-  // We need to write: argc, argv ptrs, 0, envp ptrs, 0, AT_NULL (two zeros)
-  uint64_t stack_entries[argc + envc + 4]; // argc + argv + null + envp + null + 2 auxv
+  // Calculate stack entries in a temporary buffer, then copy to user stack.
+  // Layout: argc, argv[argc], NULL, envp[envc], NULL, AT_NULL, 0
+  size_t stack_entry_count = (size_t)argc + (size_t)envc + 5;
+  uint64_t *stack_entries = kmalloc(stack_entry_count * sizeof(uint64_t));
+  if (!stack_entries) {
+    kfree(argv_ptrs);
+    kfree(envp_ptrs);
+    return 0;
+  }
   int idx = 0;
   
   stack_entries[idx++] = (uint64_t)argc;
@@ -289,6 +302,10 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path, const
   uint64_t phys = vmm_virt_to_phys(vmm_get_active_pml4(), final_sp);
   void *kernel_virt = (void *)(phys + hhdm);
   memcpy(kernel_virt, stack_entries, stack_bytes);
+
+  kfree(stack_entries);
+  kfree(argv_ptrs);
+  kfree(envp_ptrs);
 
   return final_sp;
 }
@@ -314,7 +331,12 @@ bool process_exec_argv(const char **argv) {
   klog_uint64(entry_point);
   klog_puts(")\n");
 
-  uint64_t user_rsp = process_build_initial_stack(ASCENTOS_USER_STACK_TOP, NULL, (const char **)argv, NULL);
+  uint64_t user_rsp = process_build_initial_stack(
+      ASCENTOS_USER_STACK_TOP, NULL, (const char **)argv, NULL);
+  if (!user_rsp) {
+    klog_puts("[PROC] Exec failed: could not build initial stack\n");
+    return false;
+  }
 
   // Initialize File Descriptors for the main thread
   struct thread *current_thread = sched_get_current();

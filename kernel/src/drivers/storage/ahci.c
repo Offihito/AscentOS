@@ -128,17 +128,27 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf, i
     ahci_command_table_t *cmdtbl = (ahci_command_table_t*)(ctba_addr + pmm_get_hhdm_offset());
     memset(cmdtbl, 0, sizeof(ahci_command_table_t));
 
-    // Fill PRDT (Assuming buf is physically contiguous for simplistic AHCI)
-    // In a real OS we'd walk the page tables and create PRDTs per 4K mapped physically.
-    // For shell 'readsect', the generic buffer is contiguous if < 4K.
-    
-    // Convert current buffer virtual address to physical address by subtracting HHDM.
-    // NOTE: This assumes buf is allocated in the HHDM allocator or linear map!
-    uint64_t buf_phys = (uint64_t)buf - pmm_get_hhdm_offset();
-    
-    cmdtbl->prdt_entry[0].dba = (uint32_t)buf_phys;
-    cmdtbl->prdt_entry[0].dbau = (uint32_t)(buf_phys >> 32);
-    cmdtbl->prdt_entry[0].dbc = (count * 512) - 1; // Byte count - 1
+    // Use a DMA bounce buffer in physical memory. The syscall/file layer may
+    // pass user virtual addresses which are NOT in HHDM and are not guaranteed
+    // physically contiguous.
+    uint64_t bytes = (uint64_t)count * 512;
+    uint64_t pages = (bytes + 4095) / 4096;
+    void *bounce_phys = pmm_alloc_blocks(pages);
+    if (!bounce_phys) {
+        console_puts("[ERR] AHCI OOM: bounce buffer alloc failed\n");
+        return -1;
+    }
+    void *bounce_virt = (void *)((uint64_t)bounce_phys + pmm_get_hhdm_offset());
+
+    if (is_write) {
+        memcpy(bounce_virt, buf, (size_t)bytes);
+    } else {
+        memset(bounce_virt, 0, (size_t)bytes);
+    }
+
+    cmdtbl->prdt_entry[0].dba = (uint32_t)(uint64_t)bounce_phys;
+    cmdtbl->prdt_entry[0].dbau = (uint32_t)((uint64_t)bounce_phys >> 32);
+    cmdtbl->prdt_entry[0].dbc = bytes - 1; // Byte count - 1
     cmdtbl->prdt_entry[0].i = 1; // Interrupt on completion
 
     // Setup FIS
@@ -171,6 +181,7 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf, i
             break;
         if (port->is & (1 << 30)) { // Error
             console_puts("[ERR] AHCI Disk Error during IO\n");
+            pmm_free_blocks(bounce_phys, pages);
             return -1;
         }
     }
@@ -178,8 +189,14 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf, i
     // Check for error
     if (port->is & (1 << 30)) {
         console_puts("[ERR] AHCI Disk Error bit set\n");
+        pmm_free_blocks(bounce_phys, pages);
         return -1;
     }
+
+    if (!is_write) {
+        memcpy(buf, bounce_virt, (size_t)bytes);
+    }
+    pmm_free_blocks(bounce_phys, pages);
 
     return 0;
 }

@@ -1,6 +1,7 @@
 #include "mm/pmm.h"
 #include <stdint.h>
 #include "lock/spinlock.h"
+#include "console/klog.h"
 
 static spinlock_t pmm_lock = SPINLOCK_INIT;
 
@@ -94,6 +95,13 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
     
     // Also, mark page 0 as USED to prevent allocating address zero (makes NULL checks safer).
     bitmap_set(0);
+
+    // Keep the first 1 MiB permanently reserved. Firmware/boot-time data and
+    // early paging structures may live here, and accidental reuse can corrupt
+    // active page tables.
+    for (uint64_t p = 0; p < 0x100000; p += PAGE_SIZE) {
+        bitmap_set(p / PAGE_SIZE);
+    }
 }
 
 void *pmm_alloc_blocks(size_t count) {
@@ -153,9 +161,35 @@ void *pmm_alloc(void) {
 }
 
 void pmm_free_blocks(void *ptr, size_t count) {
-    if (!ptr) return;
+    if (!ptr || count == 0) return;
+
+    uint64_t addr = (uint64_t)ptr;
+    uint64_t max_phys = highest_page * PAGE_SIZE;
+
+    // PMM owns physical page frame indices, so frees must be page-aligned
+    // physical addresses inside known RAM range.
+    if ((addr & (PAGE_SIZE - 1)) != 0) {
+        klog_puts("[PMM] Warning: ignoring unaligned free addr=");
+        klog_uint64(addr);
+        klog_puts("\n");
+        return;
+    }
+    if (addr >= max_phys) {
+        klog_puts("[PMM] Warning: ignoring out-of-range free addr=");
+        klog_uint64(addr);
+        klog_puts(" max=");
+        klog_uint64(max_phys);
+        klog_puts("\n");
+        return;
+    }
+
     spinlock_acquire(&pmm_lock);
-    size_t start_bit = ((uint64_t)ptr) / PAGE_SIZE;
+    size_t start_bit = addr / PAGE_SIZE;
+
+    if (start_bit + count > highest_page) {
+        count = highest_page - start_bit;
+    }
+
     for (size_t i = start_bit; i < start_bit + count; i++) {
         bitmap_clear(i);
     }

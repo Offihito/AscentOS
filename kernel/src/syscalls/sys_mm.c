@@ -208,34 +208,54 @@ static uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2,
     uint64_t num_pages = aligned_len / PAGE_SIZE;
     uint64_t *pml4 = vmm_get_active_pml4();
 
-    // Get VMA for this region to check if it's shared
+    // munmap should operate only on tracked mmap VMAs. This avoids tearing down
+    // unrelated ELF/stack/brk mappings if userspace passes a bad address.
     struct thread *current = sched_get_current();
+    struct vma *first_vma = NULL;
+    if (!current) {
+        return (uint64_t)-22; // EINVAL
+    }
+    first_vma = vma_find(&current->vmas, addr);
+    if (!first_vma) {
+        return (uint64_t)-22; // EINVAL
+    }
+
+    // Logging label (best-effort, based on first VMA).
     bool is_shared = false;
-    if (current) {
-        struct vma *vma = vma_find(&current->vmas, addr);
-        if (vma && (vma->flags & MAP_SHARED)) {
-            is_shared = true;
-        }
+    if (first_vma->flags & MAP_SHARED) {
+        is_shared = true;
     }
 
     for (uint64_t i = 0; i < num_pages; i++) {
         uint64_t va = addr + i * PAGE_SIZE;
+        struct vma *vma = vma_find(&current->vmas, va);
+        if (!vma) {
+            // Skip untracked pages rather than tearing down unknown mappings.
+            continue;
+        }
+
         uint64_t phys = vmm_virt_to_phys(pml4, va);
         
         if (phys != 0) {
-            // For private mappings, free the physical page
-            // For shared mappings, we don't free here (would need refcounting)
-            if (!is_shared) {
-                pmm_free((void *)phys);
+            // Only anonymous private pages are owned by this mmap path and can
+            // safely be returned to PMM. Device/file-backed mappings may not
+            // come from pmm_alloc and must not be pmm_free'd here.
+            bool should_free_phys = false;
+            if (vma->fd == -1 &&
+                (vma->flags & MAP_PRIVATE) &&
+                (vma->flags & MAP_ANONYMOUS)) {
+                should_free_phys = true;
+            }
+
+            if (should_free_phys) {
+                pmm_free((void *)PAGE_ALIGN_DOWN(phys));
             }
         }
         vmm_unmap_page(pml4, va);
     }
 
     // Remove from VMA list
-    if (current) {
-        vma_remove(&current->vmas, addr, addr + aligned_len);
-    }
+    vma_remove(&current->vmas, addr, addr + aligned_len);
 
     klog_puts("[MUNMAP] Unmapped ");
     klog_uint64(aligned_len);

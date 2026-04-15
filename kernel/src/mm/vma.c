@@ -12,6 +12,11 @@ void vma_list_init(struct vma_list *list) {
 
 int vma_add(struct vma_list *list, uint64_t start, uint64_t end,
             uint64_t prot, uint64_t flags, int fd, uint64_t offset) {
+    // Reject overlapping ranges to keep VMA bookkeeping coherent.
+    if (vma_find_overlap(list, start, end)) {
+        return -1;
+    }
+
     // Find a free slot
     for (int i = 0; i < VMA_MAX_REGIONS; i++) {
         if (!list->regions[i].active) {
@@ -46,10 +51,11 @@ bool vma_remove(struct vma_list *list, uint64_t start, uint64_t end) {
             }
             // Case 2: Unmap from middle - split into two
             else if (start > v->start && end < v->end) {
-                // Shrink the existing VMA to the first half (no count change)
-                // We don't create a new VMA for the second half - it's unmapped
-                // This avoids VMA slot exhaustion during splits
+                // Split into two VMAs: [old_start, start) and [end, old_end)
+                // Keep current slot as first half and allocate a second slot.
+                uint64_t old_end = v->end;
                 v->end = start;
+                (void)vma_add(list, end, old_end, v->prot, v->flags, v->fd, v->offset);
                 removed = true;
             }
             // Case 3: Unmap from start - shrink VMA (no count change needed)
