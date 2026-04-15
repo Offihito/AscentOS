@@ -51,7 +51,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/test_tcc_libc.c
+disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/test_tcc_libc.c userland/test_dynamic.elf
 	dd if=/dev/zero of=disk.img bs=1M count=256
 	mkfs.ext2 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
@@ -59,6 +59,9 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/t
 	debugfs -w -R "cd /" -R "mkdir tmp" disk.img
 	debugfs -w -R "write /tmp/ascentos_hello.txt hello.txt" disk.img
 	debugfs -w -R "mkdir docs" disk.img
+	debugfs -w -R "mkdir lib" disk.img
+	debugfs -w -R "write toolchain/musl-sysroot/lib/libc.so lib/libc.so" disk.img
+	debugfs -w -R "write toolchain/musl-sysroot/lib/libc.so lib/ld-musl-x86_64.so.1" disk.img
 	debugfs -w -R "write /tmp/ascentos_readme.txt docs/readme.txt" disk.img
 	debugfs -w -R "write userland/test_mmap.elf test_mmap.elf" disk.img
 	debugfs -w -R "write userland/test_arch_prctl.elf test_arch_prctl.elf" disk.img
@@ -88,6 +91,7 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/t
 	debugfs -w -R "write userland/test_sys_cwd.elf test_sys_cwd.elf" disk.img
 	debugfs -w -R "write userland/test_newfstatat.elf test_newfstatat.elf" disk.img
 	debugfs -w -R "write userland/test_unlink_rename.elf test_unlink_rename.elf" disk.img
+	debugfs -w -R "write userland/test_dynamic.elf test_dynamic.elf" disk.img
 	debugfs -w -R "write userland/test_tcc_libc.c test_tcc_libc.c" disk.img
 	debugfs -w -R "write userland/test.s test.s" disk.img
 	debugfs -w -R "write userland/standalone.s standalone.s" disk.img
@@ -294,6 +298,10 @@ userland/test_newfstatat.elf: userland/test_newfstatat.c $(MUSL_LIBC)
 userland/test_unlink_rename.elf: userland/test_unlink_rename.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_unlink_rename.c -o userland/test_unlink_rename.elf
+
+userland/test_dynamic.elf: userland/test_dynamic.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) -O2 -Wall -Wextra -fno-stack-protector -I$(MUSL_SYSROOT)/include -L$(MUSL_SYSROOT)/lib \
+		userland/test_dynamic.c -o userland/test_dynamic.elf
 
 # Kria programming language (Rust-based, compiled with musl for static linking)
 userland/kria-lang:

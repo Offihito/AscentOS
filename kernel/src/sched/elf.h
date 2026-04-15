@@ -71,6 +71,8 @@ typedef struct {
   uint64_t phdr;      // virtual address of program headers
   uint16_t phentsize; // e_phentsize
   uint16_t phnum;     // e_phnum
+  uint64_t interp_base; // Base address of interpreter
+  uint64_t interp_entry; // Entry point of interpreter
 } elf_info_t;
 
 #endif

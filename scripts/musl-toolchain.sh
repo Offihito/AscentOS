@@ -129,7 +129,7 @@ build_sysroot() {
 
 	./configure \
 		--prefix="$PREFIX" \
-		--disable-shared \
+		--enable-shared \
 		--enable-static \
 		--host="$HOST_TRIPLET" \
 		AR="$AR" \

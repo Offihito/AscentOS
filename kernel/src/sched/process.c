@@ -132,14 +132,12 @@ void process_jump_usermode(uint64_t rip, uint64_t user_rsp, uint64_t pml4) {
 
 #define PAGE_SIZE 4096
 
-bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
-  // Reset brk state for this new process
-  process_brk_base = 0;
-  process_brk_current = 0;
-
+static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base, elf_info_t *out_info, char *interp_path, size_t interp_max_len) {
   vfs_node_t *file = vfs_resolve_path(path);
   if (!file) {
-    klog_puts("[PROC] ELF load failed: File not found.\n");
+    klog_puts("[PROC] ELF load failed: File not found: ");
+    klog_puts(path);
+    klog_puts("\n");
     return false;
   }
 
@@ -147,104 +145,110 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
   Elf64_Ehdr ehdr;
   if (vfs_read(file, 0, sizeof(Elf64_Ehdr), (uint8_t *)&ehdr) !=
       sizeof(Elf64_Ehdr)) {
-    klog_puts("[PROC] Exec failed: Could not read ELF header.\n");
     return false;
   }
 
-  // Check magic
   if (ehdr.e_ident[0] != 0x7f || ehdr.e_ident[1] != 'E' ||
-      ehdr.e_ident[2] != 'L' || ehdr.e_ident[3] != 'F') {
-    klog_puts("[PROC] Exec failed: Invalid ELF magic.\n");
+      ehdr.e_ident[2] != 'L' || ehdr.e_ident[3] != 'F' || ehdr.e_ident[4] != 2) {
     return false;
   }
 
-  // We only support 64-bit EXEs
-  if (ehdr.e_ident[4] != 2) { // 2 = 64-bit
-    klog_puts("[PROC] ELF load failed: Not a 64-bit ELF.\n");
-    return false;
-  }
-
-  // Determine where program headers will be mapped in memory.
-  // They reside at file offset e_phoff, which falls inside the first PT_LOAD
-  // segment.  We compute: phdr_vaddr = seg_vaddr + (e_phoff - seg_offset).
   uint64_t phdr_vaddr = 0;
   uint64_t hhdm = pmm_get_hhdm_offset();
 
-  // First pass: find the PT_LOAD that contains the program header table
   for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
     Elf64_Phdr phdr;
     uint32_t offset = ehdr.e_phoff + (i * ehdr.e_phentsize);
-    if (vfs_read(file, offset, sizeof(Elf64_Phdr), (uint8_t *)&phdr) !=
-        sizeof(Elf64_Phdr))
+    if (vfs_read(file, offset, sizeof(Elf64_Phdr), (uint8_t *)&phdr) != sizeof(Elf64_Phdr))
       continue;
+    
+    if (phdr.p_type == PT_INTERP && interp_path) {
+      uint32_t len = phdr.p_filesz;
+      if (len >= interp_max_len) len = interp_max_len - 1;
+      vfs_read(file, phdr.p_offset, len, (uint8_t *)interp_path);
+      interp_path[len] = '\0';
+    }
+
     if (phdr.p_type == PT_LOAD && ehdr.e_phoff >= phdr.p_offset &&
         ehdr.e_phoff < phdr.p_offset + phdr.p_filesz) {
-      phdr_vaddr = phdr.p_vaddr + (ehdr.e_phoff - phdr.p_offset);
-      klog_puts("[PROC] Identified PHDR mapping: vaddr=");
-      klog_uint64(phdr_vaddr);
-      klog_puts("\n");
-      break;
+      phdr_vaddr = load_base + phdr.p_vaddr + (ehdr.e_phoff - phdr.p_offset);
     }
   }
 
-  // Read Program Headers
   for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
     Elf64_Phdr phdr;
     uint32_t offset = ehdr.e_phoff + (i * ehdr.e_phentsize);
 
-    if (vfs_read(file, offset, sizeof(Elf64_Phdr), (uint8_t *)&phdr) !=
-        sizeof(Elf64_Phdr)) {
-      continue;
-    }
+    if (vfs_read(file, offset, sizeof(Elf64_Phdr), (uint8_t *)&phdr) != sizeof(Elf64_Phdr)) continue;
+    if (phdr.p_type != PT_LOAD) continue;
 
-    if (phdr.p_type != PT_LOAD) {
-      continue;
-    }
-
-    uint64_t vaddr = phdr.p_vaddr;
+    uint64_t vaddr = load_base + phdr.p_vaddr;
     uint32_t filesz = phdr.p_filesz;
     uint32_t memsz = phdr.p_memsz;
     uint32_t file_offset = phdr.p_offset;
 
     // Track uppermost loaded address for brk base.
-    uint64_t seg_end = vaddr + memsz;
-    if (seg_end > process_brk_base) {
-      process_brk_base = seg_end;
+    if (load_base == 0) {
+      uint64_t seg_end = vaddr + memsz;
+      if (seg_end > process_brk_base) {
+        process_brk_base = seg_end;
+      }
     }
 
     if (memsz > 0) {
-      // Align and map pages
       uint64_t start_page = vaddr & ~(PAGE_SIZE - 1);
       uint64_t end_page = (vaddr + memsz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
       for (uint64_t page = start_page; page < end_page; page += PAGE_SIZE) {
         if (vmm_virt_to_phys(pml4, page) == 0) {
           void *phys = pmm_alloc();
-          if (!phys) {
-            klog_puts("[PROC] ELF load failed: Out of physical memory.\n");
-            return false;
-          }
-          vmm_map_page(pml4, page, (uint64_t)phys,
-                       PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
-
+          if (!phys) return false;
+          vmm_map_page(pml4, page, (uint64_t)phys, PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
           uint64_t kernel_virt = (uint64_t)phys + hhdm;
           memset((void *)kernel_virt, 0, PAGE_SIZE);
         }
       }
 
-      // Read the binary data into the mapped segment
       if (filesz > 0) {
-        uint32_t bytes_read =
-            vfs_read(file, file_offset, filesz, (uint8_t *)vaddr);
-        if (bytes_read != filesz) {
-          klog_puts("[PROC] ELF load failed: vfs_read error. Got=");
-          klog_uint64(bytes_read);
-          klog_puts(" Expected=");
-          klog_uint64(filesz);
-          klog_puts("\n");
-          return false;
-        }
+        vfs_read(file, file_offset, filesz, (uint8_t *)vaddr);
       }
+    }
+  }
+
+  if (out_info) {
+    if (load_base == 0) {
+      out_info->entry = ehdr.e_entry;
+      out_info->phdr = phdr_vaddr;
+      out_info->phentsize = ehdr.e_phentsize;
+      out_info->phnum = ehdr.e_phnum;
+    } else {
+      out_info->interp_base = load_base;
+      out_info->interp_entry = load_base + ehdr.e_entry;
+    }
+  }
+
+  return true;
+}
+
+bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
+  process_brk_base = 0;
+  process_brk_current = 0;
+
+  char interp_path[256];
+  memset(interp_path, 0, sizeof(interp_path));
+
+  if (!do_elf_load(path, pml4, 0, out_info, interp_path, sizeof(interp_path))) {
+    return false;
+  }
+
+  if (interp_path[0] != '\0') {
+    klog_puts("[PROC] PT_INTERP found: ");
+    klog_puts(interp_path);
+    klog_puts("\n");
+    // Load interpreter at 0x400000000000
+    if (!do_elf_load(interp_path, pml4, 0x400000000000ULL, out_info, NULL, 0)) {
+      klog_puts("[PROC] Failed to load interpreter\n");
+      return false;
     }
   }
 
@@ -269,24 +273,11 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
   }
 
   // Page-align the brk base upward and set current brk.
-  klog_puts("[PROC] Before brk alignment: process_brk_base=");
-  klog_uint64(process_brk_base);
-  klog_puts("\n");
   process_brk_base = (process_brk_base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-  klog_puts("[PROC] After brk alignment: process_brk_base=");
-  klog_uint64(process_brk_base);
-  klog_puts("\n");
   process_brk_current = process_brk_base;
 
   // Reset the mmap bump allocator for this new process.
   mm_reset_mmap_state();
-
-  if (out_info) {
-    out_info->entry = ehdr.e_entry;
-    out_info->phdr = phdr_vaddr;
-    out_info->phentsize = ehdr.e_phentsize;
-    out_info->phnum = ehdr.e_phnum;
-  }
 
   return true;
 }
@@ -434,7 +425,7 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
     stack_entries[idx++] = AT_PLATFORM;
     stack_entries[idx++] = at_random_addr + 16; // Use buffer after random data
     stack_entries[idx++] = AT_BASE;
-    stack_entries[idx++] = 0;
+    stack_entries[idx++] = elf_info->interp_base;
     stack_entries[idx++] = AT_FLAGS;
     stack_entries[idx++] = 0;
     stack_entries[idx++] = AT_HWCAP;
@@ -544,6 +535,7 @@ bool process_exec_argv(const char **argv) {
   }
 
   // Issue the jump to userspace (does not return normally)
-  process_jump_usermode(elf_info.entry, user_rsp, (uint64_t)pml4);
+  uint64_t actual_entry = elf_info.interp_base ? elf_info.interp_entry : elf_info.entry;
+  process_jump_usermode(actual_entry, user_rsp, (uint64_t)pml4);
   return true;
 }
