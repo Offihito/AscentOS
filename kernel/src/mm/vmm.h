@@ -8,18 +8,41 @@
 #define PAGE_FLAG_PRESENT ((uint64_t)1 << 0)
 #define PAGE_FLAG_RW ((uint64_t)1 << 1)
 #define PAGE_FLAG_USER ((uint64_t)1 << 2)
+#define PAGE_FLAG_A ((uint64_t)1 << 5)
+#define PAGE_FLAG_D ((uint64_t)1 << 6)
+#define PAGE_FLAG_PS ((uint64_t)1 << 7)
 #define PAGE_FLAG_NX ((uint64_t)1 << 63)
+
+// Virtual Memory Layout Definitions
+#define USER_SPACE_BASE    0x0000000000000000ULL
+#define USER_SPACE_LIMIT   0x00007FFFFFFFFFFFULL
+#define KERNEL_SPACE_BASE  0xFFFF800000000000ULL
+#define HHDM_BASE          0xFFFF800000000000ULL
+#define VMAP_BASE          0xFFFFC00000000000ULL
+#define KERNEL_HEAP_BASE   0xFFFFE00000000000ULL
 
 // To retrieve the active top-level page directory from CR3
 uint64_t *vmm_get_active_pml4(void);
 
 // Given the active PML4 and a virtual address, map it to a physical frame
-// Returns true on success, false on failure (OOM allocating intermediate page tables)
+// Returns true on success, false on failure (OOM allocating intermediate page
+// tables)
 bool vmm_map_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
                   uint64_t flags);
 
+// Maps a contiguous range of pages
+bool vmm_map_range(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
+                   size_t pages, uint64_t flags);
+
+// Maps a huge page (2MB) by setting the PS flag on the Page Directory entry
+bool vmm_map_huge_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
+                       uint64_t flags);
+
 // Unmap a virtual page
 void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr);
+
+// Frees empty page tables (PT, PD, PDPT) upwards if they contain no valid entries
+void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr);
 
 // Flush the Translation Lookaside Buffer for a specific page
 static inline void vmm_flush_tlb(uint64_t virtual_addr) {
@@ -42,12 +65,21 @@ uint64_t vmm_clone_user_mappings(uint64_t *src_pml4_phys);
 // Private mappings (MAP_PRIVATE) get deep-copied (child gets its own pages).
 // Returns the *physical* address of the new PML4, or 0 on failure.
 struct vma_list;
-uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys, struct vma_list *vmas);
+uint64_t vmm_clone_user_mappings_vma(uint64_t *src_pml4_phys,
+                                     struct vma_list *vmas);
 
 // Create a new blank address space (shallow copy of kernel-space only)
 uint64_t *vmm_create_pml4(void);
 
 // Initialize the base system kernel map
 void vmm_init(void);
+
+// Protect all current page table pages from being reclaimed by PMM
+void vmm_protect_active_tables(void);
+
+struct registers;
+
+// Demand paging fault handler. Returns 0 if handled, -1 if it's an unrecoverable fault.
+int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code, struct registers *regs);
 
 #endif

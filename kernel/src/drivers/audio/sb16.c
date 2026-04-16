@@ -83,11 +83,23 @@ static void sb16_isr(struct registers *regs) {
 
 static int ensure_dma_buffer(void) {
     if (sb16_dma_buf) return 0;
-    // Allocate 32 pages (128KB) to guarantee a 64KB-aligned block in ISA range
-    uint64_t raw_phys = (uint64_t)pmm_alloc_blocks(32);
-    if (!raw_phys) return -1;
+    // Allocate 32 pages (128KB) within first 16MB for ISA legacy DMA
+    uint64_t raw_phys = (uint64_t)pmm_alloc_pages_constrained(32, 0x1000000);
+    if (!raw_phys) {
+        klog_puts("[SB16] ERROR: Failed to allocate DMA buffer within 16MB range!\n");
+        return -1;
+    }
     sb16_dma_phys = (raw_phys + 65535) & ~65535ULL;
     sb16_dma_buf = (uint8_t *)(sb16_dma_phys + pmm_get_hhdm_offset());
+
+    klog_puts("[SB16] Allocated DMA buffer: phys=");
+    klog_uint64(sb16_dma_phys);
+    if (sb16_dma_phys >= 0x1000000) {
+        klog_puts(" [WARNING: ABOVE 16MB LIMIT for ISA DMA]\n");
+    } else {
+        klog_puts(" [OK: within 16MB range]\n");
+    }
+
     return 0;
 }
 

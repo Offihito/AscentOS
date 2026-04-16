@@ -30,22 +30,24 @@ static void path_normalize(const char *base, const char *rel, char *out) {
   }
 
   // Collapse elements
-  char collapsed[256][128];
+  char *collapsed[128];
   int count = 0;
 
   char *p = temp;
   while (*p) {
     while (*p == '/')
-      p++;
+      *p++ = '\0';
     if (!*p)
       break;
 
-    char elem[128] = {0};
-    int i = 0;
-    while (*p && *p != '/' && i < 127) {
-      elem[i++] = *p++;
+    char *elem = p;
+    while (*p && *p != '/') {
+      p++;
     }
-    elem[i] = '\0';
+    if (*p == '/') {
+      *p = '\0';
+      p++;
+    }
 
     if (strcmp(elem, ".") == 0) {
       continue;
@@ -53,7 +55,9 @@ static void path_normalize(const char *base, const char *rel, char *out) {
       if (count > 0)
         count--;
     } else {
-      strcpy(collapsed[count++], elem);
+      if (count < 128) {
+        collapsed[count++] = elem;
+      }
     }
   }
 
@@ -488,6 +492,13 @@ static uint64_t sys_fork(struct syscall_regs *regs) {
   return child->tid;
 }
 
+// ── sys_clone ───────────────────────────────────────────────────────────────
+static uint64_t sys_clone(struct syscall_regs *regs) {
+  // For now, treat clone as fork (ignores threading flags).
+  // Musl uses clone() to implement fork(), so this is essential.
+  return sys_fork(regs);
+}
+
 // ── sys_uname ─────────────────────────────────────────────────────────────
 struct utsname {
   char sysname[65];
@@ -530,5 +541,6 @@ void syscall_register_process(void) {
   syscall_register(SYS_GETCWD, sys_getcwd);
   syscall_register(SYS_CHDIR, sys_chdir);
   syscall_register_raw(SYS_FORK, sys_fork);
+  syscall_register_raw(SYS_CLONE, sys_clone);
   syscall_register_raw(SYS_EXECVE, sys_execve);
 }

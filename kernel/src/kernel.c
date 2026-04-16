@@ -9,6 +9,7 @@
 #include "cpu/idt.h"
 #include "cpu/isr.h"
 #include "cpu/pic.h"
+#include "drivers/audio/sb16.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/net/rtl8139.h"
 #include "drivers/pci/pci.h"
@@ -16,7 +17,6 @@
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/block.h"
 #include "drivers/timer/pit.h"
-#include "drivers/audio/sb16.h"
 #include "fb/framebuffer.h"
 #include "fs/ext2.h"
 #include "fs/ramfs.h"
@@ -149,11 +149,6 @@ void kmain(void) {
   klog_uint64(pmm_get_usable_memory() / (1024 * 1024));
   klog_puts(" MB\n\n");
 
-  klog_puts("[OK] Reclaiming Limine Bootloader Memory...\n");
-  pmm_reclaim_bootloader();
-  klog_puts("     Optimized Usable RAM: ");
-  klog_uint64(pmm_get_usable_memory() / (1024 * 1024));
-  klog_puts(" MB\n\n");
 
   klog_puts("[OK] Initializing Virtual Memory Manager (VMM)...\n");
   vmm_init();
@@ -339,6 +334,12 @@ void kmain(void) {
   // ═══════════════════════════════════════════════════════════════════════
   //  Phase 7: Interactive shell
   // ═══════════════════════════════════════════════════════════════════════
+  klog_puts("[OK] Reclaiming Limine Bootloader Memory...\n");
+  pmm_reclaim_bootloader();
+  klog_puts("     Optimized Usable RAM: ");
+  klog_uint64(pmm_get_usable_memory() / (1024 * 1024));
+  klog_puts(" MB\n\n");
+
   klog_puts("\nKernel initialization complete. Starting shell...\n");
   shell_init();
   shell_run();

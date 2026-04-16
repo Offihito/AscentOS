@@ -6,7 +6,7 @@ int main(void) {
   printf("Hello from TCC with musl libc on AscentOS!\n");
 
   // Test malloc/free
-  char *buf = malloc(100);
+  char *buf = malloc(2000);
   if (buf) {
     strcpy(buf, "Dynamic memory works!\n");
     printf("%s", buf);

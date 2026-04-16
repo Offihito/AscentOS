@@ -67,8 +67,23 @@ typedef struct {
     char     s_volume_name[16];    // Volume name
     uint8_t  s_last_mounted[64];   // Directory where last mounted
     uint32_t s_algo_bitmap;        // For compression
-    // Padding to 1024 bytes
-    uint8_t  s_padding[820 - 64];
+    uint8_t  s_prealloc_blocks;
+    uint8_t  s_prealloc_dir_blocks;
+    uint16_t s_reserved_gdt_blocks;
+    uint8_t  s_journal_uuid[16];   // uuid of journal superblock
+    uint32_t s_journal_inum;       // inode number of journal file
+    uint32_t s_journal_dev;        // device number of journal file
+    uint32_t s_last_orphan;        // start of list of inodes to delete
+    uint32_t s_hash_seed[4];       // HTREE hash seed
+    uint8_t  s_def_hash_version;   // Default hash version to use
+    uint8_t  s_jnl_backup_type;
+    uint16_t s_desc_size;          // size of group descriptor
+    uint32_t s_default_mount_opts;
+    uint32_t s_first_meta_bg;      // First metablock block group
+    uint32_t s_mkfs_time;          // When the filesystem was created
+    uint32_t s_jnl_blocks[17];     // Backup of the journal inode
+    // Padding to 1024 bytes (1024 - 360 = 664)
+    uint8_t  s_padding[664];
 } __attribute__((packed)) ext2_superblock_t;
 
 // Block Group Descriptor (32 bytes)
@@ -136,5 +151,11 @@ int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint);
 // Mount ext2 as the root filesystem, replacing the current fs_root.
 // Returns 0 on success, -1 on failure.
 int ext2_mount_root(struct block_device *dev);
+
+// Ext2 block/inode helpers exposed for ext3 journal reading
+int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num, void *buffer);
+int ext2_write_block(ext2_mount_t *mnt, uint32_t block_num, const void *buffer);
+int ext2_read_inode(ext2_mount_t *mnt, uint32_t inode_num, ext2_inode_t *out);
+uint32_t ext2_get_block_num(ext2_mount_t *mnt, ext2_inode_t *inode, uint32_t logical_block);
 
 #endif

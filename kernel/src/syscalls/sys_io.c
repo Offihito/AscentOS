@@ -12,6 +12,12 @@
 #include "../drivers/audio/sb16.h"
 #include <stdint.h>
 
+// User-space pointer validation: reject kernel/HHDM addresses
+#define USER_ADDR_MAX 0x00007FFFFFFFFFFFULL
+static inline bool is_user_ptr(uint64_t addr) {
+  return addr != 0 && addr <= USER_ADDR_MAX;
+}
+
 typedef struct {
   uint8_t *data;
   uint32_t capacity;
@@ -208,6 +214,7 @@ static uint64_t sys_open(uint64_t path_ptr, uint64_t flags, uint64_t mode,
 static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count,
                          uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a3; (void)a4; (void)a5;
+  if (!is_user_ptr(buf)) return (uint64_t)-14; // EFAULT
   struct thread *t = sched_get_current();
   if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
 
@@ -285,6 +292,7 @@ static int64_t fd_write(int fd, const void *buf, size_t count) {
 static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a3; (void)a4; (void)a5;
+  if (fd > 2 && !is_user_ptr(buf)) return (uint64_t)-14; // EFAULT
   int64_t r = fd_write((int)fd, (const void *)buf, (size_t)count);
   return (uint64_t)r;
 }
@@ -318,6 +326,10 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
 static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a3; (void)a4; (void)a5;
+
+  // Most ioctls take pointers. A few take ints. However, no valid integer
+  // argument or user pointer should ever be in the kernel/HHDM address range.
+  if (arg > USER_ADDR_MAX) return (uint64_t)-14; // EFAULT
 
   struct thread *t = sched_get_current();
   if (!t || fd >= MAX_FDS) return (uint64_t)-9; // EBADF
@@ -516,6 +528,7 @@ static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr,
   struct kstat *ks = (struct kstat *)statbuf_ptr;
 
   if (!path || !ks) return (uint64_t)-14; // EFAULT
+  if (!is_user_ptr((uint64_t)ks)) return (uint64_t)-14; // EFAULT
 
   struct thread *t = sched_get_current();
   vfs_node_t *cwd_node = fs_root;
@@ -543,6 +556,7 @@ static uint64_t sys_fstat(uint64_t fd, uint64_t statbuf_ptr,
   struct kstat *ks = (struct kstat *)statbuf_ptr;
 
   if (!ks) return (uint64_t)-14; // EFAULT
+  if (!is_user_ptr((uint64_t)ks)) return (uint64_t)-14; // EFAULT
 
   struct thread *t = sched_get_current();
   if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
@@ -583,6 +597,7 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
 
   uint8_t *buf = (uint8_t *)dirp;
   if (!buf) return (uint64_t)-14; // EFAULT
+  if (!is_user_ptr((uint64_t)buf)) return (uint64_t)-14; // EFAULT
 
   size_t written = 0;
   uint32_t index = t->fd_offsets[fd]; // Start from saved position
@@ -680,6 +695,7 @@ static uint64_t sys_getrandom(uint64_t buf_ptr, uint64_t buflen, uint64_t flags,
   (void)flags; (void)a3; (void)a4; (void)a5;
   
   if (!buf_ptr) return (uint64_t)-14; // EFAULT
+  if (!is_user_ptr(buf_ptr)) return (uint64_t)-14; // EFAULT
   if (buflen == 0) return 0;
   
   // Initialize PRNG if needed
@@ -762,6 +778,7 @@ static uint64_t sys_readv(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
     uint64_t base = iov[i].iov_base;
     uint64_t len  = iov[i].iov_len;
     if (len == 0) continue;
+    if (!is_user_ptr(base)) return (uint64_t)-14; // EFAULT
 
     // Reuse sys_read logic
     struct thread *t = sched_get_current();

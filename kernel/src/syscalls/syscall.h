@@ -43,6 +43,7 @@
 #define SYS_SIGALTSTACK 131
 #define SYS_GETPID 39
 #define SYS_FORK 57
+#define SYS_CLONE 56
 #define SYS_EXECVE 59
 #define SYS_EXIT 60
 #define SYS_WAIT4 61

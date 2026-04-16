@@ -1,159 +1,293 @@
 #include "mm/heap.h"
-#include "mm/pmm.h"
-#include "lib/string.h"
 #include "console/console.h"
-
+#include "lib/string.h"
+#include "mm/pmm.h"
+#include "mm/vmm.h"
 #include "lock/spinlock.h"
 
-#define HEAP_MAGIC 0xC001CAFE
-#define ALIGN_UP(val, align) (((val) + (align) - 1) & ~((align) - 1))
+#define SLAB_MAGIC 0x51ABCAFECAFE51ABULL
+#define BIG_MAGIC  0xB16A110CB16A110CULL
+
+#define BITMAP_SET(bmp, index) ((bmp)[(index) / 32] |= (1 << ((index) % 32)))
+#define BITMAP_CLEAR(bmp, index) ((bmp)[(index) / 32] &= ~(1 << ((index) % 32)))
+#define BITMAP_TEST(bmp, index) (((bmp)[(index) / 32] & (1 << ((index) % 32))) != 0)
 
 static spinlock_t heap_lock = SPINLOCK_INIT;
+static uint64_t current_heap_vaddr = KERNEL_HEAP_BASE;
 
-struct heap_segment {
-    uint32_t magic;
-    bool is_free;
-    size_t size;
-    struct heap_segment *next;
-    struct heap_segment *prev;
-} __attribute__((aligned(16)));
+struct slab_cache;
 
-static struct heap_segment *head_segment = NULL;
+struct slab {
+    uint64_t magic;
+    struct slab *next;
+    struct slab *prev;
+    uint32_t free_count;
+    uint32_t total_count;
+    struct slab_cache *cache;
+    uint32_t bitmap[4]; // 128 bits
+} __attribute__((aligned(64)));
+
+struct slab_cache {
+    size_t obj_size;
+    struct slab *partial;
+    struct slab *full;
+    struct slab *free;
+};
+
+struct big_alloc {
+    uint64_t magic;
+    size_t pages;
+    struct big_alloc *next;
+    struct big_alloc *prev;
+    uint64_t padding[4];
+} __attribute__((aligned(64)));
+
+static struct big_alloc *big_alloc_head = NULL;
+
+static struct slab_cache caches[] = {
+    {32, NULL, NULL, NULL},
+    {64, NULL, NULL, NULL},
+    {128, NULL, NULL, NULL},
+    {256, NULL, NULL, NULL},
+    {512, NULL, NULL, NULL},
+    {1024, NULL, NULL, NULL}
+};
+#define CACHE_COUNT (sizeof(caches) / sizeof(caches[0]))
+
+// Virtual address space bumper
+static uint64_t allocate_virtual_space(size_t pages) {
+    uint64_t vaddr = current_heap_vaddr;
+    current_heap_vaddr += pages * PAGE_SIZE;
+    return vaddr;
+}
 
 void heap_init(void) {
-    head_segment = NULL;
+    // Rely on static zeroes and VMM/PMM already being up
+}
+
+static struct slab *allocate_new_slab(struct slab_cache *c) {
+    void *frame = pmm_alloc_page();
+    if (!frame) return NULL;
+
+    uint64_t vaddr = allocate_virtual_space(1);
+    uint64_t *pml4 = vmm_get_active_pml4();
+
+    if (!vmm_map_page(pml4, vaddr, (uint64_t)frame, PAGE_FLAG_PRESENT | PAGE_FLAG_RW)) {
+        pmm_free_page(frame);
+        return NULL;
+    }
+
+    struct slab *s = (struct slab *)vaddr;
+    memset(s, 0, PAGE_SIZE);
+
+    s->magic = SLAB_MAGIC;
+    s->cache = c;
+    s->total_count = (PAGE_SIZE - sizeof(struct slab)) / c->obj_size;
+    if (s->total_count > 128) s->total_count = 128; // Limit by bitmap capacity
+    s->free_count = s->total_count;
+
+    // By default, a newly allocated and prepared block is considered "free array", so we set bitmap appropriately 
+    // Wait, the bitmap represents objects that are ALLOCATED, so zero means free. Thus memset 0 handles it.
+
+    return s;
 }
 
 void *kmalloc(size_t size) {
-    if (size == 0) {
-        return NULL;
-    }
+    if (size == 0) return NULL;
 
-    // Align size to 16 bytes for proper memory alignment
-    size_t size_aligned = ALIGN_UP(size, 16);
-    
     spinlock_acquire(&heap_lock);
-    
-    struct heap_segment *current = head_segment;
 
-    // Search for a suitable free segment
-    while (current != NULL) {
-        if (current->is_free && current->size >= size_aligned) {
-            // Split segment if it's much larger than needed
-            if (current->size > size_aligned + sizeof(struct heap_segment) + 16) {
-                struct heap_segment *new_segment = (struct heap_segment *)((uint8_t *)current + sizeof(struct heap_segment) + size_aligned);
-                new_segment->magic = HEAP_MAGIC;
-                new_segment->is_free = true;
-                new_segment->size = current->size - size_aligned - sizeof(struct heap_segment);
-                new_segment->next = current->next;
-                new_segment->prev = current;
-                
-                if (new_segment->next) {
-                    new_segment->next->prev = new_segment;
-                }
-                
-                current->next = new_segment;
-                current->size = size_aligned;
-            }
-            
-            current->is_free = false;
-            spinlock_release(&heap_lock);
-            return (void *)((uint8_t *)current + sizeof(struct heap_segment));
+    // 1. Can we fit it in a slab cache?
+    struct slab_cache *c = NULL;
+    for (size_t i = 0; i < CACHE_COUNT; i++) {
+        if (size <= caches[i].obj_size) {
+            c = &caches[i];
+            break;
         }
-        current = current->next;
     }
 
-    // No free segment found, ask PMM for more memory
-    size_t total_needed = size_aligned + sizeof(struct heap_segment);
-    size_t pages_needed = ALIGN_UP(total_needed, PAGE_SIZE) / PAGE_SIZE;
+    if (c) {
+        // Slab Allocation Path
+        struct slab *s = c->partial;
+        
+        // If no partial, try to get from free list, else allocate new page
+        if (!s) {
+            if (c->free) {
+                s = c->free;
+                c->free = s->next;
+                if (c->free) c->free->prev = NULL;
+                s->next = NULL;
+            } else {
+                s = allocate_new_slab(c);
+                if (!s) {
+                    spinlock_release(&heap_lock);
+                    return NULL;
+                }
+            }
+            // Put it in partial list
+            s->next = c->partial;
+            s->prev = NULL;
+            if (c->partial) c->partial->prev = s;
+            c->partial = s;
+        }
 
-    void *phys = pmm_alloc_blocks(pages_needed);
-    if (!phys) {
-        console_puts("[ERR] kmalloc Out of Memory!\n");
+        // Find free index in partial slab
+        int free_idx = -1;
+        for (int i = 0; i < (int)s->total_count; i++) {
+            if (!BITMAP_TEST(s->bitmap, i)) {
+                free_idx = i;
+                break;
+            }
+        }
+
+        if (free_idx == -1) {
+            // Should theoretically never happen as partial holds slabs with free slots.
+            spinlock_release(&heap_lock);
+            return NULL;
+        }
+
+        BITMAP_SET(s->bitmap, free_idx);
+        s->free_count--;
+
+        // If slab is now full, move it from partial to full list
+        if (s->free_count == 0) {
+            if (s->prev) s->prev->next = s->next;
+            else c->partial = s->next;
+            if (s->next) s->next->prev = s->prev;
+
+            s->next = c->full;
+            s->prev = NULL;
+            if (c->full) c->full->prev = s;
+            c->full = s;
+        }
+
+        uint8_t *obj_base = (uint8_t *)s + sizeof(struct slab);
+        void *ptr = obj_base + (free_idx * c->obj_size);
+
+        spinlock_release(&heap_lock);
+        return ptr;
+    }
+
+    // 2. Large Allocation Path (> 1024 bytes)
+    size_t total_size = size + sizeof(struct big_alloc);
+    size_t pages = (total_size + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    void *blocks = pmm_alloc_pages(pages);
+    if (!blocks) {
         spinlock_release(&heap_lock);
         return NULL;
     }
 
-    // Convert physical address to HHDM virtual address
-    struct heap_segment *new_seg = (struct heap_segment *)((uint64_t)phys + pmm_get_hhdm_offset());
-    new_seg->magic = HEAP_MAGIC;
-    new_seg->is_free = false;
-    new_seg->size = (pages_needed * PAGE_SIZE) - sizeof(struct heap_segment);
-
-    // Link it to the end of the list
-    struct heap_segment *last = head_segment;
-    if (!last) {
-        head_segment = new_seg;
-        new_seg->next = NULL;
-        new_seg->prev = NULL;
-    } else {
-        while (last->next != NULL) {
-            last = last->next;
-        }
-        last->next = new_seg;
-        new_seg->prev = last;
-        new_seg->next = NULL;
+    uint64_t vaddr = allocate_virtual_space(pages);
+    uint64_t *pml4 = vmm_get_active_pml4();
+    if (!vmm_map_range(pml4, vaddr, (uint64_t)blocks, pages, PAGE_FLAG_PRESENT | PAGE_FLAG_RW)) {
+        pmm_free_pages(blocks, pages);
+        spinlock_release(&heap_lock);
+        return NULL;
     }
 
-    // Split the newly allocated large block if possible
-    if (new_seg->size > size_aligned + sizeof(struct heap_segment) + 16) {
-        struct heap_segment *split = (struct heap_segment *)((uint8_t *)new_seg + sizeof(struct heap_segment) + size_aligned);
-        split->magic = HEAP_MAGIC;
-        split->is_free = true;
-        split->size = new_seg->size - size_aligned - sizeof(struct heap_segment);
-        split->next = NULL;
-        split->prev = new_seg;
-        
-        new_seg->next = split;
-        new_seg->size = size_aligned;
-    }
+    struct big_alloc *b = (struct big_alloc *)vaddr;
+    b->magic = BIG_MAGIC;
+    b->pages = pages;
+    
+    // Link globally
+    b->next = big_alloc_head;
+    b->prev = NULL;
+    if (big_alloc_head) big_alloc_head->prev = b;
+    big_alloc_head = b;
 
+    void *ptr = (void *)((uint8_t *)b + sizeof(struct big_alloc));
     spinlock_release(&heap_lock);
-    return (void *)((uint8_t *)new_seg + sizeof(struct heap_segment));
+    return ptr;
 }
 
 void kfree(void *ptr) {
-    if (!ptr) {
-        return;
-    }
+    if (!ptr) return;
 
     spinlock_acquire(&heap_lock);
 
-    struct heap_segment *seg = (struct heap_segment *)((uint8_t *)ptr - sizeof(struct heap_segment));
-    
-    // Check for memory corruption or double-free
-    if (seg->magic != HEAP_MAGIC) {
-        console_puts("[WARN] kfree: Magic number mismatch! Possible memory corruption.\n");
+    uint64_t page_base = (uint64_t)ptr & ~0xFFFULL;
+    uint64_t magic_check = *(uint64_t *)page_base;
+
+    // Is it a Slab chunk?
+    if (magic_check == SLAB_MAGIC) {
+        struct slab *s = (struct slab *)page_base;
+        struct slab_cache *c = s->cache;
+
+        uint64_t offset = (uint64_t)ptr - (page_base + sizeof(struct slab));
+        uint32_t idx = offset / c->obj_size;
+
+        if (!BITMAP_TEST(s->bitmap, idx)) {
+            console_puts("[WARN] kfree: Double free intercepted inside Slab!\n");
+            spinlock_release(&heap_lock);
+            return;
+        }
+
+        BITMAP_CLEAR(s->bitmap, idx);
+        s->free_count++;
+
+        // State machine updates
+        // If it was full, it is now partial
+        if (s->free_count == 1) {
+            // Remove from full
+            if (s->prev) s->prev->next = s->next;
+            else c->full = s->next;
+            if (s->next) s->next->prev = s->prev;
+
+            // Link to partial
+            s->next = c->partial;
+            s->prev = NULL;
+            if (c->partial) c->partial->prev = s;
+            c->partial = s;
+        }
+        
+        // If it's completely empty, immediately release it back to PMM
+        if (s->free_count == s->total_count) {
+            // Remove from partial (or full if somehow it skipped)
+            if (s->prev) s->prev->next = s->next;
+            else c->partial = s->next;
+            if (s->next) s->next->prev = s->prev;
+
+            // Unmap and free Native limits dynamically
+            uint64_t *pml4 = vmm_get_active_pml4();
+            uint64_t phys = vmm_virt_to_phys(pml4, page_base);
+            
+            // Only unmap if it actually existed
+            if (phys) {
+                 vmm_unmap_page(pml4, page_base);
+                 pmm_free_page((void*)phys);
+            }
+        }
+
         spinlock_release(&heap_lock);
         return;
     }
 
-    if (seg->is_free) {
-        console_puts("[WARN] kfree: Double free detected!\n");
+    // Is it a Big Alloc chunk?
+    if (magic_check == BIG_MAGIC) {
+        struct big_alloc *b = (struct big_alloc *)page_base;
+
+        // Unlink globally
+        if (b->prev) b->prev->next = b->next;
+        else big_alloc_head = b->next;
+        if (b->next) b->next->prev = b->prev;
+
+        size_t pages = b->pages;
+        uint64_t *pml4 = vmm_get_active_pml4();
+        
+        uint64_t phys_addr = vmm_virt_to_phys(pml4, page_base);
+        
+        for (size_t i = 0; i < pages; i++) {
+             vmm_unmap_page(pml4, page_base + i * PAGE_SIZE);
+        }
+        
+        pmm_free_pages((void*)phys_addr, pages);
+
         spinlock_release(&heap_lock);
         return;
     }
 
-    seg->is_free = true;
-
-    // Coalesce with next segment if it is free
-    if (seg->next && seg->next->is_free) {
-        seg->size += seg->next->size + sizeof(struct heap_segment);
-        seg->next = seg->next->next;
-        if (seg->next) {
-            seg->next->prev = seg;
-        }
-    }
-
-    // Coalesce with previous segment if it is free
-    if (seg->prev && seg->prev->is_free) {
-        seg->prev->size += seg->size + sizeof(struct heap_segment);
-        seg->prev->next = seg->next;
-        if (seg->next) {
-            seg->next->prev = seg->prev;
-        }
-    }
-    
+    console_puts("[WARN] kfree: Fatal validation failure. Invalid pointer space.\n");
     spinlock_release(&heap_lock);
 }
 
@@ -167,45 +301,36 @@ void *kcalloc(size_t num, size_t size) {
 }
 
 void *krealloc(void *ptr, size_t new_size) {
-    if (!ptr) {
-        return kmalloc(new_size);
-    }
-
+    if (!ptr) return kmalloc(new_size);
     if (new_size == 0) {
         kfree(ptr);
         return NULL;
     }
 
+    // To determine old size safely without deadlocking, acquire spinlock briefly inside lookup
     spinlock_acquire(&heap_lock);
+    uint64_t page_base = (uint64_t)ptr & ~0xFFFULL;
+    uint64_t magic_check = *(uint64_t *)page_base;
+    size_t old_size = 0;
 
-    struct heap_segment *seg = (struct heap_segment *)((uint8_t *)ptr - sizeof(struct heap_segment));
-    
-    if (seg->magic != HEAP_MAGIC) {
+    if (magic_check == SLAB_MAGIC) {
+        struct slab *s = (struct slab *)page_base;
+        old_size = s->cache->obj_size;
+    } else if (magic_check == BIG_MAGIC) {
+        struct big_alloc *b = (struct big_alloc *)page_base;
+        old_size = (b->pages * PAGE_SIZE) - sizeof(struct big_alloc);
+    } else {
         spinlock_release(&heap_lock);
-        return NULL; // Invalid pointer
-    }
-
-    // If the current block is already large enough, just return it
-    if (seg->size >= new_size) {
-        spinlock_release(&heap_lock);
-        // We could shrink the block here, but for simplicity, we don't.
-        return ptr;
-    }
-    
-    size_t copy_size = seg->size;
-    spinlock_release(&heap_lock);
-
-    // Allocate a new block
-    void *new_ptr = kmalloc(new_size);
-    if (!new_ptr) {
         return NULL;
     }
+    spinlock_release(&heap_lock);
 
-    // Copy old data to the new block
-    memcpy(new_ptr, ptr, copy_size);
-    
-    // Free the old block
-    kfree(ptr);
-    
+    if (new_size <= old_size) return ptr; // Abort reallocation if size is sufficient
+
+    void *new_ptr = kmalloc(new_size);
+    if (new_ptr) {
+        memcpy(new_ptr, ptr, old_size);
+        kfree(ptr);
+    }
     return new_ptr;
 }

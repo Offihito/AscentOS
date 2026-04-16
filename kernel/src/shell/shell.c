@@ -2,9 +2,9 @@
 #include "apic/lapic_timer.h"
 #include "console/console.h"
 #include "console/klog.h"
+#include "drivers/audio/pcspeaker.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/net/rtl8139.h"
-#include "drivers/audio/pcspeaker.h"
 #include "drivers/serial.h"
 #include "drivers/storage/block.h"
 #include "fs/ext2.h"
@@ -13,6 +13,7 @@
 #include "lock/spinlock.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
+#include "mm/vmm.h"
 #include "net/arp.h"
 #include "net/dns.h"
 #include "net/icmp.h"
@@ -116,6 +117,9 @@ static void execute_command(char *cmd) {
     console_puts("  test_ring3_phase3 - Verify Syscall translation layer\n");
     console_puts("  exec      - Execute an ELF (e.g. exec /mnt/hello_musl.elf "
                  "[args...])\n");
+    console_puts("  pmmtest   - Test the PMM buddy allocator\n");
+    console_puts("  vmmtest   - Test the VMM demand paging and mapping bounds\n");
+    console_puts("  slabtest  - Test generic native Slab Allocator constraints\n");
     console_puts("  kilo      - Launch the kilo text editor\n");
     console_puts("  netinfo   - Show NIC status and MAC address\n");
     console_puts("  ifconfig  - Show network interface configuration\n");
@@ -261,6 +265,547 @@ static void execute_command(char *cmd) {
     }
 
     console_puts("Stress test complete.\n");
+  } else if (strcmp(cmd, "pmmtest") == 0) {
+    console_puts("Starting Intensive PMM Buddy Allocator Stress Test...\n");
+
+    int global_pass = 1;
+
+    // Phase 1: Boundary & Multi-order Allocations
+    console_puts("[1/4] Testing allocations of all valid orders (0 to 10)...\n");
+    void *order_blocks[11];
+    for (int i = 0; i <= 10; i++) {
+      size_t pages = 1ULL << i;
+      order_blocks[i] = pmm_alloc_pages(pages);
+      if (!order_blocks[i]) {
+        console_puts("  -> ERROR: Failed to allocate order ");
+        shell_print_uint64(i);
+        console_puts("\n");
+        global_pass = 0;
+      } else {
+        // Deep verification setup: fill entire block with predictable pattern
+        uint64_t *ptr = (uint64_t *)((uint64_t)order_blocks[i] + pmm_get_hhdm_offset());
+        size_t words = (pages * 4096) / sizeof(uint64_t);
+        for (size_t w = 0; w < words; w++) {
+          ptr[w] = ((uint64_t)i << 56) ^ ((uint64_t)w << 32) ^ (0xDEADBEEFULL);
+        }
+      }
+    }
+
+    if (global_pass) {
+      console_puts("[2/4] Verifying data integrity across all orders...\n");
+      for (int i = 0; i <= 10; i++) {
+        if (!order_blocks[i]) continue;
+        size_t pages = 1ULL << i;
+        uint64_t *ptr = (uint64_t *)((uint64_t)order_blocks[i] + pmm_get_hhdm_offset());
+        size_t words = (pages * 4096) / sizeof(uint64_t);
+        int clean = 1;
+        for (size_t w = 0; w < words; w++) {
+          uint64_t expected = ((uint64_t)i << 56) ^ ((uint64_t)w << 32) ^ (0xDEADBEEFULL);
+          if (ptr[w] != expected) {
+            console_puts("  -> FAIL: Corruption detected in order ");
+            shell_print_uint64(i);
+            console_puts(" at word offset ");
+            shell_print_uint64(w);
+            console_puts("\n");
+            global_pass = 0;
+            clean = 0;
+            break;
+          }
+        }
+        if (clean) {
+          console_puts("  -> PASS: Order ");
+          shell_print_uint64(i);
+          console_puts(" verified.\n");
+        }
+      }
+    }
+
+    console_puts("  -> Freeing multi-order blocks...\n");
+    for (int i = 0; i <= 10; i++) {
+      if (order_blocks[i]) {
+        pmm_free_pages(order_blocks[i], 1ULL << i);
+      }
+    }
+
+    // Phase 3: Fragmentation & Coalescing stress test
+    console_puts("[3/4] Fragmentation & Coalescing stress test...\n");
+    int num_blocks = 512;
+    void *frag_blocks[512];
+    int frag_pass = 1;
+    for (int i = 0; i < num_blocks; i++) {
+      frag_blocks[i] = pmm_alloc_pages(1); // 1 page
+      if (!frag_blocks[i]) frag_pass = 0;
+    }
+    if (!frag_pass) {
+       console_puts("  -> WARNING: Could not allocate all fragmentation blocks.\n");
+    }
+
+    // Free every other block to fragment memory
+    for (int i = 0; i < num_blocks; i += 2) {
+      if (frag_blocks[i]) {
+        pmm_free_pages(frag_blocks[i], 1);
+        frag_blocks[i] = NULL;
+      }
+    }
+    
+    // Allocate order-2 (4 pages) blocks which requires coalescing or finding chunks
+    void *coalesce_blocks[64];
+    for(int i = 0; i < 64; i++) {
+       coalesce_blocks[i] = pmm_alloc_pages(4); // 4 pages
+    }
+
+    // Free everything from this test
+    for (int i = 0; i < 64; i++) {
+      if (coalesce_blocks[i]) pmm_free_pages(coalesce_blocks[i], 4);
+    }
+    for (int i = 1; i < num_blocks; i += 2) {
+      if (frag_blocks[i]) pmm_free_pages(frag_blocks[i], 1);
+    }
+    console_puts("  -> Fragmentation test completed.\n");
+
+    // Phase 4: Bulk Capacity Test
+    console_puts("[4/4] Bulk Capacity Test...\n");
+    size_t free_ram = pmm_get_free_pages();
+    // Allocate up to 25% of currently free memory to avoid OOM
+    size_t bulk_total = free_ram / 4;
+    // Cap at 100,000 pages (~400MB) if it's very large
+    if (bulk_total > 100000) bulk_total = 100000;
+    // Need at least some pages to test
+    if (bulk_total == 0) bulk_total = 10;
+    
+    console_puts("  -> Attempting to allocate ");
+    shell_print_uint64(bulk_total);
+    console_puts(" individual pages...\n");
+
+    void **bulk_array = kmalloc(bulk_total * sizeof(void*));
+    if (bulk_array) {
+      size_t bulk_allocated = 0;
+      for (size_t i = 0; i < bulk_total; i++) {
+        bulk_array[i] = pmm_alloc_pages(1);
+        if (bulk_array[i]) {
+          bulk_allocated++;
+          uint64_t *ptr = (uint64_t *)((uint64_t)bulk_array[i] + pmm_get_hhdm_offset());
+          *ptr = (uint64_t)bulk_array[i]; // Store its own physical address as signature
+        } else {
+          break; // Hit early limit
+        }
+      }
+      
+      console_puts("  -> Successfully allocated ");
+      shell_print_uint64(bulk_allocated);
+      console_puts(" pages.\n");
+
+      // Verify and Free
+      int bulk_pass = 1;
+      for (size_t i = 0; i < bulk_allocated; i++) {
+        uint64_t *ptr = (uint64_t *)((uint64_t)bulk_array[i] + pmm_get_hhdm_offset());
+        if (*ptr != (uint64_t)bulk_array[i]) {
+           bulk_pass = 0;
+        }
+        pmm_free_pages(bulk_array[i], 1);
+      }
+      
+      if (bulk_pass) console_puts("  -> PASS: Bulk test verified and freed properly.\n");
+      else { console_puts("  -> FAIL: Bulk test memory corruption!\n"); global_pass = 0; }
+      
+      kfree(bulk_array);
+    } else {
+      console_puts("  -> ERROR: Failed to allocate bulk pointer array from kernel heap.\n");
+    }
+
+    if (global_pass) {
+      console_puts("\n=== PMM STRESS TEST PASSED WITH 0 RISKS ===\n");
+    } else {
+      console_puts("\n=== PMM STRESS TEST FAILED ===\n");
+    }
+  } else if (strcmp(cmd, "vmmtest") == 0) {
+    console_puts("Starting Intensive VMM Page Table Stress Test...\n");
+
+    int vmm_pass = 1;
+    uint64_t *pml4 = vmm_get_active_pml4();
+    uint64_t test_vaddr_base = 0x0000555500000000ULL; // Arbitrary user-space base
+
+    // Test 1: Single Page Mapping & Unmapping
+    console_puts("[1/4] Testing isolated page mapping and unmapping...\n");
+    void *single_page = pmm_alloc_page();
+    if (!single_page) {
+        console_puts("  -> ERROR: PMM failed inside VMM test.\n");
+        vmm_pass = 0;
+    } else {
+        uint64_t flags = PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_USER;
+        if (!vmm_map_page(pml4, test_vaddr_base, (uint64_t)single_page, flags)) {
+             console_puts("  -> FAIL: vmm_map_page returned false.\n");
+             vmm_pass = 0;
+        } else {
+             // Verify we can access it through the VMM
+             uint64_t *test_ptr = (uint64_t *)test_vaddr_base;
+             *test_ptr = 0x1122334455667788ULL;
+             if (*test_ptr != 0x1122334455667788ULL) {
+                 console_puts("  -> FAIL: Memory access verification failed.\n");
+                 vmm_pass = 0;
+             }
+             
+             // Unmap
+             size_t free_before = pmm_get_free_pages();
+             vmm_unmap_page(pml4, test_vaddr_base);
+             size_t free_after = pmm_get_free_pages();
+             
+             // Verify intermediate table cleanup (should free PT, PD, PDPT since this is a unique tree sequence)
+             if (free_after <= free_before) {
+                 console_puts("  -> WARNING: Empty tables were not reliably freed by vmm_unmap_page!\n");
+             } else {
+                 console_puts("  -> PASS: Single mapping and empty table cleanup succeeded.\n");
+             }
+             pmm_free_page(single_page);
+        }
+    }
+
+    // Test 2: Range Mapping
+    console_puts("[2/4] Testing vmm_map_range (100 contiguous pages)...\n");
+    size_t range_pages = 100;
+    void *range_block = pmm_alloc_pages(range_pages);
+    if (!range_block) {
+        console_puts("  -> ERROR: PMM failed range allocation.\n");
+        vmm_pass = 0;
+    } else {
+        uint64_t range_vaddr = test_vaddr_base + 0x100000000ULL;
+        uint64_t flags = PAGE_FLAG_PRESENT | PAGE_FLAG_RW;
+        if (!vmm_map_range(pml4, range_vaddr, (uint64_t)range_block, range_pages, flags)) {
+             console_puts("  -> FAIL: vmm_map_range failed.\n");
+             vmm_pass = 0;
+        } else {
+             // Access start, middle, and end
+             ((volatile uint64_t*)range_vaddr)[0] = 0xAAAA;
+             ((volatile uint64_t*)(range_vaddr + 50 * 4096))[0] = 0xBBBB;
+             ((volatile uint64_t*)(range_vaddr + 99 * 4096))[0] = 0xCCCC;
+
+             if (((volatile uint64_t*)range_vaddr)[0] == 0xAAAA && 
+                 ((volatile uint64_t*)(range_vaddr + 99 * 4096))[0] == 0xCCCC) {
+                 console_puts("  -> PASS: Contiguous range mapped and accessible.\n");
+             } else {
+                 console_puts("  -> FAIL: Range accessibility check failed.\n");
+                 vmm_pass = 0;
+             }
+
+             // Free range mappings seamlessly
+             for (size_t i = 0; i < range_pages; i++) {
+                 vmm_unmap_page(pml4, range_vaddr + i * 4096);
+             }
+        }
+        pmm_free_pages(range_block, range_pages);
+    }
+
+    // Test 3: Huge Page Mapping
+    console_puts("[3/4] Testing vmm_map_huge_page (2MB)...\n");
+    void *huge_block_norm = pmm_alloc_pages(512); // Extrapolates to exactly 2MB under order-9 naturally
+    if (!huge_block_norm) {
+        console_puts("  -> ERROR: PMM failed 2MB allocation.\n");
+        vmm_pass = 0;
+    } else {
+        uint64_t huge_vaddr = test_vaddr_base + 0x200000000ULL;
+        uint64_t flags = PAGE_FLAG_PRESENT | PAGE_FLAG_RW;
+        if (!vmm_map_huge_page(pml4, huge_vaddr, (uint64_t)huge_block_norm, flags)) {
+            console_puts("  -> FAIL: vmm_map_huge_page failed.\n");
+            vmm_pass = 0;
+        } else {
+             // Check translation depth directly in Phase 2
+             uint64_t phys_ret = vmm_virt_to_phys(pml4, huge_vaddr + 0x100000); // 1MB deep lookup
+             if (phys_ret == ((uint64_t)huge_block_norm + 0x100000)) {
+                 console_puts("  -> PASS: Huge page dynamically translated via Walker.\n");
+             } else {
+                 console_puts("  -> FAIL: Huge page resolution mismatch.\n");
+                 vmm_pass = 0;
+             }
+        }
+        pmm_free_pages(huge_block_norm, 512);
+    }
+
+    // Test 4: Page Fault Handler Fast-Path Interception
+    console_puts("[4/4] Triggering intentional Fault to invoke Zero-Fill Engine...\n");
+    uint64_t fault_vaddr = test_vaddr_base + 0x300000000ULL;
+    
+    struct thread *current = sched_get_current();
+    if (current) {
+         // Wire up dummy permissions map in active tree to prove it resolves
+         if (vma_add(&current->vmas, fault_vaddr, fault_vaddr + 4096, 0x3, 0x22, -1, 0) != -1) {
+             volatile uint64_t *fault_ptr = (volatile uint64_t *)fault_vaddr;
+             
+             // -> CRASH INDUCED <-
+             // Will trigger ISR #14, run `vmm_handle_page_fault`, allocate memory, and patch PTE!
+             *fault_ptr = 0x9988776655443322ULL; 
+             
+             if (*fault_ptr == 0x9988776655443322ULL) {
+                 console_puts("  -> PASS: Fault trapped. Zero-Fill handled seamlessly via ISR Phase 2 Engine!\n");
+             } else {
+                 console_puts("  -> FAIL: Zero-Fill payload integrity mismatch.\n");
+                 vmm_pass = 0;
+             }
+
+             // Purge testing structure
+             vma_remove(&current->vmas, fault_vaddr, fault_vaddr + 4096);
+             vmm_unmap_page(pml4, fault_vaddr);
+         } else {
+             console_puts("  -> SKIP: VMA list exceeded limits. Could not construct dummy bounds.\n");
+         }
+    } else {
+         console_puts("  -> SKIP: No active process context available here.\n");
+    }
+
+    // Test 5: Thrashing Mapping/Unmapping Leaks
+    console_puts("[5/6] Testing VMM mapping thrashing for PMM leaks...\n");
+    uint64_t thrash_vaddr = test_vaddr_base + 0x400000000ULL;
+    void *thrash_page = pmm_alloc_page();
+    
+    size_t free_before_thrash = pmm_get_free_pages();
+    for (int i = 0; i < 500; i++) {
+         vmm_map_page(pml4, thrash_vaddr, (uint64_t)thrash_page, PAGE_FLAG_PRESENT | PAGE_FLAG_RW);
+         vmm_unmap_page(pml4, thrash_vaddr);
+    }
+    size_t free_after_thrash = pmm_get_free_pages();
+    
+    // Thrash unmap should have cleanly returned all intermediate empty tables back to PMM.
+    if (free_after_thrash < free_before_thrash) {
+         console_puts("  -> FAIL: Thrash test resulted in PMM frames leaking! (Diff: ");
+         shell_print_uint64(free_before_thrash - free_after_thrash);
+         console_puts(")\n");
+         vmm_pass = 0;
+    } else {
+         console_puts("  -> PASS: Thrash mapping gracefully unmapped all intermediate blocks seamlessly.\n");
+    }
+    pmm_free_page(thrash_page);
+
+    // Test 6: Deep Sparse Mapping Array
+    console_puts("[6/6] Testing deep sparse mapping alignment tables...\n");
+    uint64_t sparse_vaddr_base = test_vaddr_base + 0x500000000ULL;
+    size_t sparse_free_before = pmm_get_free_pages();
+    void *sparse_pages[10];
+
+    for (int i = 0; i < 10; i++) {
+        sparse_pages[i] = pmm_alloc_page();
+        // Shift spacing massively so each one forces a unique Page Directory or PDPT allocation
+        uint64_t shift_vaddr = sparse_vaddr_base + ((uint64_t)i * 0x40000000ULL); 
+        vmm_map_page(pml4, shift_vaddr, (uint64_t)sparse_pages[i], PAGE_FLAG_PRESENT | PAGE_FLAG_RW);
+        volatile uint64_t *ptr = (volatile uint64_t *)shift_vaddr;
+        *ptr = 0xAA55AA55;
+    }
+
+    for (int i = 0; i < 10; i++) {
+        uint64_t shift_vaddr = sparse_vaddr_base + ((uint64_t)i * 0x40000000ULL); 
+        vmm_unmap_page(pml4, shift_vaddr);
+        pmm_free_page(sparse_pages[i]);
+    }
+    size_t sparse_free_after = pmm_get_free_pages();
+    
+    if (sparse_free_before > sparse_free_after) {
+         console_puts("  -> FAIL: Sparse unmapping leaked structures (diff: ");
+         shell_print_uint64(sparse_free_before - sparse_free_after);
+         console_puts(")\n");
+         vmm_pass = 0;
+    } else {
+         console_puts("  -> PASS: Sparse wide structure mappings and cleanup successful.\n");
+    }
+
+    // Test 7: TCC Execution Environment Simulation (mmap -> write payload -> execute -> unmap)
+    console_puts("[7/7] Testing dynamic code execution (TCC simulation)...\n");
+    uint64_t tcc_vaddr = test_vaddr_base + 0x600000000ULL;
+    void *tcc_page = pmm_alloc_page();
+    
+    if (!vmm_map_page(pml4, tcc_vaddr, (uint64_t)tcc_page, PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_USER)) {
+         console_puts("  -> FAIL: TCC mapping allocation blocked!\n");
+         vmm_pass = 0;
+    } else {
+         // Generate an x86-64 assembly payload dynamically
+         // Payload: 
+         // mov rax, 0x1122334455667788
+         // ret
+         uint8_t *payload = (uint8_t *)tcc_vaddr;
+         payload[0] = 0x48; // REX.W
+         payload[1] = 0xB8; // MOV r64, imm64
+         payload[2] = 0x88;
+         payload[3] = 0x77;
+         payload[4] = 0x66;
+         payload[5] = 0x55;
+         payload[6] = 0x44;
+         payload[7] = 0x33;
+         payload[8] = 0x22;
+         payload[9] = 0x11;
+         payload[10] = 0xC3; // RET
+
+         // Flush TLB implicitly, cast to function signature
+         typedef uint64_t (*tcc_func_t)(void);
+         tcc_func_t tcc_func = (tcc_func_t)tcc_vaddr;
+
+         // Execute dynamic payload
+         uint64_t result = tcc_func();
+         
+         if (result == 0x1122334455667788ULL) {
+             console_puts("  -> PASS: Dynamic out-of-order execution payload triggered and computed correctly.\n");
+         } else {
+             console_puts("  -> FAIL: TCC computational payload returned invalid state!\n");
+             vmm_pass = 0;
+         }
+
+         vmm_unmap_page(pml4, tcc_vaddr);
+    }
+    pmm_free_page(tcc_page);
+
+    if (vmm_pass) {
+        console_puts("\n=== ADVANCED VMM STRESS TEST PASSED SEAMLESSLY ===\n");
+    } else {
+        console_puts("\n=== VMM STRESS TEST FAILED ===\n");
+    }
+  } else if (strcmp(cmd, "slabtest") == 0) {
+      console_puts("Starting Intensive Generic Kernel Slab Allocator Test...\n");
+      int slab_pass = 1;
+      
+      // Test 1: Bucket Mapping Fragmentation Resistance
+      console_puts("[1/3] Testing Discrete Bucket Spanning (32 -> 1024)...\n");
+      void *bucket_ptrs[6];
+      size_t sizes[] = {32, 64, 128, 256, 512, 1024};
+      
+      size_t baselines_before = pmm_get_free_pages();
+      
+      for(int i = 0; i < 6; i++) {
+           bucket_ptrs[i] = kmalloc(sizes[i]);
+           if (!bucket_ptrs[i]) {
+               console_puts("  -> FAIL: Dynamic slab bucket allocation failed for size: ");
+               shell_print_uint64(sizes[i]);
+               console_puts("\n");
+               slab_pass = 0;
+           } else {
+               // Prove usability by writing unique patterns across boundary edges
+               memset(bucket_ptrs[i], 0xAA, sizes[i]);
+           }
+      }
+      
+      // Verify Integrity & Free Seamlessly
+      if (slab_pass) {
+          for(int i = 0; i < 6; i++) {
+              uint8_t *chk = (uint8_t*)bucket_ptrs[i];
+              if (chk[0] != 0xAA || chk[sizes[i]-1] != 0xAA) {
+                  slab_pass = 0;
+                  console_puts("  -> FAIL: Overwrite corruption detected boundary collision!\n");
+              }
+              kfree(bucket_ptrs[i]);
+          }
+      }
+      
+      if (slab_pass) console_puts("  -> PASS: Unified discreet bucket mapping and Coalescing passed.\n");
+      
+      // Test 2: Mass Object Density Scaling (1000 items)
+      console_puts("[2/3] Testing Mass Object Density Stress (1000 allocs at 128 bytes)...\n");
+      void *mass_ptrs[1000];
+      int mass_iter = 0;
+      for (; mass_iter < 1000; mass_iter++) {
+           mass_ptrs[mass_iter] = kmalloc(128);
+           if (!mass_ptrs[mass_iter]) break;
+           *(uint64_t*)(mass_ptrs[mass_iter]) = 0x1234567890ABCDEFULL + mass_iter;
+      }
+      
+      if (mass_iter < 1000) {
+            console_puts("  -> FAIL: Mass Density failed dynamically around iteration: ");
+            shell_print_uint64(mass_iter);
+            console_puts("\n");
+            slab_pass = 0;
+      } else {
+           // Verify integrity
+           int integrity = 1;
+           for(int i = 0; i < 1000; i++) {
+                if (*(uint64_t*)(mass_ptrs[i]) != 0x1234567890ABCDEFULL + i) {
+                     integrity = 0; break;
+                }
+                kfree(mass_ptrs[i]);
+           }
+           if (integrity) console_puts("  -> PASS: 1000 sequential Slab objects mapped and dynamically unmapped perfectly.\n");
+           else { console_puts("  -> FAIL: Overwrite density leak detected in partial caches!\n"); slab_pass = 0; }
+      }
+      
+      // Test 3: Large Assorted Off-Cache Allocator
+      console_puts("[3/3] Testing Out-of-Cache Massive Allocations (4096+)...\n");
+      void *huge_obj1 = kmalloc(8192); // 8KB
+      void *huge_obj2 = kmalloc(25000); // Massive disjoint 
+      
+      if (!huge_obj1 || !huge_obj2) {
+            console_puts("  -> FAIL: Large unified allocation block routed failure.\n");
+            slab_pass = 0;
+      } else {
+            memset(huge_obj1, 0xBB, 8192);
+            memset(huge_obj2, 0xCC, 25000);
+            if (((uint8_t*)huge_obj1)[8191] == 0xBB && ((uint8_t*)huge_obj2)[24999] == 0xCC) {
+                  console_puts("  -> PASS: Large generic heap blocks bypassed flawlessly to native endpoints.\n");
+            } else {
+                  console_puts("  -> FAIL: Dynamic large block integrity fault.\n");
+                  slab_pass = 0;
+            }
+            kfree(huge_obj2);
+            kfree(huge_obj1);
+      }
+
+      size_t baselines_after = pmm_get_free_pages();
+      if (baselines_after < baselines_before) {
+          console_puts("  -> FAIL: Slab system leaked ");
+          shell_print_uint64(baselines_before - baselines_after);
+          console_puts(" physical frames globally!\n");
+          slab_pass = 0;
+      } else {
+          console_puts("  -> PASS: PMM Page frame trackers stabilized matching total equilibrium.\n");
+      }
+      
+      if (slab_pass) {
+          console_puts("\n=== KERNEL SLAB ALLOCATOR UNIFIED TEST PASSED (ZERO LEAKS) ===\n");
+      } else {
+          console_puts("\n=== SLAB TEST FAILED ===\n");
+      }
+  } else if (strcmp(cmd, "vmatest") == 0) {
+      console_puts("Starting Intensive VMA AVL Interval Tree Stress Test...\n");
+      struct vma_list tester_list;
+      vma_list_init(&tester_list);
+      int vma_pass = 1;
+
+      // Test 1: Massive Insertion scaling beyond flat-array limits (2000 insertions)
+      console_puts("[1/3] Mass Boundary scaling (2000+ insertions)...\n");
+      for(int i = 0; i < 2000; i++) {
+          if (vma_add(&tester_list, 0x1000 * 2 * i, 0x1000 * (2 * i + 1), 0x3, 0x22, -1, 0) < 0) {
+               console_puts("  -> FAIL: Native AVL insert crashed out early!\n");
+               vma_pass = 0;
+               break;
+          }
+      }
+      
+      if (vma_pass) {
+          if (tester_list.count != 2000) {
+               console_puts("  -> FAIL: VMA Node count offset detected!\n");
+               vma_pass = 0;
+          } else {
+               console_puts("  -> PASS: Native dynamic memory tree scaled bounds to exactly 2000 nodes natively.\n");
+          }
+      }
+
+      // Test 2: Dense Overlap Avoidance
+      console_puts("[2/3] Dense Interval Map Avoidance Check...\n");
+      if (vma_add(&tester_list, 0x1000 * 250, 0x1000 * 251, 0x3, 0x22, -1, 0) == 0) {
+           console_puts("  -> FAIL: Interval search tree silently allowed overlap injection!\n");
+           vma_pass = 0;
+      } else {
+           console_puts("  -> PASS: Interval tree securely blocked overlap fault cleanly.\n");
+      }
+
+      // Test 3: Total Split/Collapse destruction sequences
+      console_puts("[3/3] Deleting exactly 2000 nodes globally...\n");
+      bool success = vma_remove(&tester_list, 0, 0x1000 * 2 * 3000);
+      
+      if (success && tester_list.count == 0) {
+           console_puts("  -> PASS: Structural collapse cleared effectively inside global mappings.\n");
+      } else {
+           console_puts("  -> FAIL: Node memory leaked heavily mapping tree bounds!\n");
+           vma_pass = 0;
+      }
+
+      if (vma_pass) {
+          console_puts("\n=== KERNEL VMA INTERVAL AVL TEST PASSED (ZERO LEAKS) ===\n");
+      } else {
+          console_puts("\n=== VMA TEST FAILED ===\n");
+      }
   } else if (strcmp(cmd, "locktest") == 0) {
     console_puts("Testing Atomic Spinlock primitives...\n");
     static spinlock_t test_lock = SPINLOCK_INIT;

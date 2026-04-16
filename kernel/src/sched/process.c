@@ -44,15 +44,11 @@ extern void kernel_longjmp(kernel_jmp_buf buf, int val)
 // Global context buffer: sys_exit will longjmp here to return to shell.
 kernel_jmp_buf process_return_ctx;
 
-// ── Memory management state for the current process ─────────────────────────
-uint64_t process_brk_base = 0;    // End of last PT_LOAD (initial brk)
-uint64_t process_brk_current = 0; // Current program break
-
-extern void mm_reset_mmap_state(void);
-
 // MSR constants for TLS base registers
 #define IA32_KERNEL_GS_BASE 0xC0000102
 #define IA32_FS_BASE 0xC0000100
+
+extern void mm_reset_mmap_state(struct thread *t);
 
 // Inline assembly to perform sysret transition.
 // Note: sysret loads CS from STAR MSR and SS from STAR MSR + 8.
@@ -132,7 +128,10 @@ void process_jump_usermode(uint64_t rip, uint64_t user_rsp, uint64_t pml4) {
 
 #define PAGE_SIZE 4096
 
-static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base, elf_info_t *out_info, char *interp_path, size_t interp_max_len) {
+static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
+                        elf_info_t *out_info, char *interp_path,
+                        size_t interp_max_len) {
+  struct thread *current_thread = sched_get_current();
   vfs_node_t *file = vfs_resolve_path(path);
   if (!file) {
     klog_puts("[PROC] ELF load failed: File not found: ");
@@ -149,7 +148,8 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base, el
   }
 
   if (ehdr.e_ident[0] != 0x7f || ehdr.e_ident[1] != 'E' ||
-      ehdr.e_ident[2] != 'L' || ehdr.e_ident[3] != 'F' || ehdr.e_ident[4] != 2) {
+      ehdr.e_ident[2] != 'L' || ehdr.e_ident[3] != 'F' ||
+      ehdr.e_ident[4] != 2) {
     return false;
   }
 
@@ -159,12 +159,14 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base, el
   for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
     Elf64_Phdr phdr;
     uint32_t offset = ehdr.e_phoff + (i * ehdr.e_phentsize);
-    if (vfs_read(file, offset, sizeof(Elf64_Phdr), (uint8_t *)&phdr) != sizeof(Elf64_Phdr))
+    if (vfs_read(file, offset, sizeof(Elf64_Phdr), (uint8_t *)&phdr) !=
+        sizeof(Elf64_Phdr))
       continue;
-    
+
     if (phdr.p_type == PT_INTERP && interp_path) {
       uint32_t len = phdr.p_filesz;
-      if (len >= interp_max_len) len = interp_max_len - 1;
+      if (len >= interp_max_len)
+        len = interp_max_len - 1;
       vfs_read(file, phdr.p_offset, len, (uint8_t *)interp_path);
       interp_path[len] = '\0';
     }
@@ -179,8 +181,11 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base, el
     Elf64_Phdr phdr;
     uint32_t offset = ehdr.e_phoff + (i * ehdr.e_phentsize);
 
-    if (vfs_read(file, offset, sizeof(Elf64_Phdr), (uint8_t *)&phdr) != sizeof(Elf64_Phdr)) continue;
-    if (phdr.p_type != PT_LOAD) continue;
+    if (vfs_read(file, offset, sizeof(Elf64_Phdr), (uint8_t *)&phdr) !=
+        sizeof(Elf64_Phdr))
+      continue;
+    if (phdr.p_type != PT_LOAD)
+      continue;
 
     uint64_t vaddr = load_base + phdr.p_vaddr;
     uint32_t filesz = phdr.p_filesz;
@@ -188,10 +193,11 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base, el
     uint32_t file_offset = phdr.p_offset;
 
     // Track uppermost loaded address for brk base.
-    if (load_base == 0) {
+    if (load_base == 0 && current_thread) {
       uint64_t seg_end = vaddr + memsz;
-      if (seg_end > process_brk_base) {
-        process_brk_base = seg_end;
+      if (seg_end > current_thread->brk_base) {
+        current_thread->brk_base = seg_end;
+        current_thread->brk_current = seg_end;
       }
     }
 
@@ -202,8 +208,10 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base, el
       for (uint64_t page = start_page; page < end_page; page += PAGE_SIZE) {
         if (vmm_virt_to_phys(pml4, page) == 0) {
           void *phys = pmm_alloc();
-          if (!phys) return false;
-          vmm_map_page(pml4, page, (uint64_t)phys, PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+          if (!phys)
+            return false;
+          vmm_map_page(pml4, page, (uint64_t)phys,
+                       PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
           uint64_t kernel_virt = (uint64_t)phys + hhdm;
           memset((void *)kernel_virt, 0, PAGE_SIZE);
         }
@@ -211,6 +219,31 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base, el
 
       if (filesz > 0) {
         vfs_read(file, file_offset, filesz, (uint8_t *)vaddr);
+      }
+
+      // ── Explicitly zero the BSS portion ──────────────────────────────
+      // The ELF spec requires [vaddr+filesz, vaddr+memsz) to be zero.
+      // Pages were pre-zeroed above, but vfs_read may have written file
+      // data into the BSS region if the linker set filesz larger than
+      // the actual non-BSS content (TCC does this).  Re-zero the BSS
+      // portion through the HHDM to guarantee correctness.
+      if (memsz > filesz) {
+        uint64_t bss_start = vaddr + filesz;
+        uint64_t bss_end = vaddr + memsz;
+
+        for (uint64_t addr = bss_start; addr < bss_end;) {
+          uint64_t page_base = addr & ~(PAGE_SIZE - 1);
+          uint64_t page_off = addr - page_base;
+          uint64_t chunk = PAGE_SIZE - page_off;
+          if (chunk > bss_end - addr)
+            chunk = bss_end - addr;
+
+          uint64_t phys = vmm_virt_to_phys(pml4, page_base);
+          if (phys) {
+            memset((void *)(phys + hhdm + page_off), 0, chunk);
+          }
+          addr += chunk;
+        }
       }
     }
   }
@@ -231,8 +264,11 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base, el
 }
 
 bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
-  process_brk_base = 0;
-  process_brk_current = 0;
+  struct thread *current_thread = sched_get_current();
+  if (current_thread) {
+    current_thread->brk_base = 0;
+    current_thread->brk_current = 0;
+  }
 
   char interp_path[256];
   memset(interp_path, 0, sizeof(interp_path));
@@ -273,11 +309,12 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
   }
 
   // Page-align the brk base upward and set current brk.
-  process_brk_base = (process_brk_base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-  process_brk_current = process_brk_base;
-
-  // Reset the mmap bump allocator for this new process.
-  mm_reset_mmap_state();
+  if (current_thread) {
+    current_thread->brk_base =
+        (current_thread->brk_base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    current_thread->brk_current = current_thread->brk_base;
+    mm_reset_mmap_state(current_thread);
+  }
 
   return true;
 }
@@ -467,6 +504,131 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
   return final_sp;
 }
 
+// ── Fix up __libc.auxv for TCC-compiled binaries ────────────────────────────
+// TCC's _start calls main() directly, skipping __libc_start_main.
+// musl's mallocng reads __libc.auxv to find AT_RANDOM for its secret.
+// If auxv is NULL the code crashes. This helper finds the __libc symbol
+// in the binary's dynsym and writes the auxv pointer into it.
+//
+// musl's __libc layout (first 3 fields):
+//   offset 0: char *can_do_threads (or similar)
+//   offset 8: size_t *auxv              ← we populate this
+//   ...
+static void process_fixup_libc_auxv(const char *path, uint64_t *pml4,
+                                    uint64_t user_sp) {
+  uint64_t hhdm = pmm_get_hhdm_offset();
+  vfs_node_t *file = vfs_resolve_path(path);
+  if (!file)
+    return;
+
+  Elf64_Ehdr ehdr;
+  if (vfs_read(file, 0, sizeof(ehdr), (uint8_t *)&ehdr) != sizeof(ehdr))
+    return;
+
+  // Find PT_DYNAMIC to locate the DYNAMIC section's VA
+  uint64_t dyn_vaddr = 0, dyn_memsz = 0;
+  for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
+    Elf64_Phdr phdr;
+    uint32_t off = ehdr.e_phoff + i * ehdr.e_phentsize;
+    if (vfs_read(file, off, sizeof(phdr), (uint8_t *)&phdr) != sizeof(phdr))
+      continue;
+    if (phdr.p_type == PT_DYNAMIC) {
+      dyn_vaddr = phdr.p_vaddr;
+      dyn_memsz = phdr.p_memsz;
+      break;
+    }
+  }
+  if (!dyn_vaddr)
+    return;
+
+  // Walk the .dynamic entries (already in memory) to find SYMTAB, STRTAB,
+  // SYMENT
+  uint64_t symtab_va = 0, strtab_va = 0;
+  uint64_t syment = 24; // default Elf64_Sym size
+
+  // Read dynamic entries via HHDM (they're mapped in the process pages)
+  for (uint64_t off = 0; off < dyn_memsz; off += 16) {
+    uint64_t va = dyn_vaddr + off;
+    uint64_t phys = vmm_virt_to_phys(pml4, va & ~0xFFFULL);
+    if (!phys)
+      continue;
+    uint64_t *entry = (uint64_t *)(phys + hhdm + (va & 0xFFF));
+    uint64_t d_tag = entry[0], d_val = entry[1];
+    if (d_tag == 0)
+      break; // DT_NULL
+    if (d_tag == 6)
+      symtab_va = d_val; // DT_SYMTAB
+    if (d_tag == 5)
+      strtab_va = d_val; // DT_STRTAB
+    if (d_tag == 11)
+      syment = d_val; // DT_SYMENT
+  }
+  if (!symtab_va || !strtab_va)
+    return;
+
+  // Walk the dynsym table looking for "__libc"
+  // The dynsym is bounded by strtab (it immediately follows .dynsym in TCC
+  // output)
+  uint64_t sym_limit = (strtab_va > symtab_va) ? strtab_va : symtab_va + 0x1000;
+  for (uint64_t sym_va = symtab_va; sym_va < sym_limit; sym_va += syment) {
+    // Read st_name (first 4 bytes of Elf64_Sym)
+    uint64_t phys = vmm_virt_to_phys(pml4, sym_va & ~0xFFFULL);
+    if (!phys)
+      continue;
+    uint8_t *sym = (uint8_t *)(phys + hhdm + (sym_va & 0xFFF));
+    uint32_t st_name = *(uint32_t *)sym;
+    // st_value is at offset 8 in Elf64_Sym
+    uint64_t st_value = *(uint64_t *)(sym + 8);
+
+    if (st_name == 0 || st_value == 0)
+      continue;
+
+    // Read the name from strtab
+    uint64_t name_va = strtab_va + st_name;
+    uint64_t name_phys = vmm_virt_to_phys(pml4, name_va & ~0xFFFULL);
+    if (!name_phys)
+      continue;
+    const char *name = (const char *)(name_phys + hhdm + (name_va & 0xFFF));
+
+    // Check for "__libc" (6 chars + NUL)
+    if (name[0] == '_' && name[1] == '_' && name[2] == 'l' && name[3] == 'i' &&
+        name[4] == 'b' && name[5] == 'c' && name[6] == '\0') {
+      // Found __libc at st_value. Compute auxv address from the stack.
+      // Stack layout at user_sp: argc, argv[0..argc-1], NULL, envp[], NULL,
+      // auxv[] Read through HHDM.
+      uint64_t sp_phys = vmm_virt_to_phys(pml4, user_sp & ~0xFFFULL);
+      if (!sp_phys)
+        return;
+      uint64_t *sp = (uint64_t *)(sp_phys + hhdm + (user_sp & 0xFFF));
+      uint64_t argc_val = sp[0];
+      // auxv starts after: argc + argv[argc] + NULL + envp[] + NULL
+      uint64_t idx = 1 + argc_val + 1; // skip argc + argv + NULL
+      // Skip envp
+      while (sp[idx] != 0)
+        idx++;
+      idx++; // skip envp NULL terminator
+      // sp[idx] is now the start of auxv
+      uint64_t auxv_user_addr = user_sp + idx * sizeof(uint64_t);
+
+      // Write auxv pointer into __libc + 8
+      uint64_t libc_auxv_va = st_value + 8;
+      uint64_t libc_phys = vmm_virt_to_phys(pml4, libc_auxv_va & ~0xFFFULL);
+      if (!libc_phys)
+        return;
+      uint64_t *libc_auxv =
+          (uint64_t *)(libc_phys + hhdm + (libc_auxv_va & 0xFFF));
+      *libc_auxv = auxv_user_addr;
+
+      klog_puts("[PROC] Fixed __libc.auxv at ");
+      klog_uint64(libc_auxv_va);
+      klog_puts(" → ");
+      klog_uint64(auxv_user_addr);
+      klog_puts("\n");
+      return;
+    }
+  }
+}
+
 bool process_exec_argv(const char **argv) {
   if (!argv || !argv[0])
     return false;
@@ -475,7 +637,26 @@ bool process_exec_argv(const char **argv) {
   klog_puts(argv[0]);
   klog_puts("\n");
 
-  uint64_t *pml4 = vmm_get_active_pml4();
+  uint64_t *pml4 = vmm_create_pml4();
+  if (!pml4) {
+    klog_puts("[PROC] Failed to allocate new PML4\n");
+    return false;
+  }
+
+  klog_puts("[PROC] New PML4 phys = ");
+  klog_uint64((uint64_t)pml4);
+  klog_puts("\n");
+
+  // Switch to the newly created, clean address space
+  struct thread *current = sched_get_current();
+  if (current) {
+    current->cr3 = (uint64_t)pml4;
+    __asm__ volatile("mov %0, %%cr3" ::"r"(current->cr3) : "memory");
+
+    // Clear the memory state
+    vma_list_init(&current->vmas);
+    mm_reset_mmap_state(current);
+  }
 
   elf_info_t elf_info = {0};
 
@@ -493,6 +674,11 @@ bool process_exec_argv(const char **argv) {
     klog_puts("[PROC] Exec failed: could not build initial stack\n");
     return false;
   }
+
+  // Fix up __libc.auxv for binaries whose _start skips __libc_start_main
+  // (e.g. TCC-compiled programs). Without this, musl's malloc crashes
+  // trying to walk a NULL auxv to find AT_RANDOM.
+  process_fixup_libc_auxv(argv[0], pml4, user_rsp);
 
   // Initialize File Descriptors for the main thread
   struct thread *current_thread = sched_get_current();
@@ -535,7 +721,8 @@ bool process_exec_argv(const char **argv) {
   }
 
   // Issue the jump to userspace (does not return normally)
-  uint64_t actual_entry = elf_info.interp_base ? elf_info.interp_entry : elf_info.entry;
+  uint64_t actual_entry =
+      elf_info.interp_base ? elf_info.interp_entry : elf_info.entry;
   process_jump_usermode(actual_entry, user_rsp, (uint64_t)pml4);
   return true;
 }

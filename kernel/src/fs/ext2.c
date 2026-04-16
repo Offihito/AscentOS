@@ -1,4 +1,5 @@
 #include "fs/ext2.h"
+#include "fs/ext3.h"
 #include "apic/lapic_timer.h"
 #include "console/klog.h"
 #include "lib/string.h"
@@ -32,7 +33,7 @@ static uint32_t ext2_current_time(void) {
 // ── Block I/O ───────────────────────────────────────────────────────────────
 
 // Read a single ext2 block into buffer.
-static int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num,
+int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num,
                            void *buffer) {
   if (block_num == 0) {
     memset(buffer, 0, mnt->block_size);
@@ -45,7 +46,7 @@ static int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num,
 }
 
 // Write a single ext2 block from buffer.
-static int ext2_write_block(ext2_mount_t *mnt, uint32_t block_num,
+int ext2_write_block(ext2_mount_t *mnt, uint32_t block_num,
                             const void *buffer) {
   if (block_num == 0)
     return -1;
@@ -65,7 +66,7 @@ static int ext2_write_superblock(ext2_mount_t *mnt) {
   if (err)
     return -1;
   memcpy(buf, &mnt->sb, sizeof(ext2_superblock_t));
-  return mnt->dev->write_sectors(mnt->dev, 2, 2, buf);
+  return ext3_journal_block(mnt, 1, buf); // Superblock is at logical block 1 (offset 1024)
 }
 
 static int ext2_write_bgdt(ext2_mount_t *mnt) {
@@ -78,7 +79,7 @@ static int ext2_write_bgdt(ext2_mount_t *mnt) {
   memset(tmp, 0, blocks_needed * mnt->block_size);
   memcpy(tmp, mnt->bgdt, bgdt_size);
   for (uint32_t i = 0; i < blocks_needed; i++) {
-    int err = ext2_write_block(mnt, bgdt_block + i, tmp + i * mnt->block_size);
+    int err = ext3_journal_block(mnt, bgdt_block + i, tmp + i * mnt->block_size);
     if (err) {
       kfree(tmp);
       return -1;
@@ -90,7 +91,7 @@ static int ext2_write_bgdt(ext2_mount_t *mnt) {
 
 // ── Inode I/O ───────────────────────────────────────────────────────────────
 
-static int ext2_read_inode(ext2_mount_t *mnt, uint32_t inode_num,
+int ext2_read_inode(ext2_mount_t *mnt, uint32_t inode_num,
                            ext2_inode_t *out) {
   if (inode_num == 0)
     return -1;
@@ -157,6 +158,7 @@ static int ext2_write_inode(ext2_mount_t *mnt, uint32_t inode_num,
 // Allocate a free block from the filesystem. Returns block number or 0 on
 // failure.
 static uint32_t ext2_alloc_block(ext2_mount_t *mnt) {
+  ext3_journal_start(mnt);
   uint8_t *bitmap = kmalloc(mnt->block_size);
   if (!bitmap)
     return 0;
@@ -182,25 +184,28 @@ static uint32_t ext2_alloc_block(ext2_mount_t *mnt) {
       if (!(bitmap[byte_idx] & bit_mask)) {
         // Found a free block — mark it used
         bitmap[byte_idx] |= bit_mask;
-        ext2_write_block(mnt, mnt->bgdt[g].bg_block_bitmap, bitmap);
+        ext3_journal_block(mnt, mnt->bgdt[g].bg_block_bitmap, bitmap);
 
         mnt->bgdt[g].bg_free_blocks_count--;
         mnt->sb.s_free_blocks_count--;
         ext2_write_bgdt(mnt);
         ext2_write_superblock(mnt);
 
+        ext3_journal_stop(mnt);
         kfree(bitmap);
         return g * mnt->sb.s_blocks_per_group + b + mnt->sb.s_first_data_block;
       }
     }
   }
 
+  ext3_journal_stop(mnt);
   kfree(bitmap);
   return 0; // No free blocks
 }
 
 // Allocate a free inode. Returns inode number or 0 on failure.
 static uint32_t ext2_alloc_inode(ext2_mount_t *mnt) {
+  ext3_journal_start(mnt);
   uint8_t *bitmap = kmalloc(mnt->block_size);
   if (!bitmap)
     return 0;
@@ -216,19 +221,21 @@ static uint32_t ext2_alloc_inode(ext2_mount_t *mnt) {
       uint8_t bit_mask = 1 << (i % 8);
       if (!(bitmap[byte_idx] & bit_mask)) {
         bitmap[byte_idx] |= bit_mask;
-        ext2_write_block(mnt, mnt->bgdt[g].bg_inode_bitmap, bitmap);
+        ext3_journal_block(mnt, mnt->bgdt[g].bg_inode_bitmap, bitmap);
 
         mnt->bgdt[g].bg_free_inodes_count--;
         mnt->sb.s_free_inodes_count--;
         ext2_write_bgdt(mnt);
         ext2_write_superblock(mnt);
 
+        ext3_journal_stop(mnt);
         kfree(bitmap);
         return g * mnt->inodes_per_group + i + 1; // Inodes are 1-indexed
       }
     }
   }
 
+  ext3_journal_stop(mnt);
   kfree(bitmap);
   return 0;
 }
@@ -257,7 +264,7 @@ static int ext2_free_block(ext2_mount_t *mnt, uint32_t block_num) {
   uint8_t bit_mask = 1 << (index % 8);
   bitmap[byte_idx] &= ~bit_mask; // Clear the bit
 
-  ext2_write_block(mnt, mnt->bgdt[group].bg_block_bitmap, bitmap);
+  ext3_journal_block(mnt, mnt->bgdt[group].bg_block_bitmap, bitmap);
   kfree(bitmap);
 
   mnt->bgdt[group].bg_free_blocks_count++;
@@ -288,7 +295,7 @@ static int ext2_free_inode(ext2_mount_t *mnt, uint32_t inode_num) {
   uint8_t bit_mask = 1 << (index % 8);
   bitmap[byte_idx] &= ~bit_mask; // Clear the bit
 
-  ext2_write_block(mnt, mnt->bgdt[group].bg_inode_bitmap, bitmap);
+  ext3_journal_block(mnt, mnt->bgdt[group].bg_inode_bitmap, bitmap);
   kfree(bitmap);
 
   mnt->bgdt[group].bg_free_inodes_count++;
@@ -302,7 +309,7 @@ static int ext2_free_inode(ext2_mount_t *mnt, uint32_t inode_num) {
 
 // Get the disk block number for a given logical block index in an inode.
 // Supports direct, singly-indirect, and doubly-indirect blocks.
-static uint32_t ext2_get_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
+uint32_t ext2_get_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
                                    uint32_t logical_block) {
   uint32_t ptrs_per_block = mnt->block_size / 4;
 
@@ -708,7 +715,9 @@ static uint32_t ext2_write_impl(vfs_node_t *node, uint32_t offset,
   inode.i_mtime = now;
   inode.i_ctime = now;
 
+  ext3_journal_start(mnt);
   ext2_write_inode(mnt, node->inode, &inode);
+  ext3_journal_stop(mnt);
   node->length = inode.i_size;
 
   kfree(block_buf);
@@ -1464,6 +1473,8 @@ static int ext2_unlink_impl(vfs_node_t *node, char *name) {
   if (!mnt)
     return -1;
 
+  ext3_journal_start(mnt);
+
   // Find the target to get its inode number
   vfs_node_t *target = ext2_finddir_impl(node, name);
   if (!target)
@@ -1498,6 +1509,7 @@ static int ext2_unlink_impl(vfs_node_t *node, char *name) {
     ext2_write_inode(mnt, target_ino, &inode);
   }
 
+  ext3_journal_stop(mnt);
   return 0;
 }
 
@@ -1687,7 +1699,9 @@ int ext2_mount(struct block_device *dev, vfs_node_t *mountpoint) {
   mountpoint->chmod = ext2_chmod_impl;
   mountpoint->chown = ext2_chown_impl;
 
-  klog_puts("[OK] Ext2 filesystem mounted on /mnt\n");
+  ext3_init_journal(mnt);
+
+  klog_puts("[OK] Ext2/3 filesystem mounted on /mnt\n");
   return 0;
 }
 
@@ -1803,6 +1817,8 @@ int ext2_mount_root(struct block_device *dev) {
   // Replace fs_root with the ext2 root
   fs_root = root_vfs;
 
-  klog_puts("[OK] Ext2 filesystem mounted as root (/)\n");
+  ext3_init_journal(mnt);
+
+  klog_puts("[OK] Ext2/3 filesystem mounted as root (/)\n");
   return 0;
 }

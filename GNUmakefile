@@ -51,9 +51,9 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/test_tcc_libc.c userland/test_dynamic.elf
+disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf
 	dd if=/dev/zero of=disk.img bs=1M count=256
-	mkfs.ext2 -F disk.img
+	mkfs.ext3 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
 	echo "This is a test document." > /tmp/ascentos_readme.txt
 	debugfs -w -R "cd /" -R "mkdir tmp" disk.img
@@ -91,8 +91,10 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/t
 	debugfs -w -R "write userland/test_sys_cwd.elf test_sys_cwd.elf" disk.img
 	debugfs -w -R "write userland/test_newfstatat.elf test_newfstatat.elf" disk.img
 	debugfs -w -R "write userland/test_unlink_rename.elf test_unlink_rename.elf" disk.img
+	debugfs -w -R "write userland/test_ext3.elf test_ext3.elf" disk.img
 	debugfs -w -R "write userland/test_dynamic.elf test_dynamic.elf" disk.img
 	debugfs -w -R "write userland/test_tcc_libc.c test_tcc_libc.c" disk.img
+	debugfs -w -R "write userland/test_mm.c test_mm.c" disk.img
 	debugfs -w -R "write userland/test.s test.s" disk.img
 	debugfs -w -R "write userland/standalone.s standalone.s" disk.img
 	debugfs -w -R "write test.wav test.wav" disk.img
@@ -167,7 +169,7 @@ clean: clean-musl clean-doom
 clean-musl:
 	rm -rf build/musl-1.2.5 build/musl-cross-make
 	rm -rf toolchain/musl-sysroot toolchain/x86_64-linux-musl
-	rm -f userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/kilo.c userland/test_mmap_shared_private.elf userland/playwav.elf userland/kria.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/ls.elf userland/readelf.elf
+	rm -f userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/kilo.c userland/test_mmap_shared_private.elf userland/playwav.elf userland/kria.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/ls.elf userland/readelf.elf userland/test_ext3.elf
 	rm -rf userland/kria-lang/target
 
 .PHONY: clean-disk
@@ -270,6 +272,10 @@ userland/raycast.elf: userland/raycast.c $(MUSL_LIBC)
 userland/playwav.elf: userland/playwav.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/playwav.c -o userland/playwav.elf
+
+userland/test_ext3.elf: userland/test_ext3.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_ext3.c -o userland/test_ext3.elf
 
 userland/showbmp.elf: userland/showbmp.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \

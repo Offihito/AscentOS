@@ -1,8 +1,8 @@
 #ifndef CPU_ISR_H
 #define CPU_ISR_H
 
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 struct registers {
   uint64_t r15, r14, r13, r12, r11, r10, r9, r8;

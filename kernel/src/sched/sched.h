@@ -51,6 +51,9 @@ struct thread {
   char cwd_path[256];           // Current working directory
   struct vma_list vmas;         // Virtual memory areas for this process
   uint64_t fs_base;             // User FS_BASE (TLS) — inherited across fork
+  uint64_t brk_base;            // Base of the heap (after data/bss)
+  uint64_t brk_current;         // Current end of the heap
+  uint64_t mmap_next_addr;      // Bump-pointer for anonymous mmap
 };
 
 void sched_init(void);

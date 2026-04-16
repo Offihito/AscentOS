@@ -156,6 +156,7 @@ static void rtl8139_irq_handler(struct registers *regs) {
             // RTL8139 RX packet header: [status:16][length:16][data...]
             uint32_t offset = rx_cur_offset;
             uint16_t rx_status = *(uint16_t *)(rx_buffer + offset);
+            (void)rx_status; // Hardware status bits
             uint16_t rx_length = *(uint16_t *)(rx_buffer + offset + 2);
 
             if (rx_length == 0 || rx_length > 1536) {

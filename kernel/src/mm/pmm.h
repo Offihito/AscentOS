@@ -1,28 +1,33 @@
 #ifndef PMM_H
 #define PMM_H
 
-#include <stdint.h>
-#include <stddef.h>
 #include <limine.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
 
 #define PAGE_SIZE 4096
 
 // Initialize the physical memory manager using the memory map and HHDM offset.
 void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset);
 
-// Allocate a single contiguous physical page. Returns NULL on failure.
-void *pmm_alloc(void);
+// New Buddy Allocator API
+void *pmm_alloc_page(void);                    // Allocate single page
+void *pmm_alloc_pages(size_t count);           // Allocate multiple (will allocate ceil(log2(count)))
+void *pmm_alloc_pages_constrained(size_t count, uint64_t max_phys_addr); 
+void pmm_free_page(void *ptr);                 // Free single page
+void pmm_free_pages(void *ptr, size_t count);  // Free multiple pages
 
-// Allocate multiple contiguous physical pages. Returns NULL on failure.
-void *pmm_alloc_blocks(size_t count);
+// Compatibility aliases for existing code
+#define pmm_alloc pmm_alloc_page
+#define pmm_alloc_blocks pmm_alloc_pages
+#define pmm_free pmm_free_page
+#define pmm_free_blocks pmm_free_pages
 
-// Free a previously allocated physical page.
-void pmm_free(void *ptr);
+void pmm_mark_used(void *ptr, size_t count);
 
-// Free multiple contiguous physical pages.
-void pmm_free_blocks(void *ptr, size_t count);
-
-// Reclaims the memory occupied by the Limine bootloader after boot structures are no longer needed
+// Reclaims the memory occupied by the Limine bootloader after boot structures
+// are no longer needed
 void pmm_reclaim_bootloader(void);
 
 // Return usable memory in bytes
@@ -33,5 +38,8 @@ uint64_t pmm_get_total_memory(void);
 
 // Expose the HHDM base
 uint64_t pmm_get_hhdm_offset(void);
+
+// Statistics
+size_t pmm_get_free_pages(void);
 
 #endif
