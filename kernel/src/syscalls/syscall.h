@@ -30,15 +30,28 @@
 #define SYS_WRITEV 20
 #define SYS_ACCESS 21
 #define SYS_PIPE 22
+#define SYS_DUP 32
+#define SYS_DUP2 33
 #define SYS_NANOSLEEP 35
 #define SYS_FCNTL 72
 #define SYS_FTRUNCATE 77
 #define SYS_GETCWD 79
 #define SYS_CHDIR 80
 #define SYS_MKDIR 83
+#define SYS_RMDIR 84
 #define SYS_RENAME 82
 #define SYS_UNLINK 87
+#define SYS_SYMLINK 88
 #define SYS_READLINK 89
+#define SYS_CHMOD 90
+#define SYS_CHOWN 92
+#define SYS_UMASK 95
+#define SYS_GETUID 102
+#define SYS_GETGID 104
+#define SYS_GETEUID 107
+#define SYS_GETEGID 108
+#define SYS_GETRESUID 118
+#define SYS_GETRESGID 120
 #define SYS_RT_SIGPROCMASK 14
 #define SYS_SIGALTSTACK 131
 #define SYS_GETPID 39
@@ -47,9 +60,15 @@
 #define SYS_EXECVE 59
 #define SYS_EXIT 60
 #define SYS_WAIT4 61
+#define SYS_KILL 62
 #define SYS_UNAME 63
 #define SYS_FCNTL 72
+#define SYS_SETPGID 109
+#define SYS_GETPPID 110
+#define SYS_GETPGRP 111
+#define SYS_SETSID 112
 #define SYS_ARCH_PRCTL 158
+#define SYS_PRCTL 157
 #define SYS_SIGPROCMASK 186
 #define SYS_TGKILL 200
 #define SYS_CLOCK_GETTIME 228
@@ -60,6 +79,7 @@
 #define SYS_GETRANDOM 318
 #define SYS_OPENAT 257
 #define SYS_NEWFSTATAT 262
+#define SYS_FACCESSAT2 439
 
 #define MAX_SYSCALL 512
 

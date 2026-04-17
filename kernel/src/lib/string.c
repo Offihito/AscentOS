@@ -46,8 +46,21 @@ char *strncpy(char *dest, const char *src, size_t n) {
 
 char *strcat(char *dest, const char *src) {
   char *ptr = dest;
-  while (*ptr) ptr++;
-  while ((*ptr++ = *src++));
+  while (*ptr)
+    ptr++;
+  while ((*ptr++ = *src++))
+    ;
+  return dest;
+}
+
+char *strncat(char *dest, const char *src, size_t n) {
+  char *ptr = dest;
+  while (*ptr)
+    ptr++;
+  while (n && (*ptr++ = *src++))
+    n--;
+  if (n == 0)
+    *ptr = '\0';
   return dest;
 }
 

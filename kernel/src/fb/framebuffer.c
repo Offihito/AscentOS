@@ -1,4 +1,5 @@
 #include "framebuffer.h"
+#include "terminal.h"
 #include "lib/string.h"
 #include "../fs/ramfs.h"
 #include "../fs/vfs.h"
@@ -192,12 +193,27 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
   (void)offset;
   if (size == 0) return 0;
 
-  // Non-blocking: return 0 if no input available
-  if (!keyboard_has_char()) return 0;
-
   uint32_t count = 0;
-  while (count < size && keyboard_has_char())
-    buffer[count++] = keyboard_get_char();
+  while (count < size) {
+    char c = keyboard_get_char();
+
+    // ICRNL: Map CR to NL on input
+    if (c == '\r' && (console_termios.c_iflag & ICRNL))
+      c = '\n';
+
+    // ECHO: Echo input characters
+    if (console_termios.c_lflag & ECHO) {
+      console_putchar(c);
+    }
+
+    buffer[count++] = (uint8_t)c;
+
+    // If we've read at least one character and no more are pending, return.
+    // This allows line-at-a-time or char-at-a-time depending on how fast
+    // the user types vs how fast the app reads.
+    if (!keyboard_has_char())
+      break;
+  }
 
   return count;
 }
@@ -205,10 +221,21 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
 // Use console_write_batch so that each VFS write() call results in exactly
 // ONE backbuffer swap — eliminating per-character flicker for apps like kilo.
 static uint32_t console_vfs_write(struct vfs_node *node, uint32_t offset,
-                                  uint32_t size, uint8_t *buffer) {
+                                   uint32_t size, uint8_t *buffer) {
   (void)node;
   (void)offset;
-  console_write_batch((const char *)buffer, size);
+
+  if (console_termios.c_oflag & ONLCR) {
+    // ONLCR: Map NL to CR-NL on output
+    for (uint32_t i = 0; i < size; i++) {
+        if (buffer[i] == '\n') {
+            console_putchar('\r');
+        }
+        console_putchar(buffer[i]);
+    }
+  } else {
+    console_write_batch((const char *)buffer, size);
+  }
   return size;
 }
 
@@ -296,6 +323,10 @@ void fb_register_vfs(void) {
 
   // /dev/console
   setup_chardev(dev_dir, "console", console_vfs_read, console_vfs_write, 
+                console_vfs_open, console_vfs_close, 0, 0);
+
+  // /dev/tty (alias to console for now)
+  setup_chardev(dev_dir, "tty", console_vfs_read, console_vfs_write, 
                 console_vfs_open, console_vfs_close, 0, 0);
 
   // /dev/stdin

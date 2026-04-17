@@ -145,10 +145,21 @@ static uint64_t sys_sigprocmask(uint64_t how, uint64_t set_ptr,
   return sys_rt_sigprocmask(how, set_ptr, oldset_ptr, 8, 0, 0);
 }
 
+// ── sys_kill (stub) ─────────────────────────────────────────────────────────
+static uint64_t sys_kill(uint64_t pid, uint64_t sig, uint64_t a2,
+                         uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2; (void)a3; (void)a4; (void)a5;
+  (void)pid; (void)sig;
+  // Stub: accept but don't deliver signals yet
+  return 0;
+}
+
 void syscall_register_signal(void) {
   syscall_register(SYS_RT_SIGACTION, sys_rt_sigaction);
   syscall_register(SYS_RT_SIGPROCMASK, sys_rt_sigprocmask);
   syscall_register(SYS_SIGPROCMASK, sys_sigprocmask);
   syscall_register(SYS_SIGALTSTACK, sys_sigaltstack);
   syscall_register(SYS_TGKILL, sys_tgkill);
+  syscall_register(SYS_KILL, sys_kill);
 }
+

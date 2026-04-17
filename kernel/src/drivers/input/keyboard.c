@@ -1,8 +1,9 @@
 #include "drivers/input/keyboard.h"
 #include "drivers/input/scancode.h"
-#include "cpu/isr.h"
-#include "io/io.h"
-#include "console/console.h"
+#include "../../cpu/isr.h"
+#include "../../io/io.h"
+#include "../../console/console.h"
+#include "../../sched/sched.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -78,7 +79,7 @@ bool keyboard_has_char(void) {
 char keyboard_get_char(void) {
 
     while (kbd_head == kbd_tail) {
-        __asm__ volatile ("sti; hlt; cli"); // Enable interrupts while waiting
+        sched_yield();
     }
     char c = kbd_buffer[kbd_tail];
     kbd_tail = (kbd_tail + 1) % KBD_BUFFER_SIZE;

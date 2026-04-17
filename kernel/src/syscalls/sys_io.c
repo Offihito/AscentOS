@@ -1,15 +1,15 @@
 // ── I/O Syscalls: read, write, close, open, lseek ────────────────────────────
-#include "syscall.h"
-#include "console/klog.h"
-#include "sched/sched.h"
-#include "fs/vfs.h"
-#include "fs/ramfs.h"
-#include "mm/heap.h"
-#include "lib/string.h"
+#include "../console/console.h"
+#include "../console/klog.h"
+#include "../drivers/audio/sb16.h"
 #include "../fb/framebuffer.h"
 #include "../font/font.h"
-#include "../console/console.h"
-#include "../drivers/audio/sb16.h"
+#include "../fs/ramfs.h"
+#include "../fs/vfs.h"
+#include "../lib/string.h"
+#include "../mm/heap.h"
+#include "../sched/sched.h"
+#include "syscall.h"
 #include <stdint.h>
 
 // User-space pointer validation: reject kernel/HHDM addresses
@@ -23,83 +23,62 @@ typedef struct {
   uint32_t capacity;
 } ramfs_file_t;
 
-#define TCGETS     0x5401
-#define TCSETS     0x5402
-#define TCSETSW    0x5403
-#define TCSETSF    0x5404
+#define TCGETS 0x5401
+#define TCSETS 0x5402
+#define TCSETSW 0x5403
+#define TCSETSF 0x5404
 #define TIOCGWINSZ 0x5413
 
 // OSS /dev/dsp ioctls
-#define SNDCTL_DSP_RESET    0x00005000
-#define SNDCTL_DSP_SPEED    0xC0045002
-#define SNDCTL_DSP_STEREO   0xC0045003
-#define SNDCTL_DSP_SETFMT   0xC0045005
+#define SNDCTL_DSP_RESET 0x00005000
+#define SNDCTL_DSP_SPEED 0xC0045002
+#define SNDCTL_DSP_STEREO 0xC0045003
+#define SNDCTL_DSP_SETFMT 0xC0045005
 #define SNDCTL_DSP_CHANNELS 0xC0045006
 
-#define AFMT_U8     0x00000008
+#define AFMT_U8 0x00000008
 #define AFMT_S16_LE 0x00000010
 
 #define O_RDONLY 0
 #define O_WRONLY 1
-#define O_RDWR   2
-#define O_CREAT  0x40
-#define O_TRUNC  0x200
+#define O_RDWR 2
+#define O_CREAT 0x40
+#define O_TRUNC 0x200
 #define O_APPEND 0x400
-
-#define NCCS 32
 
 #define F_GETFL 3
 #define F_SETFL 4
 
 #define AT_FDCWD -100
 
-// ── Linux x86_64 stat structure (matches musl struct stat) ────────────────────
+// ── Linux x86_64 stat structure (matches musl struct stat)
+// ────────────────────
 struct kstat {
-  uint64_t st_dev;      // Device
-  uint64_t st_ino;      // Inode
-  uint64_t st_nlink;    // Number of hard links
+  uint64_t st_dev;   // Device
+  uint64_t st_ino;   // Inode
+  uint64_t st_nlink; // Number of hard links
 
-  uint32_t st_mode;     // Mode (file type + permissions)
-  uint32_t st_uid;     // User ID
-  uint32_t st_gid;     // Group ID
-  uint32_t __pad0;     // Padding
-  uint64_t st_rdev;     // Device ID (if special file)
-  int64_t  st_size;     // Total size in bytes
-  int64_t  st_blksize;  // Block size for filesystem I/O
-  int64_t  st_blocks;   // Number of 512B blocks allocated
+  uint32_t st_mode;   // Mode (file type + permissions)
+  uint32_t st_uid;    // User ID
+  uint32_t st_gid;    // Group ID
+  uint32_t __pad0;    // Padding
+  uint64_t st_rdev;   // Device ID (if special file)
+  int64_t st_size;    // Total size in bytes
+  int64_t st_blksize; // Block size for filesystem I/O
+  int64_t st_blocks;  // Number of 512B blocks allocated
 
-  int64_t  st_atim_sec;   // Access time seconds
-  int64_t  st_atim_nsec;  // Access time nanoseconds
-  int64_t  st_mtim_sec;   // Modification time seconds
-  int64_t  st_mtim_nsec;  // Modification time nanoseconds
-  int64_t  st_ctim_sec;   // Status change time seconds
-  int64_t  st_ctim_nsec;  // Status change time nanoseconds
-  int64_t  __unused[3];   // Unused padding
+  int64_t st_atim_sec;  // Access time seconds
+  int64_t st_atim_nsec; // Access time nanoseconds
+  int64_t st_mtim_sec;  // Modification time seconds
+  int64_t st_mtim_nsec; // Modification time nanoseconds
+  int64_t st_ctim_sec;  // Status change time seconds
+  int64_t st_ctim_nsec; // Status change time nanoseconds
+  int64_t __unused[3];  // Unused padding
 };
 
-typedef unsigned int  tcflag_t;
-typedef unsigned char cc_t;
-typedef unsigned int  speed_t;
+#include "../fb/terminal.h"
 
-struct termios {
-  tcflag_t c_iflag;
-  tcflag_t c_oflag;
-  tcflag_t c_cflag;
-  tcflag_t c_lflag;
-  cc_t     c_line;
-  cc_t     c_cc[NCCS];
-  speed_t  __c_ispeed;
-  speed_t  __c_ospeed;
-};
-
-struct winsize {
-  unsigned short ws_row;
-  unsigned short ws_col;
-  unsigned short ws_xpixel;
-  unsigned short ws_ypixel;
-};
-
-static struct termios console_termios;
+struct termios console_termios;
 
 static int alloc_fd(struct thread *t) {
   for (int i = 0; i < MAX_FDS; i++) {
@@ -109,24 +88,31 @@ static int alloc_fd(struct thread *t) {
   return -1; // ENFILE
 }
 
-static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags, uint64_t mode) {
-  if (!path) return (uint64_t)-14; // EFAULT
+static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
+                            uint64_t mode) {
+  if (!path)
+    return (uint64_t)-14; // EFAULT
 
   struct thread *t = sched_get_current();
-  if (!t) return (uint64_t)-1;
+  if (!t)
+    return (uint64_t)-1;
 
   int fd = alloc_fd(t);
-  if (fd < 0) return (uint64_t)-24; // EMFILE
+  if (fd < 0)
+    return (uint64_t)-24; // EMFILE
 
   vfs_node_t *base_dir = fs_root;
   if (path[0] != '/') {
     if (dirfd == AT_FDCWD) {
-       base_dir = vfs_resolve_path_at(fs_root, t->cwd_path);
-       if (!base_dir) base_dir = fs_root; // Fallback
+      base_dir = vfs_resolve_path_at(fs_root, t->cwd_path);
+      if (!base_dir)
+        base_dir = fs_root; // Fallback
     } else {
-       if (dirfd < 0 || dirfd >= MAX_FDS || !t->fds[dirfd]) return (uint64_t)-9; // EBADF
-       base_dir = t->fds[dirfd];
-       if ((base_dir->flags & 0xFF) != FS_DIRECTORY) return (uint64_t)-20; // ENOTDIR
+      if (dirfd < 0 || dirfd >= MAX_FDS || !t->fds[dirfd])
+        return (uint64_t)-9; // EBADF
+      base_dir = t->fds[dirfd];
+      if ((base_dir->flags & 0xFF) != FS_DIRECTORY)
+        return (uint64_t)-20; // ENOTDIR
     }
   }
 
@@ -136,12 +122,12 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags, uint64_
     // Try to get from device registry first
     node = fb_lookup_device((char *)path + 5); // Skip "/dev/"
   }
-  
+
   // Fall back to normal VFS path resolution
   if (!node) {
     node = vfs_resolve_path_at(base_dir, path);
   }
-  
+
   if (!node) {
     if (flags & O_CREAT) {
       char parent_path[128];
@@ -152,7 +138,8 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags, uint64_
 
       const char *slash = 0;
       for (const char *p = path; *p; p++)
-        if (*p == '/') slash = p;
+        if (*p == '/')
+          slash = p;
 
       vfs_node_t *parent = base_dir;
       if (slash) {
@@ -168,11 +155,13 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags, uint64_
           parent = vfs_resolve_path_at(base_dir, parent_path);
         }
         size_t file_len = strlen(slash + 1);
-        if (file_len >= sizeof(file_name)) return (uint64_t)-14;
+        if (file_len >= sizeof(file_name))
+          return (uint64_t)-14;
         strcpy(file_name, slash + 1);
       } else {
         size_t file_len = len;
-        if (file_len >= sizeof(file_name)) return (uint64_t)-14;
+        if (file_len >= sizeof(file_name))
+          return (uint64_t)-14;
         strcpy(file_name, path);
       }
 
@@ -186,7 +175,8 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags, uint64_
         return (uint64_t)-17; // EEXIST or generic error
 
       node = vfs_finddir(parent, file_name);
-      if (!node) return (uint64_t)-2; // ENOENT
+      if (!node)
+        return (uint64_t)-2; // ENOENT
     } else {
       klog_puts("[SYSCALL] sys_open failed to find: ");
       klog_puts(path);
@@ -207,19 +197,26 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags, uint64_
 
 static uint64_t sys_open(uint64_t path_ptr, uint64_t flags, uint64_t mode,
                          uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a3; (void)a4; (void)a5;
+  (void)a3;
+  (void)a4;
+  (void)a5;
   return do_sys_open(AT_FDCWD, (const char *)path_ptr, flags, mode);
 }
 
-static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count,
-                         uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a3; (void)a4; (void)a5;
-  if (!is_user_ptr(buf)) return (uint64_t)-14; // EFAULT
+static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a3,
+                         uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (!is_user_ptr(buf))
+    return (uint64_t)-14; // EFAULT
   struct thread *t = sched_get_current();
-  if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
 
   vfs_node_t *node = t->fds[fd];
-  uint32_t bytes_read = vfs_read(node, t->fd_offsets[fd], count, (uint8_t *)buf);
+  uint32_t bytes_read =
+      vfs_read(node, t->fd_offsets[fd], count, (uint8_t *)buf);
   t->fd_offsets[fd] += bytes_read;
 
   return bytes_read;
@@ -227,13 +224,19 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count,
 
 static uint64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2,
                               uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a2; (void)a3; (void)a4; (void)a5;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
   struct thread *t = sched_get_current();
-  if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
 
   vfs_node_t *node = t->fds[fd];
-  if (!node || node->flags != FS_FILE) return (uint64_t)-1; // EPERM
-  if (!node->device) return (uint64_t)-1;
+  if (!node || node->flags != FS_FILE)
+    return (uint64_t)-1; // EPERM
+  if (!node->device)
+    return (uint64_t)-1;
 
   ramfs_file_t *file = (ramfs_file_t *)node->device;
   uint32_t new_len = (uint32_t)length;
@@ -248,16 +251,17 @@ static uint64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2,
   }
 
   if (new_len > file->capacity) {
-    uint32_t new_cap  = new_len;
+    uint32_t new_cap = new_len;
     uint8_t *new_data = kmalloc(new_cap);
-    if (!new_data) return (uint64_t)-12; // ENOMEM
+    if (!new_data)
+      return (uint64_t)-12; // ENOMEM
     if (file->data) {
       memcpy(new_data, file->data, node->length);
       kfree(file->data);
     }
     if (new_len > node->length)
       memset(new_data + node->length, 0, new_len - node->length);
-    file->data     = new_data;
+    file->data = new_data;
     file->capacity = new_cap;
   } else if (new_len > node->length) {
     memset((uint8_t *)file->data + node->length, 0, new_len - node->length);
@@ -291,8 +295,11 @@ static int64_t fd_write(int fd, const void *buf, size_t count) {
 
 static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a3; (void)a4; (void)a5;
-  if (fd > 2 && !is_user_ptr(buf)) return (uint64_t)-14; // EFAULT
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (fd > 2 && !is_user_ptr(buf))
+    return (uint64_t)-14; // EFAULT
   int64_t r = fd_write((int)fd, (const void *)buf, (size_t)count);
   return (uint64_t)r;
 }
@@ -304,55 +311,70 @@ struct user_iovec {
 
 static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a3; (void)a4; (void)a5;
-  if (iovcnt == 0)   return 0;
-  if (iovcnt > 1024) return (uint64_t)-22; // EINVAL
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (iovcnt == 0)
+    return 0;
+  if (iovcnt > 1024)
+    return (uint64_t)-22; // EINVAL
 
   struct user_iovec *iov = (struct user_iovec *)iov_u;
   size_t total = 0;
 
   for (uint64_t i = 0; i < iovcnt; i++) {
     uint64_t base = iov[i].iov_base;
-    uint64_t len  = iov[i].iov_len;
-    if (len == 0) continue;
+    uint64_t len = iov[i].iov_len;
+    if (len == 0)
+      continue;
     int64_t w = fd_write((int)fd, (const void *)base, (size_t)len);
-    if (w < 0)    return (uint64_t)w;
+    if (w < 0)
+      return (uint64_t)w;
     total += (size_t)w;
-    if ((size_t)w != len) break;
+    if ((size_t)w != len)
+      break;
   }
   return total;
 }
 
 static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a3; (void)a4; (void)a5;
+  (void)a3;
+  (void)a4;
+  (void)a5;
 
   // Most ioctls take pointers. A few take ints. However, no valid integer
   // argument or user pointer should ever be in the kernel/HHDM address range.
-  if (arg > USER_ADDR_MAX) return (uint64_t)-14; // EFAULT
+  if (arg > USER_ADDR_MAX)
+    return (uint64_t)-14; // EFAULT
 
   struct thread *t = sched_get_current();
-  if (!t || fd >= MAX_FDS) return (uint64_t)-9; // EBADF
+  if (!t || fd >= MAX_FDS)
+    return (uint64_t)-9; // EBADF
 
   bool is_console_fd = (fd <= 2);
   if (!is_console_fd) {
-    if (!t->fds[fd]) return (uint64_t)-9;
-    if ((t->fds[fd]->flags & 0xFF) != FS_CHARDEV) return (uint64_t)-25; // ENOTTY
+    if (!t->fds[fd])
+      return (uint64_t)-9;
+    if ((t->fds[fd]->flags & 0xFF) != FS_CHARDEV)
+      return (uint64_t)-25; // ENOTTY
   }
 
   switch ((uint32_t)request) {
   case TIOCGWINSZ: {
     struct winsize *ws = (struct winsize *)arg;
-    if (!ws) return (uint64_t)-14; // EFAULT
-    ws->ws_row    = (unsigned short)(fb_get_height() / FONT_HEIGHT);
-    ws->ws_col    = (unsigned short)(fb_get_width()  / FONT_WIDTH);
+    if (!ws)
+      return (uint64_t)-14; // EFAULT
+    ws->ws_row = (unsigned short)(fb_get_height() / FONT_HEIGHT);
+    ws->ws_col = (unsigned short)(fb_get_width() / FONT_WIDTH);
     ws->ws_xpixel = (unsigned short)fb_get_width();
     ws->ws_ypixel = (unsigned short)fb_get_height();
     return 0;
   }
   case TCGETS: {
     struct termios *term = (struct termios *)arg;
-    if (!term) return (uint64_t)-14;
+    if (!term)
+      return (uint64_t)-14;
     *term = console_termios;
     return 0;
   }
@@ -360,13 +382,15 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
   case TCSETSW:
   case TCSETSF: {
     const struct termios *term = (const struct termios *)arg;
-    if (!term) return (uint64_t)-14;
+    if (!term)
+      return (uint64_t)-14;
     console_termios = *term;
     return 0;
   }
   case 0x5470: { // KBDSCANMODE_GET
     int *mode = (int *)arg;
-    if (!mode) return (uint64_t)-14;
+    if (!mode)
+      return (uint64_t)-14;
     extern bool keyboard_is_scancode_mode(void);
     *mode = keyboard_is_scancode_mode() ? 1 : 0;
     return 0;
@@ -380,11 +404,12 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
   case 0x5472: { // KBDSCANCODE_READ
     // Scancode event structure: {scancode(1), is_extended(1), is_release(1)}
     unsigned char *event = (unsigned char *)arg;
-    if (!event) return (uint64_t)-14;
-    
+    if (!event)
+      return (uint64_t)-14;
+
     extern bool keyboard_has_scancode(void);
     extern bool keyboard_get_scancode(void *event_ptr);
-    
+
     if (keyboard_has_scancode()) {
       if (keyboard_get_scancode((void *)event)) {
         return 1; // 1 scancode event read
@@ -394,28 +419,32 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
   }
   case SNDCTL_DSP_SPEED: {
     uint32_t *rate = (uint32_t *)arg;
-    if (!rate) return (uint64_t)-14;
+    if (!rate)
+      return (uint64_t)-14;
     sb16_set_format(*rate, sb16_get_channels(), sb16_get_bits());
     *rate = sb16_get_sample_rate();
     return 0;
   }
   case SNDCTL_DSP_STEREO: {
     int *stereo = (int *)arg;
-    if (!stereo) return (uint64_t)-14;
+    if (!stereo)
+      return (uint64_t)-14;
     sb16_set_format(sb16_get_sample_rate(), (*stereo ? 2 : 1), sb16_get_bits());
     *stereo = (sb16_get_channels() == 2);
     return 0;
   }
   case SNDCTL_DSP_CHANNELS: {
     int *ch = (int *)arg;
-    if (!ch) return (uint64_t)-14;
+    if (!ch)
+      return (uint64_t)-14;
     sb16_set_format(sb16_get_sample_rate(), (uint8_t)*ch, sb16_get_bits());
     *ch = sb16_get_channels();
     return 0;
   }
   case SNDCTL_DSP_SETFMT: {
     int *fmt = (int *)arg;
-    if (!fmt) return (uint64_t)-14;
+    if (!fmt)
+      return (uint64_t)-14;
     uint8_t bits = (*fmt == AFMT_S16_LE) ? 16 : 8;
     sb16_set_format(sb16_get_sample_rate(), sb16_get_channels(), bits);
     *fmt = (sb16_get_bits() == 16) ? AFMT_S16_LE : AFMT_U8;
@@ -428,9 +457,12 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
 
 static uint64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a3; (void)a4; (void)a5;
+  (void)a3;
+  (void)a4;
+  (void)a5;
   struct thread *t = sched_get_current();
-  if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
 
   vfs_node_t *node = t->fds[fd];
 
@@ -445,32 +477,41 @@ static uint64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence,
     return (uint64_t)-22; // EINVAL
   }
 
-  if (new_offset < 0) return (uint64_t)-22;
+  if (new_offset < 0)
+    return (uint64_t)-22;
 
   t->fd_offsets[fd] = (uint32_t)new_offset;
   return (uint64_t)new_offset;
 }
 
-static uint64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2,
-                          uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+static uint64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
   struct thread *t = sched_get_current();
-  if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
 
   vfs_close(t->fds[fd]);
-  t->fds[fd]        = NULL;
+  t->fds[fd] = NULL;
   t->fd_offsets[fd] = 0;
 
   return 0;
 }
 
-static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg,
-                          uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a3; (void)a4; (void)a5;
+static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
   (void)arg;
 
   struct thread *t = sched_get_current();
-  if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
 
   switch (cmd) {
   case F_GETFL:
@@ -486,34 +527,46 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg,
 
 // ── Fill kstat from vfs_node ────────────────────────────────────────────────
 static void fill_kstat(struct kstat *ks, vfs_node_t *node) {
-  ks->st_dev     = 0;  // No device numbers yet
-  ks->st_ino     = (uint64_t)node->inode;
-  ks->st_nlink   = 1;  // No hard link tracking yet
+  ks->st_dev = 0; // No device numbers yet
+  ks->st_ino = (uint64_t)node->inode;
+  ks->st_nlink = 1; // No hard link tracking yet
 
   // Convert vfs flags to mode
-  uint32_t mode = node->mask & 0777;  // Permission bits
+  uint32_t mode = node->mask & 0777; // Permission bits
   switch (node->flags & 0xFF) {
-    case FS_FILE:      mode |= 0100000; break; // S_IFREG
-    case FS_DIRECTORY: mode |= 0040000; break; // S_IFDIR
-    case FS_CHARDEV:   mode |= 0020000; break; // S_IFCHR
-    case FS_BLOCKDEV:  mode |= 0060000; break; // S_IFBLK
-    case FS_SYMLINK:   mode |= 0120000; break; // S_IFLNK
-    default:           mode |= 0100000; break; // Default to regular file
+  case FS_FILE:
+    mode |= 0100000;
+    break; // S_IFREG
+  case FS_DIRECTORY:
+    mode |= 0040000;
+    break; // S_IFDIR
+  case FS_CHARDEV:
+    mode |= 0020000;
+    break; // S_IFCHR
+  case FS_BLOCKDEV:
+    mode |= 0060000;
+    break; // S_IFBLK
+  case FS_SYMLINK:
+    mode |= 0120000;
+    break; // S_IFLNK
+  default:
+    mode |= 0100000;
+    break; // Default to regular file
   }
-  ks->st_mode    = mode;
-  ks->st_uid     = node->uid;
-  ks->st_gid     = node->gid;
-  ks->__pad0     = 0;
-  ks->st_rdev    = 0;
-  ks->st_size    = (int64_t)node->length;
-  ks->st_blksize = 4096;  // Reasonable default
-  ks->st_blocks  = ((int64_t)node->length + 511) / 512;
+  ks->st_mode = mode;
+  ks->st_uid = node->uid;
+  ks->st_gid = node->gid;
+  ks->__pad0 = 0;
+  ks->st_rdev = 0;
+  ks->st_size = (int64_t)node->length;
+  ks->st_blksize = 4096; // Reasonable default
+  ks->st_blocks = ((int64_t)node->length + 511) / 512;
 
-  ks->st_atim_sec  = (int64_t)node->atime;
+  ks->st_atim_sec = (int64_t)node->atime;
   ks->st_atim_nsec = 0;
-  ks->st_mtim_sec  = (int64_t)node->mtime;
+  ks->st_mtim_sec = (int64_t)node->mtime;
   ks->st_mtim_nsec = 0;
-  ks->st_ctim_sec  = (int64_t)node->ctime;
+  ks->st_ctim_sec = (int64_t)node->ctime;
   ks->st_ctim_nsec = 0;
   ks->__unused[0] = 0;
   ks->__unused[1] = 0;
@@ -521,22 +574,28 @@ static void fill_kstat(struct kstat *ks, vfs_node_t *node) {
 }
 
 // ── sys_stat: stat(path, statbuf) ────────────────────────────────────────────
-static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr,
-                         uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a2; (void)a3; (void)a4; (void)a5;
+static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
+                         uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
   const char *path = (const char *)path_ptr;
   struct kstat *ks = (struct kstat *)statbuf_ptr;
 
-  if (!path || !ks) return (uint64_t)-14; // EFAULT
-  if (!is_user_ptr((uint64_t)ks)) return (uint64_t)-14; // EFAULT
+  if (!path || !ks)
+    return (uint64_t)-14; // EFAULT
+  if (!is_user_ptr((uint64_t)ks))
+    return (uint64_t)-14; // EFAULT
 
   struct thread *t = sched_get_current();
   vfs_node_t *cwd_node = fs_root;
   if (t && t->cwd_path[0]) {
     cwd_node = vfs_resolve_path_at(fs_root, t->cwd_path);
-    if (!cwd_node) cwd_node = fs_root;
+    if (!cwd_node)
+      cwd_node = fs_root;
   }
-  
+
   vfs_node_t *node = vfs_resolve_path_at(cwd_node, path);
   if (!node) {
     klog_puts("[SYSCALL] sys_stat: not found: ");
@@ -549,17 +608,24 @@ static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr,
   return 0;
 }
 
-// ── sys_fstat: fstat(fd, statbuf) ─────────────────────────────────────────────
-static uint64_t sys_fstat(uint64_t fd, uint64_t statbuf_ptr,
-                          uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a2; (void)a3; (void)a4; (void)a5;
+// ── sys_fstat: fstat(fd, statbuf)
+// ─────────────────────────────────────────────
+static uint64_t sys_fstat(uint64_t fd, uint64_t statbuf_ptr, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
   struct kstat *ks = (struct kstat *)statbuf_ptr;
 
-  if (!ks) return (uint64_t)-14; // EFAULT
-  if (!is_user_ptr((uint64_t)ks)) return (uint64_t)-14; // EFAULT
+  if (!ks)
+    return (uint64_t)-14; // EFAULT
+  if (!is_user_ptr((uint64_t)ks))
+    return (uint64_t)-14; // EFAULT
 
   struct thread *t = sched_get_current();
-  if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
 
   vfs_node_t *node = t->fds[fd];
   fill_kstat(ks, node);
@@ -568,43 +634,50 @@ static uint64_t sys_fstat(uint64_t fd, uint64_t statbuf_ptr,
 
 // Linux getdents64 structure (binary compatible with musl/glibc)
 struct linux_dirent64 {
-  uint64_t d_ino;     // Inode number
-  uint64_t d_off;     // Offset to next entry
-  uint16_t d_reclen;  // Size of this dirent
-  uint8_t  d_type;    // File type (DT_REG, DT_DIR, etc.)
-  char     d_name[];  // Filename (null-terminated)
+  uint64_t d_ino;    // Inode number
+  uint64_t d_off;    // Offset to next entry
+  uint16_t d_reclen; // Size of this dirent
+  uint8_t d_type;    // File type (DT_REG, DT_DIR, etc.)
+  char d_name[];     // Filename (null-terminated)
 };
 
 // DT_* constants from Linux dirent.h
-#define DT_UNKNOWN  0
-#define DT_FIFO     1
-#define DT_CHR      2
-#define DT_DIR      4
-#define DT_BLK      6
-#define DT_REG      8
-#define DT_LNK     10
-#define DT_SOCK    12
+#define DT_UNKNOWN 0
+#define DT_FIFO 1
+#define DT_CHR 2
+#define DT_DIR 4
+#define DT_BLK 6
+#define DT_REG 8
+#define DT_LNK 10
+#define DT_SOCK 12
 
 // getdents64(fd, dirp, count) - read directory entries
 static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
                                uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a3; (void)a4; (void)a5;
+  (void)a3;
+  (void)a4;
+  (void)a5;
   struct thread *t = sched_get_current();
-  if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
 
   vfs_node_t *node = t->fds[fd];
-  if ((node->flags & 0xFF) != FS_DIRECTORY) return (uint64_t)-20; // ENOTDIR
+  if ((node->flags & 0xFF) != FS_DIRECTORY)
+    return (uint64_t)-20; // ENOTDIR
 
   uint8_t *buf = (uint8_t *)dirp;
-  if (!buf) return (uint64_t)-14; // EFAULT
-  if (!is_user_ptr((uint64_t)buf)) return (uint64_t)-14; // EFAULT
+  if (!buf)
+    return (uint64_t)-14; // EFAULT
+  if (!is_user_ptr((uint64_t)buf))
+    return (uint64_t)-14; // EFAULT
 
   size_t written = 0;
   uint32_t index = t->fd_offsets[fd]; // Start from saved position
 
   while (1) {
     struct dirent *de = vfs_readdir(node, index);
-    if (!de) break; // No more entries
+    if (!de)
+      break; // No more entries
 
     size_t name_len = strlen(de->name);
     size_t entry_size = sizeof(struct linux_dirent64) + name_len + 1;
@@ -624,12 +697,24 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
     vfs_node_t *child = vfs_finddir(node, de->name);
     if (child) {
       switch (child->flags & 0xFF) {
-        case FS_FILE:      entry->d_type = DT_REG; break;
-        case FS_DIRECTORY: entry->d_type = DT_DIR; break;
-        case FS_CHARDEV:   entry->d_type = DT_CHR; break;
-        case FS_BLOCKDEV:  entry->d_type = DT_BLK; break;
-        case FS_SYMLINK:   entry->d_type = DT_LNK; break;
-        default:          entry->d_type = DT_UNKNOWN; break;
+      case FS_FILE:
+        entry->d_type = DT_REG;
+        break;
+      case FS_DIRECTORY:
+        entry->d_type = DT_DIR;
+        break;
+      case FS_CHARDEV:
+        entry->d_type = DT_CHR;
+        break;
+      case FS_BLOCKDEV:
+        entry->d_type = DT_BLK;
+        break;
+      case FS_SYMLINK:
+        entry->d_type = DT_LNK;
+        break;
+      default:
+        entry->d_type = DT_UNKNOWN;
+        break;
       }
     } else {
       entry->d_type = DT_UNKNOWN;
@@ -663,21 +748,23 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout,
 static uint64_t prng_state = 0;
 
 static void prng_seed(void) {
-  if (prng_state != 0) return;
-  
+  if (prng_state != 0)
+    return;
+
   // Use RDTSC for initial entropy
   uint64_t tsc;
   __asm__ volatile("rdtsc" : "=A"(tsc));
-  
+
   // Mix with PIT ticks if available
   extern uint64_t pit_get_ticks(void);
   uint64_t ticks = pit_get_ticks();
-  
+
   // Combine sources
   prng_state = tsc ^ (ticks << 32) ^ 0xDEADBEEFCAFEBABEULL;
-  
+
   // Ensure non-zero
-  if (prng_state == 0) prng_state = 1;
+  if (prng_state == 0)
+    prng_state = 1;
 }
 
 static uint64_t xorshift64(void) {
@@ -692,38 +779,48 @@ static uint64_t xorshift64(void) {
 // getrandom(2) - syscall 318
 static uint64_t sys_getrandom(uint64_t buf_ptr, uint64_t buflen, uint64_t flags,
                               uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)flags; (void)a3; (void)a4; (void)a5;
-  
-  if (!buf_ptr) return (uint64_t)-14; // EFAULT
-  if (!is_user_ptr(buf_ptr)) return (uint64_t)-14; // EFAULT
-  if (buflen == 0) return 0;
-  
+  (void)flags;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  if (!buf_ptr)
+    return (uint64_t)-14; // EFAULT
+  if (!is_user_ptr(buf_ptr))
+    return (uint64_t)-14; // EFAULT
+  if (buflen == 0)
+    return 0;
+
   // Initialize PRNG if needed
   prng_seed();
-  
+
   uint8_t *buf = (uint8_t *)buf_ptr;
   uint64_t written = 0;
-  
+
   // Fill buffer with random bytes
   while (written < buflen) {
     uint64_t rand_val = xorshift64();
-    
+
     // Write up to 8 bytes at a time
     for (int i = 0; i < 8 && written < buflen; i++) {
       buf[written++] = (uint8_t)(rand_val & 0xFF);
       rand_val >>= 8;
     }
   }
-  
+
   return written;
 }
 
 // ── sys_mkdir: mkdir(pathname, mode) — syscall 83 ──────────────────────────
 static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a2; (void)a3; (void)a4; (void)a5;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
   const char *path = (const char *)pathname;
-  if (!path) return (uint64_t)-14; // EFAULT
+  if (!path)
+    return (uint64_t)-14; // EFAULT
 
   // Split path into parent directory + new dir name
   char parent_path[128];
@@ -734,7 +831,8 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
 
   const char *slash = 0;
   for (const char *p = path; *p; p++)
-    if (*p == '/') slash = p;
+    if (*p == '/')
+      slash = p;
 
   vfs_node_t *parent = fs_root;
   if (slash) {
@@ -742,14 +840,16 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
     if (parent_len == 0) {
       parent = fs_root;
     } else {
-      if (parent_len >= sizeof(parent_path)) return (uint64_t)-14;
+      if (parent_len >= sizeof(parent_path))
+        return (uint64_t)-14;
       for (size_t i = 0; i < parent_len; i++)
         parent_path[i] = path[i];
       parent_path[parent_len] = '\0';
       parent = vfs_resolve_path(parent_path);
     }
     size_t dlen = strlen(slash + 1);
-    if (dlen == 0 || dlen >= sizeof(dir_name)) return (uint64_t)-22; // EINVAL
+    if (dlen == 0 || dlen >= sizeof(dir_name))
+      return (uint64_t)-22; // EINVAL
     strcpy(dir_name, slash + 1);
   } else {
     strcpy(dir_name, path);
@@ -767,28 +867,37 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
 // ── sys_readv: readv(fd, iov, iovcnt) — syscall 19 ──────────────────────────
 static uint64_t sys_readv(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a3; (void)a4; (void)a5;
-  if (iovcnt == 0)   return 0;
-  if (iovcnt > 1024) return (uint64_t)-22; // EINVAL
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (iovcnt == 0)
+    return 0;
+  if (iovcnt > 1024)
+    return (uint64_t)-22; // EINVAL
 
   struct user_iovec *iov = (struct user_iovec *)iov_u;
   size_t total = 0;
 
   for (uint64_t i = 0; i < iovcnt; i++) {
     uint64_t base = iov[i].iov_base;
-    uint64_t len  = iov[i].iov_len;
-    if (len == 0) continue;
-    if (!is_user_ptr(base)) return (uint64_t)-14; // EFAULT
+    uint64_t len = iov[i].iov_len;
+    if (len == 0)
+      continue;
+    if (!is_user_ptr(base))
+      return (uint64_t)-14; // EFAULT
 
     // Reuse sys_read logic
     struct thread *t = sched_get_current();
-    if (!t || fd >= MAX_FDS || !t->fds[fd]) return (uint64_t)-9; // EBADF
+    if (!t || fd >= MAX_FDS || !t->fds[fd])
+      return (uint64_t)-9; // EBADF
 
     vfs_node_t *node = t->fds[fd];
-    uint32_t bytes_read = vfs_read(node, t->fd_offsets[fd], len, (uint8_t *)base);
+    uint32_t bytes_read =
+        vfs_read(node, t->fd_offsets[fd], len, (uint8_t *)base);
     t->fd_offsets[fd] += bytes_read;
     total += bytes_read;
-    if (bytes_read < len) break; // Short read
+    if (bytes_read < len)
+      break; // Short read
   }
   return total;
 }
@@ -796,16 +905,23 @@ static uint64_t sys_readv(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
 // ── sys_pipe2: pipe2(pipefd, flags) — syscall 293 ────────────────────────────
 static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)flags; (void)a2; (void)a3; (void)a4; (void)a5;
+  (void)flags;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
   int *pipefd = (int *)pipefd_ptr;
-  if (!pipefd) return (uint64_t)-14; // EFAULT
+  if (!pipefd)
+    return (uint64_t)-14; // EFAULT
 
   struct thread *t = sched_get_current();
-  if (!t) return (uint64_t)-1;
+  if (!t)
+    return (uint64_t)-1;
 
   // Allocate two file descriptors
   int fd_read = alloc_fd(t);
-  if (fd_read < 0) return (uint64_t)-24; // EMFILE
+  if (fd_read < 0)
+    return (uint64_t)-24;       // EMFILE
   t->fds[fd_read] = (void *)-1; // Reserve it
 
   int fd_write = alloc_fd(t);
@@ -837,10 +953,11 @@ static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
   pipe_node->read = ramfs_read;
   pipe_node->write = ramfs_write;
 
-  // Both fds point to the same node; read offset and write offset tracked separately
-  t->fds[fd_read]  = pipe_node;
+  // Both fds point to the same node; read offset and write offset tracked
+  // separately
+  t->fds[fd_read] = pipe_node;
   t->fds[fd_write] = pipe_node;
-  t->fd_offsets[fd_read]  = 0;
+  t->fd_offsets[fd_read] = 0;
   t->fd_offsets[fd_write] = 0;
 
   pipefd[0] = fd_read;
@@ -857,46 +974,77 @@ static uint64_t sys_pipe(uint64_t pipefd_ptr, uint64_t a1, uint64_t a2,
 }
 
 // ── sys_access: access(pathname, mode) — syscall 21 ──────────────────────────
-static uint64_t sys_access(uint64_t pathname_ptr, uint64_t mode, uint64_t a2,
-                           uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)mode; (void)a2; (void)a3; (void)a4; (void)a5;
-  const char *path = (const char *)pathname_ptr;
-  if (!path) return (uint64_t)-14; // EFAULT
+static uint64_t do_sys_access(int dirfd, const char *path, uint64_t mode,
+                              int flags) {
+  (void)flags;
+  if (!path)
+    return (uint64_t)-14; // EFAULT
 
+  struct thread *t = sched_get_current();
   vfs_node_t *node = NULL;
-  if (strncmp(path, "/dev/", 5) == 0) {
+
+  if (path[0] == '/') {
+    node = vfs_resolve_path_at(fs_root, path);
+  } else if (strncmp(path, "/dev/", 5) == 0) {
     node = fb_lookup_device((char *)path + 5);
   }
-  
+
   if (!node) {
-    struct thread *t = sched_get_current();
-    vfs_node_t *cwd_node = fs_root;
-    if (t && t->cwd_path[0]) {
-      cwd_node = vfs_resolve_path_at(fs_root, t->cwd_path);
-      if (!cwd_node) cwd_node = fs_root;
+    vfs_node_t *base_dir = fs_root;
+    if (dirfd == AT_FDCWD) {
+      if (t && t->cwd_path[0]) {
+        base_dir = vfs_resolve_path_at(fs_root, t->cwd_path);
+        if (!base_dir)
+          base_dir = fs_root;
+      }
+    } else {
+      if (dirfd < 0 || dirfd >= MAX_FDS || !t->fds[dirfd])
+        return (uint64_t)-9; // EBADF
+      base_dir = t->fds[dirfd];
+      if ((base_dir->flags & 0xFF) != FS_DIRECTORY)
+        return (uint64_t)-20; // ENOTDIR
     }
-    node = vfs_resolve_path_at(cwd_node, path);
+    node = vfs_resolve_path_at(base_dir, path);
   }
-  
+
   if (!node) {
     return (uint64_t)-2; // ENOENT
   }
 
   // POSIX mode check.
   // mode bits: F_OK = 0, X_OK = 1, W_OK = 2, R_OK = 4.
-  // node->mask contains unix permissions (e.g. 0777).
-  // We check globally against all mask bits (owner, group, other) since we lack user contexts.
   if (mode != 0) {
     bool can_read = (node->mask & 0444) != 0;
     bool can_write = (node->mask & 0222) != 0;
     bool can_exec = (node->mask & 0111) != 0;
-    
-    if ((mode & 4) && !can_read) return (uint64_t)-13; // EACCES
-    if ((mode & 2) && !can_write) return (uint64_t)-13; // EACCES
-    if ((mode & 1) && !can_exec) return (uint64_t)-13; // EACCES
+
+    if ((mode & 4) && !can_read)
+      return (uint64_t)-13; // EACCES
+    if ((mode & 2) && !can_write)
+      return (uint64_t)-13; // EACCES
+    if ((mode & 1) && !can_exec)
+      return (uint64_t)-13; // EACCES
   }
 
   return 0;
+}
+
+static uint64_t sys_access(uint64_t pathname_ptr, uint64_t mode, uint64_t a2,
+                           uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return do_sys_access(AT_FDCWD, (const char *)pathname_ptr, mode, 0);
+}
+
+static uint64_t sys_faccessat2(uint64_t dirfd, uint64_t pathname_ptr,
+                               uint64_t mode, uint64_t flags, uint64_t a4,
+                               uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  return do_sys_access((int)dirfd, (const char *)pathname_ptr, mode,
+                       (int)flags);
 }
 
 // ── sys_newfstatat: fstatat(dirfd, pathname, statbuf, flags) — syscall 262 ──
@@ -905,14 +1053,17 @@ static uint64_t sys_access(uint64_t pathname_ptr, uint64_t mode, uint64_t a2,
 static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
                                uint64_t statbuf_ptr, uint64_t flags,
                                uint64_t a4, uint64_t a5) {
-  (void)a4; (void)a5;
+  (void)a4;
+  (void)a5;
   const char *path = (const char *)pathname_ptr;
   struct kstat *ks = (struct kstat *)statbuf_ptr;
 
-  if (!ks) return (uint64_t)-14; // EFAULT
+  if (!ks)
+    return (uint64_t)-14; // EFAULT
 
   struct thread *t = sched_get_current();
-  if (!t) return (uint64_t)-1;
+  if (!t)
+    return (uint64_t)-1;
 
   // AT_EMPTY_PATH with empty string: behave like fstat(dirfd)
   if ((flags & AT_EMPTY_PATH) && path && path[0] == '\0') {
@@ -922,7 +1073,8 @@ static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
     return 0;
   }
 
-  if (!path) return (uint64_t)-14; // EFAULT
+  if (!path)
+    return (uint64_t)-14; // EFAULT
 
   // Resolve the base directory
   vfs_node_t *base_dir = fs_root;
@@ -931,7 +1083,8 @@ static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
       // Use thread CWD
       if (t->cwd_path[0]) {
         base_dir = vfs_resolve_path_at(fs_root, t->cwd_path);
-        if (!base_dir) base_dir = fs_root;
+        if (!base_dir)
+          base_dir = fs_root;
       }
     } else {
       if ((int)dirfd < 0 || dirfd >= MAX_FDS || !t->fds[dirfd])
@@ -952,9 +1105,11 @@ static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
 }
 
 // ── sys_openat: openat(dirfd, pathname, flags, mode) — syscall 257 ──────────
-static uint64_t sys_openat(uint64_t dirfd, uint64_t pathname_ptr, uint64_t flags,
-                           uint64_t mode, uint64_t a4, uint64_t a5) {
-  (void)a4; (void)a5;
+static uint64_t sys_openat(uint64_t dirfd, uint64_t pathname_ptr,
+                           uint64_t flags, uint64_t mode, uint64_t a4,
+                           uint64_t a5) {
+  (void)a4;
+  (void)a5;
   return do_sys_open((int)dirfd, (const char *)pathname_ptr, flags, mode);
 }
 
@@ -974,13 +1129,15 @@ static vfs_node_t *resolve_parent_and_name(const char *path, char *name_out,
   vfs_node_t *base = fs_root;
   if (t && path[0] != '/' && t->cwd_path[0]) {
     base = vfs_resolve_path_at(fs_root, t->cwd_path);
-    if (!base) base = fs_root;
+    if (!base)
+      base = fs_root;
   }
 
   // Find last slash
   const char *last_slash = NULL;
   for (const char *p = path; *p; p++)
-    if (*p == '/') last_slash = p;
+    if (*p == '/')
+      last_slash = p;
 
   vfs_node_t *parent;
   const char *basename;
@@ -1014,21 +1171,67 @@ static vfs_node_t *resolve_parent_and_name(const char *path, char *name_out,
   return parent;
 }
 
+// ── sys_symlink: symlink(target, linkpath) — syscall 88 ──────────────────────
+static uint64_t sys_symlink(uint64_t target_ptr, uint64_t linkpath_ptr,
+                            uint64_t a2, uint64_t a3, uint64_t a4,
+                            uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  const char *target = (const char *)target_ptr;
+  const char *linkpath = (const char *)linkpath_ptr;
+
+  if (!target || !linkpath)
+    return (uint64_t)-14; // EFAULT
+
+  char link_name[128];
+  vfs_node_t *parent =
+      resolve_parent_and_name(linkpath, link_name, sizeof(link_name));
+  if (!parent)
+    return (uint64_t)-2; // ENOENT
+
+  // Check if it already exists
+  if (vfs_finddir(parent, link_name)) {
+    return (uint64_t)-17; // EEXIST
+  }
+
+  // A local buffer for target string
+  char target_buf[256];
+  size_t t_len = strlen(target);
+  if (t_len == 0 || t_len >= sizeof(target_buf))
+    return (uint64_t)-14;
+  strcpy(target_buf, target);
+
+  int ret = vfs_symlink(parent, link_name, target_buf);
+  if (ret != 0)
+    return (uint64_t)-1;
+  return 0;
+}
+
 // ── sys_unlink: unlink(pathname) — syscall 87 ────────────────────────────────
 static uint64_t sys_unlink(uint64_t pathname_ptr, uint64_t a1, uint64_t a2,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
   const char *path = (const char *)pathname_ptr;
-  if (!path) return (uint64_t)-14; // EFAULT
+  if (!path)
+    return (uint64_t)-14; // EFAULT
 
   char name[128];
   vfs_node_t *parent = resolve_parent_and_name(path, name, sizeof(name));
-  if (!parent) return (uint64_t)-2; // ENOENT
+  if (!parent)
+    return (uint64_t)-2; // ENOENT
 
   // Check that the target exists and is not a directory
   vfs_node_t *target = vfs_finddir(parent, name);
-  if (!target) return (uint64_t)-2; // ENOENT
-  if ((target->flags & 0x07) == FS_DIRECTORY) return (uint64_t)-21; // EISDIR
+  if (!target)
+    return (uint64_t)-2; // ENOENT
+  if ((target->flags & 0x07) == FS_DIRECTORY)
+    return (uint64_t)-21; // EISDIR
 
   // Invalidate any open fds pointing to this node
   struct thread *t = sched_get_current();
@@ -1042,36 +1245,136 @@ static uint64_t sys_unlink(uint64_t pathname_ptr, uint64_t a1, uint64_t a2,
   }
 
   int ret = vfs_unlink(parent, name);
-  if (ret != 0) return (uint64_t)-1; // Generic error
+  if (ret != 0)
+    return (uint64_t)-1; // Generic error
 
+  return 0;
+}
+
+// ── sys_rmdir: rmdir(pathname) — syscall 84 ──────────────────────────────────
+static uint64_t sys_rmdir(uint64_t pathname_ptr, uint64_t a1, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  const char *path = (const char *)pathname_ptr;
+  if (!path)
+    return (uint64_t)-14; // EFAULT
+
+  char name[128];
+  vfs_node_t *parent = resolve_parent_and_name(path, name, sizeof(name));
+  if (!parent)
+    return (uint64_t)-2; // ENOENT
+
+  vfs_node_t *target = vfs_finddir(parent, name);
+  if (!target)
+    return (uint64_t)-2; // ENOENT
+  if ((target->flags & 0x07) != FS_DIRECTORY)
+    return (uint64_t)-20; // ENOTDIR
+
+  int ret = vfs_rmdir(parent, name);
+  if (ret != 0)
+    return (uint64_t)-1;
+
+  return 0;
+}
+
+// ── sys_chmod: chmod(pathname, mode) — syscall 90 ────────────────────────────
+static uint64_t sys_chmod(uint64_t pathname_ptr, uint64_t mode, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  const char *path = (const char *)pathname_ptr;
+  if (!path)
+    return (uint64_t)-14;
+
+  struct thread *t = sched_get_current();
+  vfs_node_t *base = fs_root;
+  if (t && path[0] != '/' && t->cwd_path[0]) {
+    base = vfs_resolve_path_at(fs_root, t->cwd_path);
+    if (!base)
+      base = fs_root;
+  }
+
+  vfs_node_t *node = vfs_resolve_path_at(base, path);
+  if (!node)
+    return (uint64_t)-2;
+
+  int ret = vfs_chmod(node, (uint16_t)mode);
+  if (ret != 0)
+    return (uint64_t)-1;
+  return 0;
+}
+
+// ── sys_chown: chown(pathname, owner, group) — syscall 92 ────────────────────
+static uint64_t sys_chown(uint64_t pathname_ptr, uint64_t owner, uint64_t group,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  const char *path = (const char *)pathname_ptr;
+  if (!path)
+    return (uint64_t)-14;
+
+  struct thread *t = sched_get_current();
+  vfs_node_t *base = fs_root;
+  if (t && path[0] != '/' && t->cwd_path[0]) {
+    base = vfs_resolve_path_at(fs_root, t->cwd_path);
+    if (!base)
+      base = fs_root;
+  }
+
+  vfs_node_t *node = vfs_resolve_path_at(base, path);
+  if (!node)
+    return (uint64_t)-2;
+
+  uint32_t uid = (owner == (uint64_t)-1) ? node->uid : (uint32_t)owner;
+  uint32_t gid = (group == (uint64_t)-1) ? node->gid : (uint32_t)group;
+
+  int ret = vfs_chown(node, uid, gid);
+  if (ret != 0)
+    return (uint64_t)-1;
   return 0;
 }
 
 // ── sys_rename: rename(oldpath, newpath) — syscall 82 ────────────────────────
 static uint64_t sys_rename(uint64_t oldpath_ptr, uint64_t newpath_ptr,
                            uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a2; (void)a3; (void)a4; (void)a5;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
   const char *oldpath = (const char *)oldpath_ptr;
   const char *newpath = (const char *)newpath_ptr;
-  if (!oldpath || !newpath) return (uint64_t)-14; // EFAULT
+  if (!oldpath || !newpath)
+    return (uint64_t)-14; // EFAULT
 
   char old_name[128], new_name[128];
-  vfs_node_t *old_parent = resolve_parent_and_name(oldpath, old_name, sizeof(old_name));
-  vfs_node_t *new_parent = resolve_parent_and_name(newpath, new_name, sizeof(new_name));
+  vfs_node_t *old_parent =
+      resolve_parent_and_name(oldpath, old_name, sizeof(old_name));
+  vfs_node_t *new_parent =
+      resolve_parent_and_name(newpath, new_name, sizeof(new_name));
 
-  if (!old_parent) return (uint64_t)-2; // ENOENT (source path invalid)
-  if (!new_parent) return (uint64_t)-2; // ENOENT (dest path invalid)
+  if (!old_parent)
+    return (uint64_t)-2; // ENOENT (source path invalid)
+  if (!new_parent)
+    return (uint64_t)-2; // ENOENT (dest path invalid)
 
   // Check source exists
   vfs_node_t *source = vfs_finddir(old_parent, old_name);
-  if (!source) return (uint64_t)-2; // ENOENT
+  if (!source)
+    return (uint64_t)-2; // ENOENT
 
   // Same directory rename (most common case, and what TCC uses)
   // Compare by inode, not pointer — ext2 finddir allocates new nodes per lookup
-  if (old_parent == new_parent ||
-      old_parent->inode == new_parent->inode) {
+  if (old_parent == new_parent || old_parent->inode == new_parent->inode) {
     int ret = vfs_rename(old_parent, old_name, new_name);
-    if (ret != 0) return (uint64_t)-1;
+    if (ret != 0)
+      return (uint64_t)-1;
     return 0;
   }
 
@@ -1083,18 +1386,23 @@ static uint64_t sys_rename(uint64_t oldpath_ptr, uint64_t newpath_ptr,
 static uint64_t sys_readlink(uint64_t pathname_ptr, uint64_t buf_ptr,
                              uint64_t bufsiz, uint64_t a3, uint64_t a4,
                              uint64_t a5) {
-  (void)a3; (void)a4; (void)a5;
+  (void)a3;
+  (void)a4;
+  (void)a5;
   const char *path = (const char *)pathname_ptr;
   char *buf = (char *)buf_ptr;
-  if (!path || !buf) return (uint64_t)-14; // EFAULT
-  if (bufsiz == 0) return (uint64_t)-22; // EINVAL
+  if (!path || !buf)
+    return (uint64_t)-14; // EFAULT
+  if (bufsiz == 0)
+    return (uint64_t)-22; // EINVAL
 
   // Special case: /proc/self/exe — TCC and other tools read this
   if (strcmp(path, "/proc/self/exe") == 0) {
     // We don't track per-thread executable paths yet, so return a generic path
     const char *exe_path = "/init";
     size_t len = strlen(exe_path);
-    if (len > bufsiz) len = bufsiz;
+    if (len > bufsiz)
+      len = bufsiz;
     memcpy(buf, exe_path, len);
     return len; // readlink returns bytes written, NOT null-terminated
   }
@@ -1104,45 +1412,113 @@ static uint64_t sys_readlink(uint64_t pathname_ptr, uint64_t buf_ptr,
   vfs_node_t *base = fs_root;
   if (t && path[0] != '/' && t->cwd_path[0]) {
     base = vfs_resolve_path_at(fs_root, t->cwd_path);
-    if (!base) base = fs_root;
+    if (!base)
+      base = fs_root;
   }
 
   vfs_node_t *node = vfs_resolve_path_at(base, path);
-  if (!node) return (uint64_t)-2; // ENOENT
+  if (!node)
+    return (uint64_t)-2; // ENOENT
 
   // Must be a symlink
   if ((node->flags & 0xFF) != FS_SYMLINK)
     return (uint64_t)-22; // EINVAL — not a symlink
 
   int ret = vfs_readlink(node, buf, (uint32_t)bufsiz);
-  if (ret < 0) return (uint64_t)-22; // EINVAL
+  if (ret < 0)
+    return (uint64_t)-22; // EINVAL
 
   return (uint64_t)ret;
 }
 
+// ── sys_dup: dup(oldfd) — syscall 32
+// ──────────────────────────────────────────
+static uint64_t sys_dup(uint64_t oldfd, uint64_t a1, uint64_t a2, uint64_t a3,
+                        uint64_t a4, uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct thread *t = sched_get_current();
+  if (!t || oldfd >= MAX_FDS || !t->fds[oldfd])
+    return (uint64_t)-9; // EBADF
+
+  int newfd = alloc_fd(t);
+  if (newfd < 0)
+    return (uint64_t)-24; // EMFILE
+
+  t->fds[newfd] = t->fds[oldfd];
+  t->fd_offsets[newfd] = t->fd_offsets[oldfd];
+
+  return newfd;
+}
+
+// ── sys_dup2: dup2(oldfd, newfd) — syscall 33 ────────────────────────────────
+static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2,
+                         uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct thread *t = sched_get_current();
+  if (!t || oldfd >= MAX_FDS || !t->fds[oldfd])
+    return (uint64_t)-9; // EBADF
+
+  if (newfd >= MAX_FDS)
+    return (uint64_t)-9; // EBADF
+
+  if (oldfd == newfd)
+    return newfd;
+
+  // If newfd is already open, close it
+  if (t->fds[newfd]) {
+    vfs_close(t->fds[newfd]);
+    t->fds[newfd] = NULL;
+    t->fd_offsets[newfd] = 0;
+  }
+
+  t->fds[newfd] = t->fds[oldfd];
+  t->fd_offsets[newfd] = t->fd_offsets[oldfd];
+
+  return newfd;
+}
+
 void syscall_register_io(void) {
-  syscall_register(SYS_READ,       sys_read);
-  syscall_register(SYS_WRITE,      sys_write);
-  syscall_register(SYS_READV,      sys_readv);
-  syscall_register(SYS_WRITEV,     sys_writev);
-  syscall_register(SYS_IOCTL,      sys_ioctl);
-  syscall_register(SYS_OPEN,       sys_open);
-  syscall_register(SYS_CLOSE,      sys_close);
-  syscall_register(SYS_LSEEK,      sys_lseek);
-  syscall_register(SYS_MKDIR,      sys_mkdir);
-  syscall_register(SYS_FTRUNCATE,  sys_ftruncate);
-  syscall_register(SYS_FCNTL,      sys_fcntl);
-  syscall_register(SYS_STAT,       sys_stat);
-  syscall_register(SYS_FSTAT,      sys_fstat);
+  syscall_register(SYS_READ, sys_read);
+  syscall_register(SYS_WRITE, sys_write);
+  syscall_register(SYS_READV, sys_readv);
+  syscall_register(SYS_WRITEV, sys_writev);
+  syscall_register(SYS_IOCTL, sys_ioctl);
+  syscall_register(SYS_OPEN, sys_open);
+  syscall_register(SYS_CLOSE, sys_close);
+  syscall_register(SYS_LSEEK, sys_lseek);
+  syscall_register(SYS_MKDIR, sys_mkdir);
+  syscall_register(SYS_FTRUNCATE, sys_ftruncate);
+  syscall_register(SYS_FCNTL, sys_fcntl);
+  syscall_register(SYS_STAT, sys_stat);
+  syscall_register(SYS_FSTAT, sys_fstat);
   syscall_register(SYS_GETDENTS64, sys_getdents64);
-  syscall_register(SYS_POLL,       sys_poll);
-  syscall_register(SYS_PIPE,       sys_pipe);
-  syscall_register(SYS_PIPE2,      sys_pipe2);
-  syscall_register(SYS_GETRANDOM,  sys_getrandom);
-  syscall_register(SYS_ACCESS,     sys_access);
-  syscall_register(SYS_OPENAT,     sys_openat);
+  syscall_register(SYS_POLL, sys_poll);
+  syscall_register(SYS_PIPE, sys_pipe);
+  syscall_register(SYS_PIPE2, sys_pipe2);
+  syscall_register(SYS_GETRANDOM, sys_getrandom);
+  syscall_register(SYS_ACCESS, sys_access);
+  syscall_register(SYS_FACCESSAT2, sys_faccessat2);
+  syscall_register(SYS_OPENAT, sys_openat);
   syscall_register(SYS_NEWFSTATAT, sys_newfstatat);
-  syscall_register(SYS_UNLINK,     sys_unlink);
-  syscall_register(SYS_RENAME,     sys_rename);
-  syscall_register(SYS_READLINK,   sys_readlink);
+  syscall_register(SYS_UNLINK, sys_unlink);
+  syscall_register(SYS_RENAME, sys_rename);
+  syscall_register(SYS_SYMLINK, sys_symlink);
+  syscall_register(SYS_READLINK, sys_readlink);
+  syscall_register(SYS_DUP, sys_dup);
+  syscall_register(SYS_DUP2, sys_dup2);
+  syscall_register(SYS_RMDIR, sys_rmdir);
+  syscall_register(SYS_CHMOD, sys_chmod);
+  syscall_register(SYS_CHOWN, sys_chown);
+
+  // Initialize console termios with standard defaults:
+  console_termios.c_lflag = 0x0000000b; // ISIG | ICANON | ECHO
+  console_termios.c_iflag = 0x00000100; // ICRNL (0x100)
+  console_termios.c_oflag = 0x00000005; // OPOST (1) | ONLCR (4)
 }

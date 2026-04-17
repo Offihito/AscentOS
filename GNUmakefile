@@ -51,7 +51,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf
+disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf
 	dd if=/dev/zero of=disk.img bs=1M count=256
 	mkfs.ext3 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
@@ -95,6 +95,10 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/t
 	debugfs -w -R "write userland/test_dynamic.elf test_dynamic.elf" disk.img
 	debugfs -w -R "write userland/test_tcc_libc.c test_tcc_libc.c" disk.img
 	debugfs -w -R "write userland/test_mm.c test_mm.c" disk.img
+	debugfs -w -R "write userland/test_dup.elf test_dup.elf" disk.img
+	debugfs -w -R "write userland/test_attrib.elf test_attrib.elf" disk.img
+	debugfs -w -R "write userland/test_symlink.elf test_symlink.elf" disk.img
+	debugfs -w -R "write userland/test_cred.elf test_cred.elf" disk.img
 	debugfs -w -R "write userland/test.s test.s" disk.img
 	debugfs -w -R "write userland/standalone.s standalone.s" disk.img
 	debugfs -w -R "write test.wav test.wav" disk.img
@@ -117,6 +121,25 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/t
 		debugfs -w -R "write toolchain/musl-sysroot/lib/crti.o crti.o" disk.img; \
 		debugfs -w -R "write toolchain/musl-sysroot/lib/crtn.o crtn.o" disk.img; \
 		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/lib/tcc/libtcc1.a libtcc1.a" disk.img; \
+	fi
+	@if [ -d toolchain/musl-sysroot/opt/coreutils ]; then \
+		echo "Installing coreutils into disk image..."; \
+		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/opt/coreutils opt/coreutils; \
+	fi
+	@if [ -d toolchain/musl-sysroot/opt/bash ]; then \
+		echo "Installing bash into disk image..."; \
+		debugfs -w -R "mkdir opt" disk.img 2>/dev/null || true; \
+		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/opt/bash opt/bash; \
+		debugfs -w -R "write toolchain/musl-sysroot/opt/bash/bin/bash bash.elf" disk.img; \
+		echo "root:x:0:0:root:/root:/bash.elf" > /tmp/passwd; \
+		echo "PS1='\033[0;32mRoot@AscentOS\033[0m:\w\\\$ '" > /tmp/bashrc; \
+		echo "PATH=/opt/coreutils/bin:/opt/bash/bin:/opt/tcc/bin:/" >> /tmp/bashrc; \
+		echo "HOME=/root" >> /tmp/bashrc; \
+		debugfs -w -R "mkdir etc" disk.img 2>/dev/null || true; \
+		debugfs -w -R "write /tmp/passwd etc/passwd" disk.img; \
+		debugfs -w -R "mkdir root" disk.img 2>/dev/null || true; \
+		debugfs -w -R "write /tmp/bashrc root/.bashrc" disk.img; \
+		rm -f /tmp/passwd /tmp/bashrc; \
 	fi
 
 edk2-ovmf:
@@ -161,9 +184,14 @@ $(IMAGE_NAME).iso: limine/limine kernel
 	rm -rf iso_root
 
 .PHONY: clean
-clean: clean-musl clean-doom
+clean: clean-musl clean-doom clean-coreutils
 	$(MAKE) -C kernel clean
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
+
+.PHONY: clean-coreutils
+clean-coreutils:
+	rm -rf build/coreutils-9.5
+	rm -rf toolchain/musl-sysroot/opt/coreutils
 
 .PHONY: clean-musl
 clean-musl:
@@ -304,6 +332,22 @@ userland/test_newfstatat.elf: userland/test_newfstatat.c $(MUSL_LIBC)
 userland/test_unlink_rename.elf: userland/test_unlink_rename.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_unlink_rename.c -o userland/test_unlink_rename.elf
+
+userland/test_dup.elf: userland/test_dup.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_dup.c -o userland/test_dup.elf
+
+userland/test_attrib.elf: userland/test_attrib.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_attrib.c -o userland/test_attrib.elf
+
+userland/test_symlink.elf: userland/test_symlink.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_symlink.c -o userland/test_symlink.elf
+
+userland/test_cred.elf: userland/test_cred.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_cred.c -o userland/test_cred.elf
 
 userland/test_dynamic.elf: userland/test_dynamic.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) -O2 -Wall -Wextra -fno-stack-protector -I$(MUSL_SYSROOT)/include -L$(MUSL_SYSROOT)/lib \

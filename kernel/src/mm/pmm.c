@@ -4,7 +4,7 @@
 #include "lib/list.h"
 #include <stdint.h>
 
-#define MAX_ORDER 11
+#define MAX_ORDER 20
 
 struct buddy_zone {
     struct list_head free_list[MAX_ORDER];
@@ -85,11 +85,8 @@ static void buddy_free_internal(uint64_t phys, size_t order) {
         uint64_t buddy_pfn = pfn ^ (1ULL << order);
         
         bool buddy_free = true;
-        for (size_t i = 0; i < (1ULL << order); i++) {
-            if (buddy_pfn + i >= highest_page || bitmap_test(buddy_pfn + i)) {
-                buddy_free = false;
-                break;
-            }
+        if (buddy_pfn >= highest_page || bitmap_test(buddy_pfn)) {
+            buddy_free = false;
         }
         if (!buddy_free) break;
 
@@ -156,12 +153,54 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
     for (uint64_t i = 0; i < memmap->entry_count; i++) {
         struct limine_memmap_entry *entry = memmap->entries[i];
         if (entry->type == LIMINE_MEMMAP_USABLE) {
-            for (uint64_t p = 0; p < entry->length; p += PAGE_SIZE) {
-                uint64_t phys = entry->base + p;
-                if (phys < 0x100000) continue; // Keep first 1MB reserved
-                if (phys >= bitmap_phys_base && phys < bitmap_phys_base + bitmap_size) continue;
-                buddy_free_internal(phys, 0);
-                usable_memory += PAGE_SIZE;
+            uint64_t entry_phys_base = entry->base;
+            uint64_t entry_length = entry->length;
+            
+            uint64_t p = 0;
+            while (p < entry_length) {
+                uint64_t phys = entry_phys_base + p;
+                uint64_t pfn = phys / PAGE_SIZE;
+                
+                // Skip first 1MB
+                if (phys < 0x100000) {
+                    p += PAGE_SIZE;
+                    continue;
+                }
+                
+                // Skip bitmap region
+                if (phys >= bitmap_phys_base && phys < bitmap_phys_base + bitmap_size) {
+                    p += PAGE_SIZE;
+                    continue;
+                }
+
+                // Determine the largest order we can use here.
+                // It must be:
+                // 1. Power of two pages
+                // 2. Aligned to that power of two
+                // 3. Not exceeding MAX_ORDER - 1
+                // 4. Not overlapping with bitmap or 1MB reserve
+                // 5. Fit within the remaining entry length
+                
+                size_t order = 0;
+                while (order < MAX_ORDER - 1) {
+                    uint64_t next_order_pages = 1ULL << (order + 1);
+                    uint64_t next_order_size = next_order_pages * PAGE_SIZE;
+                    
+                    if (p + next_order_size > entry_length) break;
+                    if ((phys % next_order_size) != 0) break;
+                    
+                    // Check if next order would overlap with bitmap
+                    uint64_t phys_end = phys + next_order_size;
+                    if (!(phys_end <= bitmap_phys_base || phys >= bitmap_phys_base + bitmap_size)) {
+                        break;
+                    }
+
+                    order++;
+                }
+
+                buddy_free_internal(phys, order);
+                usable_memory += (1ULL << order) * PAGE_SIZE;
+                p += (1ULL << order) * PAGE_SIZE;
             }
         }
     }
@@ -320,9 +359,16 @@ void pmm_reclaim_bootloader(void) {
     // Allocate a temporary bitmap to track which pages are reclaimable.
     // pmm_alloc_pages returns a physical address.
     size_t temp_count = (bitmap_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    size_t order = get_order(temp_count);
     uint8_t *temp_bitmap_phys = pmm_alloc_pages(temp_count);
     if (!temp_bitmap_phys) {
-        klog_puts("[PMM] FATAL: Failed to allocate temp bitmap for reclaim.\n");
+        klog_puts("[PMM] FATAL: Failed to allocate temp bitmap for reclaim. count=");
+        klog_uint64(temp_count);
+        klog_puts(" order=");
+        klog_uint64(order);
+        klog_puts(" bitmap_size=");
+        klog_uint64(bitmap_size);
+        klog_puts("\n");
         return;
     }
     uint8_t *temp_bitmap = (uint8_t *)((uint64_t)temp_bitmap_phys + physical_memory_offset);
@@ -370,14 +416,47 @@ void pmm_reclaim_bootloader(void) {
         }
     }
 
-    // Step 4: Now safely pass exactly the unprotected pages to the buddy allocator
+    // Step 4: Now safely pass exactly the unprotected pages to the buddy allocator in large blocks
     for (size_t b = 0; b < bitmap_size; b++) {
         if (temp_bitmap[b]) {
             for (int i = 0; i < 8; i++) {
                 if (temp_bitmap[b] & (1 << i)) {
-                    uint64_t pfn = b * 8 + i;
-                    buddy_free_internal(pfn * PAGE_SIZE, 0); 
-                    usable_memory += PAGE_SIZE;
+                    uint64_t start_pfn = (uint64_t)b * 8 + i;
+                    
+                    // Find length of contiguous run of set bits in temp_bitmap
+                    size_t count = 0;
+                    uint64_t curr_pfn = start_pfn;
+                    while (curr_pfn < highest_page) {
+                        size_t curr_b = curr_pfn / 8;
+                        int curr_bit_idx = curr_pfn % 8;
+                        if (temp_bitmap[curr_b] & (1 << curr_bit_idx)) {
+                            count++;
+                            // Clear bit so we don't process it again in the outer loop
+                            temp_bitmap[curr_b] &= ~(1 << curr_bit_idx);
+                            curr_pfn++;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Add this run in the largest possible blocks
+                    uint64_t p = 0;
+                    while (p < count) {
+                        uint64_t phys = (start_pfn + p) * PAGE_SIZE;
+                        size_t remaining = count - p;
+                        
+                        size_t order = 0;
+                        while (order < MAX_ORDER - 1) {
+                            uint64_t next_order_pages = 1ULL << (order + 1);
+                            if (next_order_pages > remaining) break;
+                            if ((phys % (next_order_pages * PAGE_SIZE)) != 0) break;
+                            order++;
+                        }
+                        
+                        buddy_free_internal(phys, order);
+                        usable_memory += (1ULL << order) * PAGE_SIZE;
+                        p += (1ULL << order);
+                    }
                 }
             }
         }

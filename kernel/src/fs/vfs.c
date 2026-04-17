@@ -1,4 +1,6 @@
 #include "fs/vfs.h"
+#include "lib/string.h"
+#include "mm/heap.h"
 
 vfs_node_t *fs_root = 0;
 
@@ -107,39 +109,120 @@ int vfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid) {
   return -1;
 }
 
-vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
-  if (!path || !fs_root) return 0;
-  
-  vfs_node_t *current = dir;
-  
-  if (path[0] == '/') {
-     current = fs_root;
-     while (*path == '/') path++;
-  } else if (!current) {
-     current = fs_root; // Fallback similarly if dir is null
-  }
-  
-  if (*path == '\0') return current;
+#define MAX_SYMLINK_DEPTH 8
 
-  char comp[128];
-  const char *p = path;
+vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
+  if (!path || !fs_root)
+    return 0;
+
+  char *path_buf = kmalloc(512);
+  if (!path_buf)
+    return 0;
+  strncpy(path_buf, path, 511);
+  path_buf[511] = '\0';
+
+  vfs_node_t *current = (path[0] == '/') ? fs_root : (dir ? dir : fs_root);
+  int symlink_depth = 0;
+  char *p = path_buf;
+
+  // Initial skip of root slashes
+  if (path_buf[0] == '/') {
+    while (*p == '/')
+      p++;
+  }
 
   while (*p) {
+    char comp[128];
     int i = 0;
-    // Skip extra slashes in the middle
-    while (*p == '/') p++;
-    if (*p == '\0') break;
 
+    // Skip slashes
+    while (*p == '/')
+      p++;
+    if (*p == '\0')
+      break;
+
+    // Extract next component
     while (*p && *p != '/' && i < 127) {
       comp[i++] = *p++;
     }
     comp[i] = '\0';
 
-    current = vfs_finddir(current, comp);
-    if (!current) {
-      return 0; // Not found
+    vfs_node_t *next = vfs_finddir(current, comp);
+    if (!next) {
+      if (current != fs_root && current != dir)
+        kfree(current);
+      kfree(path_buf);
+      return 0;
     }
+
+    // Handle symlinks
+    if ((next->flags & 0x7) == FS_SYMLINK) {
+      if (++symlink_depth > MAX_SYMLINK_DEPTH) {
+        kfree(next);
+        if (current != fs_root && current != dir)
+          kfree(current);
+        kfree(path_buf);
+        return 0;
+      }
+
+      char link_target[256];
+      int len = vfs_readlink(next, link_target, 256);
+      kfree(next);
+
+      if (len < 0) {
+        if (current != fs_root && current != dir)
+          kfree(current);
+        kfree(path_buf);
+        return 0;
+      }
+
+      // Construct new path: [link_target] + "/" + [remaining p]
+      char *next_path = kmalloc(512);
+      if (!next_path) {
+        if (current != fs_root && current != dir)
+          kfree(current);
+        kfree(path_buf);
+        return 0;
+      }
+      strncpy(next_path, link_target, 511);
+      next_path[511] = '\0';
+
+      if (*p) {
+        int cur_len = strlen(next_path);
+        if (cur_len < 510) {
+          if (next_path[cur_len - 1] != '/') {
+            strcat(next_path, "/");
+          }
+          strncat(next_path, p, 511 - strlen(next_path));
+        }
+      }
+      next_path[511] = '\0';
+
+      // Update path_buf and p
+      strcpy(path_buf, next_path);
+      kfree(next_path);
+      p = path_buf;
+
+      if (path_buf[0] == '/') {
+        if (current != fs_root && current != dir)
+          kfree(current);
+        current = fs_root;
+        while (*p == '/')
+          p++;
+      }
+      // Continue loop with new path and same current (if relative) or root (if
+      // absolute)
+      continue;
+    }
+
+    // Move to next directory component
+    if (current != fs_root && current != dir) {
+      kfree(current);
+    }
+    current = next;
   }
+
+  kfree(path_buf);
   return current;
 }
 

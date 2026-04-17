@@ -114,6 +114,8 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
 
   memset(t, 0, sizeof(struct thread));
   t->cwd_path[0] = '/';
+  t->umask = 0022;
+  t->uid = t->gid = t->euid = t->egid = t->suid = t->sgid = 0;
   vma_list_init(&t->vmas);
 
   spinlock_acquire(&tid_lock);

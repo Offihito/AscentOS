@@ -54,6 +54,13 @@ struct thread {
   uint64_t brk_base;            // Base of the heap (after data/bss)
   uint64_t brk_current;         // Current end of the heap
   uint64_t mmap_next_addr;      // Bump-pointer for anonymous mmap
+  uint32_t uid;                 // User ID
+  uint32_t gid;                 // Group ID
+  uint32_t euid;                // Effective User ID
+  uint32_t egid;                // Effective Group ID
+  uint32_t suid;                // Saved set-user-ID
+  uint32_t sgid;                // Saved set-group-ID
+  uint32_t umask;               // File creation mask
 };
 
 void sched_init(void);

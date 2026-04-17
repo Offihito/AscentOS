@@ -482,6 +482,13 @@ static uint64_t sys_fork(struct syscall_regs *regs) {
     vma_list_clone(&child->vmas, &parent->vmas);
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
     child->fs_base = parent->fs_base;
+    child->umask = parent->umask;
+    child->uid   = parent->uid;
+    child->gid   = parent->gid;
+    child->euid  = parent->euid;
+    child->egid  = parent->egid;
+    child->suid  = parent->suid;
+    child->sgid  = parent->sgid;
   }
 
   klog_puts("[FORK] Child created with PID ");
@@ -527,7 +534,129 @@ static uint64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2,
   strcpy(buf->machine, "x86_64");
   strcpy(buf->domainname, "");
 
+  strcpy(buf->domainname, "");
+
   return 0;
+}
+
+static uint64_t sys_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
+                          uint64_t arg4, uint64_t arg5, uint64_t a5) {
+  (void)option;
+  (void)arg2;
+  (void)arg3;
+  (void)arg4;
+  (void)arg5;
+  (void)a5;
+  return 0; // Success stub
+}
+
+// ── sys_umask ───────────────────────────────────────────────────────────────
+static uint64_t sys_umask(struct syscall_regs *regs) {
+  uint32_t mask = (uint32_t)regs->rdi;
+  struct thread *t = sched_get_current();
+  if (!t) return 0;
+  
+  uint32_t old_mask = t->umask;
+  t->umask = mask & 0777;
+  return old_mask;
+}
+
+// ── sys_getuid ──────────────────────────────────────────────────────────────
+static uint64_t sys_getuid(struct syscall_regs *regs) {
+  (void)regs;
+  struct thread *t = sched_get_current();
+  if (!t) return 0;
+  return t->uid;
+}
+
+// ── sys_getgid ──────────────────────────────────────────────────────────────
+static uint64_t sys_getgid(struct syscall_regs *regs) {
+  (void)regs;
+  struct thread *t = sched_get_current();
+  if (!t) return 0;
+  return t->gid;
+}
+
+// ── sys_geteuid ─────────────────────────────────────────────────────────────
+static uint64_t sys_geteuid(struct syscall_regs *regs) {
+  (void)regs;
+  struct thread *t = sched_get_current();
+  if (!t) return 0;
+  return t->euid;
+}
+
+// ── sys_getegid ─────────────────────────────────────────────────────────────
+static uint64_t sys_getegid(struct syscall_regs *regs) {
+  (void)regs;
+  struct thread *t = sched_get_current();
+  if (!t) return 0;
+  return t->egid;
+}
+
+// ── sys_getresuid ───────────────────────────────────────────────────────────
+static uint64_t sys_getresuid(struct syscall_regs *regs) {
+  uint32_t *ruid_ptr = (uint32_t *)regs->rdi;
+  uint32_t *euid_ptr = (uint32_t *)regs->rsi;
+  uint32_t *suid_ptr = (uint32_t *)regs->rdx;
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  if (ruid_ptr) *ruid_ptr = t->uid;
+  if (euid_ptr) *euid_ptr = t->euid;
+  if (suid_ptr) *suid_ptr = t->suid;
+
+  return 0;
+}
+
+// ── sys_getresgid ───────────────────────────────────────────────────────────
+static uint64_t sys_getresgid(struct syscall_regs *regs) {
+  uint32_t *rgid_ptr = (uint32_t *)regs->rdi;
+  uint32_t *egid_ptr = (uint32_t *)regs->rsi;
+  uint32_t *sgid_ptr = (uint32_t *)regs->rdx;
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  if (rgid_ptr) *rgid_ptr = t->gid;
+  if (egid_ptr) *egid_ptr = t->egid;
+  if (sgid_ptr) *sgid_ptr = t->sgid;
+
+  return 0;
+}
+
+// ── sys_getppid ─────────────────────────────────────────────────────────────
+static uint64_t sys_getppid(struct syscall_regs *regs) {
+  (void)regs;
+  struct thread *t = sched_get_current();
+  if (!t) return 0;
+  if (t->parent) return t->parent->tid;
+  return 0;
+}
+
+// ── sys_setpgid (stub) ─────────────────────────────────────────────────────
+static uint64_t sys_setpgid(struct syscall_regs *regs) {
+  (void)regs;
+  // Stub: accept but ignore. Job control disabled.
+  return 0;
+}
+
+// ── sys_getpgrp (stub) ─────────────────────────────────────────────────────
+static uint64_t sys_getpgrp(struct syscall_regs *regs) {
+  (void)regs;
+  struct thread *t = sched_get_current();
+  if (!t) return 0;
+  return t->tid; // Return own PID as PGID
+}
+
+// ── sys_setsid (stub) ──────────────────────────────────────────────────────
+static uint64_t sys_setsid(struct syscall_regs *regs) {
+  (void)regs;
+  struct thread *t = sched_get_current();
+  if (!t) return 0;
+  return t->tid; // Return own PID as new session ID
 }
 
 // ── Registration ────────────────────────────────────────────────────────────
@@ -540,7 +669,20 @@ void syscall_register_process(void) {
   syscall_register(SYS_UNAME, sys_uname);
   syscall_register(SYS_GETCWD, sys_getcwd);
   syscall_register(SYS_CHDIR, sys_chdir);
+  syscall_register(SYS_PRCTL, sys_prctl);
   syscall_register_raw(SYS_FORK, sys_fork);
   syscall_register_raw(SYS_CLONE, sys_clone);
   syscall_register_raw(SYS_EXECVE, sys_execve);
+  syscall_register_raw(SYS_UMASK, sys_umask);
+  syscall_register_raw(SYS_GETUID, sys_getuid);
+  syscall_register_raw(SYS_GETGID, sys_getgid);
+  syscall_register_raw(SYS_GETEUID, sys_geteuid);
+  syscall_register_raw(SYS_GETEGID, sys_getegid);
+  syscall_register_raw(SYS_GETRESUID, sys_getresuid);
+  syscall_register_raw(SYS_GETRESGID, sys_getresgid);
+  syscall_register_raw(SYS_GETPPID, sys_getppid);
+  syscall_register_raw(SYS_SETPGID, sys_setpgid);
+  syscall_register_raw(SYS_GETPGRP, sys_getpgrp);
+  syscall_register_raw(SYS_SETSID, sys_setsid);
 }
+
