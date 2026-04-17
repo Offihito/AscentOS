@@ -322,7 +322,7 @@ static void print_paging_entry_flags(uint64_t entry, bool is_leaf,
 
 static void print_entry_summary(const char *name, size_t idx, uint64_t entry,
                                 bool is_leaf, bool is_pde) {
-  const uint64_t PAGE_MASK = 0x000FFFFFFFFFF000ULL;
+
   console_puts("  ");
   console_puts(name);
   console_puts("[");
@@ -357,7 +357,7 @@ static void print_neighbor_entries(const char *label, uint64_t *table,
 // ── Full page-table walk with enriched PTE analysis ──────────────────────────
 
 static void print_pf_walk(uint64_t cr2) {
-  const uint64_t PAGE_MASK = 0x000FFFFFFFFFF000ULL;
+
   uint64_t hhdm = pmm_get_hhdm_offset();
   uint64_t *pml4_phys = vmm_get_active_pml4();
   uint64_t *pml4 = (uint64_t *)((uint64_t)pml4_phys + hhdm);

@@ -8,6 +8,7 @@
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../smp/cpu.h"
+#include "../cpu/msr.h"
 
 static uint32_t next_tid = 1;
 static spinlock_t tid_lock = SPINLOCK_INIT;
@@ -193,7 +194,7 @@ void sched_yield(void) {
     next_t->state = THREAD_RUNNING;
     cpu->current_thread = next_t;
 
-    cpu->stack_top = next_t->stack_base + next_t->stack_size;
+    cpu->stack_top = (next_t->stack_base + next_t->stack_size) & ~0xFULL;
     extern void tss_set_rsp0(uint64_t rsp0);
     tss_set_rsp0(cpu->stack_top);
 
@@ -203,6 +204,12 @@ void sched_yield(void) {
     if (target_cr3 != current_cr3) {
       __asm__ volatile("mov %0, %%cr3" ::"r"(target_cr3) : "memory");
     }
+
+    // Save current thread's TLS MSRs
+    prev->fs_base = rdmsr(0xC0000100);
+
+    // Restore next thread's TLS MSRs
+    wrmsr(0xC0000100, next_t->fs_base);
 
     spinlock_release(&cpu->queue_lock);
     switch_context(&prev->rsp, next_t->rsp);
@@ -331,4 +338,126 @@ bool sched_terminate_thread(uint32_t tid) {
     __asm__ volatile("sti");
   }
   return false;
+}
+
+// Helper: remove thread from global thread list
+static void remove_from_global_list(struct thread *t) {
+  if (!global_thread_list)
+    return;
+
+  spinlock_acquire(&tid_lock);
+
+  if (global_thread_list == t) {
+    global_thread_list = t->global_next;
+  } else {
+    struct thread *prev = global_thread_list;
+    while (prev && prev->global_next != t) {
+      prev = prev->global_next;
+    }
+    if (prev) {
+      prev->global_next = t->global_next;
+    }
+  }
+
+  spinlock_release(&tid_lock);
+}
+
+// Helper: remove thread from its CPU's runqueue
+static void remove_from_runqueue(struct thread *t) {
+  // Find which CPU has this thread
+  for (uint32_t i = 0; i < cpu_get_count(); i++) {
+    struct cpu_info *cpu = cpu_get_info(i);
+    if (!cpu || cpu->status == CPU_STATUS_OFFLINE)
+      continue;
+
+    spinlock_acquire(&cpu->queue_lock);
+    struct thread *first = cpu->runqueue;
+
+    if (!first) {
+      spinlock_release(&cpu->queue_lock);
+      continue;
+    }
+
+    // Check if this thread is in this CPU's runqueue
+    struct thread *curr = first;
+    bool found = false;
+    do {
+      if (curr == t) {
+        found = true;
+        break;
+      }
+      curr = curr->next;
+    } while (curr != first);
+
+    if (!found) {
+      spinlock_release(&cpu->queue_lock);
+      continue;
+    }
+
+    // Remove from circular list
+    if (t->next == t) {
+      // Only thread in queue
+      cpu->runqueue = NULL;
+    } else {
+      // Find predecessor
+      struct thread *prev = first;
+      while (prev->next != t) {
+        prev = prev->next;
+      }
+      prev->next = t->next;
+      // Update runqueue head if needed
+      if (cpu->runqueue == t) {
+        cpu->runqueue = t->next;
+      }
+    }
+
+    spinlock_release(&cpu->queue_lock);
+    return;
+  }
+}
+
+void sched_reap_thread(struct thread *t) {
+  if (!t || t->is_idle)
+    return;
+
+  klog_puts("[REAP] Reaping thread ");
+  klog_uint64(t->tid);
+  klog_puts("\n");
+
+  // 1. Remove from runqueue
+  klog_puts("[REAP] Step 1: remove from runqueue\n");
+  remove_from_runqueue(t);
+
+  // 2. Remove from global thread list
+  klog_puts("[REAP] Step 2: remove from global list\n");
+  remove_from_global_list(t);
+
+  // 3. Free fork_ctx (saved register state)
+  klog_puts("[REAP] Step 3: free fork_ctx\n");
+  if (t->fork_ctx) {
+    kfree(t->fork_ctx);
+    t->fork_ctx = NULL;
+  }
+
+  // 4. Free user page tables (CR3) if still set
+  klog_puts("[REAP] Step 4: free CR3=");
+  klog_uint64(t->cr3);
+  klog_puts("\n");
+  if (t->cr3) {
+    vmm_free_user_pages(t->cr3);
+    t->cr3 = 0;
+  }
+
+  // 5. Free kernel stack
+  klog_puts("[REAP] Step 5: free stack\n");
+  if (t->stack_base) {
+    kfree((void *)t->stack_base);
+    t->stack_base = 0;
+  }
+
+  // 6. Free thread struct
+  klog_puts("[REAP] Step 6: free thread struct\n");
+  kfree(t);
+
+  klog_puts("[REAP] Done\n");
 }

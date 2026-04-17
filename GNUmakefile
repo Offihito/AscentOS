@@ -132,7 +132,7 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/t
 		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/opt/bash opt/bash; \
 		debugfs -w -R "write toolchain/musl-sysroot/opt/bash/bin/bash bash.elf" disk.img; \
 		echo "root:x:0:0:root:/root:/bash.elf" > /tmp/passwd; \
-		echo "PS1='\033[0;32mRoot@AscentOS\033[0m:\w\\\$ '" > /tmp/bashrc; \
+		echo "PS1='\033[0;32mRoot@AscentOS\033[0m:\w\\$$ '" > /tmp/bashrc; \
 		echo "PATH=/opt/coreutils/bin:/opt/bash/bin:/opt/tcc/bin:/" >> /tmp/bashrc; \
 		echo "HOME=/root" >> /tmp/bashrc; \
 		debugfs -w -R "mkdir etc" disk.img 2>/dev/null || true; \

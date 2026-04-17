@@ -166,7 +166,7 @@ build_bash() {
     mkdir -p "$BASH_INSTALL/etc"
     cat > "$BASH_INSTALL/etc/bashrc" << 'BASHRC_EOF'
 # AscentOS default bashrc
-export PS1='root@AscentOS$ '
+export PS1='\033[0;32mRoot@AscentOS\033[0m:\w\$ '
 export PATH='/opt/coreutils/bin:/opt/bash/bin:/opt/tcc/bin:/'
 BASHRC_EOF
 

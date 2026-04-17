@@ -168,6 +168,7 @@ static void keyboard_callback(struct registers *regs) {
             case 0x4D: c = KEY_RIGHT; break;
             case 0x49: c = KEY_PGUP; break;
             case 0x51: c = KEY_PGDN; break;
+            case 0x53: c = 0x7F; break; // Delete key
             default: break;
         }
         if (c) {
@@ -188,6 +189,10 @@ static void keyboard_callback(struct registers *regs) {
                 keyboard_push_bytes(seq, 4);
             } else if (c == KEY_PGDN) {
                 const char seq[] = {'\x1B','[','6','~'};
+                keyboard_push_bytes(seq, 4);
+            } else if (c == 0x7F) {
+                // Delete key - send VT100 escape sequence
+                const char seq[] = {'\x1B','[','3','~'};
                 keyboard_push_bytes(seq, 4);
             }
         }

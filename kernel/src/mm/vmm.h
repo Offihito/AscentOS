@@ -13,13 +13,19 @@
 #define PAGE_FLAG_PS ((uint64_t)1 << 7)
 #define PAGE_FLAG_NX ((uint64_t)1 << 63)
 
+// Mask to extract the physical address from a page table entry.
+// Strips both the low 12 flag bits AND the high bits (NX, available).
+// Using ~0xFFFULL instead of this will preserve the NX bit and cause
+// HHDM address overflow → GPF!
+#define PAGE_MASK 0x000FFFFFFFFFF000ULL
+
 // Virtual Memory Layout Definitions
-#define USER_SPACE_BASE    0x0000000000000000ULL
-#define USER_SPACE_LIMIT   0x00007FFFFFFFFFFFULL
-#define KERNEL_SPACE_BASE  0xFFFF800000000000ULL
-#define HHDM_BASE          0xFFFF800000000000ULL
-#define VMAP_BASE          0xFFFFC00000000000ULL
-#define KERNEL_HEAP_BASE   0xFFFFE00000000000ULL
+#define USER_SPACE_BASE 0x0000000000000000ULL
+#define USER_SPACE_LIMIT 0x00007FFFFFFFFFFFULL
+#define KERNEL_SPACE_BASE 0xFFFF800000000000ULL
+#define HHDM_BASE 0xFFFF800000000000ULL
+#define VMAP_BASE 0xFFFFC00000000000ULL
+#define KERNEL_HEAP_BASE 0xFFFFE00000000000ULL
 
 // To retrieve the active top-level page directory from CR3
 uint64_t *vmm_get_active_pml4(void);
@@ -31,17 +37,18 @@ bool vmm_map_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
                   uint64_t flags);
 
 // Maps a contiguous range of pages
-bool vmm_map_range(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
-                   size_t pages, uint64_t flags);
+bool vmm_map_range(uint64_t *pml4, uint64_t virtual_addr,
+                   uint64_t physical_addr, size_t pages, uint64_t flags);
 
 // Maps a huge page (2MB) by setting the PS flag on the Page Directory entry
-bool vmm_map_huge_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
-                       uint64_t flags);
+bool vmm_map_huge_page(uint64_t *pml4, uint64_t virtual_addr,
+                       uint64_t physical_addr, uint64_t flags);
 
 // Unmap a virtual page
 void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr);
 
-// Frees empty page tables (PT, PD, PDPT) upwards if they contain no valid entries
+// Frees empty page tables (PT, PD, PDPT) upwards if they contain no valid
+// entries
 void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr);
 
 // Flush the Translation Lookaside Buffer for a specific page
@@ -77,9 +84,16 @@ void vmm_init(void);
 // Protect all current page table pages from being reclaimed by PMM
 void vmm_protect_active_tables(void);
 
+// Free all user-space page tables and mapped pages for a given PML4.
+// The PML4 physical page itself is also freed.
+// Uses PAGE_MASK to properly strip NX/available bits from PTEs.
+void vmm_free_user_pages(uint64_t cr3);
+
 struct registers;
 
-// Demand paging fault handler. Returns 0 if handled, -1 if it's an unrecoverable fault.
-int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code, struct registers *regs);
+// Demand paging fault handler. Returns 0 if handled, -1 if it's an
+// unrecoverable fault.
+int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
+                          struct registers *regs);
 
 #endif

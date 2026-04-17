@@ -82,6 +82,9 @@ void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu);
 void sched_print_tasks(void);
 bool sched_terminate_thread(uint32_t tid);
 
+// Reap a zombie thread (remove from runqueue, free resources)
+void sched_reap_thread(struct thread *t);
+
 // Userspace Management
 #include <stdbool.h>
 #include "elf.h"

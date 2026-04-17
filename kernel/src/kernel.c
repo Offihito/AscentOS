@@ -283,13 +283,13 @@ void kmain(void) {
   klog_puts("[OK] Initializing RamFS & Virtual Filesystem (VFS)...\n");
   ramfs_init();
   fb_register_vfs();
-  sb16_register_vfs();
 
   pci_init();
   ahci_init();
   rtl8139_init();
   net_init();
   sb16_init();
+  sb16_register_vfs();
 
   int devs = block_count();
   klog_puts("[DIAG] Available Block Devices (via Block API):\n");

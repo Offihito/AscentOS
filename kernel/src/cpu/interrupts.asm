@@ -91,8 +91,11 @@ isr_common_stub:
     push r15
 
     ; Call C handler
-    mov rdi, rsp
+    mov rdi, rsp           ; First parameter: pointer to struct registers
+    mov rbp, rsp           ; Save original RSP
+    and rsp, -16           ; Align stack to 16 bytes for System V AMD64 ABI
     call isr_handler
+    mov rsp, rbp           ; Restore original RSP exactly right after the call!
 
     ; We shouldn't return from panic, but just in case
     pop r15

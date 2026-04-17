@@ -1,58 +1,62 @@
 #ifndef VMA_H
 #define VMA_H
 
-#include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 // Linux mmap flags (must match sys_mm.c)
-#define MAP_SHARED    0x01
-#define MAP_PRIVATE   0x02
-#define MAP_FIXED     0x10
+#define MAP_SHARED 0x01
+#define MAP_PRIVATE 0x02
+#define MAP_FIXED 0x10
 #define MAP_ANONYMOUS 0x20
 
 // VMA structure - internally represents an AVL Interval Tree Node
 struct vma {
-    uint64_t start;        // Start virtual address (page-aligned)
-    uint64_t end;          // End virtual address (page-aligned, exclusive)
-    uint64_t max_end;      // Subtree Tracking for Interval overlap queries
-    uint64_t prot;         // Protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
-    uint64_t flags;        // Mapping flags (MAP_SHARED, MAP_PRIVATE, MAP_ANONYMOUS)
-    uint64_t offset;       // File offset (for file-backed mappings)
-    int fd;                // File descriptor (for file-backed mappings, -1 if anonymous)
+  uint64_t start;   // Start virtual address (page-aligned)
+  uint64_t end;     // End virtual address (page-aligned, exclusive)
+  uint64_t max_end; // Subtree Tracking for Interval overlap queries
+  uint64_t prot;    // Protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
+  uint64_t flags;   // Mapping flags (MAP_SHARED, MAP_PRIVATE, MAP_ANONYMOUS)
+  uint64_t offset;  // File offset (for file-backed mappings)
+  int fd; // File descriptor (for file-backed mappings, -1 if anonymous)
 
-    int height;            // AVL Balance Height Tracker
-    struct vma *left;
-    struct vma *right;
+  int height; // AVL Balance Height Tracker
+  struct vma *left;
+  struct vma *right;
 };
 
 // VMA list for a process (now a Tree Root)
 struct vma_list {
-    struct vma *root;
-    int count;             // Number of active dynamically allocated regions
+  struct vma *root;
+  int count; // Number of active dynamically allocated regions
 };
 
 // Initialize a VMA list
 void vma_list_init(struct vma_list *list);
 
 // Add a new VMA region, returns 0 on success or -1 on overlap/OOM
-int vma_add(struct vma_list *list, uint64_t start, uint64_t end,
-            uint64_t prot, uint64_t flags, int fd, uint64_t offset);
+int vma_add(struct vma_list *list, uint64_t start, uint64_t end, uint64_t prot,
+            uint64_t flags, int fd, uint64_t offset);
 
-// Remove a VMA region by address range (auto-splits and auto-unmaps Native structures)
-// Returns true if any region was removed/split
+// Remove a VMA region by address range (auto-splits and auto-unmaps Native
+// structures) Returns true if any region was removed/split
 bool vma_remove(struct vma_list *list, uint64_t start, uint64_t end);
 
 // Find VMA containing a given address (O(log n))
 struct vma *vma_find(struct vma_list *list, uint64_t addr);
 
 // Find VMA that overlaps with given range (O(log n) Interval lookup)
-struct vma *vma_find_overlap(struct vma_list *list, uint64_t start, uint64_t end);
+struct vma *vma_find_overlap(struct vma_list *list, uint64_t start,
+                             uint64_t end);
 
-// Scan tree to find the first linearly unmapped gap capable of fitting 'length' cleanly.
-uint64_t vma_find_gap(struct vma_list *list, uint64_t length, uint64_t base_addr, uint64_t limit_addr);
+// Scan tree to find the first linearly unmapped gap capable of fitting 'length'
+// cleanly.
+uint64_t vma_find_gap(struct vma_list *list, uint64_t length,
+                      uint64_t base_addr, uint64_t limit_addr);
 
-// Dynamically condense adjacent matching boundary limits sequentially into monolithic mappings natively.
+// Dynamically condense adjacent matching boundary limits sequentially into
+// monolithic mappings natively.
 void vma_merge_adjacent(struct vma_list *list);
 
 // Clone VMA list for fork (shared mappings stay shared, private get copied)

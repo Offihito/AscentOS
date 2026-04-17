@@ -12,7 +12,7 @@
 #include "syscall.h"
 #include <stdint.h>
 
-extern void mm_reset_mmap_state(void);
+extern void mm_reset_mmap_state(struct thread *t);
 void vma_list_init(struct vma_list *list);
 
 // ── Path Normalization ──────────────────────────────────────────────────────
@@ -101,11 +101,29 @@ static void process_do_exit(uint64_t status) {
   }
 
   if (current && current->is_forked_child) {
+    // Ensure kernel data segments are loaded
     __asm__ volatile("mov $0x10, %%ax\n"
                      "mov %%ax, %%ds\n"
                      "mov %%ax, %%es\n" ::
                          : "eax");
     __asm__ volatile("sti");
+
+    // Pre-free the user address space NOW, while we're still on our own
+    // kernel stack. This avoids the parent having to do heavy page-table
+    // walking during reap (which risks corrupting the parent's execution
+    // context). Switch to kernel CR3 first so we don't pull the rug from
+    // under ourselves.
+    if (current->cr3) {
+      extern uint64_t *vmm_get_active_pml4(void);
+      // Read the kernel CR3 from our CPU
+      struct cpu_info *cpu = cpu_get_current();
+      uint64_t saved_cr3 = current->cr3;
+      // Switch to kernel address space
+      __asm__ volatile("mov %0, %%cr3" ::"r"(cpu->kernel_cr3) : "memory");
+      current->cr3 = 0;
+      // Now safely free the child's user pages
+      vmm_free_user_pages(saved_cr3);
+    }
 
     current->exit_status = (int)status;
     current->state = THREAD_ZOMBIE;
@@ -114,6 +132,7 @@ static void process_do_exit(uint64_t status) {
       current->parent->state = THREAD_READY;
     }
 
+    // Spin-yield forever; the parent will reap us.
     while (1) {
       sched_yield();
     }
@@ -239,9 +258,10 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t a1, uint64_t a2,
 // ── sys_wait4 ───────────────────────────────────────────────────────────────
 extern struct thread *global_thread_list; // From sched.c
 
+#define WNOHANG 1
+
 static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
                           uint64_t rusage, uint64_t a4, uint64_t a5) {
-  (void)options;
   (void)rusage;
   (void)a4;
   (void)a5;
@@ -282,15 +302,19 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
       }
       uint32_t reaped_pid = zombie->tid;
 
-      // Fully dead now
-      zombie->state = THREAD_DEAD;
-      zombie->parent = NULL; // Detach
+      // Fully reap the zombie (remove from runqueue, free resources)
+      sched_reap_thread(zombie);
 
       return reaped_pid;
     }
 
     if (!has_children) {
       return (uint64_t)-10; // ECHILD
+    }
+
+    // WNOHANG: return 0 immediately if no zombie found
+    if (options & WNOHANG) {
+      return 0;
     }
 
     // Block and wait for a child to exit
@@ -355,7 +379,7 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
 
   // Reset memory management state for the new program
   vma_list_init(&current->vmas);
-  mm_reset_mmap_state();
+  mm_reset_mmap_state(current);
   current->fs_base = 0;
 
   elf_info_t elf_info = {0};
@@ -375,6 +399,12 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   klog_puts("[EXECVE] Success, returning to user space at ");
   klog_uint64(elf_info.entry);
   klog_puts("\n");
+
+  // Free the old address space (from fork) now that the new one is loaded.
+  // We've already switched CR3, so this is safe.
+  if (old_cr3 != 0) {
+    vmm_free_user_pages(old_cr3);
+  }
 
   // Cleanup kernel-side copies
   for (int i = 0; i < argc; i++) kfree(k_argv[i]);

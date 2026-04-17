@@ -5,7 +5,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #define PHYS_TO_VIRT(p) ((void *)((uint64_t)(p) + pmm_get_hhdm_offset()))
-#define PAGE_MASK 0x000FFFFFFFFFF000ULL
 
 #include "lock/spinlock.h"
 static spinlock_t vmm_lock = SPINLOCK_INIT;
@@ -189,8 +188,8 @@ unlock:
   return success;
 }
 
-bool vmm_map_huge_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
-                       uint64_t flags) {
+bool vmm_map_huge_page(uint64_t *pml4, uint64_t virtual_addr,
+                       uint64_t physical_addr, uint64_t flags) {
   spinlock_acquire(&vmm_lock);
   bool success = false;
 
@@ -202,15 +201,18 @@ bool vmm_map_huge_page(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_
   uint64_t propagate_flags = flags & (PAGE_FLAG_USER | PAGE_FLAG_RW);
 
   uint64_t *pdpt_virt = get_next_level(pml4_virt, pml4_index, true);
-  if (!pdpt_virt) goto unlock;
+  if (!pdpt_virt)
+    goto unlock;
   pml4_virt[pml4_index] |= propagate_flags;
 
   uint64_t *pd_virt = get_next_level(pdpt_virt, pdpt_index, true);
-  if (!pd_virt) goto unlock;
+  if (!pd_virt)
+    goto unlock;
   pdpt_virt[pdpt_index] |= propagate_flags;
 
   // Set the 2MB huge page entry (PS flag)
-  pd_virt[pd_index] = (physical_addr & PAGE_MASK) | flags | PAGE_FLAG_PRESENT | PAGE_FLAG_PS;
+  pd_virt[pd_index] =
+      (physical_addr & PAGE_MASK) | flags | PAGE_FLAG_PRESENT | PAGE_FLAG_PS;
   vmm_flush_tlb(virtual_addr);
   success = true;
 
@@ -219,77 +221,83 @@ unlock:
   return success;
 }
 
-bool vmm_map_range(uint64_t *pml4, uint64_t virtual_addr, uint64_t physical_addr,
-                   size_t pages, uint64_t flags) {
-    for (size_t i = 0; i < pages; i++) {
-        if (!vmm_map_page(pml4, virtual_addr + (i * 4096), physical_addr + (i * 4096), flags)) {
-            return false;
-        }
+bool vmm_map_range(uint64_t *pml4, uint64_t virtual_addr,
+                   uint64_t physical_addr, size_t pages, uint64_t flags) {
+  for (size_t i = 0; i < pages; i++) {
+    if (!vmm_map_page(pml4, virtual_addr + (i * 4096),
+                      physical_addr + (i * 4096), flags)) {
+      return false;
     }
-    return true;
+  }
+  return true;
 }
 
 void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
-    // Currently only called under vmm_lock
-    size_t pml4_index = (virtual_addr >> 39) & 0x1FF;
-    size_t pdpt_index = (virtual_addr >> 30) & 0x1FF;
-    size_t pd_index = (virtual_addr >> 21) & 0x1FF;
+  // Currently only called under vmm_lock
+  size_t pml4_index = (virtual_addr >> 39) & 0x1FF;
+  size_t pdpt_index = (virtual_addr >> 30) & 0x1FF;
+  size_t pd_index = (virtual_addr >> 21) & 0x1FF;
 
-    uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4);
-    if (!(pml4_virt[pml4_index] & PAGE_FLAG_PRESENT)) return;
-    
-    uint64_t pdpt_phys = pml4_virt[pml4_index] & PAGE_MASK;
-    uint64_t *pdpt_virt = (uint64_t *)PHYS_TO_VIRT(pdpt_phys);
-    if (!(pdpt_virt[pdpt_index] & PAGE_FLAG_PRESENT) || (pdpt_virt[pdpt_index] & PAGE_FLAG_PS)) return;
+  uint64_t *pml4_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)pml4);
+  if (!(pml4_virt[pml4_index] & PAGE_FLAG_PRESENT))
+    return;
 
-    uint64_t pd_phys = pdpt_virt[pdpt_index] & PAGE_MASK;
-    uint64_t *pd_virt = (uint64_t *)PHYS_TO_VIRT(pd_phys);
-    if (!(pd_virt[pd_index] & PAGE_FLAG_PRESENT) || (pd_virt[pd_index] & PAGE_FLAG_PS)) return;
+  uint64_t pdpt_phys = pml4_virt[pml4_index] & PAGE_MASK;
+  uint64_t *pdpt_virt = (uint64_t *)PHYS_TO_VIRT(pdpt_phys);
+  if (!(pdpt_virt[pdpt_index] & PAGE_FLAG_PRESENT) ||
+      (pdpt_virt[pdpt_index] & PAGE_FLAG_PS))
+    return;
 
-    uint64_t pt_phys = pd_virt[pd_index] & PAGE_MASK;
-    uint64_t *pt_virt = (uint64_t *)PHYS_TO_VIRT(pt_phys);
+  uint64_t pd_phys = pdpt_virt[pdpt_index] & PAGE_MASK;
+  uint64_t *pd_virt = (uint64_t *)PHYS_TO_VIRT(pd_phys);
+  if (!(pd_virt[pd_index] & PAGE_FLAG_PRESENT) ||
+      (pd_virt[pd_index] & PAGE_FLAG_PS))
+    return;
 
-    // Check if PT is empty
-    bool pt_empty = true;
+  uint64_t pt_phys = pd_virt[pd_index] & PAGE_MASK;
+  uint64_t *pt_virt = (uint64_t *)PHYS_TO_VIRT(pt_phys);
+
+  // Check if PT is empty
+  bool pt_empty = true;
+  for (int i = 0; i < 512; i++) {
+    if (pt_virt[i] & PAGE_FLAG_PRESENT) {
+      pt_empty = false;
+      break;
+    }
+  }
+
+  if (pt_empty) {
+    pmm_free_page((void *)pt_phys);
+    pd_virt[pd_index] = 0;
+
+    // Check if PD is empty
+    bool pd_empty = true;
     for (int i = 0; i < 512; i++) {
-        if (pt_virt[i] & PAGE_FLAG_PRESENT) {
-            pt_empty = false;
-            break;
-        }
+      if (pd_virt[i] & PAGE_FLAG_PRESENT) {
+        pd_empty = false;
+        break;
+      }
     }
 
-    if (pt_empty) {
-        pmm_free_page((void*)pt_phys);
-        pd_virt[pd_index] = 0;
-        
-        // Check if PD is empty
-        bool pd_empty = true;
-        for (int i = 0; i < 512; i++) {
-            if (pd_virt[i] & PAGE_FLAG_PRESENT) {
-                pd_empty = false;
-                break;
-            }
+    if (pd_empty) {
+      pmm_free_page((void *)pd_phys);
+      pdpt_virt[pdpt_index] = 0;
+
+      // Check if PDPT is empty
+      bool pdpt_empty = true;
+      for (int i = 0; i < 512; i++) {
+        if (pdpt_virt[i] & PAGE_FLAG_PRESENT) {
+          pdpt_empty = false;
+          break;
         }
-        
-        if (pd_empty) {
-            pmm_free_page((void*)pd_phys);
-            pdpt_virt[pdpt_index] = 0;
-            
-            // Check if PDPT is empty
-            bool pdpt_empty = true;
-            for (int i = 0; i < 512; i++) {
-                if (pdpt_virt[i] & PAGE_FLAG_PRESENT) {
-                    pdpt_empty = false;
-                    break;
-                }
-            }
-            
-            if (pdpt_empty) {
-                pmm_free_page((void*)pdpt_phys);
-                pml4_virt[pml4_index] = 0;
-            }
-        }
+      }
+
+      if (pdpt_empty) {
+        pmm_free_page((void *)pdpt_phys);
+        pml4_virt[pml4_index] = 0;
+      }
     }
+  }
 }
 
 void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
@@ -677,81 +685,158 @@ uint64_t *vmm_create_pml4(void) {
   return (uint64_t *)new_pml4_phys;
 }
 
-#include "sched/sched.h"
+// ── Free all user-space pages and page tables for a given CR3 ───────────────
+// Walks PML4 entries 0-255 (user half), frees all mapped physical pages
+// and all intermediate page table pages, then frees the PML4 itself.
+// CRITICAL: Uses PAGE_MASK to strip NX/available bits from PTEs.
+void vmm_free_user_pages(uint64_t cr3) {
+  if (cr3 == 0)
+    return;
 
-int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code, struct registers *regs) {
-    (void)regs;
-    bool user_mode = (error_code & 0x4) != 0;
-    bool write_fault = (error_code & 0x2) != 0;
+  // Safety: never free the active PML4
+  uint64_t active_cr3;
+  __asm__ volatile("mov %%cr3, %0" : "=r"(active_cr3));
+  if (cr3 == (active_cr3 & PAGE_MASK)) {
+    klog_puts("[VMM] WARNING: refusing to free active CR3!\n");
+    return;
+  }
 
-    struct thread *current = sched_get_current();
-    if (!current) {
-        return -1; // Kernel fault, no process context
-    }
+  uint64_t hhdm = pmm_get_hhdm_offset();
+  uint64_t *pml4_virt = (uint64_t *)(hhdm + cr3);
 
-    uint64_t target_cr3 = current->cr3;
-    if (target_cr3 == 0) {
-        // Kernel thread inheritance fallback
-        __asm__ volatile("mov %%cr3, %0" : "=r"(target_cr3));
-        target_cr3 &= 0xFFFFFFFFFFFFF000ULL;
-    }
+  for (size_t i = 0; i < 256; i++) {
+    if (!(pml4_virt[i] & PAGE_FLAG_PRESENT))
+      continue;
 
-    // Special case for thread stack expansion (temporary hack until VMA strictly maps stacks)
-    if (cr2 >= current->stack_base - 0x100000 && cr2 < current->stack_base + current->stack_size) {
-        // Allow stack growth within 1MB automatically for user mode
-    } else {
-        // Real VMA validation
-        struct vma *vma = vma_find(&current->vmas, cr2);
-        if (!vma) {
-            if (user_mode) {
-                klog_puts("[VMM] Invalid user space memory access (SIGSEGV) at 0x");
-                klog_uint64(cr2);
-                klog_puts("\n");
-                sched_terminate_thread(current->tid);
-                return 0; // Terminated handles it
-            }
-            return -1;
+    uint64_t pdpt_phys = pml4_virt[i] & PAGE_MASK;
+    uint64_t *pdpt_virt = (uint64_t *)(hhdm + pdpt_phys);
+
+    for (size_t j = 0; j < 512; j++) {
+      if (!(pdpt_virt[j] & PAGE_FLAG_PRESENT))
+        continue;
+
+      // 1GB huge page — skip freeing individual pages
+      if (pdpt_virt[j] & PAGE_FLAG_PS)
+        continue;
+
+      uint64_t pd_phys = pdpt_virt[j] & PAGE_MASK;
+      uint64_t *pd_virt = (uint64_t *)(hhdm + pd_phys);
+
+      for (size_t k = 0; k < 512; k++) {
+        if (!(pd_virt[k] & PAGE_FLAG_PRESENT))
+          continue;
+
+        // 2MB huge page
+        if (pd_virt[k] & PAGE_FLAG_PS) {
+          uint64_t huge_phys = pd_virt[k] & PAGE_MASK;
+          for (size_t p = 0; p < 512; p++) {
+            pmm_free_page((void *)(huge_phys + p * 4096));
+          }
+          pd_virt[k] = 0;
+          continue;
         }
 
-        // Validate permissions
-        if (write_fault && !(vma->prot & 0x2)) { // PROT_WRITE mapped to 2 loosely. Assuming sys_mm.c maps this
-             if (user_mode) {
-                 klog_puts("[VMM] User space write violation (SIGSEGV) at 0x");
-                 klog_uint64(cr2);
-                 klog_puts("\n");
-                 sched_terminate_thread(current->tid);
-                 return 0; // Handled
-             }
-             return -1;
+        uint64_t pt_phys = pd_virt[k] & PAGE_MASK;
+        uint64_t *pt_virt = (uint64_t *)(hhdm + pt_phys);
+
+        for (size_t l = 0; l < 512; l++) {
+          if (pt_virt[l] & PAGE_FLAG_PRESENT) {
+            uint64_t page_phys = pt_virt[l] & PAGE_MASK;
+            pmm_free_page((void *)page_phys);
+          }
         }
+        pmm_free_page((void *)pt_phys);
+      }
+      pmm_free_page((void *)pd_phys);
     }
+    pmm_free_page((void *)pdpt_phys);
+  }
 
-    // Allocate frame (Zero-Fill Engine)
-    void *frame = pmm_alloc_page();
-    if (!frame) {
-        klog_puts("[VMM] OOM during demand paging!\n");
-        if (user_mode) {
-            sched_terminate_thread(current->tid);
-            return 0;
-        }
-        return -1;
-    }
-
-    uint64_t *frame_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)frame);
-    for(int i = 0; i < 512; i++) frame_virt[i] = 0; // Zero Out
-
-    uint64_t flags = PAGE_FLAG_USER | PAGE_FLAG_PRESENT | PAGE_FLAG_RW;
-
-    if (!vmm_map_page((uint64_t*)target_cr3, cr2 & ~0xFFFULL, (uint64_t)frame, flags)) {
-        pmm_free_page(frame);
-        klog_puts("[VMM] Fatal PT alloc failure in paging engine\n");
-        if (user_mode) {
-            sched_terminate_thread(current->tid);
-            return 0;
-        }
-        return -1;
-    }
-
-    return 0; // successfully handled!
+  // Free the PML4 page itself
+  pmm_free_page((void *)cr3);
 }
 
+#include "sched/sched.h"
+
+int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
+                          struct registers *regs) {
+  (void)regs;
+  bool user_mode = (error_code & 0x4) != 0;
+  bool write_fault = (error_code & 0x2) != 0;
+
+  struct thread *current = sched_get_current();
+  if (!current) {
+    return -1; // Kernel fault, no process context
+  }
+
+  uint64_t target_cr3 = current->cr3;
+  if (target_cr3 == 0) {
+    // Kernel thread inheritance fallback
+    __asm__ volatile("mov %%cr3, %0" : "=r"(target_cr3));
+    target_cr3 &= 0xFFFFFFFFFFFFF000ULL;
+  }
+
+  // Special case for thread stack expansion (temporary hack until VMA strictly
+  // maps stacks)
+  if (cr2 >= current->stack_base - 0x100000 &&
+      cr2 < current->stack_base + current->stack_size) {
+    // Allow stack growth within 1MB automatically for user mode
+  } else {
+    // Real VMA validation
+    struct vma *vma = vma_find(&current->vmas, cr2);
+    if (!vma) {
+      if (user_mode) {
+        klog_puts("[VMM] Invalid user space memory access (SIGSEGV) at 0x");
+        klog_uint64(cr2);
+        klog_puts("\n");
+        sched_terminate_thread(current->tid);
+        return 0; // Terminated handles it
+      }
+      return -1;
+    }
+
+    // Validate permissions
+    if (write_fault &&
+        !(vma->prot &
+          0x2)) { // PROT_WRITE mapped to 2 loosely. Assuming sys_mm.c maps this
+      if (user_mode) {
+        klog_puts("[VMM] User space write violation (SIGSEGV) at 0x");
+        klog_uint64(cr2);
+        klog_puts("\n");
+        sched_terminate_thread(current->tid);
+        return 0; // Handled
+      }
+      return -1;
+    }
+  }
+
+  // Allocate frame (Zero-Fill Engine)
+  void *frame = pmm_alloc_page();
+  if (!frame) {
+    klog_puts("[VMM] OOM during demand paging!\n");
+    if (user_mode) {
+      sched_terminate_thread(current->tid);
+      return 0;
+    }
+    return -1;
+  }
+
+  uint64_t *frame_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)frame);
+  for (int i = 0; i < 512; i++)
+    frame_virt[i] = 0; // Zero Out
+
+  uint64_t flags = PAGE_FLAG_USER | PAGE_FLAG_PRESENT | PAGE_FLAG_RW;
+
+  if (!vmm_map_page((uint64_t *)target_cr3, cr2 & ~0xFFFULL, (uint64_t)frame,
+                    flags)) {
+    pmm_free_page(frame);
+    klog_puts("[VMM] Fatal PT alloc failure in paging engine\n");
+    if (user_mode) {
+      sched_terminate_thread(current->tid);
+      return 0;
+    }
+    return -1;
+  }
+
+  return 0; // successfully handled!
+}
