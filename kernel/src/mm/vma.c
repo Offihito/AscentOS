@@ -279,6 +279,27 @@ struct vma *vma_find_overlap(struct vma_list *list, uint64_t start,
   return vma_find_overlap_recursive(list->root, start, end);
 }
 
+static struct vma *vma_find_growdown_recursive(struct vma *node, uint64_t cr2,
+                                               uint64_t max_limit) {
+  if (!node)
+    return NULL;
+
+  if ((node->flags & MAP_GROWSDOWN) && cr2 < node->start &&
+      cr2 >= (node->end - max_limit))
+    return node;
+
+  struct vma *res = vma_find_growdown_recursive(node->left, cr2, max_limit);
+  if (res)
+    return res;
+
+  return vma_find_growdown_recursive(node->right, cr2, max_limit);
+}
+
+struct vma *vma_find_growdown(struct vma_list *list, uint64_t cr2,
+                              uint64_t max_limit) {
+  return vma_find_growdown_recursive(list->root, cr2, max_limit);
+}
+
 static void clone_recursive(struct vma_list *dst, struct vma *node) {
   if (!node)
     return;

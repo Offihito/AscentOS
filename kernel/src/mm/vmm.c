@@ -792,10 +792,16 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     // Real VMA validation
     struct vma *vma = vma_find(&current->vmas, cr2);
     if (!vma) {
-      if (user_mode) {
-        return -1; // Let ISR handle SIGSEGV reporting
+      vma = vma_find_growdown(&current->vmas, cr2, 8 * 1024 * 1024);
+      if (vma) {
+        // Expand the stack VMA dynamically
+        vma->start = cr2 & ~0xFFFULL;
+      } else {
+        if (user_mode) {
+          return -1; // Let ISR handle SIGSEGV reporting
+        }
+        return -1;
       }
-      return -1;
     }
 
     // Validate permissions

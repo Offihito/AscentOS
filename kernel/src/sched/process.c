@@ -291,7 +291,7 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
   // User stack: [stack_top - stack_size, stack_top); stack_top is unmapped
   // (guard).
   uint64_t stack_top = ASCENTOS_USER_STACK_TOP;
-  uint64_t stack_size = 4 * PAGE_SIZE; // 16 KB stack
+  uint64_t stack_size = 4 * PAGE_SIZE; // 16 KB stack initially mapped
   uint64_t stack_bottom = stack_top - stack_size;
 
   for (uint64_t page = stack_bottom; page < stack_top; page += PAGE_SIZE) {
@@ -310,6 +310,9 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
 
   // Page-align the brk base upward and set current brk.
   if (current_thread) {
+    vma_add(&current_thread->vmas, stack_bottom, stack_top, 0x3,
+            0x22 | MAP_GROWSDOWN, -1, 0);
+
     current_thread->brk_base =
         (current_thread->brk_base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     current_thread->brk_current = current_thread->brk_base;

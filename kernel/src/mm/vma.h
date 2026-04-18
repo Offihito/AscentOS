@@ -10,6 +10,7 @@
 #define MAP_PRIVATE 0x02
 #define MAP_FIXED 0x10
 #define MAP_ANONYMOUS 0x20
+#define MAP_GROWSDOWN 0x0100
 
 // VMA structure - internally represents an AVL Interval Tree Node
 struct vma {
@@ -49,6 +50,10 @@ struct vma *vma_find(struct vma_list *list, uint64_t addr);
 // Find VMA that overlaps with given range (O(log n) Interval lookup)
 struct vma *vma_find_overlap(struct vma_list *list, uint64_t start,
                              uint64_t end);
+
+// Find nearest GROWSDOWN VMA below cr2 within max_limit
+struct vma *vma_find_growdown(struct vma_list *list, uint64_t cr2,
+                              uint64_t max_limit);
 
 // Scan tree to find the first linearly unmapped gap capable of fitting 'length'
 // cleanly.
