@@ -150,7 +150,6 @@ void ap_main(void) {
   print_hex32(current->apic_id);
   console_puts(") ONLINE.\n");
 
-
   // Endless loop, waiting for IPIs or scheduler interrupts
   while (1) {
     __asm__ volatile("hlt");
@@ -253,7 +252,6 @@ void cpu_init(void) {
   } else {
     console_puts("[ERR] GS base verification FAILED!\n");
   }
-
 }
 
 void cpu_init_aps(void) {
@@ -274,8 +272,8 @@ void cpu_init_aps(void) {
     // Identity-map the 0x8000 page in the active PML4 so the AP safely
     // transitions PAGING -> 64-bit Long Mode
     if (!vmm_map_page(vmm_get_active_pml4(), tramp_phys, tramp_phys,
-                     PAGE_FLAG_RW | PAGE_FLAG_PRESENT)) {
-        klog_puts("[SMP] Warning: Failed to map trampoline page\n");
+                      PAGE_FLAG_RW | PAGE_FLAG_PRESENT)) {
+      klog_puts("[SMP] Warning: Failed to map trampoline page\n");
     }
 
     // Find offsets to modify the trampoline variables natively

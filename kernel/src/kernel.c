@@ -116,6 +116,7 @@ void kmain(void) {
   cpu_features_init();
   idt_init();
   syscall_init();
+  isr_init_exceptions();
 
   // ═══════════════════════════════════════════════════════════════════════
   //  Phase 2: Legacy PIC — used temporarily until APIC takes over
@@ -148,7 +149,6 @@ void kmain(void) {
   klog_puts("     Usable RAM: ");
   klog_uint64(pmm_get_usable_memory() / (1024 * 1024));
   klog_puts(" MB\n\n");
-
 
   klog_puts("[OK] Initializing Virtual Memory Manager (VMM)...\n");
   vmm_init();

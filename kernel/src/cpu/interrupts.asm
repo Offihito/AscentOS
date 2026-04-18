@@ -73,7 +73,16 @@ ISR_NOERRCODE 48
 ISR_NOERRCODE 255
 
 isr_common_stub:
-    ; Push all general purpose registers
+    ; Hardware has already switched RSP to the kernel stack (via TSS) if coming from Ring 3.
+    ; First, check if we came from user mode (Ring 3) to decide if swapgs is needed.
+    ; Interrupt frame on stack: SS, RSP, RFLAGS, CS, RIP, ERR, INT
+    ; RSP points to INT. CS is at [RSP + 24].
+    test qword [rsp + 24], 3
+    jz .skip_swapgs
+    swapgs
+.skip_swapgs:
+
+    ; Push all general purpose registers (matching struct registers)
     push rax
     push rbx
     push rcx
@@ -95,9 +104,9 @@ isr_common_stub:
     mov rbp, rsp           ; Save original RSP
     and rsp, -16           ; Align stack to 16 bytes for System V AMD64 ABI
     call isr_handler
-    mov rsp, rbp           ; Restore original RSP exactly right after the call!
+    mov rsp, rbp           ; Restore original RSP
 
-    ; We shouldn't return from panic, but just in case
+    ; Pop all general purpose registers
     pop r15
     pop r14
     pop r13
@@ -113,6 +122,12 @@ isr_common_stub:
     pop rcx
     pop rbx
     pop rax
+
+    ; Swap GS back if we came from user mode
+    test qword [rsp + 24], 3
+    jz .skip_swapgs_exit
+    swapgs
+.skip_swapgs_exit:
 
     add rsp, 16 ; remove error code and int number
     iretq

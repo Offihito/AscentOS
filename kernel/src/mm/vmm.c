@@ -1,12 +1,12 @@
-#include "mm/vmm.h"
-#include "console/klog.h"
-#include "mm/pmm.h"
-#include "mm/vma.h"
+#include "vmm.h"
+#include "../console/klog.h"
+#include "pmm.h"
+#include "vma.h"
 #include <stddef.h>
 #include <stdint.h>
 #define PHYS_TO_VIRT(p) ((void *)((uint64_t)(p) + pmm_get_hhdm_offset()))
 
-#include "lock/spinlock.h"
+#include "../lock/spinlock.h"
 static spinlock_t vmm_lock = SPINLOCK_INIT;
 
 static uint64_t *kernel_pml4 = NULL;
@@ -756,7 +756,7 @@ void vmm_free_user_pages(uint64_t cr3) {
   pmm_free_page((void *)cr3);
 }
 
-#include "sched/sched.h"
+#include "../sched/sched.h"
 
 int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
                           struct registers *regs) {
@@ -780,17 +780,20 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   // maps stacks)
   if (cr2 >= current->stack_base - 0x100000 &&
       cr2 < current->stack_base + current->stack_size) {
-    // Allow stack growth within 1MB automatically for user mode
+    // Authentically map the missing stack page to resolve the fault and
+    // prevent infinite recursion.
+    void *phys = pmm_alloc();
+    if (phys) {
+      vmm_map_page((uint64_t *)current->cr3, cr2 & PAGE_MASK, (uint64_t)phys,
+                   PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+      return 0; // Success: CPU will now re-execute and find the page
+    }
   } else {
     // Real VMA validation
     struct vma *vma = vma_find(&current->vmas, cr2);
     if (!vma) {
       if (user_mode) {
-        klog_puts("[VMM] Invalid user space memory access (SIGSEGV) at 0x");
-        klog_uint64(cr2);
-        klog_puts("\n");
-        sched_terminate_thread(current->tid);
-        return 0; // Terminated handles it
+        return -1; // Let ISR handle SIGSEGV reporting
       }
       return -1;
     }
@@ -839,4 +842,12 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   }
 
   return 0; // successfully handled!
+}
+void vmm_map_signal_trampoline(uint64_t *pml4) {
+  extern uint64_t signal_trampoline_phys;
+  if (signal_trampoline_phys == 0)
+    return;
+  // Map the trampoline page as USER accessible and executable (no NX)
+  vmm_map_page(pml4, 0x00007FFFFFFFF000ULL, signal_trampoline_phys,
+               PAGE_FLAG_USER);
 }

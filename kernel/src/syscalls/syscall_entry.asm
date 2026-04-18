@@ -66,6 +66,9 @@ syscall_entry:
     pop rsp ; User RSP
 
     ; Swap GS back to User TLS (if any)
+    ; Disable interrupts to protect the window between swapgs and sysret,
+    ; as the ISR would now see a kernel CS but with user GS.
+    cli
     swapgs
 
     ; Return to user mode safely

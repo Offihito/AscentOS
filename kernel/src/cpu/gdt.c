@@ -1,8 +1,8 @@
 #include "gdt.h"
 #include "../lib/string.h"
 
-// 0: Null, 1: KCode, 2: KData, 3: UData, 4: UCode, 5: TSS (Low), 6: TSS (High)
-static struct gdt_entry gdt[7];
+// 0: Null, 1: KCode, 2: KData, 3: UCode32, 4: UData, 5: UCode64, 6: TSS (Low), 7: TSS (High)
+static struct gdt_entry gdt[8];
 static struct gdt_ptr gp;
 static struct tss_entry tss_bsp;
 
@@ -39,7 +39,7 @@ void tss_set_rsp0(uint64_t rsp0) {
 }
 
 void gdt_init(void) {
-    gp.limit = (sizeof(struct gdt_entry) * 7) - 1;
+    gp.limit = (sizeof(struct gdt_entry) * 8) - 1;
     gp.base  = (uint64_t)&gdt;
 
     // 0: Null descriptor
@@ -51,19 +51,22 @@ void gdt_init(void) {
     // 2: Kernel Data descriptor (0x10)
     gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF);
 
-    // 3: User Data descriptor (0x1B)   - DPL 3, Data R/W
-    gdt_set_gate(3, 0, 0xFFFFFFFF, 0xF2, 0xC0); // F2 = 1 11 1 0 0 1 0 (Pr, DPL=3, S=1, C=0, E=0, W=1, A=0)
+    // 3: User Code 32-bit (compatibility mode) (0x1B)
+    gdt_set_gate(3, 0, 0xFFFFFFFF, 0xFA, 0xCF);
 
-    // 4: User Code descriptor (0x23)   - DPL 3, Code Exec/Read, 64-bit
-    gdt_set_gate(4, 0, 0xFFFFFFFF, 0xFA, 0xAF); // FA = 1 11 1 1 0 1 0 (Pr, DPL=3, S=1, C=1, C=0, R=1, A=0)
+    // 4: User Data descriptor (0x23)   - DPL 3, Data R/W
+    gdt_set_gate(4, 0, 0xFFFFFFFF, 0xF2, 0xCF);
 
-    // 5-6: TSS descriptor (0x28)
+    // 5: User Code descriptor (0x2B)   - DPL 3, Code Exec/Read, 64-bit
+    gdt_set_gate(5, 0, 0xFFFFFFFF, 0xFA, 0xAF);
+
+    // 6-7: TSS descriptor (0x30)
     memset(&tss_bsp, 0, sizeof(struct tss_entry));
     tss_bsp.iopb_offset = sizeof(struct tss_entry);
-    gdt_set_tss(5, (uint64_t)&tss_bsp, sizeof(struct tss_entry) - 1);
+    gdt_set_tss(6, (uint64_t)&tss_bsp, sizeof(struct tss_entry) - 1);
 
     gdt_flush((uint64_t)&gp);
-    ltr(0x28);
+    ltr(0x30);
 }
 
 void gdt_load_ap(void) {

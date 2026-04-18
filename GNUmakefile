@@ -51,7 +51,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf
+disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf
 	dd if=/dev/zero of=disk.img bs=1M count=256
 	mkfs.ext3 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
@@ -72,6 +72,7 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/t
 	debugfs -w -R "write userland/test_syscalls.elf test_syscalls.elf" disk.img
 	debugfs -w -R "write userland/test_ioctl.elf test_ioctl.elf" disk.img
 	debugfs -w -R "write userland/test_kilo_syscalls.elf test_kilo_syscalls.elf" disk.img
+	debugfs -w -R "write userland/test_wait4_complex.elf test_wait4_complex.elf" disk.img
 	debugfs -w -R "write userland/test_kilo_asm.elf test_kilo_asm.elf" disk.img
 	debugfs -w -R "write userland/kilo.elf kilo.elf" disk.img
 	debugfs -w -R "write userland/test_args.elf test_args.elf" disk.img
@@ -348,6 +349,10 @@ userland/test_symlink.elf: userland/test_symlink.c $(MUSL_LIBC)
 userland/test_cred.elf: userland/test_cred.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_cred.c -o userland/test_cred.elf
+
+userland/test_wait4_complex.elf: userland/test_wait4_complex.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_wait4_complex.c -o userland/test_wait4_complex.elf
 
 userland/test_dynamic.elf: userland/test_dynamic.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) -O2 -Wall -Wextra -fno-stack-protector -I$(MUSL_SYSROOT)/include -L$(MUSL_SYSROOT)/lib \

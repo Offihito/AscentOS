@@ -1,156 +1,296 @@
 // ── Signal Syscalls: rt_sigaction, rt_sigprocmask ───────────────────────────
-#include "syscall.h"
 #include "../console/klog.h"
+#include "../lib/string.h"
+#include "../lock/spinlock.h"
+#include "../mm/vmm.h"
 #include "../sched/sched.h"
+#include "syscall.h"
 #include <stdint.h>
 
-// Kernel ABI for x86_64 rt_sigaction uses a single 64-bit mask word when
-// sigsetsize == sizeof(uint64_t) (what musl passes on this target).
-struct k_sigaction {
-    uint64_t sa_handler;
-    uint64_t sa_flags;
-    uint64_t sa_restorer;
-    uint64_t sa_mask;
-};
+#define SIG_BLOCK 0
+#define SIG_UNBLOCK 1
+#define SIG_SETMASK 2
 
-// Signal handler table: one per signal (64 signals)
-typedef struct {
-    uint64_t handler;
-    uint64_t flags;
-} signal_handler_t;
-
-static signal_handler_t signal_handlers[64] = {0};
+struct sigframe {
+  struct registers regs;
+  uint64_t mask;
+} __attribute__((packed));
 
 // ── rt_sigaction: Set or get signal action ──────────────────────────────────
 static uint64_t sys_rt_sigaction(uint64_t signum, uint64_t act_ptr,
-                                  uint64_t oldact_ptr, uint64_t sigsetsize,
-                                  uint64_t a4, uint64_t a5) {
+                                 uint64_t oldact_ptr, uint64_t sigsetsize,
+                                 uint64_t a4, uint64_t a5) {
   (void)a4;
   (void)a5;
-  
-  // Validate signal number
-  if (signum >= 64 || signum < 1) {
-    return (uint64_t)-22; // EINVAL
-  }
-  
-  // Default sigsetsize should be 8 (sizeof(uint64_t))
-  if (sigsetsize != 8) {
-    return (uint64_t)-22; // EINVAL
-  }
-  
+  if (signum > 64 || signum < 1 || sigsetsize != 8)
+    return (uint64_t)-22;
+
+  struct thread *current = sched_get_current();
+  if (!current)
+    return (uint64_t)-1;
   uint64_t idx = signum - 1;
 
-  // If oldact_ptr is provided, store the old signal action
   if (oldact_ptr) {
     struct k_sigaction *old = (struct k_sigaction *)oldact_ptr;
-    if (!old) return (uint64_t)-14; // EFAULT
-
-    old->sa_handler = signal_handlers[idx].handler;
-    old->sa_flags = signal_handlers[idx].flags;
-    old->sa_restorer = 0;
-    old->sa_mask = 0;
+    *old = current->signal_handlers[idx];
   }
-  
-  // If act_ptr is provided, set the new signal action
+
   if (act_ptr) {
     struct k_sigaction *new = (struct k_sigaction *)act_ptr;
-    if (!new) return (uint64_t)-14; // EFAULT
-    
-    signal_handlers[idx].handler = new->sa_handler;
-    signal_handlers[idx].flags = new->sa_flags;
-    
-    // For now, we don't actually install signal handlers in the kernel
-    // This is a stub that accepts the configuration but doesn't implement
-    // actual signal delivery (that would require interrupt handling, etc.)
+    if (signum == SIGKILL || signum == SIGSTOP)
+      return (uint64_t)-22;
+    current->signal_handlers[idx] = *new;
   }
-  
-  return 0; // Success
+  return 0;
 }
 
 // ── rt_sigprocmask: Set or get signal mask ──────────────────────────────────
 static uint64_t sys_rt_sigprocmask(uint64_t how, uint64_t set_ptr,
-                                    uint64_t oldset_ptr, uint64_t sigsetsize,
-                                    uint64_t a4, uint64_t a5) {
-  (void)how;
-  (void)set_ptr;
-  (void)oldset_ptr;
-  (void)sigsetsize;
+                                   uint64_t oldset_ptr, uint64_t sigsetsize,
+                                   uint64_t a4, uint64_t a5) {
   (void)a4;
   (void)a5;
-  
-  // Stub: Just return success
-  // Full implementation would maintain per-thread signal masks
+  if (sigsetsize != 8)
+    return (uint64_t)-22;
+  struct thread *current = sched_get_current();
+  if (!current)
+    return (uint64_t)-1;
+
+  if (oldset_ptr) {
+    *(uint64_t *)oldset_ptr = current->signal_mask;
+  }
+
+  if (set_ptr) {
+    uint64_t newset = *(uint64_t *)set_ptr;
+    newset &= ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
+
+    switch (how) {
+    case SIG_BLOCK:
+      current->signal_mask |= newset;
+      break;
+    case SIG_UNBLOCK:
+      current->signal_mask &= ~newset;
+      break;
+    case SIG_SETMASK:
+      current->signal_mask = newset;
+      break;
+    default:
+      return (uint64_t)-22;
+    }
+  }
   return 0;
 }
 
-// Stub for tgkill - used by musl for thread cancellation
+// ── sigreturn ──────────────────────────────────────────────────────────────
+static uint64_t sys_rt_sigreturn(struct syscall_regs *sregs) {
+  struct thread *current = sched_get_current();
+  // Frame is on user stack.
+  struct sigframe *frame = (struct sigframe *)sregs->rsp;
+
+  current->signal_mask = frame->mask;
+
+  // Restore state into syscall_regs
+  sregs->rax = frame->regs.rax;
+  sregs->rbx = frame->regs.rbx;
+  sregs->rbp = frame->regs.rbp;
+  sregs->r12 = frame->regs.r12;
+  sregs->r13 = frame->regs.r13;
+  sregs->r14 = frame->regs.r14;
+  sregs->r15 = frame->regs.r15;
+  sregs->rdi = frame->regs.rdi;
+  sregs->rsi = frame->regs.rsi;
+  sregs->rdx = frame->regs.rdx;
+  sregs->r10 = frame->regs.r10;
+  sregs->r8 = frame->regs.r8;
+  sregs->r9 = frame->regs.r9;
+
+  sregs->rip = frame->regs.rip;
+  sregs->rflags = frame->regs.rflags;
+  sregs->rsp = frame->regs.rsp;
+
+  return sregs->rax;
+}
+
+// ── Signal Delivery ─────────────────────────────────────────────────────────
+
+void signal_deliver(struct registers *regs) {
+  struct thread *current = sched_get_current();
+  if (!current)
+    return;
+
+  uint64_t pending = current->pending_signals & ~current->signal_mask;
+  if (!pending)
+    return;
+
+  int sig = 0;
+  for (int i = 0; i < 64; i++) {
+    if (pending & (1ULL << i)) {
+      sig = i + 1;
+      break;
+    }
+  }
+  if (!sig)
+    return;
+
+  current->pending_signals &= ~(1ULL << (sig - 1));
+  struct k_sigaction *sa = &current->signal_handlers[sig - 1];
+
+  if (sa->sa_handler == (void *)SIG_IGN)
+    return;
+  if (sa->sa_handler == (void *)SIG_DFL) {
+    if (sig == SIGCHLD || sig == SIGURG || sig == SIGWINCH)
+      return;
+    klog_puts("[SIGNAL] Default action (terminate) for sig ");
+    klog_uint64(sig);
+    klog_puts("\n");
+    process_do_exit(128 + sig);
+    return;
+  }
+
+  // Push frame to user stack
+  uint64_t rsp = regs->rsp;
+  rsp -= sizeof(struct sigframe);
+  rsp &= ~0xFULL;
+
+  struct sigframe *frame = (struct sigframe *)rsp;
+  frame->regs = *regs;
+  frame->mask = current->signal_mask;
+
+  regs->rip = (uint64_t)sa->sa_handler;
+  regs->rdi = sig;
+
+  // Set up return
+  rsp -= 8;
+  if (sa->sa_flags & 0x04000000) { // SA_RESTORER
+    *(uint64_t *)rsp = (uint64_t)sa->sa_restorer;
+  } else {
+    // If no restorer, we'd need a kernel trampoline. We'll warn for now.
+    klog_puts("[SIGNAL] No SA_RESTORER for sig ");
+    klog_uint64(sig);
+    klog_puts("\n");
+  }
+  regs->rsp = rsp;
+
+  if (!(sa->sa_flags & 0x40000000)) { // !SA_NODEFER
+    current->signal_mask |= sa->sa_mask | (1ULL << (sig - 1));
+  }
+}
+
+// Helper to deliver from syscall context
+void signal_deliver_syscall(struct syscall_regs *sregs) {
+  struct registers regs = {0};
+  regs.rdi = sregs->rdi;
+  regs.rsi = sregs->rsi;
+  regs.rdx = sregs->rdx;
+  regs.r10 = sregs->r10;
+  regs.r8 = sregs->r8;
+  regs.r9 = sregs->r9;
+  regs.rax = sregs->rax;
+  regs.rbx = sregs->rbx;
+  regs.rbp = sregs->rbp;
+  regs.r12 = sregs->r12;
+  regs.r13 = sregs->r13;
+  regs.r14 = sregs->r14;
+  regs.r15 = sregs->r15;
+  regs.rip = sregs->rip;
+  regs.rflags = sregs->rflags;
+  regs.rsp = sregs->rsp;
+  regs.cs = 0x2B;
+  regs.ss = 0x23; // Standard user segments
+
+  signal_deliver(&regs);
+
+  // Sync back
+  sregs->rdi = regs.rdi;
+  sregs->rsi = regs.rsi;
+  sregs->rdx = regs.rdx;
+  sregs->r10 = regs.r10;
+  sregs->r8 = regs.r8;
+  sregs->r9 = regs.r9;
+  sregs->rax = regs.rax;
+  sregs->rbx = regs.rbx;
+  sregs->rbp = regs.rbp;
+  sregs->r12 = regs.r12;
+  sregs->r13 = regs.r13;
+  sregs->r14 = regs.r14;
+  sregs->r15 = regs.r15;
+  sregs->rip = regs.rip;
+  sregs->rflags = regs.rflags;
+  sregs->rsp = regs.rsp;
+}
+
+// ── Other stubs ──────────────────────────────────────────────────────────────
+
 static uint64_t sys_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig,
                            uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)tgid;
-  (void)tid;
-  (void)sig;
   (void)a3;
   (void)a4;
   (void)a5;
-  // Return success - we don't implement signals yet
+  if (sig > 64)
+    return (uint64_t)-22;
+  // TODO: Implement proper tid lookup and signal sending
   return 0;
 }
 
-// Linux stack_t structure for sigaltstack
 typedef struct {
-  uint64_t ss_sp;    // Pointer to stack
-  uint32_t ss_flags; // Flags
-  uint32_t __pad;    // Padding
-  uint64_t ss_size;  // Size of stack
+  uint64_t ss_sp;
+  uint32_t ss_flags;
+  uint32_t __pad;
+  uint64_t ss_size;
 } stack_t;
-
-// Stub for sigaltstack - needed for Rust panic handling
 static uint64_t sys_sigaltstack(uint64_t ss_ptr, uint64_t old_ss_ptr,
-                                uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a2; (void)a3; (void)a4; (void)a5;
-  
-  // If old_ss_ptr is provided, store the old alt stack info
+                                uint64_t a2, uint64_t a3, uint64_t a4,
+                                uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
   if (old_ss_ptr) {
     stack_t *old = (stack_t *)old_ss_ptr;
     old->ss_sp = 0;
-    old->ss_flags = 0x00000002; // SS_DISABLE
+    old->ss_flags = 2;
     old->ss_size = 0;
   }
-  
-  // If ss_ptr is provided, set the new alt stack
   if (ss_ptr) {
     stack_t *ss = (stack_t *)ss_ptr;
-    // Check for SS_DISABLE flag - if set, just disable alt stack
-    if (ss->ss_flags & 0x00000002) {
-      // SS_DISABLE - disable the alt stack, always succeeds
+    if (ss->ss_flags & 2)
       return 0;
-    }
-    // Validate minimum size for enabled stack
-    if (ss->ss_size < 8192) {
-      return (uint64_t)-22; // EINVAL - too small
-    }
-    // Accept the stack configuration - we don't enforce it but pretend to
-    // This allows Rust's std to proceed with its stack setup
+    if (ss->ss_size < 8192)
+      return (uint64_t)-22;
   }
-  
-  return 0; // Success
+  return 0;
 }
 
-// Old non-rt sigprocmask (syscall 186) - wrapper around rt_sigprocmask
 static uint64_t sys_sigprocmask(uint64_t how, uint64_t set_ptr,
-                                uint64_t oldset_ptr, uint64_t a3,
-                                uint64_t a4, uint64_t a5) {
-  (void)a3; (void)a4; (void)a5;
-  // Just call the rt version with sigsetsize=8
+                                uint64_t oldset_ptr, uint64_t a3, uint64_t a4,
+                                uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
   return sys_rt_sigprocmask(how, set_ptr, oldset_ptr, 8, 0, 0);
 }
 
-// ── sys_kill (stub) ─────────────────────────────────────────────────────────
-static uint64_t sys_kill(uint64_t pid, uint64_t sig, uint64_t a2,
-                         uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a2; (void)a3; (void)a4; (void)a5;
-  (void)pid; (void)sig;
-  // Stub: accept but don't deliver signals yet
+static uint64_t sys_kill(uint64_t pid, uint64_t sig, uint64_t a2, uint64_t a3,
+                         uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  if (sig > 64)
+    return (uint64_t)-22;
+  extern struct thread *global_thread_list;
+  extern spinlock_t tid_lock;
+  spinlock_acquire(&tid_lock);
+  struct thread *t = global_thread_list;
+  while (t) {
+    if (t->tid == (uint32_t)pid) {
+      t->pending_signals |= (1ULL << (sig - 1));
+      break;
+    }
+    t = t->global_next;
+  }
+  spinlock_release(&tid_lock);
   return 0;
 }
 
@@ -158,8 +298,8 @@ void syscall_register_signal(void) {
   syscall_register(SYS_RT_SIGACTION, sys_rt_sigaction);
   syscall_register(SYS_RT_SIGPROCMASK, sys_rt_sigprocmask);
   syscall_register(SYS_SIGPROCMASK, sys_sigprocmask);
+  syscall_register_raw(SYS_RT_SIGRETURN, sys_rt_sigreturn);
   syscall_register(SYS_SIGALTSTACK, sys_sigaltstack);
   syscall_register(SYS_TGKILL, sys_tgkill);
   syscall_register(SYS_KILL, sys_kill);
 }
-

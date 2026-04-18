@@ -9,6 +9,49 @@
 
 #define MAX_FDS 32
 
+// Signal constants
+#define SIGHUP 1
+#define SIGINT 2
+#define SIGQUIT 3
+#define SIGILL 4
+#define SIGTRAP 5
+#define SIGABRT 6
+#define SIGBUS 7
+#define SIGFPE 8
+#define SIGKILL 9
+#define SIGUSR1 10
+#define SIGSEGV 11
+#define SIGUSR2 12
+#define SIGPIPE 13
+#define SIGALRM 14
+#define SIGTERM 15
+#define SIGSTKFLT 16
+#define SIGCHLD 17
+#define SIGCONT 18
+#define SIGSTOP 19
+#define SIGTSTP 20
+#define SIGTTIN 21
+#define SIGTTOU 22
+#define SIGURG 23
+#define SIGXCPU 24
+#define SIGXFSZ 25
+#define SIGVTALRM 26
+#define SIGPROF 27
+#define SIGWINCH 28
+#define SIGIO 29
+#define SIGPWR 30
+#define SIGSYS 31
+
+#define SIG_DFL 0
+#define SIG_IGN 1
+
+struct k_sigaction {
+  void (*sa_handler)(int);
+  uint64_t sa_flags;
+  void (*sa_restorer)(void);
+  uint64_t sa_mask;
+};
+
 typedef enum {
   THREAD_RUNNING,
   THREAD_READY,
@@ -44,23 +87,31 @@ struct thread {
   bool is_idle;                 // True for idle thread (cannot be terminated)
   void *fork_ctx;               // Saved register state for child entry
   struct thread *parent;        // Pointer to parent thread (for wait4)
-  int exit_status;              // Status code when exiting (for wait4)
-  uint64_t *tid_address;        // Pointer to user-space TID for set_tid_address
-  struct thread *global_next;   // Used to link all threads together
-  struct thread *next;          // Used for runqueue / blocked queue
-  char cwd_path[256];           // Current working directory
-  struct vma_list vmas;         // Virtual memory areas for this process
-  uint64_t fs_base;             // User FS_BASE (TLS) — inherited across fork
-  uint64_t brk_base;            // Base of the heap (after data/bss)
-  uint64_t brk_current;         // Current end of the heap
-  uint64_t mmap_next_addr;      // Bump-pointer for anonymous mmap
-  uint32_t uid;                 // User ID
-  uint32_t gid;                 // Group ID
-  uint32_t euid;                // Effective User ID
-  uint32_t egid;                // Effective Group ID
-  uint32_t suid;                // Saved set-user-ID
-  uint32_t sgid;                // Saved set-group-ID
-  uint32_t umask;               // File creation mask
+  struct thread *children;      // Head of children list
+  struct thread *sibling_next; // Link to next sibling in parent's children list
+  uint32_t pgid;               // Process group ID
+  int exit_status;             // Status code when exiting (for wait4)
+  uint64_t *tid_address;       // Pointer to user-space TID for set_tid_address
+  struct thread *global_next;  // Used to link all threads together
+  struct thread *next;         // Used for runqueue / blocked queue
+  char cwd_path[256];          // Current working directory
+  struct vma_list vmas;        // Virtual memory areas for this process
+  uint64_t fs_base;            // User FS_BASE (TLS) — inherited across fork
+  uint64_t brk_base;           // Base of the heap (after data/bss)
+  uint64_t brk_current;        // Current end of the heap
+  uint64_t mmap_next_addr;     // Bump-pointer for anonymous mmap
+  uint32_t uid;                // User ID
+  uint32_t gid;                // Group ID
+  uint32_t euid;               // Effective User ID
+  uint32_t egid;               // Effective Group ID
+  uint32_t suid;               // Saved set-user-ID
+  uint32_t sgid;               // Saved set-group-ID
+  uint32_t umask;              // File creation mask
+
+  // Signal state
+  struct k_sigaction signal_handlers[64];
+  uint64_t pending_signals;
+  uint64_t signal_mask;
 };
 
 void sched_init(void);
@@ -85,9 +136,12 @@ bool sched_terminate_thread(uint32_t tid);
 // Reap a zombie thread (remove from runqueue, free resources)
 void sched_reap_thread(struct thread *t);
 
+// Reparent children to init
+void sched_reparent_children(struct thread *parent);
+
 // Userspace Management
-#include <stdbool.h>
 #include "elf.h"
+#include <stdbool.h>
 bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info);
 // Linux-style stack: path string near top, then auxv/envp/argv/argc; RSP points
 // at argc.
@@ -95,6 +149,7 @@ uint64_t process_build_initial_stack(uint64_t stack_top, const char *path,
                                      const char **argv, const char **envp,
                                      const elf_info_t *elf_info);
 bool process_exec_argv(const char **argv);
+void process_do_exit(uint64_t status);
 
 #define ASCENTOS_USER_STACK_TOP 0x00007FFFF0000000ULL
 

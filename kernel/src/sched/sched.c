@@ -2,16 +2,16 @@
 #include "../console/console.h"
 #include "../console/klog.h"
 #include "../cpu/idt.h"
+#include "../cpu/msr.h"
 #include "../lib/string.h"
 #include "../lock/spinlock.h"
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../smp/cpu.h"
-#include "../cpu/msr.h"
 
 static uint32_t next_tid = 1;
-static spinlock_t tid_lock = SPINLOCK_INIT;
+spinlock_t tid_lock = SPINLOCK_INIT;
 
 // Global list of all threads (for wait4)
 struct thread *global_thread_list = NULL;
@@ -37,6 +37,7 @@ void sched_init(void) {
     idle_thread->tid = next_tid++;
     spinlock_release(&tid_lock);
     idle_thread->is_idle = true;
+    idle_thread->pgid = idle_thread->tid;
     idle_thread->state = THREAD_RUNNING;
     idle_thread->next = idle_thread; // Circular queue
 
@@ -123,10 +124,18 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
   t->tid = next_tid++;
   t->global_next = global_thread_list;
   global_thread_list = t;
-  spinlock_release(&tid_lock);
 
-  // Set parent to the thread that called create
-  t->parent = sched_get_current();
+  // Set parent and link into hierarchy
+  struct thread *current = sched_get_current();
+  t->parent = current;
+  if (current) {
+    t->sibling_next = current->children;
+    current->children = t;
+    t->pgid = current->pgid; // Inherit PGID by default
+  } else {
+    t->pgid = t->tid; // Root threads have PGID = TID
+  }
+  spinlock_release(&tid_lock);
 
   t->state = THREAD_READY;
   t->stack_size = THREAD_STACK_SIZE;
@@ -416,6 +425,36 @@ static void remove_from_runqueue(struct thread *t) {
   }
 }
 
+void sched_reparent_children(struct thread *parent) {
+  if (!parent)
+    return;
+
+  spinlock_acquire(&tid_lock);
+  struct thread *child = parent->children;
+  while (child) {
+    struct thread *next_sibling = child->sibling_next;
+
+    // Reparent to BSP idle thread (TID 1) as a fallback for init
+    // In a mature kernel, this would be the actual 'init' process.
+    struct thread *init = global_thread_list;
+    while (init && init->tid != 1) {
+      init = init->global_next;
+    }
+
+    child->parent = init;
+    if (init) {
+      child->sibling_next = init->children;
+      init->children = child;
+    } else {
+      child->sibling_next = NULL;
+    }
+
+    child = next_sibling;
+  }
+  parent->children = NULL;
+  spinlock_release(&tid_lock);
+}
+
 void sched_reap_thread(struct thread *t) {
   if (!t || t->is_idle)
     return;
@@ -427,6 +466,33 @@ void sched_reap_thread(struct thread *t) {
   // 1. Remove from runqueue
   klog_puts("[REAP] Step 1: remove from runqueue\n");
   remove_from_runqueue(t);
+
+  // 1.25 Ensure the thread is not currently active on any CPU (race prevention)
+  // Although remove_from_runqueue unlinks it, a CPU might still be in the
+  // middle of switching AWAY from this thread.
+  for (uint32_t i = 0; i < cpu_get_count(); i++) {
+    struct cpu_info *cpu_local = cpu_get_info(i);
+    while (cpu_local->current_thread == t) {
+      __asm__ volatile("pause");
+    }
+  }
+
+  // 1.5 Remove from parent's children list
+  if (t->parent) {
+    spinlock_acquire(&tid_lock);
+    if (t->parent->children == t) {
+      t->parent->children = t->sibling_next;
+    } else {
+      struct thread *p = t->parent->children;
+      while (p && p->sibling_next != t) {
+        p = p->sibling_next;
+      }
+      if (p) {
+        p->sibling_next = t->sibling_next;
+      }
+    }
+    spinlock_release(&tid_lock);
+  }
 
   // 2. Remove from global thread list
   klog_puts("[REAP] Step 2: remove from global list\n");

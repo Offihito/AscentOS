@@ -86,9 +86,12 @@ extern void fork_return_to_userspace(struct syscall_regs *regs)
 #define IA32_FS_BASE 0xC0000100
 
 // ── exit / exit_group (shared) ─────────────────────────────────────────────
-static void process_do_exit(uint64_t status) __attribute__((noreturn));
-static void process_do_exit(uint64_t status) {
+void process_do_exit(uint64_t status) __attribute__((noreturn));
+void process_do_exit(uint64_t status) {
   struct thread *current = sched_get_current();
+  if (current) {
+    sched_reparent_children(current);
+  }
 
   klog_puts("\n[SYSCALL] Process exited with status: ");
   klog_uint64(status);
@@ -255,8 +258,7 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t a1, uint64_t a2,
 
   return 0; // Success
 }
-// ── sys_wait4 ───────────────────────────────────────────────────────────────
-extern struct thread *global_thread_list; // From sched.c
+extern spinlock_t tid_lock;
 
 #define WNOHANG 1
 
@@ -272,30 +274,38 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
   int target_pid = (int)pid;
 
   while (1) {
-    bool has_children = false;
+    bool has_matching_children = false;
     struct thread *zombie = NULL;
 
-    // Scan global list for children
-    struct thread *t = global_thread_list;
-
+    spinlock_acquire(&tid_lock);
+    struct thread *t = current->children;
     while (t) {
-      if (t->parent == current) {
-        if (target_pid <= 0 || t->tid == (uint32_t)target_pid) {
-          has_children = true;
-          if (t->state == THREAD_ZOMBIE) {
-            zombie = t;
-            break;
-          }
+      bool matches = false;
+      if (target_pid == -1) {
+        matches = true;
+      } else if (target_pid > 0) {
+        if (t->tid == (uint32_t)target_pid)
+          matches = true;
+      } else if (target_pid == 0) {
+        if (t->pgid == current->pgid)
+          matches = true;
+      } else { // target_pid < -1
+        if (t->pgid == (uint32_t)(-target_pid))
+          matches = true;
+      }
+
+      if (matches) {
+        has_matching_children = true;
+        if (t->state == THREAD_ZOMBIE) {
+          zombie = t;
+          break;
         }
       }
-      t = t->global_next;
+      t = t->sibling_next;
     }
+    spinlock_release(&tid_lock);
 
     if (zombie) {
-      klog_puts("[WAIT4] Reaping zombie PID ");
-      klog_uint64(zombie->tid);
-      klog_puts("\n");
-
       if (wstatus_ptr != 0) {
         int *wstatus = (int *)wstatus_ptr;
         *wstatus = (zombie->exit_status & 0xFF) << 8;
@@ -305,10 +315,10 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
       // Fully reap the zombie (remove from runqueue, free resources)
       sched_reap_thread(zombie);
 
-      return reaped_pid;
+      return (uint64_t)reaped_pid;
     }
 
-    if (!has_children) {
+    if (!has_matching_children) {
       return (uint64_t)-10; // ECHILD
     }
 
@@ -336,11 +346,14 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   // We need to copy the path, the argv array, and the envp array
   size_t path_len = strlen(user_path);
   char *path = kmalloc(path_len + 1);
-  if (!path) return (uint64_t)-12;
+  if (!path)
+    return (uint64_t)-12;
   memcpy(path, user_path, path_len + 1);
 
   int argc = 0;
-  if (user_argv) while (user_argv[argc]) argc++;
+  if (user_argv)
+    while (user_argv[argc])
+      argc++;
   char **k_argv = kmalloc((argc + 1) * sizeof(char *));
   for (int i = 0; i < argc; i++) {
     size_t len = strlen(user_argv[i]);
@@ -350,7 +363,9 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   k_argv[argc] = NULL;
 
   int envc = 0;
-  if (user_envp) while (user_envp[envc]) envc++;
+  if (user_envp)
+    while (user_envp[envc])
+      envc++;
   char **k_envp = kmalloc((envc + 1) * sizeof(char *));
   for (int i = 0; i < envc; i++) {
     size_t len = strlen(user_envp[i]);
@@ -365,9 +380,10 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
 
   uint64_t *new_pml4 = vmm_create_pml4();
   if (!new_pml4) {
-    // Cleanup skipped for brevity in this first pass, but ideally we'd kfree everything
+    // Cleanup skipped for brevity in this first pass, but ideally we'd kfree
+    // everything
     kfree(path);
-    return (uint64_t)-12; 
+    return (uint64_t)-12;
   }
 
   // EARLY CR3 SWITCH:
@@ -393,8 +409,9 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   }
 
   // We are now safely loaded into the new address space!
-  uint64_t user_rsp = process_build_initial_stack(ASCENTOS_USER_STACK_TOP, path,
-                                                  (const char **)k_argv, (const char **)k_envp, &elf_info);
+  uint64_t user_rsp = process_build_initial_stack(
+      ASCENTOS_USER_STACK_TOP, path, (const char **)k_argv,
+      (const char **)k_envp, &elf_info);
 
   klog_puts("[EXECVE] Success, returning to user space at ");
   klog_uint64(elf_info.entry);
@@ -407,9 +424,11 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   }
 
   // Cleanup kernel-side copies
-  for (int i = 0; i < argc; i++) kfree(k_argv[i]);
+  for (int i = 0; i < argc; i++)
+    kfree(k_argv[i]);
   kfree(k_argv);
-  for (int i = 0; i < envc; i++) kfree(k_envp[i]);
+  for (int i = 0; i < envc; i++)
+    kfree(k_envp[i]);
   kfree(k_envp);
   kfree(path);
 
@@ -513,12 +532,12 @@ static uint64_t sys_fork(struct syscall_regs *regs) {
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
     child->fs_base = parent->fs_base;
     child->umask = parent->umask;
-    child->uid   = parent->uid;
-    child->gid   = parent->gid;
-    child->euid  = parent->euid;
-    child->egid  = parent->egid;
-    child->suid  = parent->suid;
-    child->sgid  = parent->sgid;
+    child->uid = parent->uid;
+    child->gid = parent->gid;
+    child->euid = parent->euid;
+    child->egid = parent->egid;
+    child->suid = parent->suid;
+    child->sgid = parent->sgid;
   }
 
   klog_puts("[FORK] Child created with PID ");
@@ -584,8 +603,9 @@ static uint64_t sys_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
 static uint64_t sys_umask(struct syscall_regs *regs) {
   uint32_t mask = (uint32_t)regs->rdi;
   struct thread *t = sched_get_current();
-  if (!t) return 0;
-  
+  if (!t)
+    return 0;
+
   uint32_t old_mask = t->umask;
   t->umask = mask & 0777;
   return old_mask;
@@ -595,7 +615,8 @@ static uint64_t sys_umask(struct syscall_regs *regs) {
 static uint64_t sys_getuid(struct syscall_regs *regs) {
   (void)regs;
   struct thread *t = sched_get_current();
-  if (!t) return 0;
+  if (!t)
+    return 0;
   return t->uid;
 }
 
@@ -603,7 +624,8 @@ static uint64_t sys_getuid(struct syscall_regs *regs) {
 static uint64_t sys_getgid(struct syscall_regs *regs) {
   (void)regs;
   struct thread *t = sched_get_current();
-  if (!t) return 0;
+  if (!t)
+    return 0;
   return t->gid;
 }
 
@@ -611,7 +633,8 @@ static uint64_t sys_getgid(struct syscall_regs *regs) {
 static uint64_t sys_geteuid(struct syscall_regs *regs) {
   (void)regs;
   struct thread *t = sched_get_current();
-  if (!t) return 0;
+  if (!t)
+    return 0;
   return t->euid;
 }
 
@@ -619,7 +642,8 @@ static uint64_t sys_geteuid(struct syscall_regs *regs) {
 static uint64_t sys_getegid(struct syscall_regs *regs) {
   (void)regs;
   struct thread *t = sched_get_current();
-  if (!t) return 0;
+  if (!t)
+    return 0;
   return t->egid;
 }
 
@@ -633,9 +657,12 @@ static uint64_t sys_getresuid(struct syscall_regs *regs) {
   if (!t)
     return (uint64_t)-1;
 
-  if (ruid_ptr) *ruid_ptr = t->uid;
-  if (euid_ptr) *euid_ptr = t->euid;
-  if (suid_ptr) *suid_ptr = t->suid;
+  if (ruid_ptr)
+    *ruid_ptr = t->uid;
+  if (euid_ptr)
+    *euid_ptr = t->euid;
+  if (suid_ptr)
+    *suid_ptr = t->suid;
 
   return 0;
 }
@@ -650,9 +677,12 @@ static uint64_t sys_getresgid(struct syscall_regs *regs) {
   if (!t)
     return (uint64_t)-1;
 
-  if (rgid_ptr) *rgid_ptr = t->gid;
-  if (egid_ptr) *egid_ptr = t->egid;
-  if (sgid_ptr) *sgid_ptr = t->sgid;
+  if (rgid_ptr)
+    *rgid_ptr = t->gid;
+  if (egid_ptr)
+    *egid_ptr = t->egid;
+  if (sgid_ptr)
+    *sgid_ptr = t->sgid;
 
   return 0;
 }
@@ -661,31 +691,65 @@ static uint64_t sys_getresgid(struct syscall_regs *regs) {
 static uint64_t sys_getppid(struct syscall_regs *regs) {
   (void)regs;
   struct thread *t = sched_get_current();
-  if (!t) return 0;
-  if (t->parent) return t->parent->tid;
+  if (!t)
+    return 0;
+  if (t->parent)
+    return t->parent->tid;
   return 0;
 }
 
-// ── sys_setpgid (stub) ─────────────────────────────────────────────────────
+// ── sys_setpgid ─────────────────────────────────────────────────────────────
 static uint64_t sys_setpgid(struct syscall_regs *regs) {
-  (void)regs;
-  // Stub: accept but ignore. Job control disabled.
+  uint32_t pid = (uint32_t)regs->rdi;
+  uint32_t pgid = (uint32_t)regs->rsi;
+
+  struct thread *current = sched_get_current();
+  struct thread *target = NULL;
+
+  if (pid == 0) {
+    target = current;
+  } else {
+    // Only allow setting PGID for self or children
+    if (current->tid == pid) {
+      target = current;
+    } else {
+      spinlock_acquire(&tid_lock);
+      struct thread *c = current->children;
+      while (c) {
+        if (c->tid == pid) {
+          target = c;
+          break;
+        }
+        c = c->sibling_next;
+      }
+      spinlock_release(&tid_lock);
+    }
+  }
+
+  if (!target)
+    return (uint64_t)-3; // ESRCH
+
+  if (pgid == 0)
+    pgid = target->tid;
+  target->pgid = pgid;
   return 0;
 }
 
-// ── sys_getpgrp (stub) ─────────────────────────────────────────────────────
+// ── sys_getpgrp ─────────────────────────────────────────────────────────────
 static uint64_t sys_getpgrp(struct syscall_regs *regs) {
   (void)regs;
   struct thread *t = sched_get_current();
-  if (!t) return 0;
-  return t->tid; // Return own PID as PGID
+  if (!t)
+    return 0;
+  return t->pgid;
 }
 
 // ── sys_setsid (stub) ──────────────────────────────────────────────────────
 static uint64_t sys_setsid(struct syscall_regs *regs) {
   (void)regs;
   struct thread *t = sched_get_current();
-  if (!t) return 0;
+  if (!t)
+    return 0;
   return t->tid; // Return own PID as new session ID
 }
 
@@ -715,4 +779,3 @@ void syscall_register_process(void) {
   syscall_register_raw(SYS_GETPGRP, sys_getpgrp);
   syscall_register_raw(SYS_SETSID, sys_setsid);
 }
-

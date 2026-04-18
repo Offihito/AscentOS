@@ -1,12 +1,12 @@
 #include "syscall.h"
-#include "console/klog.h"
-#include "cpu/msr.h"
+#include "../console/klog.h"
+#include "../cpu/msr.h"
 #include <stdint.h>
 
 extern void syscall_entry(void);
 
 // ── Syscall dispatch tables ─────────────────────────────────────────────────
-static syscall_handler_t     syscall_table[MAX_SYSCALL]     = {0};
+static syscall_handler_t syscall_table[MAX_SYSCALL] = {0};
 static syscall_raw_handler_t raw_syscall_table[MAX_SYSCALL] = {0};
 
 void syscall_register(int num, syscall_handler_t handler) {
@@ -49,6 +49,9 @@ void syscall_dispatcher(struct syscall_regs *regs) {
   syscall_handler_t handler = syscall_table[regs->rax];
   regs->rax =
       handler(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
+
+  // Delivery signals before returning to usermode
+  signal_deliver_syscall(regs);
 }
 
 // ── Core initialization ────────────────────────────────────────────────────
@@ -66,8 +69,10 @@ void syscall_init(void) {
   wrmsr(IA32_EFER, efer);
 
   // 2. Configure STAR:
-  // KCode=0x08, KData=0x10, UData=0x18 | 3, UCode=0x20 | 3
-  uint64_t star = ((uint64_t)0x10 << 48) | ((uint64_t)0x08 << 32);
+  // KCode=0x08, KData=0x10, UCode32=0x18|3, UData=0x20|3, UCode64=0x28|3
+  // SYSRET base (63:48) points to Index 3 (UCode32).
+  // CS = base + 16 = Index 5 (UCode64), SS = base + 8 = Index 4 (UData).
+  uint64_t star = ((uint64_t)0x1B << 48) | ((uint64_t)0x08 << 32);
   wrmsr(IA32_STAR, star);
 
   // 3. Configure LSTAR with the syscall entry point

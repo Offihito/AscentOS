@@ -25,6 +25,8 @@
 #define SYS_MUNMAP 11
 #define SYS_BRK 12
 #define SYS_RT_SIGACTION 13
+#define SYS_RT_SIGPROCMASK 14
+#define SYS_RT_SIGRETURN 15
 #define SYS_IOCTL 16
 #define SYS_READV 19
 #define SYS_WRITEV 20
@@ -110,6 +112,7 @@ void syscall_register_process(void);
 void syscall_register_mm(void);
 void syscall_register_arch(void);
 void syscall_register_signal(void);
+void signal_deliver_syscall(struct syscall_regs *regs);
 void syscall_register_media(void);
 
 // ── Core init (MSRs + calls subsystem registrations) ────────────────────────

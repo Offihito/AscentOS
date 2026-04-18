@@ -5,6 +5,8 @@
 #include "apic/lapic.h"
 #include "msr.h"
 #include "pic.h"
+#include "../sched/sched.h"
+#include "../console/klog.h"
 
 const char *exception_messages[] = {"Division By Zero",
                                     "Debug",
@@ -39,8 +41,7 @@ const char *exception_messages[] = {"Division By Zero",
                                     "Security Exception",
                                     "Reserved"};
 
-// ── Low-level output helpers
-// ──────────────────────────────────────────────────
+// ── Low-level output helpers ──────────────────────────────────────────────────
 
 static void print_hex(uint64_t value) {
   const char *hex_chars = "0123456789ABCDEF";
@@ -90,8 +91,7 @@ static bool is_canonical_addr(uint64_t vaddr) {
   return (high == 0x0000ULL) || (high == 0xFFFFULL);
 }
 
-// ── RFLAGS decoder
-// ────────────────────────────────────────────────────────────
+// ── RFLAGS decoder ────────────────────────────────────────────────────────────
 
 static void print_rflags_decoded(uint64_t rflags) {
   console_puts("RFLAGS: ");
@@ -157,8 +157,7 @@ static void print_cr_state(void) {
   console_puts("\n");
 }
 
-// ── GP fault decoder
-// ──────────────────────────────────────────────────────────
+// ── GP fault decoder ──────────────────────────────────────────────────────────
 
 static void print_gp_error_details(uint64_t err_code) {
   console_puts("GP_ERR_DETAILS: ");
@@ -181,8 +180,7 @@ static void print_gp_error_details(uint64_t err_code) {
   console_puts(")\n");
 }
 
-// ── PF fault error code decoder
-// ───────────────────────────────────────────────
+// ── PF fault error code decoder ───────────────────────────────────────────────
 
 static void print_pf_error_details(uint64_t err_code) {
   bool p = (err_code >> 0) & 1;    /* page present */
@@ -222,14 +220,6 @@ static void print_pf_error_details(uint64_t err_code) {
   console_puts("\n");
 }
 
-// ── PTE corruption analysis
-// ───────────────────────────────────────────────────
-//
-// A well-formed PTE has its physical address bits in [51:12].  Any bits set in
-// the "software available" range [62:52] or outside the implemented PA width
-// (assuming 52-bit max per the AMD64 spec) indicate corruption.  We also check
-// for conflicting flag combinations.
-
 static void analyze_pte_corruption(uint64_t pte) {
   const uint64_t PA_MASK = 0x000FFFFFFFFFF000ULL;
   const uint64_t LOW_MASK = 0xFFFULL;               /* bits [11:0] */
@@ -263,9 +253,6 @@ static void analyze_pte_corruption(uint64_t pte) {
     console_puts(") -- reserved or OS-specific bits set; likely corruption\n");
   }
 
-  /* Detect packed-word pattern: upper and lower 32-bit halves are suspiciously
-   * similar (common symptom of a struct written to the wrong field or a
-   * 32-bit store to a 64-bit PTE slot). */
   uint32_t lo32 = (uint32_t)(pte & 0xFFFFFFFFULL);
   uint32_t hi32 = (uint32_t)(pte >> 32);
   if (hi32 != 0 && hi32 != 0xFFFFFFFF) {
@@ -277,12 +264,10 @@ static void analyze_pte_corruption(uint64_t pte) {
       print_hex(lo32);
       console_puts(" hi=");
       print_hex(hi32);
-      console_puts(
-          ") -- looks like a 32-bit value replicated into both halves\n");
+      console_puts(") -- looks like a 32-bit value replicated into both halves\n");
     }
   }
 
-  /* Flag-combination sanity checks */
   if (!present && dirty)
     console_puts("    WARN: D=1 but P=0 (dirty non-present page)\n");
   if (!present && global)
@@ -293,15 +278,10 @@ static void analyze_pte_corruption(uint64_t pte) {
     console_puts("    NOTE: NX + kernel + non-present\n");
 
   if (high_bits == 0 && lo32 == 0 && hi32 == 0)
-    console_puts("    PTE is completely zero (was never mapped or was "
-                 "explicitly cleared)\n");
+    console_puts("    PTE is completely zero (was never mapped or was explicitly cleared)\n");
 }
 
-// ── Paging-entry flag printer
-// ─────────────────────────────────────────────────
-
-static void print_paging_entry_flags(uint64_t entry, bool is_leaf,
-                                     bool is_pde) {
+static void print_paging_entry_flags(uint64_t entry, bool is_leaf, bool is_pde) {
   print_yes_no("P", (entry & (1ULL << 0)) != 0);
   print_yes_no("RW", (entry & (1ULL << 1)) != 0);
   print_yes_no("US", (entry & (1ULL << 2)) != 0);
@@ -320,9 +300,7 @@ static void print_paging_entry_flags(uint64_t entry, bool is_leaf,
   console_puts("\n");
 }
 
-static void print_entry_summary(const char *name, size_t idx, uint64_t entry,
-                                bool is_leaf, bool is_pde) {
-
+static void print_entry_summary(const char *name, size_t idx, uint64_t entry, bool is_leaf, bool is_pde) {
   console_puts("  ");
   console_puts(name);
   console_puts("[");
@@ -335,8 +313,7 @@ static void print_entry_summary(const char *name, size_t idx, uint64_t entry,
   print_paging_entry_flags(entry, is_leaf, is_pde);
 }
 
-static void print_neighbor_entries(const char *label, uint64_t *table,
-                                   size_t index) {
+static void print_neighbor_entries(const char *label, uint64_t *table, size_t index) {
   size_t start = (index > 1) ? index - 1 : 0;
   size_t end = (index < 510) ? index + 1 : 511;
 
@@ -354,16 +331,11 @@ static void print_neighbor_entries(const char *label, uint64_t *table,
   }
 }
 
-// ── Full page-table walk with enriched PTE analysis ──────────────────────────
-
 static void print_pf_walk(uint64_t cr2) {
-
   uint64_t hhdm = pmm_get_hhdm_offset();
   uint64_t *pml4_phys = vmm_get_active_pml4();
   uint64_t *pml4 = (uint64_t *)((uint64_t)pml4_phys + hhdm);
-  uint64_t cr3;
-  __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-
+  
   size_t pml4_i = (cr2 >> 39) & 0x1FF;
   size_t pdpt_i = (cr2 >> 30) & 0x1FF;
   size_t pd_i = (cr2 >> 21) & 0x1FF;
@@ -371,97 +343,24 @@ static void print_pf_walk(uint64_t cr2) {
   uint64_t page_off = cr2 & 0xFFF;
 
   console_puts("PF_WALK:\n");
-  console_puts("  CR3(raw)      = ");
-  print_hex(cr3);
-  console_puts("\n");
-  console_puts("  CR3(pml4 phys)= ");
-  print_hex((uint64_t)pml4_phys);
-  console_puts("\n");
-  console_puts("  CR3(pml4 virt)= ");
-  print_hex((uint64_t)pml4);
-  console_puts("\n");
-  console_puts("  VA canonical  = ");
-  console_puts(is_canonical_addr(cr2) ? "yes\n" : "NO (invalid high bits)\n");
-  console_puts("  VA split: pml4=");
-  print_hex(pml4_i);
-  console_puts(" pdpt=");
-  print_hex(pdpt_i);
-  console_puts(" pd=");
-  print_hex(pd_i);
-  console_puts(" pt=");
-  print_hex(pt_i);
-  console_puts(" off=");
-  print_hex(page_off);
-  console_puts("\n");
-
   uint64_t pml4e = pml4[pml4_i];
   print_entry_summary("PML4E", pml4_i, pml4e, false, false);
-  print_neighbor_entries("PML4", pml4, pml4_i);
-  if (!(pml4e & 1)) {
-    console_puts("  Walk stop: non-present PML4E\n");
-    return;
-  }
+  if (!(pml4e & 1)) return;
 
   uint64_t *pdpt = (uint64_t *)((pml4e & PAGE_MASK) + hhdm);
   uint64_t pdpte = pdpt[pdpt_i];
   print_entry_summary("PDPTE", pdpt_i, pdpte, false, false);
-  print_neighbor_entries("PDPT", pdpt, pdpt_i);
-  if (!(pdpte & 1)) {
-    console_puts("  Walk stop: non-present PDPTE\n");
-    return;
-  }
-  if (pdpte & (1ULL << 7)) {
-    uint64_t phys_1g = (pdpte & 0x000FFFFFC0000000ULL) | (cr2 & 0x3FFFFFFFULL);
-    console_puts("  Walk stop: 1GiB huge page\n  Resolved PA = ");
-    print_hex(phys_1g);
-    console_puts("\n");
-    return;
-  }
+  if (!(pdpte & 1) || (pdpte & (1ULL << 7))) return;
 
   uint64_t *pd = (uint64_t *)((pdpte & PAGE_MASK) + hhdm);
   uint64_t pde = pd[pd_i];
   print_entry_summary("PDE", pd_i, pde, false, true);
-  print_neighbor_entries("PD", pd, pd_i);
-  if (!(pde & 1)) {
-    console_puts("  Walk stop: non-present PDE\n");
-    return;
-  }
-  if (pde & (1ULL << 7)) {
-    uint64_t phys_2m = (pde & 0x000FFFFFFFE00000ULL) | (cr2 & 0x1FFFFFULL);
-    console_puts("  Walk stop: 2MiB huge page\n  Resolved PA = ");
-    print_hex(phys_2m);
-    console_puts("\n");
-    return;
-  }
+  if (!(pde & 1) || (pde & (1ULL << 7))) return;
 
   uint64_t *pt = (uint64_t *)((pde & PAGE_MASK) + hhdm);
   uint64_t pte = pt[pt_i];
   print_entry_summary("PTE", pt_i, pte, true, false);
-  print_neighbor_entries("PT", pt, pt_i);
-
-  if (pte & 1ULL) {
-    uint64_t final_pa = (pte & PAGE_MASK) | page_off;
-    console_puts("  Final PA = ");
-    print_hex(final_pa);
-    console_puts("\n");
-  } else {
-    console_puts("  Walk stop: non-present PTE\n");
-    /* Always run deep analysis on a non-present PTE -- the raw value may
-     * reveal what kind of error caused it (corruption, swap, COW, ...) */
-    analyze_pte_corruption(pte);
-  }
-
-  /* Run corruption check even for present PTEs with suspicious bits. */
-  const uint64_t RESERVED_MASK = 0x7FF0000000000000ULL;
-  if ((pte & 1ULL) && (pte & RESERVED_MASK)) {
-    console_puts("  WARN: present PTE has reserved bits set!\n");
-    analyze_pte_corruption(pte);
-  }
-  console_puts("\n");
 }
-
-// ── User-stack word dump
-// ──────────────────────────────────────────────────────
 
 static void print_user_stack_words(uint64_t user_rsp, int words) {
   uint64_t *pml4 = vmm_get_active_pml4();
@@ -480,20 +379,11 @@ static void print_user_stack_words(uint64_t user_rsp, int words) {
   }
 }
 
-// ── Privilege / context summary
-// ───────────────────────────────────────────────
-
 static void print_context_summary(struct registers *regs) {
   uint8_t cpl = regs->cs & 0x3;
   console_puts("CONTEXT: ");
-  if (cpl == 0)
-    console_puts("kernel (ring 0)");
-  else if (cpl == 1)
-    console_puts("ring 1 (unusual)");
-  else if (cpl == 2)
-    console_puts("ring 2 (unusual)");
-  else
-    console_puts("user   (ring 3)");
+  if (cpl == 0) console_puts("kernel (ring 0)");
+  else console_puts("user   (ring 3)");
   console_puts("  CS=");
   print_hex(regs->cs);
   console_puts("  SS=");
@@ -501,12 +391,7 @@ static void print_context_summary(struct registers *regs) {
   console_puts("\n");
 }
 
-// ── Interrupt handler table
-// ───────────────────────────────────────────────────
 static isr_t interrupt_handlers[256] = {0};
-
-// ── APIC mode flag
-// ────────────────────────────────────────────────────────────
 static bool apic_mode = false;
 
 void isr_set_apic_mode(bool enabled) { apic_mode = enabled; }
@@ -515,136 +400,125 @@ void register_interrupt_handler(uint8_t n, isr_t handler) {
   interrupt_handlers[n] = handler;
 }
 
-// ── EOI dispatch
-// ──────────────────────────────────────────────────────────────
 static void send_eoi(struct registers *regs) {
-  if (regs->int_no == LAPIC_SPURIOUS_VECTOR)
-    return;
-  if (regs->int_no < 32)
-    return;
-
-  if (apic_mode) {
-    lapic_send_eoi();
-  } else {
-    if (regs->int_no <= 47)
-      pic_send_eoi(regs->int_no - 32);
-  }
+  if (regs->int_no == 255) return;
+  if (regs->int_no < 32) return;
+  if (apic_mode) lapic_send_eoi();
+  else if (regs->int_no <= 47) pic_send_eoi(regs->int_no - 32);
 }
 
-// ── Common ISR handler (called from assembly stub)
-// ────────────────────────────
-void isr_handler(struct registers *regs) {
-  if (interrupt_handlers[regs->int_no] != 0) {
-    isr_t handler = interrupt_handlers[regs->int_no];
-    handler(regs);
-    send_eoi(regs);
-    return;
-  }
+// ── Exception Handling & Signals ─────────────────────────────────────────────
 
-  if (regs->int_no >= 32) {
-    send_eoi(regs);
-    return;
-  }
-
-  // Intercept Page Faults (#14) for native Paging and VMM checks BEFORE crashing out.
-  if (regs->int_no == 14) {
-    uint64_t cr2;
-    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
-    if (vmm_handle_page_fault(cr2, regs->err_code, regs) == 0) {
-        return; // Fault successfully handled (e.g. zero-fill on demand). Resume execution.
-    }
-  }
-
-  // ── CPU Exception → KERNEL PANIC ─────────────────────────────────────────
+static void isr_panic(struct registers *regs, const char *msg) {
   console_clear();
   console_puts("==================== KERNEL PANIC ====================\n");
-  if (regs->int_no < 32) {
-    console_puts(exception_messages[regs->int_no]);
-    console_puts(" Exception");
-  } else {
-    console_puts("Unknown Exception");
-  }
+  console_puts(msg);
   console_puts("  [INT ");
   print_dec(regs->int_no);
   console_puts("]\n");
+
+  if (regs->int_no < 32) {
+    console_puts("Exception: ");
+    console_puts(exception_messages[regs->int_no]);
+    console_puts("\n");
+  }
 
   console_puts("ERR_CODE: ");
   print_hex(regs->err_code);
   console_puts("\n\n");
 
-  // Context / privilege level
   print_context_summary(regs);
-  console_puts("\n");
-
-  // RIP / RSP first – most useful for locating the fault
-  console_puts("RIP:    ");
+  console_puts("RIP: ");
   print_hex(regs->rip);
-  console_puts("\n");
-  console_puts("RSP:    ");
+  console_puts(" RSP: ");
   print_hex(regs->rsp);
   console_puts("\n");
-  print_rflags_decoded(regs->rflags);
-  console_puts("\n");
 
-  // GPRs
-  print_reg_line("RAX", regs->rax);
-  print_reg_line("RBX", regs->rbx);
-  print_reg_line("RCX", regs->rcx);
-  print_reg_line("RDX", regs->rdx);
-  print_reg_line("RSI", regs->rsi);
-  print_reg_line("RDI", regs->rdi);
-  print_reg_line("RBP", regs->rbp);
-  print_reg_line("R8", regs->r8);
-  print_reg_line("R9", regs->r9);
-  print_reg_line("R10", regs->r10);
-  print_reg_line("R11", regs->r11);
-  print_reg_line("R12", regs->r12);
-  print_reg_line("R13", regs->r13);
-  print_reg_line("R14", regs->r14);
-  print_reg_line("R15", regs->r15);
-
-  // Exception-specific sections
   if (regs->int_no == 13) {
-    console_puts("\n");
     print_gp_error_details(regs->err_code);
-    if ((regs->cs & 0x3) == 0x3)
-      print_user_stack_words(regs->rsp, 8);
-  }
-
-  if (regs->int_no == 14) {
+  } else if (regs->int_no == 14) {
     uint64_t cr2;
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
-
-    console_puts("\n=> UNHANDLED PAGE FAULT ADDRESS (CR2): ");
+    console_puts("CR2: ");
     print_hex(cr2);
     console_puts("\n");
-
-    // Call out instruction-fetch faults explicitly (CR2 == RIP means the CPU
-    // could not fetch the next instruction -- very different root cause from a
-    // data access fault at the same address).
-    if (cr2 == regs->rip) {
-      console_puts(
-          "  NOTE: CR2 == RIP -- this is an instruction fetch fault,\n");
-      console_puts("        not a data access. The page containing the next\n");
-      console_puts("        instruction to execute is not mapped.\n");
-    }
-
     print_pf_error_details(regs->err_code);
     print_pf_walk(cr2);
   }
 
-  // Control register state (CR0 / CR3 / CR4 flags)
   print_cr_state();
-
-  // MSR state
-  console_puts("\nMSR STATE:\n");
-  print_reg_line("IA32_FS_BASE", rdmsr(0xC0000100));
-  print_reg_line("IA32_GS_BASE", rdmsr(0xC0000101));
-  print_reg_line("IA32_KERNEL_GS_BASE", rdmsr(0xC0000102));
-  print_reg_line("EFER", rdmsr(0xC0000080));
-
+  
   console_puts("\nSystem Halted.\n");
   for (;;) {
     __asm__ volatile("cli; hlt");
   }
+}
+
+static void isr_report_user_fault(struct registers *regs, int sig, uint64_t addr) {
+  (void)addr;
+  struct thread *current = sched_get_current();
+  if (current) {
+    current->pending_signals |= (1ULL << (sig - 1));
+  } else {
+    isr_panic(regs, "User fault with no thread context");
+  }
+}
+
+static void page_fault_handler(struct registers *regs) {
+  uint64_t cr2;
+  __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+
+  if (vmm_handle_page_fault(cr2, regs->err_code, regs) != 0) {
+    if ((regs->cs & 0x3) == 0x3) {
+      isr_report_user_fault(regs, SIGSEGV, cr2);
+    } else {
+      isr_panic(regs, "Unhandled Kernel Page Fault");
+    }
+  }
+}
+
+static void gpf_handler(struct registers *regs) {
+  if ((regs->cs & 0x3) == 0x3) {
+    isr_report_user_fault(regs, SIGSEGV, 0);
+  } else {
+    isr_panic(regs, "Unhandled General Protection Fault");
+  }
+}
+
+static void stack_fault_handler(struct registers *regs) {
+  if ((regs->cs & 0x3) == 0x3) {
+    isr_report_user_fault(regs, SIGSTKFLT, 0);
+  } else {
+    isr_panic(regs, "Unhandled Stack Fault");
+  }
+}
+
+void isr_init_exceptions(void) {
+  register_interrupt_handler(12, stack_fault_handler);
+  register_interrupt_handler(13, gpf_handler);
+  register_interrupt_handler(14, page_fault_handler);
+}
+
+void isr_handler(struct registers *regs) {
+  if (interrupt_handlers[regs->int_no] != 0) {
+    isr_t handler = interrupt_handlers[regs->int_no];
+    handler(regs);
+    
+    if ((regs->cs & 0x3) == 0x3) {
+      signal_deliver(regs);
+    }
+    
+    send_eoi(regs);
+    return;
+  }
+
+  if (regs->int_no >= 32) {
+    if ((regs->cs & 0x3) == 0x3) {
+      signal_deliver(regs);
+    }
+    send_eoi(regs);
+    return;
+  }
+
+  isr_panic(regs, "Unhandled CPU Exception");
 }

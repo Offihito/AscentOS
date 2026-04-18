@@ -93,7 +93,7 @@ void process_jump_usermode(uint64_t rip, uint64_t user_rsp, uint64_t pml4) {
       user_rsp; // Use rdi temporarily to hold stack
 
   __asm__ volatile(".intel_syntax noprefix\n"
-                   "mov ax, 0x1B\n"
+                   "mov ax, 0x23\n"
                    "mov ds, ax\n"
                    "mov es, ax\n"
                    "mov rsp, %[usr_stack]\n"
