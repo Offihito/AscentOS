@@ -146,6 +146,21 @@ build_coreutils() {
         find "$COREUTILS_INSTALL/bin" -type f -executable -exec "$STRIP" {} + || true
     fi
 
+    # Add 'clear' utility (not part of coreutils)
+    echo "Adding 'clear' utility ..."
+    cat > "$BUILD_DIR/clear.c" <<EOF
+#include <stdio.h>
+int main() {
+    printf("\033[2J\033[H");
+    fflush(stdout);
+    return 0;
+}
+EOF
+    "$CC" -static -O2 "$BUILD_DIR/clear.c" -o "$COREUTILS_INSTALL/bin/clear"
+    if command -v "$STRIP" >/dev/null 2>&1; then
+        "$STRIP" "$COREUTILS_INSTALL/bin/clear"
+    fi
+
     cd "$ROOT_DIR"
 
     echo ""

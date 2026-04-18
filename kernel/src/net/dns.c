@@ -15,7 +15,8 @@ static uint16_t next_local_port = 50000;
 static volatile bool dns_resolved = false;
 static uint32_t dns_resolved_ip = 0;
 
-static void dns_recv_cb(const uint8_t *payload, uint16_t length, uint32_t src_ip, uint16_t src_port) {
+static void dns_recv_cb(uint16_t local_port, const uint8_t *payload, uint16_t length, uint32_t src_ip, uint16_t src_port) {
+    (void)local_port;
     (void)src_ip;
     if (src_port != DNS_PORT) return;
     console_puts("[DNS] Received response packet!\n");

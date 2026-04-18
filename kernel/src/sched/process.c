@@ -710,7 +710,7 @@ bool process_exec_argv(const char **argv) {
     }
   }
 
-  console_clear();
+  // Note: removed console_clear() here so the prompt stays at current position
 
   // Set the TSS rsp0 to the kernel stack for hardware interrupts
   tss_set_rsp0(cpu_get_current()->stack_top);

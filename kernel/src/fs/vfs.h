@@ -11,6 +11,7 @@
 #define FS_BLOCKDEV 0x04
 #define FS_PIPE 0x05
 #define FS_SYMLINK 0x06
+#define FS_SOCKET 0x07
 #define FS_MOUNTPOINT 0x08
 
 struct vfs_node;

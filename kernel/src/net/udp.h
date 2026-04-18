@@ -15,7 +15,7 @@ typedef struct __attribute__((packed)) {
 } udp_header_t;
 
 // Callback type for incoming UDP packets
-typedef void (*udp_recv_cb_t)(const uint8_t *payload, uint16_t length, uint32_t src_ip, uint16_t src_port);
+typedef void (*udp_recv_cb_t)(uint16_t local_port, const uint8_t *payload, uint16_t length, uint32_t src_ip, uint16_t src_port);
 
 typedef struct {
     uint16_t local_port;

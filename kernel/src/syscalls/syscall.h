@@ -35,6 +35,13 @@
 #define SYS_DUP 32
 #define SYS_DUP2 33
 #define SYS_NANOSLEEP 35
+#define SYS_SOCKET 41
+#define SYS_CONNECT 42
+#define SYS_ACCEPT 43
+#define SYS_SENDTO 44
+#define SYS_RECVFROM 45
+#define SYS_BIND 49
+#define SYS_LISTEN 50
 #define SYS_FCNTL 72
 #define SYS_FTRUNCATE 77
 #define SYS_GETCWD 79
@@ -114,6 +121,7 @@ void syscall_register_arch(void);
 void syscall_register_signal(void);
 void signal_deliver_syscall(struct syscall_regs *regs);
 void syscall_register_media(void);
+void syscall_register_net(void);
 
 // ── Core init (MSRs + calls subsystem registrations) ────────────────────────
 void syscall_init(void);

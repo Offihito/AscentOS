@@ -68,6 +68,30 @@ static void tcp_send_segment(tcp_socket_t *sock, uint8_t flags, const void *data
     ipv4_send_packet(sock->remote_ip, PROTO_TCP, packet, total_len);
 }
 
+int tcp_listen(uint16_t port, tcp_recv_cb_t on_recv) {
+    int sock_id = -1;
+    for (int i = 0; i < MAX_TCP_SOCKETS; i++) {
+        if (!sockets[i].valid) {
+            sock_id = i;
+            break;
+        }
+    }
+    if (sock_id == -1) return -1;
+
+    tcp_socket_t *sock = &sockets[sock_id];
+    memset(sock, 0, sizeof(tcp_socket_t));
+    sock->valid = true;
+    sock->state = TCP_STATE_LISTEN;
+    
+    netif_t *nif = netif_get();
+    sock->local_ip = nif ? nif->ip : 0;
+    sock->local_port = port;
+    sock->recv_callback = on_recv;
+    sock->parent_sock_id = -1;
+    
+    return sock_id;
+}
+
 int tcp_connect(uint32_t ip, uint16_t port, tcp_recv_cb_t on_recv) {
     int sock_id = -1;
     for (int i = 0; i < MAX_TCP_SOCKETS; i++) {
@@ -80,6 +104,7 @@ int tcp_connect(uint32_t ip, uint16_t port, tcp_recv_cb_t on_recv) {
 
     tcp_socket_t *sock = &sockets[sock_id];
     memset(sock, 0, sizeof(tcp_socket_t));
+    sock->parent_sock_id = -1;
     sock->valid = true;
     sock->state = TCP_STATE_SYN_SENT;
     
@@ -173,10 +198,48 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
     const uint8_t *data = payload + data_offset;
 
     tcp_socket_t *sock = NULL;
+    int listen_sock_idx = -1;
+    
     for (int i = 0; i < MAX_TCP_SOCKETS; i++) {
-        if (sockets[i].valid && sockets[i].local_port == dst_port && sockets[i].remote_ip == src_ip && sockets[i].remote_port == src_port) {
-            sock = &sockets[i];
-            break;
+        if (sockets[i].valid && sockets[i].local_port == dst_port) {
+            if (sockets[i].remote_ip == src_ip && sockets[i].remote_port == src_port) {
+                sock = &sockets[i];
+                break;
+            } else if (sockets[i].state == TCP_STATE_LISTEN) {
+                listen_sock_idx = i;
+            }
+        }
+    }
+
+    if (!sock && listen_sock_idx >= 0) {
+        if ((hdr->flags & TCP_FLAG_SYN) && !(hdr->flags & TCP_FLAG_ACK)) {
+            int new_sock_idx = -1;
+            for (int i = 0; i < MAX_TCP_SOCKETS; i++) {
+                if (!sockets[i].valid) {
+                    new_sock_idx = i;
+                    break;
+                }
+            }
+            if (new_sock_idx >= 0) {
+                tcp_socket_t *listen_sock = &sockets[listen_sock_idx];
+                if (listen_sock->accept_count < TCP_MAX_BACKLOG) {
+                    tcp_socket_t *new_sock = &sockets[new_sock_idx];
+                    memset(new_sock, 0, sizeof(tcp_socket_t));
+                    new_sock->valid = true;
+                    new_sock->state = TCP_STATE_SYN_RCVD;
+                    new_sock->local_ip = listen_sock->local_ip;
+                    new_sock->local_port = listen_sock->local_port;
+                    new_sock->remote_ip = src_ip;
+                    new_sock->remote_port = src_port;
+                    new_sock->seq_num = 0xCCDDEEFF;
+                    new_sock->ack_num = seq + 1;
+                    new_sock->recv_callback = listen_sock->recv_callback;
+                    new_sock->parent_sock_id = listen_sock_idx;
+                    
+                    tcp_send_segment(new_sock, TCP_FLAG_SYN | TCP_FLAG_ACK, NULL, 0);
+                    return;
+                }
+            }
         }
     }
 
@@ -198,6 +261,28 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
             }
             break;
 
+        case TCP_STATE_SYN_RCVD:
+            if (hdr->flags & TCP_FLAG_ACK) {
+                sock->state = TCP_STATE_ESTABLISHED;
+                sock->seq_num = ack;
+                
+                if (sock->parent_sock_id >= 0) {
+                    tcp_socket_t *psock = &sockets[sock->parent_sock_id];
+                    if (psock->accept_count < TCP_MAX_BACKLOG) {
+                        psock->accept_queue[psock->accept_count++] = (sock - sockets);
+                    }
+                }
+                
+                if (data_len > 0) {
+                    if (sock->recv_callback) {
+                        sock->recv_callback(sock - sockets, data, data_len);
+                    }
+                    sock->ack_num += data_len;
+                    tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
+                }
+            }
+            break;
+
         case TCP_STATE_ESTABLISHED:
             if (hdr->flags & TCP_FLAG_ACK) {
                 // If the ACK advances our sent window, update our seq_num
@@ -210,7 +295,7 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
                 if (seq == sock->ack_num) {
                     // In-order data
                     if (sock->recv_callback) {
-                        sock->recv_callback(data, data_len);
+                        sock->recv_callback(sock - sockets, data, data_len);
                     }
                     sock->ack_num += data_len;
                     tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
@@ -250,4 +335,30 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
         default:
             break;
     }
+}
+
+int tcp_accept(int sock_id) {
+    if (sock_id < 0 || sock_id >= MAX_TCP_SOCKETS) return -1;
+    tcp_socket_t *sock = &sockets[sock_id];
+    if (!sock->valid || sock->state != TCP_STATE_LISTEN) return -1;
+
+    if (sock->accept_count > 0) {
+        int new_sock_id = sock->accept_queue[0];
+        for (int i = 1; i < sock->accept_count; i++) {
+            sock->accept_queue[i - 1] = sock->accept_queue[i];
+        }
+        sock->accept_count--;
+        return new_sock_id;
+    }
+    return -1;
+}
+
+int tcp_get_remote_info(int sock_id, uint32_t *ip, uint16_t *port) {
+    if (sock_id < 0 || sock_id >= MAX_TCP_SOCKETS) return -1;
+    tcp_socket_t *sock = &sockets[sock_id];
+    if (!sock->valid) return -1;
+    
+    if (ip) *ip = sock->remote_ip;
+    if (port) *port = sock->remote_port;
+    return 0;
 }

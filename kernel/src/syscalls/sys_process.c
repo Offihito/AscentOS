@@ -141,6 +141,51 @@ void process_do_exit(uint64_t status) {
     }
   }
 
+  // ── Non-forked (main) process exit ──────────────────────────────────────
+  // Close all open file descriptors to prevent resource leaks.
+  // Must deduplicate: dup/dup2 can make multiple fds share the same node.
+  // Closing a node twice would use-after-free and corrupt kernel memory.
+  if (current) {
+    for (int i = 3; i < MAX_FDS; i++) {
+      if (current->fds[i]) {
+        vfs_node_t *node = current->fds[i];
+        current->fds[i] = NULL;
+
+        // Skip if this node is the console (shared with stdin/stdout/stderr)
+        if (node == current->fds[0] || node == current->fds[1] ||
+            node == current->fds[2]) {
+          current->fds[i] = NULL;
+          continue;
+        }
+
+        // Check if this same node pointer appears at a higher index (dup'd)
+        // and NULL those out too, so we only close once
+        for (int j = i + 1; j < MAX_FDS; j++) {
+          if (current->fds[j] == node) {
+            current->fds[j] = NULL;
+          }
+        }
+
+        if (node->close) node->close(node);
+      }
+    }
+
+    // Switch to kernel CR3 and free the user address space BEFORE longjmp.
+    // Without this, the longjmp returns with the dead process's page tables
+    // still active, risking page faults during bash restart.
+    if (current->cr3) {
+      struct cpu_info *cpu = cpu_get_current();
+      uint64_t saved_cr3 = current->cr3;
+      __asm__ volatile("mov %0, %%cr3" ::"r"(cpu->kernel_cr3) : "memory");
+      current->cr3 = 0;
+      vmm_free_user_pages(saved_cr3);
+    }
+
+    // Clear VMA and mmap state
+    vma_list_init(&current->vmas);
+    mm_reset_mmap_state(current);
+  }
+
   kernel_longjmp(process_return_ctx, 1);
 }
 
@@ -413,8 +458,10 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
       ASCENTOS_USER_STACK_TOP, path, (const char **)k_argv,
       (const char **)k_envp, &elf_info);
 
+  uint64_t actual_entry = elf_info.interp_base ? elf_info.interp_entry : elf_info.entry;
+
   klog_puts("[EXECVE] Success, returning to user space at ");
-  klog_uint64(elf_info.entry);
+  klog_uint64(actual_entry);
   klog_puts("\n");
 
   // Free the old address space (from fork) now that the new one is loaded.
@@ -437,7 +484,7 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   wrmsr(IA32_FS_BASE, 0);
 
   // Set the return registers for the syscall exit handler to jump to!
-  regs->rip = elf_info.entry;
+  regs->rip = actual_entry;
   regs->rsp = user_rsp;
 
   // We are heavily relying on the fact that `regs` pointer is on the KERNEL

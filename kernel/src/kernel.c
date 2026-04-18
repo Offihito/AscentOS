@@ -340,7 +340,21 @@ void kmain(void) {
   klog_uint64(pmm_get_usable_memory() / (1024 * 1024));
   klog_puts(" MB\n\n");
 
-  klog_puts("\nKernel initialization complete. Starting shell...\n");
-  shell_init();
-  shell_run();
+  klog_puts("\nKernel initialization complete.\n");
+
+  console_clear();
+
+  while (1) {
+    klog_puts("Starting Bash session...\n");
+    const char *bash_argv[] = {"/bash.elf", NULL};
+    if (!process_exec_argv(bash_argv)) {
+      klog_puts(
+          "\n[ERR] Failed to start Bash. Falling back to kernel shell.\n");
+      shell_init();
+      shell_run();
+      break;
+    }
+    // If we returned here, bash exited (via longjmp from sys_exit)
+    klog_puts("\n[INFO] Session ended. Restarting Bash...\n");
+  }
 }

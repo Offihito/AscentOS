@@ -62,6 +62,7 @@ void syscall_init(void) {
   syscall_register_mm();
   syscall_register_arch();
   syscall_register_signal();
+  syscall_register_net();
 
   // 1. Enable System Call Extensions and No-Execute
   uint64_t efer = rdmsr(IA32_EFER);

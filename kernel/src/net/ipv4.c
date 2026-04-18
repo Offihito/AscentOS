@@ -36,7 +36,7 @@ void ipv4_handle_packet(const uint8_t *data, uint16_t len) {
     uint32_t dst_ip = ntohl(hdr->dst_ip);
 
     // Filter packets not for us (and not broadcast)
-    if (dst_ip != nif->ip && dst_ip != 0xFFFFFFFF) {
+    if (dst_ip != nif->ip && dst_ip != 0xFFFFFFFF && dst_ip != 0x7F000001) {
         return;
     }
 
@@ -62,6 +62,30 @@ void ipv4_handle_packet(const uint8_t *data, uint16_t len) {
 int ipv4_send_packet(uint32_t dst_ip, uint8_t protocol, const void *data, uint16_t len) {
     netif_t *nif = netif_get();
     if (!nif->up) return -1;
+
+    if (dst_ip == 0x7F000001 || dst_ip == nif->ip) {
+        ipv4_header_t hdr;
+        hdr.version_ihl = (4 << 4) | 5;
+        hdr.tos = 0;
+        hdr.length = htons(sizeof(ipv4_header_t) + len);
+        hdr.id = htons(next_id++);
+        hdr.flags_offset = 0;
+        hdr.ttl = 64;
+        hdr.protocol = protocol;
+        hdr.src_ip = htonl(dst_ip);  // Loopback: source = destination
+        hdr.dst_ip = htonl(dst_ip);
+        hdr.checksum = 0;
+        hdr.checksum = calculate_checksum(&hdr, sizeof(ipv4_header_t));
+
+        uint8_t packet[sizeof(ipv4_header_t) + len];
+        memcpy(packet, &hdr, sizeof(ipv4_header_t));
+        if (len > 0 && data) {
+            memcpy(packet + sizeof(ipv4_header_t), data, len);
+        }
+        
+        ipv4_handle_packet(packet, sizeof(ipv4_header_t) + len);
+        return 0;
+    }
 
     // Routing: if destination is off-subnet, send via gateway
     uint32_t next_hop = dst_ip;

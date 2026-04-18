@@ -57,7 +57,8 @@ static void shell_print_hex_byte(uint8_t num) {
 
 static void print_prompt(void) { console_puts("AscentOS> "); }
 
-static void http_recv_cb(const uint8_t *p, uint16_t l) {
+static void http_recv_cb(int sock_id, const uint8_t *p, uint16_t l) {
+  (void)sock_id;
   for (uint16_t i = 0; i < l; i++) {
     console_putchar((char)p[i]);
   }

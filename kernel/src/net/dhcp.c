@@ -77,7 +77,8 @@ static void dhcp_send_request(void) {
     dhcp_state = 3;
 }
 
-static void dhcp_recv_cb(const uint8_t *payload, uint16_t length, uint32_t src_ip, uint16_t src_port) {
+static void dhcp_recv_cb(uint16_t local_port, const uint8_t *payload, uint16_t length, uint32_t src_ip, uint16_t src_port) {
+    (void)local_port;
     (void)src_ip;
     (void)src_port;
     if (length < sizeof(dhcp_packet_t) - 308) return;

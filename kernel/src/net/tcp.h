@@ -28,15 +28,18 @@ typedef struct {
 
 typedef enum {
     TCP_STATE_CLOSED,
+    TCP_STATE_LISTEN,
     TCP_STATE_SYN_SENT,
+    TCP_STATE_SYN_RCVD,
     TCP_STATE_ESTABLISHED,
     TCP_STATE_FIN_WAIT1,
     TCP_STATE_FIN_WAIT2
 } tcp_state_t;
 
-#define MAX_TCP_SOCKETS 8
+#define MAX_TCP_SOCKETS 32
+#define TCP_MAX_BACKLOG 8
 
-typedef void (*tcp_recv_cb_t)(const uint8_t *payload, uint16_t length);
+typedef void (*tcp_recv_cb_t)(int sock_id, const uint8_t *payload, uint16_t length);
 
 typedef struct {
     bool valid;
@@ -51,12 +54,21 @@ typedef struct {
     uint32_t ack_num; // Their next sequence number we expect to ACK
     
     tcp_recv_cb_t recv_callback;
+
+    // Server mode fields
+    int parent_sock_id; // If spawned from a listening socket
+    int accept_queue[TCP_MAX_BACKLOG];
+    int accept_count;
 } tcp_socket_t;
 
 void tcp_init(void);
+int tcp_listen(uint16_t port, tcp_recv_cb_t on_recv);
 int tcp_connect(uint32_t ip, uint16_t port, tcp_recv_cb_t on_recv);
 int tcp_send(int sock_id, const void *data, uint16_t len);
 void tcp_close(int sock_id);
 void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip, uint32_t dst_ip);
+
+int tcp_accept(int sock_id);
+int tcp_get_remote_info(int sock_id, uint32_t *ip, uint16_t *port);
 
 #endif
