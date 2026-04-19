@@ -11,6 +11,7 @@ static uint32_t ext2_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size,
                                uint8_t *buffer);
 static uint32_t ext2_write_impl(vfs_node_t *node, uint32_t offset,
                                 uint32_t size, uint8_t *buffer);
+static int ext2_truncate_impl(vfs_node_t *node, uint32_t new_len);
 static struct dirent *ext2_readdir_impl(vfs_node_t *node, uint32_t index);
 static vfs_node_t *ext2_finddir_impl(vfs_node_t *node, char *name);
 static int ext2_create_impl(vfs_node_t *node, char *name, uint16_t permission);
@@ -598,6 +599,7 @@ static vfs_node_t *ext2_make_vfs_node(ext2_mount_t *mnt, uint32_t inode_num,
     node->flags = FS_FILE;
     node->read = ext2_read_impl;
     node->write = ext2_write_impl;
+    node->truncate = ext2_truncate_impl;
     node->chmod = ext2_chmod_impl;
     node->chown = ext2_chown_impl;
   } else if ((inode->i_mode & 0xF000) == EXT2_S_IFLNK) {
@@ -657,7 +659,23 @@ static uint32_t ext2_read_impl(vfs_node_t *node, uint32_t offset, uint32_t size,
   return bytes_read;
 }
 
-// ── VFS Write Implementation ────────────────────────────────────────────────
+static int ext2_truncate_impl(vfs_node_t *node, uint32_t new_len) {
+  if (!node || node->flags != FS_FILE || !node->device)
+    return -1;
+
+  ext2_mount_t *mnt = (ext2_mount_t *)node->device;
+  ext2_inode_t inode;
+  if (ext2_read_inode(mnt, node->inode, &inode) != 0)
+    return -1;
+
+  inode.i_size = new_len;
+  node->length = new_len;
+
+  // We just update the size and rewrite the inode. 
+  // Blocks are intentionally not freed here for simplicity,
+  // they will be naturally reused if the file grows again.
+  return ext2_write_inode(mnt, node->inode, &inode);
+}
 
 static uint32_t ext2_write_impl(vfs_node_t *node, uint32_t offset,
                                 uint32_t size, uint8_t *buffer) {

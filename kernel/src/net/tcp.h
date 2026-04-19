@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "../sched/wait.h"
 
 #define TCP_FLAG_FIN 0x01
 #define TCP_FLAG_SYN 0x02
@@ -59,6 +60,8 @@ typedef struct {
     int parent_sock_id; // If spawned from a listening socket
     int accept_queue[TCP_MAX_BACKLOG];
     int accept_count;
+    
+    wait_queue_t wait_queue;
 } tcp_socket_t;
 
 void tcp_init(void);

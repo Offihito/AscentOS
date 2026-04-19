@@ -4,6 +4,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "drivers/input/scancode.h"
+#include "../../sched/wait.h"
+
+extern wait_queue_t keyboard_wait_queue;
 
 void keyboard_init(void);
 

@@ -86,6 +86,7 @@ struct thread {
   bool is_forked_child;         // True for forked children (affects sys_exit)
   bool is_idle;                 // True for idle thread (cannot be terminated)
   void *fork_ctx;               // Saved register state for child entry
+  bool is_main_session;        // True if this is the primary user session (Bash)
   struct thread *parent;        // Pointer to parent thread (for wait4)
   struct thread *children;      // Head of children list
   struct thread *sibling_next; // Link to next sibling in parent's children list
@@ -118,7 +119,8 @@ void sched_init(void);
 
 struct cpu_info;
 struct thread *sched_create_kernel_thread(void (*entry_point)(void),
-                                          struct cpu_info *explicit_cpu);
+                                          struct cpu_info *explicit_cpu,
+                                          bool enqueue);
 
 void sched_tick(struct registers *regs);
 void sched_yield(void);

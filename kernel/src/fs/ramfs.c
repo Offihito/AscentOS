@@ -74,6 +74,42 @@ uint32_t ramfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
   return size;
 }
 
+static int ramfs_truncate(vfs_node_t *node, uint32_t new_len) {
+  if (!node || node->flags != FS_FILE || !node->device)
+    return -1;
+
+  ramfs_file_t *file = (ramfs_file_t *)node->device;
+  if (new_len == 0) {
+    if (file->data) {
+      kfree(file->data);
+      file->data = NULL;
+      file->capacity = 0;
+    }
+    node->length = 0;
+    return 0;
+  }
+
+  if (new_len > file->capacity) {
+    uint32_t new_cap = new_len;
+    uint8_t *new_data = kmalloc(new_cap);
+    if (!new_data)
+      return -1; // ENOMEM
+    if (file->data) {
+      memcpy(new_data, file->data, node->length);
+      kfree(file->data);
+    }
+    if (new_len > node->length)
+      memset(new_data + node->length, 0, new_len - node->length);
+    file->data = new_data;
+    file->capacity = new_cap;
+  } else if (new_len > node->length) {
+    memset(file->data + node->length, 0, new_len - node->length);
+  }
+
+  node->length = new_len;
+  return 0;
+}
+
 static struct dirent *ramfs_readdir(vfs_node_t *node, uint32_t index) {
   if (!node || !node->device)
     return 0;
@@ -164,6 +200,7 @@ static vfs_node_t *ramfs_make_node(char *name, uint16_t perm, uint32_t type) {
     n->device = f;
     n->read = ramfs_read;
     n->write = ramfs_write;
+    n->truncate = ramfs_truncate;
   }
   // Block devices would be populated via ramfs_mount_node
 

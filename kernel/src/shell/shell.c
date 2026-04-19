@@ -160,7 +160,7 @@ static void execute_command(char *cmd) {
     pcspeaker_nosound();
   } else if (strcmp(cmd, "test-task") == 0) {
     for (int i = 0; i < 4; i++) {
-      sched_create_kernel_thread(test_task_entry, NULL);
+      sched_create_kernel_thread(test_task_entry, NULL, true);
     }
     console_puts("Spawned 4 test tasks across SMP cores!\n");
   } else if (strcmp(cmd, "heaptest") == 0) {

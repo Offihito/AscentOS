@@ -33,16 +33,7 @@ static void process_copy_to_user(uint64_t *pml4, uint64_t dest_user_va,
   }
 }
 
-// ── Kernel setjmp/longjmp for returning from userspace ──────────────────────
-// jmp_buf: rbx, rbp, r12, r13, r14, r15, rsp, rip  (8 x uint64_t)
-typedef uint64_t kernel_jmp_buf[8];
-
-extern int kernel_setjmp(kernel_jmp_buf buf);
-extern void kernel_longjmp(kernel_jmp_buf buf, int val)
-    __attribute__((noreturn));
-
-// Global context buffer: sys_exit will longjmp here to return to shell.
-kernel_jmp_buf process_return_ctx;
+// Removed process_return_ctx as we now use restart_main_session
 
 // MSR constants for TLS base registers
 #define IA32_KERNEL_GS_BASE 0xC0000102
@@ -641,7 +632,7 @@ bool process_exec_argv(const char **argv) {
   if (!argv || !argv[0])
     return false;
 
-  klog_puts("[PROC] Attempting to execute: ");
+  klog_puts("[PROC] Executing main session: ");
   klog_puts(argv[0]);
   klog_puts("\n");
 
@@ -661,8 +652,9 @@ bool process_exec_argv(const char **argv) {
     current->cr3 = (uint64_t)pml4;
     __asm__ volatile("mov %0, %%cr3" ::"r"(current->cr3) : "memory");
 
-    // Clear the memory state
-    vma_list_init(&current->vmas);
+    // Destroy old VMA tree nodes before resetting
+    extern void vma_list_destroy(struct vma_list * list);
+    vma_list_destroy(&current->vmas);
     mm_reset_mmap_state(current);
   }
 
@@ -714,19 +706,6 @@ bool process_exec_argv(const char **argv) {
 
   // Set the TSS rsp0 to the kernel stack for hardware interrupts
   tss_set_rsp0(cpu_get_current()->stack_top);
-
-  // Save kernel context so sys_exit can return here
-  if (kernel_setjmp(process_return_ctx) != 0) {
-    // ── We've been longjmp'd back from sys_exit ──
-    // Restore kernel data segments (syscall came from Ring 3)
-    __asm__ volatile("mov $0x10, %%ax\n" // Kernel Data selector
-                     "mov %%ax, %%ds\n"
-                     "mov %%ax, %%es\n" ::
-                         : "eax");
-    // Re-enable interrupts (FMASK cleared IF on syscall entry)
-    __asm__ volatile("sti");
-    return true;
-  }
 
   // Issue the jump to userspace (does not return normally)
   uint64_t actual_entry =

@@ -2,6 +2,7 @@
 #include "../console/console.h"
 #include "../console/klog.h"
 #include "../drivers/audio/sb16.h"
+#include "../drivers/timer/pit.h"
 #include "../fb/framebuffer.h"
 #include "../font/font.h"
 #include "../fs/ramfs.h"
@@ -233,42 +234,13 @@ static uint64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2,
     return (uint64_t)-9; // EBADF
 
   vfs_node_t *node = t->fds[fd];
-  if (!node || node->flags != FS_FILE)
+  if (!node || (node->flags & 0xFF) != FS_FILE)
     return (uint64_t)-1; // EPERM
-  if (!node->device)
-    return (uint64_t)-1;
 
-  ramfs_file_t *file = (ramfs_file_t *)node->device;
-  uint32_t new_len = (uint32_t)length;
-  if (new_len == 0) {
-    if (file->data) {
-      kfree(file->data);
-      file->data = NULL;
-      file->capacity = 0;
-    }
-    node->length = 0;
+  if (vfs_truncate(node, (uint32_t)length) == 0) {
     return 0;
   }
-
-  if (new_len > file->capacity) {
-    uint32_t new_cap = new_len;
-    uint8_t *new_data = kmalloc(new_cap);
-    if (!new_data)
-      return (uint64_t)-12; // ENOMEM
-    if (file->data) {
-      memcpy(new_data, file->data, node->length);
-      kfree(file->data);
-    }
-    if (new_len > node->length)
-      memset(new_data + node->length, 0, new_len - node->length);
-    file->data = new_data;
-    file->capacity = new_cap;
-  } else if (new_len > node->length) {
-    memset((uint8_t *)file->data + node->length, 0, new_len - node->length);
-  }
-
-  node->length = new_len;
-  return 0;
+  return (uint64_t)-1;
 }
 
 // ── fd_write ─────────────────────────────────────────────────────────────────
@@ -732,16 +704,71 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
 }
 
 // Stub for poll(2) - used by musl stdio for detecting tty
+struct pollfd {
+  int fd;
+  short events;
+  short revents;
+};
+
 static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout,
                          uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)fds_ptr;
-  (void)nfds;
-  (void)timeout;
   (void)a3;
   (void)a4;
   (void)a5;
-  // Return 0 (no events) with timeout - musl uses this to check if fd is a tty
-  return 0;
+
+  if (!is_user_ptr(fds_ptr))
+    return (uint64_t)-14; // EFAULT
+
+  struct thread *t = sched_get_current();
+  struct pollfd *fds = (struct pollfd *)fds_ptr;
+
+  uint64_t start_ticks = pit_get_ticks();
+  uint64_t timeout_ticks = (timeout == (uint64_t)-1) ? 0 : (timeout / 10);
+  if (timeout != (uint64_t)-1 && timeout_ticks == 0 && timeout > 0)
+    timeout_ticks = 1;
+
+  while (1) {
+    int count = 0;
+    for (uint64_t i = 0; i < nfds; i++) {
+      fds[i].revents = 0;
+      int fd = fds[i].fd;
+      if (fd < 0)
+        continue;
+
+      if (fd >= MAX_FDS || !t->fds[fd]) {
+        fds[i].revents = POLLNVAL;
+        count++;
+        continue;
+      }
+
+      int revents = vfs_poll(t->fds[fd], fds[i].events);
+      if (revents != 0) {
+        fds[i].revents = revents;
+        count++;
+      }
+    }
+
+    if (count > 0)
+      return (uint64_t)count;
+    if (timeout == 0)
+      return 0;
+
+    uint64_t current_ticks = pit_get_ticks();
+    if (timeout != (uint64_t)-1 &&
+        (current_ticks - start_ticks) >= timeout_ticks)
+      return 0;
+
+    // Block the thread. We'll be woken up by a driver's wait_queue_wake_all
+    // or by the scheduler timer if we set wakeup_ticks.
+    t->state = THREAD_BLOCKED;
+    if (timeout != (uint64_t)-1) {
+      t->wakeup_ticks = start_ticks + timeout_ticks;
+    } else {
+      t->wakeup_ticks = 0;
+    }
+
+    sched_yield();
+  }
 }
 
 // Simple xorshift64 PRNG state
@@ -756,7 +783,6 @@ static void prng_seed(void) {
   __asm__ volatile("rdtsc" : "=A"(tsc));
 
   // Mix with PIT ticks if available
-  extern uint64_t pit_get_ticks(void);
   uint64_t ticks = pit_get_ticks();
 
   // Combine sources

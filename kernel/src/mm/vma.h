@@ -36,6 +36,9 @@ struct vma_list {
 // Initialize a VMA list
 void vma_list_init(struct vma_list *list);
 
+// Destroy a VMA list, freeing all AVL tree nodes
+void vma_list_destroy(struct vma_list *list);
+
 // Add a new VMA region, returns 0 on success or -1 on overlap/OOM
 int vma_add(struct vma_list *list, uint64_t start, uint64_t end, uint64_t prot,
             uint64_t flags, int fd, uint64_t offset);

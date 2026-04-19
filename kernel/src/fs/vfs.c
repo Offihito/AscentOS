@@ -109,6 +109,25 @@ int vfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid) {
   return -1;
 }
 
+int vfs_truncate(vfs_node_t *node, uint32_t size) {
+  if (node && node->truncate) {
+    return node->truncate(node, size);
+  }
+  return -1;
+}
+
+int vfs_poll(vfs_node_t *node, int events) {
+  if (node && node->poll) {
+    return node->poll(node, events);
+  }
+  // Default: if no poll handler, assume ready for regular files
+  uint32_t type = (node->flags & 0xFF);
+  if (type == FS_FILE || type == FS_DIRECTORY) {
+    return events & (POLLIN | POLLOUT);
+  }
+  return 0;
+}
+
 #define MAX_SYMLINK_DEPTH 8
 
 vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {

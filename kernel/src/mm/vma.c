@@ -171,6 +171,20 @@ void vma_list_init(struct vma_list *list) {
   list->count = 0;
 }
 
+static void vma_destroy_recursive(struct vma *node) {
+  if (!node)
+    return;
+  vma_destroy_recursive(node->left);
+  vma_destroy_recursive(node->right);
+  kfree(node);
+}
+
+void vma_list_destroy(struct vma_list *list) {
+  vma_destroy_recursive(list->root);
+  list->root = NULL;
+  list->count = 0;
+}
+
 int vma_add(struct vma_list *list, uint64_t start, uint64_t end, uint64_t prot,
             uint64_t flags, int fd, uint64_t offset) {
   if (vma_find_overlap(list, start, end)) {
@@ -393,8 +407,15 @@ void vma_merge_adjacent(struct vma_list *list) {
         uint64_t prot = cur->prot;
         uint64_t flags = cur->flags;
 
+        // Save nxt boundaries BEFORE any tree modification.
+        // The first vma_remove may free nxt's tree node (AVL
+        // copy-up during two-child deletion), making nxt a
+        // dangling pointer.
+        uint64_t nxt_start = nxt->start;
+        uint64_t nxt_end = nxt->end;
+
         vma_remove(list, cur->start, cur->end);
-        vma_remove(list, nxt->start, nxt->end);
+        vma_remove(list, nxt_start, nxt_end);
 
         vma_add(list, old_start, old_end, prot, flags, -1, 0);
 

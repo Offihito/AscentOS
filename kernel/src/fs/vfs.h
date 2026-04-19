@@ -14,6 +14,13 @@
 #define FS_SOCKET 0x07
 #define FS_MOUNTPOINT 0x08
 
+// Poll Events
+#define POLLIN     0x0001
+#define POLLOUT    0x0004
+#define POLLERR    0x0008
+#define POLLHUP    0x0010
+#define POLLNVAL   0x0020
+
 struct vfs_node;
 struct dirent {
   char name[128];
@@ -38,7 +45,9 @@ typedef int (*symlink_type_t)(struct vfs_node *, char *name, char *target);
 typedef int (*rename_type_t)(struct vfs_node *, char *old_name, char *new_name);
 typedef int (*chmod_type_t)(struct vfs_node *, uint16_t permission);
 typedef int (*chown_type_t)(struct vfs_node *, uint32_t uid, uint32_t gid);
+typedef int (*truncate_type_t)(struct vfs_node *, uint32_t);
 typedef uint64_t (*mmap_type_t)(struct vfs_node *, uint64_t length, uint64_t prot, uint64_t flags);
+typedef int (*poll_type_t)(struct vfs_node *, int events);
 
 typedef struct vfs_node {
   char name[128];
@@ -71,7 +80,9 @@ typedef struct vfs_node {
   rename_type_t rename;
   chmod_type_t chmod;
   chown_type_t chown;
+  truncate_type_t truncate;
   mmap_type_t mmap;  // Device-specific mmap handler
+  poll_type_t poll;  // Device-specific poll handler
 
   struct vfs_node *ptr; // Used by mountpoints and symlinks
 } vfs_node_t;
@@ -98,5 +109,7 @@ int vfs_symlink(vfs_node_t *node, char *name, char *target);
 int vfs_rename(vfs_node_t *node, char *old_name, char *new_name);
 int vfs_chmod(vfs_node_t *node, uint16_t permission);
 int vfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid);
+int vfs_truncate(vfs_node_t *node, uint32_t size);
+int vfs_poll(vfs_node_t *node, int events);
 
 #endif

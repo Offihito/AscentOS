@@ -267,8 +267,11 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
   }
 
   if (pt_empty) {
-    pmm_free_page((void *)pt_phys);
+    // CRITICAL: clear the directory entry FIRST so no CPU can walk
+    // into the page we're about to free, then flush, then free.
     pd_virt[pd_index] = 0;
+    vmm_flush_tlb(virtual_addr);
+    pmm_free_page((void *)pt_phys);
 
     // Check if PD is empty
     bool pd_empty = true;
@@ -280,8 +283,9 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
     }
 
     if (pd_empty) {
-      pmm_free_page((void *)pd_phys);
       pdpt_virt[pdpt_index] = 0;
+      vmm_flush_tlb(virtual_addr);
+      pmm_free_page((void *)pd_phys);
 
       // Check if PDPT is empty
       bool pdpt_empty = true;
@@ -293,8 +297,9 @@ void vmm_free_empty_tables(uint64_t *pml4, uint64_t virtual_addr) {
       }
 
       if (pdpt_empty) {
-        pmm_free_page((void *)pdpt_phys);
         pml4_virt[pml4_index] = 0;
+        vmm_flush_tlb(virtual_addr);
+        pmm_free_page((void *)pdpt_phys);
       }
     }
   }
@@ -341,8 +346,14 @@ void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
   pt_virt[pt_index] = 0;
   vmm_flush_tlb(virtual_addr);
 
-  // Recurse upward to free empty tables
-  vmm_free_empty_tables(pml4, virtual_addr);
+  // Only free empty intermediate tables for kernel-space addresses.
+  // User-space page tables (PML4 entries 0-255) must NOT be eagerly freed:
+  // doing so destroys the PD/PDPT/PML4 entries that subsequent mmap calls
+  // rely on, causing page faults.  They are cleaned up in bulk by
+  // vmm_free_user_pages() when the process exits.
+  if (pml4_index >= 256) {
+    vmm_free_empty_tables(pml4, virtual_addr);
+  }
 
 unlock:
   spinlock_release(&vmm_lock);

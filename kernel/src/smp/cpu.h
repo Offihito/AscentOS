@@ -1,21 +1,21 @@
 #ifndef SMP_CPU_H
 #define SMP_CPU_H
 
-#include <stdint.h>
-#include <stdbool.h>
 #include "../lock/spinlock.h"
+#include <stdbool.h>
+#include <stdint.h>
 
 // Forward declaration
 struct thread;
 
 // ── Limits ───────────────────────────────────────────────────────────────────
-#define MAX_CPUS        64
-#define CPU_STACK_SIZE  (16384)  // 16 KiB kernel stack per CPU
+#define MAX_CPUS 64
+#define CPU_STACK_SIZE (16384) // 16 KiB kernel stack per CPU
 
 // ── CPU Status ───────────────────────────────────────────────────────────────
-#define CPU_STATUS_OFFLINE   0
-#define CPU_STATUS_BSP       1
-#define CPU_STATUS_ONLINE    2
+#define CPU_STATUS_OFFLINE 0
+#define CPU_STATUS_BSP 1
+#define CPU_STATUS_ONLINE 2
 
 // ── Per-CPU Data ─────────────────────────────────────────────────────────────
 // Every CPU gets one of these.  The BSP's is initialized at boot; each AP
@@ -23,20 +23,20 @@ struct thread;
 //
 // At runtime the current CPU's struct is accessible via the GS segment base.
 struct cpu_info {
-    struct cpu_info *self;       // self-pointer (GS:0 → this)
-    uint32_t        cpu_id;     // logical index (0 = BSP, 1..N = APs)
-    uint32_t        apic_id;    // the LAPIC hardware ID from the MADT
-    uint8_t         status;     // CPU_STATUS_*
-    uint64_t        stack_top;  // top of this CPU's kernel stack
-    uint64_t        kernel_cr3; // page table root (shared early on)
-    uint64_t        ticks;      // per-CPU tick counter (for future scheduler)
-    
-    // -- Task Scheduling --
-    struct thread   *current_thread;
-    struct thread   *runqueue;
-    spinlock_t      queue_lock;
-    uint64_t        scratch_rsp;
-    uint64_t        reserved;
+  struct cpu_info *self; // self-pointer (GS:0 → this)
+  uint32_t cpu_id;       // logical index (0 = BSP, 1..N = APs)
+  uint32_t apic_id;      // the LAPIC hardware ID from the MADT
+  uint8_t status;        // CPU_STATUS_*
+  uint64_t stack_top;    // top of this CPU's kernel stack
+  uint64_t kernel_cr3;   // page table root (shared early on)
+  uint64_t ticks;        // per-CPU tick counter (for future scheduler)
+
+  // -- Task Scheduling --
+  struct thread *current_thread;
+  struct thread *runqueue;
+  spinlock_t queue_lock;
+  uint64_t scratch_rsp;
+  uint64_t reserved;
 } __attribute__((packed));
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -46,7 +46,8 @@ struct cpu_info {
 void cpu_init(void);
 
 // Wakes up all Application Processors (APs) discovered during cpu_init.
-// Must be called after lapic_timer_init() so that APs can calibrate their timers.
+// Must be called after lapic_timer_init() so that APs can calibrate their
+// timers.
 void cpu_init_aps(void);
 
 // Returns a pointer to the calling CPU's cpu_info (read from GS base).

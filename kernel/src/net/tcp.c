@@ -5,12 +5,27 @@
 #include "net/net.h"
 #include "lib/string.h"
 #include "console/console.h"
+#include "sched/sched.h"
+#include "drivers/timer/pit.h"
+
+static inline uint32_t tcp_generate_isn(void) {
+    uint64_t tsc;
+    __asm__ volatile("rdtsc" : "=A"(tsc));
+    static uint32_t pseudo_random = 0x98765432;
+    pseudo_random ^= pseudo_random << 13;
+    pseudo_random ^= pseudo_random >> 17;
+    pseudo_random ^= pseudo_random << 5;
+    return (uint32_t)(tsc ^ pseudo_random);
+}
 
 static tcp_socket_t sockets[MAX_TCP_SOCKETS];
 static uint16_t next_local_port = 45000;
 
 void tcp_init(void) {
     memset(sockets, 0, sizeof(sockets));
+    for (int i = 0; i < MAX_TCP_SOCKETS; i++) {
+        wait_queue_init(&sockets[i].wait_queue);
+    }
 }
 
 static uint16_t tcp_calculate_checksum(uint32_t src_ip, uint32_t dst_ip, const uint8_t *tcp_segment, uint16_t tcp_len) {
@@ -116,22 +131,51 @@ int tcp_connect(uint32_t ip, uint16_t port, tcp_recv_cb_t on_recv) {
     
     sock->remote_ip = ip;
     sock->remote_port = port;
-    sock->seq_num = 0xAA00BB00; // Arbitrary ISN
+    sock->seq_num = tcp_generate_isn();
     sock->ack_num = 0;
     sock->recv_callback = on_recv;
 
-    int attempts = 5;
-    while (attempts--) {
-        tcp_send_segment(sock, TCP_FLAG_SYN, NULL, 0);
+    wait_queue_entry_t wq_entry;
+    struct thread *current = sched_get_current();
+    if (current) {
+        wq_entry.thread = current;
+        wq_entry.next = NULL;
+        wait_queue_add(&sock->wait_queue, &wq_entry);
+    }
 
-        // Wait for Handshake up to 1 second before retrying
-        for (int wait = 0; wait < 1000; wait++) {
-            net_poll();
-            if (sock->state == TCP_STATE_ESTABLISHED) {
-                return sock_id;
-            }
-            for (volatile int d = 0; d < 10000; d++); // ~1ms
+    uint64_t start_ticks = pit_get_ticks();
+    uint64_t last_retransmit = start_ticks;
+
+    tcp_send_segment(sock, TCP_FLAG_SYN, NULL, 0);
+
+    while (sock->state == TCP_STATE_SYN_SENT && sock->valid) {
+        net_poll();
+        uint64_t now = pit_get_ticks();
+        
+        if (now - start_ticks > 5000) { // 5 seconds timeout
+            break;
         }
+
+        if (now - last_retransmit > 1000) { // retransmit every 1 sec
+            tcp_send_segment(sock, TCP_FLAG_SYN, NULL, 0);
+            last_retransmit = now;
+        }
+
+        if (current && sock->state == TCP_STATE_SYN_SENT) {
+            current->state = THREAD_BLOCKED;
+            current->wakeup_ticks = now + 10;
+            sched_yield();
+        } else if (!current) {
+            for (volatile int d = 0; d < 10000; d++);
+        }
+    }
+
+    if (current) {
+        wait_queue_remove(&sock->wait_queue, &wq_entry);
+    }
+
+    if (sock->state == TCP_STATE_ESTABLISHED) {
+        return sock_id;
     }
 
     sock->valid = false;
@@ -144,23 +188,50 @@ int tcp_send(int sock_id, const void *data, uint16_t len) {
     if (!sock->valid || sock->state != TCP_STATE_ESTABLISHED) return -1;
 
     uint32_t start_seq = sock->seq_num;
-    int attempts = 5;
-    while (attempts--) {
-        tcp_send_segment(sock, TCP_FLAG_ACK | TCP_FLAG_PSH, data, len);
+    
+    wait_queue_entry_t wq_entry;
+    struct thread *current = sched_get_current();
+    if (current) {
+        wq_entry.thread = current;
+        wq_entry.next = NULL;
+        wait_queue_add(&sock->wait_queue, &wq_entry);
+    }
 
-        // Wait for ACK
-        for (int wait = 0; wait < 1000; wait++) {
-            net_poll();
-            if (sock->seq_num == start_seq + len) {
-                return len; // Successfully ACKed
-            }
-            if (sock->state != TCP_STATE_ESTABLISHED) {
-                return -1; // Socket closed prematurely
-            }
+    uint64_t start_ticks = pit_get_ticks();
+    uint64_t last_retransmit = start_ticks;
+
+    tcp_send_segment(sock, TCP_FLAG_ACK | TCP_FLAG_PSH, data, len);
+
+    while (sock->seq_num != start_seq + len && sock->state == TCP_STATE_ESTABLISHED && sock->valid) {
+        net_poll();
+        uint64_t now = pit_get_ticks();
+
+        if (now - start_ticks > 5000) { // 5 sec timeout
+            break;
+        }
+
+        if (now - last_retransmit > 1000) { // retransmit every 1 sec
+            tcp_send_segment(sock, TCP_FLAG_ACK | TCP_FLAG_PSH, data, len);
+            last_retransmit = now;
+        }
+
+        if (current && sock->seq_num != start_seq + len && sock->state == TCP_STATE_ESTABLISHED) {
+            current->state = THREAD_BLOCKED;
+            current->wakeup_ticks = now + 10;
+            sched_yield();
+        } else if (!current) {
             for (volatile int d = 0; d < 10000; d++);
         }
     }
-    return -1; // Timeout
+
+    if (current) {
+        wait_queue_remove(&sock->wait_queue, &wq_entry);
+    }
+
+    if (sock->seq_num == start_seq + len) {
+        return len; // Successfully ACKed
+    }
+    return -1; // Timeout or Socket closed
 }
 
 void tcp_close(int sock_id) {
@@ -172,10 +243,41 @@ void tcp_close(int sock_id) {
         tcp_send_segment(sock, TCP_FLAG_FIN | TCP_FLAG_ACK, NULL, 0);
         sock->state = TCP_STATE_FIN_WAIT1;
         
-        for (int wait = 0; wait < 3000; wait++) {
+        wait_queue_entry_t wq_entry;
+        struct thread *current = sched_get_current();
+        if (current) {
+            wq_entry.thread = current;
+            wq_entry.next = NULL;
+            wait_queue_add(&sock->wait_queue, &wq_entry);
+        }
+
+        uint64_t start_ticks = pit_get_ticks();
+        uint64_t last_retransmit = start_ticks;
+
+        while (sock->state != TCP_STATE_CLOSED && sock->valid) {
             net_poll();
-            if (sock->state == TCP_STATE_CLOSED) break;
-            for (volatile int d = 0; d < 10000; d++);
+            uint64_t now = pit_get_ticks();
+
+            if (now - start_ticks > 3000) {
+                break;
+            }
+
+            if ((sock->state == TCP_STATE_FIN_WAIT1 || sock->state == TCP_STATE_FIN_WAIT2) && now - last_retransmit > 1000) {
+                tcp_send_segment(sock, TCP_FLAG_FIN | TCP_FLAG_ACK, NULL, 0);
+                last_retransmit = now;
+            }
+
+            if (current && sock->state != TCP_STATE_CLOSED) {
+                current->state = THREAD_BLOCKED;
+                current->wakeup_ticks = now + 10;
+                sched_yield();
+            } else if (!current) {
+                for (volatile int d = 0; d < 10000; d++);
+            }
+        }
+
+        if (current) {
+            wait_queue_remove(&sock->wait_queue, &wq_entry);
         }
     }
     
@@ -231,12 +333,13 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
                     new_sock->local_port = listen_sock->local_port;
                     new_sock->remote_ip = src_ip;
                     new_sock->remote_port = src_port;
-                    new_sock->seq_num = 0xCCDDEEFF;
+                    new_sock->seq_num = tcp_generate_isn();
                     new_sock->ack_num = seq + 1;
                     new_sock->recv_callback = listen_sock->recv_callback;
                     new_sock->parent_sock_id = listen_sock_idx;
                     
                     tcp_send_segment(new_sock, TCP_FLAG_SYN | TCP_FLAG_ACK, NULL, 0);
+                    wait_queue_wake_all(&listen_sock->wait_queue);
                     return;
                 }
             }
@@ -248,6 +351,7 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
     // Reject packet if RST
     if (hdr->flags & TCP_FLAG_RST) {
         sock->state = TCP_STATE_CLOSED;
+        wait_queue_wake_all(&sock->wait_queue);
         return;
     }
 
@@ -258,6 +362,7 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
                 sock->seq_num++;         // Consume our SYN's space
                 sock->state = TCP_STATE_ESTABLISHED;
                 tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
+                wait_queue_wake_all(&sock->wait_queue);
             }
             break;
 
@@ -278,7 +383,7 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
                         sock->recv_callback(sock - sockets, data, data_len);
                     }
                     sock->ack_num += data_len;
-                    tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
+                    wait_queue_wake_all(&sock->wait_queue);
                 }
             }
             break;
@@ -294,11 +399,8 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
             if (data_len > 0) {
                 if (seq == sock->ack_num) {
                     // In-order data
-                    if (sock->recv_callback) {
-                        sock->recv_callback(sock - sockets, data, data_len);
-                    }
-                    sock->ack_num += data_len;
                     tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
+                    wait_queue_wake_all(&sock->wait_queue);
                 } else if ((int32_t)(seq - sock->ack_num) < 0) {
                     // Duplicate or old packet, ACK our expected sequence number again
                     tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
@@ -309,6 +411,7 @@ void tcp_handle_packet(const uint8_t *payload, uint16_t length, uint32_t src_ip,
                 sock->ack_num++; // Consume FIN
                 tcp_send_segment(sock, TCP_FLAG_ACK, NULL, 0);
                 sock->state = TCP_STATE_CLOSED; // Simplified closure
+                wait_queue_wake_all(&sock->wait_queue);
             }
             break;
 

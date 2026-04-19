@@ -13,6 +13,7 @@ void socket_push_rx(struct socket_data *sock, const uint8_t *data, uint16_t len)
         sock->rx_buffer[sock->rx_head] = data[i];
         sock->rx_head = next_head;
     }
+    wait_queue_wake_all(&sock->wait_queue);
 }
 
 uint32_t socket_pull_rx(struct socket_data *sock, uint8_t *buffer, uint32_t size) {
@@ -71,6 +72,24 @@ static uint32_t socket_write(struct vfs_node *node, uint32_t offset, uint32_t si
     return 0; // standard write on UDP lacking sendto logic
 }
 
+static int socket_poll(struct vfs_node *node, int events) {
+    struct socket_data *sock = (struct socket_data *)node->device;
+    if (!sock) return 0;
+    
+    int revents = 0;
+    if (events & POLLIN) {
+        if (sock->rx_head != sock->rx_tail || sock->closed || sock->listening) {
+            revents |= POLLIN;
+        }
+    }
+    if (events & POLLOUT) {
+        if (!sock->closed) {
+            revents |= POLLOUT; // Sockets are generally writable in this simple stack
+        }
+    }
+    return revents;
+}
+
 static void socket_close(vfs_node_t *node) {
     if (!node) return;
     struct socket_data *data = (struct socket_data *)node->device;
@@ -109,6 +128,7 @@ vfs_node_t *socket_create_node(int domain, int type, int protocol) {
     node->close = socket_close;
     node->read = socket_read;
     node->write = socket_write;
+    node->poll = socket_poll;
 
     struct socket_data *data = (struct socket_data *)kmalloc(sizeof(struct socket_data));
     if (data) {
@@ -121,6 +141,7 @@ vfs_node_t *socket_create_node(int domain, int type, int protocol) {
         data->next = global_socket_list;
         global_socket_list = data;
         
+        wait_queue_init(&data->wait_queue);
         node->device = data;
     }
 

@@ -9,9 +9,19 @@
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../smp/cpu.h"
+#include "../drivers/timer/pit.h"
 
 static uint32_t next_tid = 1;
 spinlock_t tid_lock = SPINLOCK_INIT;
+
+// Deferred reaping structures
+struct dead_thread_info {
+    uint64_t stack_base;
+    uint64_t thread_ptr;
+    struct dead_thread_info *next;
+};
+struct dead_thread_info *dead_threads = NULL;
+spinlock_t dead_threads_lock = SPINLOCK_INIT;
 
 // Global list of all threads (for wait4)
 struct thread *global_thread_list = NULL;
@@ -90,6 +100,7 @@ void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
     target_cpu = cpu_get_bsp();
   }
 
+  __asm__ volatile("cli");
   spinlock_acquire(&target_cpu->queue_lock);
 
   if (!target_cpu->runqueue) {
@@ -105,10 +116,12 @@ void sched_enqueue_thread(struct thread *t, struct cpu_info *explicit_cpu) {
   }
 
   spinlock_release(&target_cpu->queue_lock);
+  __asm__ volatile("sti");
 }
 
 struct thread *sched_create_kernel_thread(void (*entry)(void),
-                                          struct cpu_info *explicit_cpu) {
+                                          struct cpu_info *explicit_cpu,
+                                          bool enqueue) {
   // Allocate thread struct
   struct thread *t = kmalloc(sizeof(struct thread));
   if (!t)
@@ -167,8 +180,10 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
 
   t->rsp = stack_top;
 
-  // Balance and add to a CPU's runqueue
-  sched_enqueue_thread(t, explicit_cpu);
+  // Balance and add to a CPU's runqueue conditionally
+  if (enqueue) {
+    sched_enqueue_thread(t, explicit_cpu);
+  }
 
   return t;
 }
@@ -186,13 +201,27 @@ void sched_yield(void) {
   // Use local pointers to prevent breaking if queue is modified
   spinlock_acquire(&cpu->queue_lock);
   struct thread *next_t = cpu->current_thread->next;
+  struct thread *start_t = next_t; // Keep track of the starting thread
 
   // Find next ready/running thread
   while (next_t != cpu->current_thread) {
     if (next_t->state == THREAD_READY || next_t->state == THREAD_RUNNING) {
       break;
     }
+    
+    // Check for timeout on sleeping/blocked threads
+    if ((next_t->state == THREAD_SLEEPING || next_t->state == THREAD_BLOCKED) &&
+        next_t->wakeup_ticks != 0 && pit_get_ticks() >= next_t->wakeup_ticks) {
+      next_t->state = THREAD_READY;
+      next_t->wakeup_ticks = 0;
+      break;
+    }
+    
     next_t = next_t->next;
+    if (next_t == start_t) {
+      // Broken loop gracefully, likely due to runqueue modifications
+      break;
+    }
   }
 
   if (next_t != cpu->current_thread &&
@@ -379,11 +408,13 @@ static void remove_from_runqueue(struct thread *t) {
     if (!cpu || cpu->status == CPU_STATUS_OFFLINE)
       continue;
 
+    __asm__ volatile("cli");
     spinlock_acquire(&cpu->queue_lock);
     struct thread *first = cpu->runqueue;
 
     if (!first) {
       spinlock_release(&cpu->queue_lock);
+      __asm__ volatile("sti");
       continue;
     }
 
@@ -400,6 +431,7 @@ static void remove_from_runqueue(struct thread *t) {
 
     if (!found) {
       spinlock_release(&cpu->queue_lock);
+      __asm__ volatile("sti");
       continue;
     }
 
@@ -421,6 +453,7 @@ static void remove_from_runqueue(struct thread *t) {
     }
 
     spinlock_release(&cpu->queue_lock);
+    __asm__ volatile("sti");
     return;
   }
 }
@@ -514,16 +547,37 @@ void sched_reap_thread(struct thread *t) {
     t->cr3 = 0;
   }
 
-  // 5. Free kernel stack
-  klog_puts("[REAP] Step 5: free stack\n");
-  if (t->stack_base) {
-    kfree((void *)t->stack_base);
-    t->stack_base = 0;
+  // Deferred Free: Free any previously deferred dead threads.
+  // By the time a new thread is being reaped, any previously dead threads
+  // have long been switched away from, guaranteeing their stacks are safe to free.
+  spinlock_acquire(&dead_threads_lock);
+  struct dead_thread_info *curr_dead = dead_threads;
+  dead_threads = NULL;
+  spinlock_release(&dead_threads_lock);
+
+  while (curr_dead) {
+    if (curr_dead->stack_base) {
+      kfree((void *)curr_dead->stack_base);
+    }
+    if (curr_dead->thread_ptr) {
+      kfree((void *)curr_dead->thread_ptr);
+    }
+    struct dead_thread_info *to_free = curr_dead;
+    curr_dead = curr_dead->next;
+    kfree(to_free);
   }
 
-  // 6. Free thread struct
-  klog_puts("[REAP] Step 6: free thread struct\n");
-  kfree(t);
+  // Defer Freeing for THIS thread
+  struct dead_thread_info *dead_info = kmalloc(sizeof(struct dead_thread_info));
+  if (dead_info) {
+    dead_info->stack_base = t->stack_base;
+    dead_info->thread_ptr = (uint64_t)t;
+    spinlock_acquire(&dead_threads_lock);
+    dead_info->next = dead_threads;
+    dead_threads = dead_info;
+    spinlock_release(&dead_threads_lock);
+    t->stack_base = 0;
+  }
 
   klog_puts("[REAP] Done\n");
 }

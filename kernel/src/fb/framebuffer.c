@@ -218,6 +218,20 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
   return count;
 }
 
+static int console_vfs_poll(struct vfs_node *node, int events) {
+    (void)node;
+    int revents = 0;
+    if (events & POLLIN) {
+        if (keyboard_has_char()) {
+            revents |= POLLIN;
+        }
+    }
+    if (events & POLLOUT) {
+        revents |= POLLOUT; // Console is always ready to write
+    }
+    return revents;
+}
+
 // Use console_write_batch so that each VFS write() call results in exactly
 // ONE backbuffer swap — eliminating per-character flicker for apps like kilo.
 static uint32_t console_vfs_write(struct vfs_node *node, uint32_t offset,
@@ -272,6 +286,7 @@ static void setup_chardev(vfs_node_t *dev_dir, const char *name,
                          uint32_t (*read_fn)(struct vfs_node *, uint32_t, uint32_t, uint8_t *),
                          uint32_t (*write_fn)(struct vfs_node *, uint32_t, uint32_t, uint8_t *),
                          void (*open_fn)(struct vfs_node *), void (*close_fn)(struct vfs_node *),
+                         int (*poll_fn)(struct vfs_node *, int),
                          void *device, uint32_t length) {
   (void)dev_dir; // Not needed - we use the device registry
   
@@ -289,6 +304,7 @@ static void setup_chardev(vfs_node_t *dev_dir, const char *name,
   node->write  = write_fn;
   node->open   = open_fn;
   node->close  = close_fn;
+  node->poll   = poll_fn;
   
   // Register in device registry for persistent lookups
   // This ensures device callbacks are always available,
@@ -323,31 +339,31 @@ void fb_register_vfs(void) {
 
   // /dev/console
   setup_chardev(dev_dir, "console", console_vfs_read, console_vfs_write, 
-                console_vfs_open, console_vfs_close, 0, 0);
+                console_vfs_open, console_vfs_close, console_vfs_poll, 0, 0);
 
   // /dev/tty (alias to console for now)
   setup_chardev(dev_dir, "tty", console_vfs_read, console_vfs_write, 
-                console_vfs_open, console_vfs_close, 0, 0);
+                console_vfs_open, console_vfs_close, console_vfs_poll, 0, 0);
 
   // /dev/stdin
   setup_chardev(dev_dir, "stdin", console_vfs_read, 0, 
-                console_vfs_open, console_vfs_close, 0, 0);
+                console_vfs_open, console_vfs_close, console_vfs_poll, 0, 0);
 
   // /dev/stdout
   setup_chardev(dev_dir, "stdout", 0, console_vfs_write, 
-                console_vfs_open, console_vfs_close, 0, 0);
+                console_vfs_open, console_vfs_close, 0, 0, 0);
 
   // /dev/stderr
   setup_chardev(dev_dir, "stderr", 0, console_vfs_write, 
-                console_vfs_open, console_vfs_close, 0, 0);
+                console_vfs_open, console_vfs_close, 0, 0, 0);
 
   // /dev/null
   setup_chardev(dev_dir, "null", null_vfs_read, null_vfs_write, 
-                0, 0, 0, 0);
+                0, 0, 0, 0, 0);
 
   // /dev/zero
   setup_chardev(dev_dir, "zero", zero_vfs_read, zero_vfs_write, 
-                0, 0, 0, 0);
+                0, 0, 0, 0, 0);
 
   // Note: don't free dev_dir - it still points to a valid VFS node
 }

@@ -4,6 +4,7 @@
 #include "vfs.h"
 #include "../net/tcp.h"
 #include "../net/udp.h"
+#include "../sched/wait.h"
 
 // POSIX Domain
 #define AF_INET     2
@@ -44,6 +45,7 @@ struct socket_data {
     uint32_t rx_tail;
     bool closed;
     bool listening; // True if this socket is in listen mode
+    wait_queue_t wait_queue;
 
     struct socket_data *next;
 };

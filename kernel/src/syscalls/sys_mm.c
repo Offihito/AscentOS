@@ -539,12 +539,154 @@ static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// sys_mremap
+// Linux ABI: mremap(old_addr, old_size, new_size, flags, [new_addr])
+//   rdi=old_addr  rsi=old_size  rdx=new_size  r10=flags  r8=new_addr
+// ════════════════════════════════════════════════════════════════════════════
+#define MREMAP_MAYMOVE 1
+#define MREMAP_FIXED   2
+
+static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
+                           uint64_t new_size, uint64_t flags,
+                           uint64_t new_addr_hint, uint64_t a5) {
+  (void)new_addr_hint;
+  (void)a5;
+
+  if (old_addr == 0 || old_size == 0 || new_size == 0)
+    return MAP_FAILED;
+  if (old_addr & (PAGE_SIZE - 1))
+    return MAP_FAILED;
+  if (!is_user_pointer(old_addr))
+    return MAP_FAILED;
+
+  // We only support MREMAP_MAYMOVE for now (the common musl realloc path).
+  // MREMAP_FIXED is rarely used and complex to implement.
+  if (flags & MREMAP_FIXED)
+    return MAP_FAILED;
+
+  struct thread *current = sched_get_current();
+  if (!current)
+    return MAP_FAILED;
+
+  uint64_t aligned_old = PAGE_ALIGN_UP(old_size);
+  uint64_t aligned_new = PAGE_ALIGN_UP(new_size);
+  uint64_t *pml4 = vmm_get_active_pml4();
+
+  // Shrink: just unmap the tail pages and update the VMA.
+  if (aligned_new <= aligned_old) {
+    if (aligned_new < aligned_old) {
+      uint64_t trim_base = old_addr + aligned_new;
+      uint64_t trim_len = aligned_old - aligned_new;
+      teardown_range(pml4, current, trim_base, trim_len, "mremap shrink");
+      vma_remove(&current->vmas, trim_base, trim_base + trim_len);
+    }
+    return old_addr;
+  }
+
+  // Grow: try in-place first — check if pages right after old region are free.
+  uint64_t grow_base = old_addr + aligned_old;
+  uint64_t grow_len = aligned_new - aligned_old;
+  bool can_grow_inplace = true;
+
+  // Check that the expansion area doesn't overlap any existing VMA.
+  if (vma_find_overlap(&current->vmas, grow_base, grow_base + grow_len)) {
+    can_grow_inplace = false;
+  }
+
+  // Also verify no existing page mappings in the expansion zone.
+  if (can_grow_inplace) {
+    for (uint64_t va = grow_base; va < grow_base + grow_len; va += PAGE_SIZE) {
+      if (vmm_virt_to_phys(pml4, va) != 0) {
+        can_grow_inplace = false;
+        break;
+      }
+    }
+  }
+
+  // Look up the original VMA to get its protection/flags.
+  struct vma *orig_vma = vma_find(&current->vmas, old_addr);
+  if (!orig_vma)
+    return MAP_FAILED;
+  uint64_t prot = orig_vma->prot;
+  uint64_t vma_flags = orig_vma->flags;
+  uint64_t page_flags = build_page_flags(prot);
+
+  if (can_grow_inplace) {
+    // Allocate and map the new pages.
+    for (uint64_t va = grow_base; va < grow_base + grow_len; va += PAGE_SIZE) {
+      void *phys = pmm_alloc();
+      if (!phys)
+        return MAP_FAILED; // OOM — leave partial state; not ideal but safe.
+      if (!vmm_map_page(pml4, va, (uint64_t)phys, page_flags)) {
+        pmm_free(phys);
+        return MAP_FAILED;
+      }
+      void *kva = (void *)((uint64_t)phys + HHDM_OFFSET);
+      memset(kva, 0, PAGE_SIZE);
+    }
+    // Extend the VMA to cover the new range.
+    vma_remove(&current->vmas, old_addr, old_addr + aligned_old);
+    vma_add(&current->vmas, old_addr, old_addr + aligned_new, prot, vma_flags,
+            -1, 0);
+    return old_addr;
+  }
+
+  // Cannot grow in-place.  If MAYMOVE is allowed, allocate a new region,
+  // copy old data, and unmap the old region.
+  if (!(flags & MREMAP_MAYMOVE))
+    return MAP_FAILED;
+
+  uint64_t new_addr =
+      vma_find_gap(&current->vmas, aligned_new, MMAP_REGION_BASE, MMAP_REGION_LIMIT);
+  if (new_addr == 0 || new_addr + aligned_new > MMAP_REGION_LIMIT)
+    return MAP_FAILED;
+
+  // Allocate and map new pages.
+  for (uint64_t i = 0; i < aligned_new / PAGE_SIZE; i++) {
+    void *phys = pmm_alloc();
+    if (!phys)
+      return MAP_FAILED;
+    if (!vmm_map_page(pml4, new_addr + i * PAGE_SIZE, (uint64_t)phys,
+                      page_flags)) {
+      pmm_free(phys);
+      return MAP_FAILED;
+    }
+    void *kva = (void *)((uint64_t)phys + HHDM_OFFSET);
+    memset(kva, 0, PAGE_SIZE);
+  }
+
+  // Copy old data to new location (page by page through HHDM).
+  for (uint64_t off = 0; off < aligned_old; off += PAGE_SIZE) {
+    uint64_t old_phys = vmm_virt_to_phys(pml4, old_addr + off);
+    uint64_t new_phys = vmm_virt_to_phys(pml4, new_addr + off);
+    if (old_phys && new_phys) {
+      void *src = (void *)(PAGE_ALIGN_DOWN(old_phys) + HHDM_OFFSET);
+      void *dst = (void *)(PAGE_ALIGN_DOWN(new_phys) + HHDM_OFFSET);
+      memcpy(dst, src, PAGE_SIZE);
+    }
+  }
+
+  // Tear down old mapping.
+  teardown_range(pml4, current, old_addr, aligned_old, "mremap move");
+  vma_remove(&current->vmas, old_addr, old_addr + aligned_old);
+
+  // Register new VMA.
+  vma_add(&current->vmas, new_addr, new_addr + aligned_new, prot, vma_flags,
+          -1, 0);
+
+  current->mmap_next_addr = MAX(current->mmap_next_addr, new_addr + aligned_new);
+
+  return new_addr;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Public API
 // ════════════════════════════════════════════════════════════════════════════
 
 void syscall_register_mm(void) {
   syscall_register(SYS_MMAP, sys_mmap);
   syscall_register(SYS_MUNMAP, sys_munmap);
+  syscall_register(SYS_MREMAP, sys_mremap);
   syscall_register(SYS_BRK, sys_brk);
   syscall_register(SYS_MPROTECT, sys_mprotect);
 }

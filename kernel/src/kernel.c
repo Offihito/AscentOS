@@ -82,6 +82,48 @@ static void halt(void) {
   }
 }
 
+static void init_thread_entry(void);
+
+void restart_main_session(void) __attribute__((noreturn));
+void restart_main_session(void) {
+  // Restore kernel data segments since we are coming from a syscall
+  __asm__ volatile("mov $0x10, %%ax\n"
+                   "mov %%ax, %%ds\n"
+                   "mov %%ax, %%es\n" ::
+                       : "eax");
+  __asm__ volatile("sti");
+
+  struct thread *current = sched_get_current();
+  uint64_t stack_top = current->stack_base + current->stack_size;
+  stack_top &= ~0xFULL; // Maintain 16-byte alignment
+
+  __asm__ volatile("mov %0, %%rsp\n"
+                   "mov %0, %%rbp\n"
+                   "jmp init_thread_entry\n" ::"r"(stack_top)
+                   : "memory");
+  while (1)
+    ;
+}
+
+static void init_thread_entry(void) {
+  while (1) {
+    const char *bash_argv[] = {"/bash.elf", NULL};
+
+    struct thread *current = sched_get_current();
+    if (current) {
+      current->is_main_session = true;
+    }
+
+    if (!process_exec_argv(bash_argv)) {
+      klog_puts(
+          "\n[ERR] Failed to start Bash. Falling back to kernel shell.\n");
+      shell_init();
+      shell_run();
+      break;
+    }
+  }
+}
+
 void kmain(void) {
   if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision)) {
     halt();
@@ -344,17 +386,19 @@ void kmain(void) {
 
   console_clear();
 
+  // Create a dedicated kernel thread for the init process (Bash)
+  sched_create_kernel_thread(init_thread_entry, cpu_get_info(0), true);
+
+  // Switch the CPU stack pointer away from the Limine boot stack,
+  // since it was just reclaimed by the physical memory manager.
+  // We become the idle thread for the BSP.
+  uint64_t bsp_stack = cpu_get_bsp()->stack_top;
+  __asm__ volatile("mov %0, %%rsp\n"
+                   "mov %0, %%rbp\n" ::"r"(bsp_stack)
+                   : "memory");
+
   while (1) {
-    klog_puts("Starting Bash session...\n");
-    const char *bash_argv[] = {"/bash.elf", NULL};
-    if (!process_exec_argv(bash_argv)) {
-      klog_puts(
-          "\n[ERR] Failed to start Bash. Falling back to kernel shell.\n");
-      shell_init();
-      shell_run();
-      break;
-    }
-    // If we returned here, bash exited (via longjmp from sys_exit)
-    klog_puts("\n[INFO] Session ended. Restarting Bash...\n");
+    sched_yield();
+    __asm__ volatile("hlt");
   }
 }

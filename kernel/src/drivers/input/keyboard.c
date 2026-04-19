@@ -46,11 +46,14 @@ static bool right_alt = false;
 static bool caps_lock = false;
 static bool extended_scancode = false;
 
+wait_queue_t keyboard_wait_queue;
+
 static void ring_buffer_push(char c) {
     uint32_t next = (kbd_head + 1) % KBD_BUFFER_SIZE;
     if (next != kbd_tail) {
         kbd_buffer[kbd_head] = c;
         kbd_head = next;
+        wait_queue_wake_all(&keyboard_wait_queue);
     }
 }
 
@@ -61,6 +64,7 @@ static void scancode_buffer_push(uint8_t scancode, uint8_t is_extended, uint8_t 
         scancode_buffer[scancode_head].is_extended = is_extended;
         scancode_buffer[scancode_head].is_release = is_release;
         scancode_head = next;
+        wait_queue_wake_all(&keyboard_wait_queue);
     }
 }
 
@@ -272,5 +276,6 @@ void keyboard_init(void) {
     while (inb(0x64) & 1) {
         inb(0x60);
     }
+    wait_queue_init(&keyboard_wait_queue);
     register_interrupt_handler(33, keyboard_callback);
 }

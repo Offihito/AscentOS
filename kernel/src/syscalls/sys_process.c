@@ -14,6 +14,7 @@
 
 extern void mm_reset_mmap_state(struct thread *t);
 void vma_list_init(struct vma_list *list);
+void vma_list_destroy(struct vma_list *list);
 
 // ── Path Normalization ──────────────────────────────────────────────────────
 static void path_normalize(const char *base, const char *rel, char *out) {
@@ -71,11 +72,8 @@ static void path_normalize(const char *base, const char *rel, char *out) {
     strcpy(out, "/");
 }
 
-// Defined in process.c — the saved kernel context from before entering Ring 3
-typedef uint64_t kernel_jmp_buf[8];
-extern kernel_jmp_buf process_return_ctx;
-extern void kernel_longjmp(kernel_jmp_buf buf, int val)
-    __attribute__((noreturn));
+// Used to restart bash session on exit
+extern void restart_main_session(void) __attribute__((noreturn));
 
 // Assembly trampoline that restores user registers and sysrets to Ring 3
 extern void fork_return_to_userspace(struct syscall_regs *regs)
@@ -93,14 +91,23 @@ void process_do_exit(uint64_t status) {
     sched_reparent_children(current);
   }
 
-  klog_puts("\n[SYSCALL] Process exited with status: ");
-  klog_uint64(status);
-  klog_puts("\n");
+  if (current && !current->is_main_session) {
+    klog_puts("\n[SYSCALL] Process exited with status: ");
+    klog_uint64(status);
+    klog_puts("\n");
+  }
 
   // If tid_address was set via set_tid_address, clear it (set to 0) to signal
-  // exit
+  // exit. We must check if the memory is actually mapped to avoid panicking
+  // if the user unmapped it.
   if (current && current->tid_address) {
-    *current->tid_address = 0;
+    if (current->cr3) {
+      uint64_t phys = vmm_virt_to_phys((uint64_t *)current->cr3,
+                                       (uint64_t)current->tid_address);
+      if (phys != 0) {
+        *current->tid_address = 0;
+      }
+    }
   }
 
   if (current && current->is_forked_child) {
@@ -127,6 +134,9 @@ void process_do_exit(uint64_t status) {
       // Now safely free the child's user pages
       vmm_free_user_pages(saved_cr3);
     }
+
+    // Free VMA tree nodes (vma_list_init just NULLs root, leaking them)
+    vma_list_destroy(&current->vmas);
 
     current->exit_status = (int)status;
     current->state = THREAD_ZOMBIE;
@@ -166,7 +176,8 @@ void process_do_exit(uint64_t status) {
           }
         }
 
-        if (node->close) node->close(node);
+        if (node->close)
+          node->close(node);
       }
     }
 
@@ -181,12 +192,15 @@ void process_do_exit(uint64_t status) {
       vmm_free_user_pages(saved_cr3);
     }
 
-    // Clear VMA and mmap state
-    vma_list_init(&current->vmas);
+    // Free VMA tree nodes and reset mmap state
+    vma_list_destroy(&current->vmas);
     mm_reset_mmap_state(current);
   }
 
-  kernel_longjmp(process_return_ctx, 1);
+  extern void restart_main_session(void);
+  restart_main_session();
+  while (1)
+    ;
 }
 
 static uint64_t __attribute__((noreturn)) sys_exit(uint64_t status, uint64_t a1,
@@ -439,9 +453,15 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   __asm__ volatile("mov %0, %%cr3" ::"r"(current->cr3) : "memory");
 
   // Reset memory management state for the new program
-  vma_list_init(&current->vmas);
+  vma_list_destroy(&current->vmas);
   mm_reset_mmap_state(current);
   current->fs_base = 0;
+
+  // Reset signal handlers to SIG_DFL after exec (POSIX requirement).
+  // Stale handler addresses pointing into the old address space would
+  // cause a jump to an invalid RIP on the next signal delivery.
+  memset(current->signal_handlers, 0, sizeof(current->signal_handlers));
+  current->pending_signals = 0;
 
   elf_info_t elf_info = {0};
   if (!elf_load(path, new_pml4, &elf_info)) {
@@ -458,7 +478,8 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
       ASCENTOS_USER_STACK_TOP, path, (const char **)k_argv,
       (const char **)k_envp, &elf_info);
 
-  uint64_t actual_entry = elf_info.interp_base ? elf_info.interp_entry : elf_info.entry;
+  uint64_t actual_entry =
+      elf_info.interp_base ? elf_info.interp_entry : elf_info.entry;
 
   klog_puts("[EXECVE] Success, returning to user space at ");
   klog_uint64(actual_entry);
@@ -556,7 +577,7 @@ static uint64_t sys_fork(struct syscall_regs *regs) {
   //    We FORCE it to the current CPU for now to ensure visibility and
   //    scheduling.
   struct thread *child =
-      sched_create_kernel_thread(fork_child_entry, cpu_get_current());
+      sched_create_kernel_thread(fork_child_entry, cpu_get_current(), false);
   if (!child) {
     kfree(child_regs);
     klog_puts("[FORK] Failed: could not create child thread\n");
@@ -591,7 +612,10 @@ static uint64_t sys_fork(struct syscall_regs *regs) {
   klog_uint64(child->tid);
   klog_puts("\n");
 
-  // 8. Return child PID to parent
+  // 8. Enqueue child thread now that it is fully configured
+  sched_enqueue_thread(child, cpu_get_current());
+
+  // 9. Return child PID to parent
   return child->tid;
 }
 
