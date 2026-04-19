@@ -62,6 +62,8 @@ void fb_init(struct limine_framebuffer *framebuffer) {
 }
 
 void fb_set_backbuffer_mode(bool enabled) { backbuffer_enabled = enabled; }
+bool fb_is_backbuffer_enabled(void) { return backbuffer_enabled; }
+void *fb_get_backbuffer(void) { return backbuffer; }
 
 void fb_swap_buffer(void) {
   if (!backbuffer) return;

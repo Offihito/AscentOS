@@ -11,6 +11,7 @@
 #include "cpu/pic.h"
 #include "drivers/audio/sb16.h"
 #include "drivers/input/keyboard.h"
+#include "drivers/input/mouse.h"
 #include "drivers/net/rtl8139.h"
 #include "drivers/pci/pci.h"
 #include "drivers/serial.h"
@@ -164,13 +165,14 @@ void kmain(void) {
   //  Phase 2: Legacy PIC — used temporarily until APIC takes over
   // ═══════════════════════════════════════════════════════════════════════
   pic_remap(32, 40);
-  outb(0x21, 0xFC); // unmask IRQ0 (PIT) and IRQ1 (Keyboard)
-  outb(0xA1, 0xFF); // mask everything on slave PIC
+  outb(0x21, 0xF8); // unmask IRQ0 (PIT), IRQ1 (Keyboard), and IRQ2 (Slave PIC)
+  outb(0xA1, 0xEF); // unmask IRQ12 (Mouse)
 
   pit_init(100);
   klog_puts("[OK] Legacy PIC Remapped and PIT 100Hz started.\n");
 
   keyboard_init();
+  mouse_init();
   __asm__ volatile("sti"); // Enable hardware interrupts!
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -277,6 +279,22 @@ void kmain(void) {
       klog_putchar(c);
     }
     klog_puts(" -> Vector 33\n");
+    
+    // ── 5g. Route Mouse (IRQ 12) through the I/O APIC ──────────────────
+    uint32_t mouse_gsi = 12;
+    uint16_t mouse_flags = 0;
+    acpi_get_irq_override(12, &mouse_gsi, &mouse_flags);
+    ioapic_route_irq((uint8_t)mouse_gsi, 44, (uint8_t)lapic_get_id(), mouse_flags);
+    klog_puts("[OK] Mouse routed: GSI ");
+    {
+      if (mouse_gsi >= 10) {
+        klog_putchar('1');
+        klog_putchar('0' + (char)(mouse_gsi - 10));
+      } else {
+        klog_putchar('0' + (char)mouse_gsi);
+      }
+    }
+    klog_puts(" -> Vector 44\n");
 
     // ── 5f. Switch ISR EOI routing to LAPIC ─────────────────────────────
     isr_set_apic_mode(true);
@@ -325,6 +343,7 @@ void kmain(void) {
   klog_puts("[OK] Initializing RamFS & Virtual Filesystem (VFS)...\n");
   ramfs_init();
   fb_register_vfs();
+  mouse_register_vfs();
 
   pci_init();
   ahci_init();

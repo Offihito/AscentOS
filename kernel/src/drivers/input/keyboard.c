@@ -172,10 +172,36 @@ static void keyboard_callback(struct registers *regs) {
             case 0x4D: c = KEY_RIGHT; break;
             case 0x49: c = KEY_PGUP; break;
             case 0x51: c = KEY_PGDN; break;
+            case 0x47: c = KEY_HOME; break;
+            case 0x4F: c = KEY_END; break;
             case 0x53: c = 0x7F; break; // Delete key
             default: break;
         }
         if (c) {
+            bool shift = left_shift || right_shift;
+            
+            if (shift) {
+                if (c == KEY_PGUP) {
+                    console_scroll_view(console_get_rows() - 1);
+                    return;
+                } else if (c == KEY_PGDN) {
+                    console_scroll_view(-(int)(console_get_rows() - 1));
+                    return;
+                } else if (c == KEY_UP) {
+                    console_scroll_view(1);
+                    return;
+                } else if (c == KEY_DOWN) {
+                    console_scroll_view(-1);
+                    return;
+                } else if (c == KEY_HOME) {
+                    console_scroll_view(1000000); // Jump to top
+                    return;
+                } else if (c == KEY_END) {
+                    console_scroll_view(-1000000); // Jump to bottom
+                    return;
+                }
+            }
+
             if (c == KEY_UP) {
                 const char seq[] = {'\x1B','[','A'};
                 keyboard_push_bytes(seq, 3);
@@ -233,13 +259,16 @@ static void keyboard_callback(struct registers *regs) {
         }
         
         if (c != 0) {
+            bool shift = left_shift || right_shift;
             switch ((unsigned char)c) {
                 case KEY_UP: {
+                    if (shift) { console_scroll_view(1); return; }
                     const char seq[] = {'\x1B','[','A'};
                     keyboard_push_bytes(seq, 3);
                     break;
                 }
                 case KEY_DOWN: {
+                    if (shift) { console_scroll_view(-1); return; }
                     const char seq[] = {'\x1B','[','B'};
                     keyboard_push_bytes(seq, 3);
                     break;
@@ -255,11 +284,13 @@ static void keyboard_callback(struct registers *regs) {
                     break;
                 }
                 case KEY_PGUP: {
+                    if (shift) { console_scroll_view(console_get_rows() - 1); return; }
                     const char seq[] = {'\x1B','[','5','~'};
                     keyboard_push_bytes(seq, 4);
                     break;
                 }
                 case KEY_PGDN: {
+                    if (shift) { console_scroll_view(-(int)(console_get_rows() - 1)); return; }
                     const char seq[] = {'\x1B','[','6','~'};
                     keyboard_push_bytes(seq, 4);
                     break;

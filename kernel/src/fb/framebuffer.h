@@ -17,6 +17,8 @@ void *fb_get_base(void);
 uint32_t fb_get_pitch(void);
 
 void fb_set_backbuffer_mode(bool enabled);
+bool fb_is_backbuffer_enabled(void);
+void *fb_get_backbuffer(void);
 void fb_swap_buffer(void);
 void fb_copy_to_backbuffer(
     void); // For keeping backbuffer in sync when drawing directly

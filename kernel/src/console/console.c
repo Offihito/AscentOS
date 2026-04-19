@@ -59,7 +59,7 @@ typedef struct {
 } console_char_t;
 
 #define HISTORY_MAX 1000
-#define COLS_MAX 256
+#define COLS_MAX 512
 
 static console_char_t history[HISTORY_MAX][COLS_MAX];
 static uint32_t history_write_row = 0;
@@ -146,14 +146,18 @@ void console_scroll_view(int delta) {
   spinlock_release(&console_lock);
 }
 
+uint32_t console_get_rows(void) {
+  return max_rows;
+}
+
 static void scroll_up(void) {
   uint32_t fb_w = fb_get_width();
   uint32_t fb_h = fb_get_height();
   uint32_t pitch = fb_get_pitch();
-  void *base = fb_get_base();
+  void *base = fb_is_backbuffer_enabled() ? fb_get_backbuffer() : fb_get_base();
 
   uint32_t move_height = fb_h - FONT_HEIGHT;
-  uint64_t bytes_to_copy = move_height * pitch;
+  uint64_t bytes_to_copy = (uint64_t)move_height * pitch;
 
   uint8_t *dst = (uint8_t *)base;
   uint8_t *src = (uint8_t *)base + (FONT_HEIGHT * pitch);
@@ -452,6 +456,13 @@ static void console_putchar_unlocked(char c) {
 
   serial_putchar(c);
 
+  // Scroll to bottom on any new output if we were viewing history,
+  // or at least reset the offset if desired. 
+  // Standard terminal behavior is usually to scroll on output only if 
+  // we weren't scrolled far back, but for simplicity we can just reset it 
+  // if it's user input (echoed).
+  // For now, let's just ensure manual scrolling works first.
+
   if (c == '\n') {
     cursor_x = 0;
     cursor_y++;
@@ -670,11 +681,15 @@ void console_refresh_cursor(void) {
 void console_clear(void) {
   spinlock_acquire(&console_lock);
   fb_clear(BG_COLOR);
-  memset(history, 0, sizeof(history));
+  // To simulate a clear while keeping history, we just "scroll" the current 
+  // output out of view by incrementing history_write_row.
+  if (history_write_row > 0 || cursor_y > 0) {
+      history_write_row += (max_rows - cursor_y);
+  }
+
   cursor_x = 0;
   cursor_y = 0;
   view_scroll_offset = 0;
-  history_write_row = 0;
   cursor_logical_visible = false;
   cursor_phys_on = false;
   current_fg = FG_COLOR;

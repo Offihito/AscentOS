@@ -17,5 +17,7 @@ void console_clear(void);
 void console_set_cursor_visible(bool visible);
 void console_refresh_cursor(void);
 void console_scroll_view(int delta);
+uint32_t console_get_rows(void);
+
 
 #endif

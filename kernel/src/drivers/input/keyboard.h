@@ -30,5 +30,7 @@ bool keyboard_is_scancode_mode(void);
 #define KEY_RIGHT 0xE3
 #define KEY_PGUP  0xE4
 #define KEY_PGDN  0xE5
+#define KEY_HOME  0xE6
+#define KEY_END   0xE7
 
 #endif
