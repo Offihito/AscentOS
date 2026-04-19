@@ -33,6 +33,7 @@ typedef uint32_t (*write_type_t)(struct vfs_node *, uint32_t, uint32_t,
                                  uint8_t *);
 typedef void (*open_type_t)(struct vfs_node *);
 typedef void (*close_type_t)(struct vfs_node *);
+typedef int (*ioctl_type_t)(struct vfs_node *, uint32_t request, uint64_t arg);
 typedef struct dirent *(*readdir_type_t)(struct vfs_node *, uint32_t);
 typedef struct vfs_node *(*finddir_type_t)(struct vfs_node *, char *name);
 typedef int (*create_type_t)(struct vfs_node *, char *name,
@@ -83,6 +84,7 @@ typedef struct vfs_node {
   truncate_type_t truncate;
   mmap_type_t mmap;  // Device-specific mmap handler
   poll_type_t poll;  // Device-specific poll handler
+  ioctl_type_t ioctl; // Device-specific ioctl handler
 
   struct vfs_node *ptr; // Used by mountpoints and symlinks
 } vfs_node_t;

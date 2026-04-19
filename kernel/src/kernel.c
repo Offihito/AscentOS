@@ -9,6 +9,7 @@
 #include "cpu/idt.h"
 #include "cpu/isr.h"
 #include "cpu/pic.h"
+#include "drivers/audio/ac97.h"
 #include "drivers/audio/sb16.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/input/mouse.h"
@@ -18,6 +19,8 @@
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/block.h"
 #include "drivers/timer/pit.h"
+#include "drivers/virtio/virtio.h"
+#include "drivers/virtio/virtio_gpu.h"
 #include "fb/framebuffer.h"
 #include "fs/ext2.h"
 #include "fs/ramfs.h"
@@ -279,12 +282,13 @@ void kmain(void) {
       klog_putchar(c);
     }
     klog_puts(" -> Vector 33\n");
-    
+
     // ── 5g. Route Mouse (IRQ 12) through the I/O APIC ──────────────────
     uint32_t mouse_gsi = 12;
     uint16_t mouse_flags = 0;
     acpi_get_irq_override(12, &mouse_gsi, &mouse_flags);
-    ioapic_route_irq((uint8_t)mouse_gsi, 44, (uint8_t)lapic_get_id(), mouse_flags);
+    ioapic_route_irq((uint8_t)mouse_gsi, 44, (uint8_t)lapic_get_id(),
+                     mouse_flags);
     klog_puts("[OK] Mouse routed: GSI ");
     {
       if (mouse_gsi >= 10) {
@@ -346,9 +350,17 @@ void kmain(void) {
   mouse_register_vfs();
 
   pci_init();
+
+  // ── VirtIO subsystem ─────────────────────────────────────────────────────
+  virtio_self_test();     // Phase 1: virtqueue foundation tests
+  virtio_gpu_init();      // Phase 2: GPU device discovery & init
+  virtio_gpu_self_test(); // Phase 2: GPU device tests
+
   ahci_init();
   rtl8139_init();
   net_init();
+  ac97_init();
+  ac97_register_vfs();
   sb16_init();
   sb16_register_vfs();
 
@@ -386,6 +398,7 @@ void kmain(void) {
       block_repopulate_devices();
       // Re-register framebuffer and console devices
       fb_register_vfs();
+      ac97_register_vfs();
       sb16_register_vfs();
     }
   } else {

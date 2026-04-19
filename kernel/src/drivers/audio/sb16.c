@@ -13,6 +13,14 @@
 #include "../../lib/string.h"
 #include "../../sched/sched.h"
 #include "../../fb/framebuffer.h"
+#include "../../lib/string.h"
+
+#define SNDCTL_DSP_SPEED    0xC0045002
+#define SNDCTL_DSP_STEREO   0xC0045003
+#define SNDCTL_DSP_SETFMT   0xC0045005
+#define SNDCTL_DSP_CHANNELS 0xC0045006
+#define AFMT_U8     0x00000008
+#define AFMT_S16_LE 0x00000010
 
 #define SB16_BASE 0x220
 #define MIXER_REG (SB16_BASE + 0x4)
@@ -230,6 +238,43 @@ uint32_t sb16_get_sample_rate(void) { return dsp_sample_rate; }
 uint8_t  sb16_get_channels(void)    { return dsp_channels; }
 uint8_t  sb16_get_bits(void)        { return dsp_bits; }
 
+int sb16_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
+    (void)node;
+    switch (request) {
+    case SNDCTL_DSP_SPEED: {
+        uint32_t *rate = (uint32_t *)arg;
+        if (!rate) return -14; // EFAULT
+        sb16_set_format(*rate, dsp_channels, dsp_bits);
+        *rate = dsp_sample_rate;
+        return 0;
+    }
+    case SNDCTL_DSP_STEREO: {
+        int *stereo = (int *)arg;
+        if (!stereo) return -14;
+        sb16_set_format(dsp_sample_rate, (*stereo ? 2 : 1), dsp_bits);
+        *stereo = (dsp_channels == 2);
+        return 0;
+    }
+    case SNDCTL_DSP_CHANNELS: {
+        int *ch = (int *)arg;
+        if (!ch) return -14;
+        sb16_set_format(dsp_sample_rate, (uint8_t)*ch, dsp_bits);
+        *ch = dsp_channels;
+        return 0;
+    }
+    case SNDCTL_DSP_SETFMT: {
+        int *fmt = (int *)arg;
+        if (!fmt) return -14;
+        uint8_t bits = (*fmt == AFMT_S16_LE) ? 16 : 8;
+        sb16_set_format(dsp_sample_rate, dsp_channels, bits);
+        *fmt = (dsp_bits == 16) ? AFMT_S16_LE : AFMT_U8;
+        return 0;
+    }
+    default:
+        return -25; // ENOTTY
+    }
+}
+
 #define SB16_RING_SIZE 65536
 static uint8_t sb16_ring[SB16_RING_SIZE];
 static volatile uint32_t ring_head = 0;
@@ -321,6 +366,7 @@ void sb16_register_vfs(void) {
     node->mask   = 0666;
     node->length = 0;
     node->write  = dsp_vfs_write;
+    node->ioctl  = sb16_ioctl;
 
     fb_register_device_node("dsp", node);
 }

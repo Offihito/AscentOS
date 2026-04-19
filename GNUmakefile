@@ -37,6 +37,7 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-audiodev pa,id=snd0 \
 		-device rtl8139,netdev=net0 \
 		-device sb16,audiodev=snd0 \
+		-device AC97,audiodev=snd0 \
 		-netdev user,id=net0 \
 		$(QEMUFLAGS)
 
@@ -48,6 +49,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		-hda disk.img \
 		-boot d \
 		-audiodev pa,id=snd0 \
+		-device AC97,audiodev=snd0 \
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
