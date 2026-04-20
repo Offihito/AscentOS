@@ -53,7 +53,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: test.wav test.bmp userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/test_wolfssl.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf
+disk.img: test.wav test.bmp userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf
 	dd if=/dev/zero of=disk.img bs=1M count=256
 	mkfs.ext3 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
@@ -109,7 +109,6 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_syscalls.elf userla
 	debugfs -w -R "write userland/test_time.elf test_time.elf" disk.img
 	debugfs -w -R "write userland/test_tsc_manual.elf test_tsc_manual.elf" disk.img
 	debugfs -w -R "write doomu.wad doom1.wad" disk.img
-	debugfs -w -R "write userland/test_wolfssl.elf test_wolfssl.elf" disk.img
 	debugfs -w -R "write userland/wget.elf wget.elf" disk.img
 	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
 	@if [ -d toolchain/musl-sysroot/opt/tcc ]; then \
@@ -341,10 +340,6 @@ userland/test_time.elf: userland/test_time.c $(MUSL_LIBC)
 userland/test_tsc_manual.elf: userland/test_tsc_manual.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_tsc_manual.c -o userland/test_tsc_manual.elf
-
-userland/test_wolfssl.elf: userland/test_wolfssl.c $(MUSL_LIBC)
-	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
-		userland/test_wolfssl.c -lwolfssl -o userland/test_wolfssl.elf
 
 userland/wget.elf: $(MUSL_LIBC)
 	./scripts/build-wget.sh
