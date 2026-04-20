@@ -28,6 +28,14 @@ static int device_count = 0;
 
 // Register a device node in the registry
 void fb_register_device_node(const char *name, vfs_node_t *node) {
+  // Check if device already exists and update it
+  for (int i = 0; i < device_count; i++) {
+    if (strcmp(device_registry[i].name, name) == 0) {
+      device_registry[i].node = node;
+      return;
+    }
+  }
+  // Add new entry
   if (device_count >= MAX_DEVICES) return;
   strncpy(device_registry[device_count].name, name, 63);
   device_registry[device_count].name[63] = '\0';
@@ -186,6 +194,10 @@ static uint32_t fb_vfs_read(struct vfs_node *node, uint32_t offset,
 
 // ── /dev/console VFS node ────────────────────────────────────────────────────
 
+static uint8_t canon_buffer[1024];
+static uint32_t canon_len = 0;
+static uint32_t canon_pos = 0;
+
 static void console_vfs_open(vfs_node_t *node)  { (void)node; }
 static void console_vfs_close(vfs_node_t *node) { (void)node; }
 
@@ -195,29 +207,87 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
   (void)offset;
   if (size == 0) return 0;
 
-  uint32_t count = 0;
-  while (count < size) {
-    char c = keyboard_get_char();
-
-    // ICRNL: Map CR to NL on input
-    if (c == '\r' && (console_termios.c_iflag & ICRNL))
-      c = '\n';
-
-    // ECHO: Echo input characters
-    if (console_termios.c_lflag & ECHO) {
-      console_putchar(c);
+  if (console_termios.c_lflag & ICANON) {
+    // If we have data in the canon buffer, return it first
+    if (canon_pos < canon_len) {
+      uint32_t to_copy = canon_len - canon_pos;
+      if (to_copy > size) to_copy = size;
+      memcpy(buffer, canon_buffer + canon_pos, to_copy);
+      canon_pos += to_copy;
+      if (canon_pos == canon_len) {
+        canon_pos = 0;
+        canon_len = 0;
+      }
+      return to_copy;
     }
 
-    buffer[count++] = (uint8_t)c;
+    // Otherwise, collect a new line
+    canon_len = 0;
+    canon_pos = 0;
 
-    // If we've read at least one character and no more are pending, return.
-    // This allows line-at-a-time or char-at-a-time depending on how fast
-    // the user types vs how fast the app reads.
-    if (!keyboard_has_char())
-      break;
+    while (1) {
+      char c = keyboard_get_char();
+
+      // ICRNL: Map CR to NL on input
+      if (c == '\r' && (console_termios.c_iflag & ICRNL))
+        c = '\n';
+
+      // Handle erasing (Backspace or Delete)
+      if (c == '\b' || c == 0x7F) {
+        if (canon_len > 0) {
+          canon_len--;
+          if (console_termios.c_lflag & ECHO) {
+            console_putchar('\b');
+          }
+        }
+        continue;
+      }
+
+      // Buffer the character
+      if (canon_len < sizeof(canon_buffer)) {
+        canon_buffer[canon_len++] = c;
+        if (console_termios.c_lflag & ECHO) {
+          console_putchar(c);
+        }
+      }
+
+      // If it's a newline, we have a complete line
+      if (c == '\n') break;
+    }
+
+    // Return as much as requested from the newly collected line
+    uint32_t to_copy = canon_len;
+    if (to_copy > size) to_copy = size;
+    memcpy(buffer, canon_buffer, to_copy);
+    canon_pos = to_copy;
+
+    if (canon_pos == canon_len) {
+      canon_pos = 0;
+      canon_len = 0;
+    }
+    return to_copy;
+  } else {
+    // Non-canonical mode (raw-ish)
+    uint32_t count = 0;
+    while (count < size) {
+      char c = keyboard_get_char();
+
+      // ICRNL: Map CR to NL on input
+      if (c == '\r' && (console_termios.c_iflag & ICRNL))
+        c = '\n';
+
+      // ECHO: Echo input characters
+      if (console_termios.c_lflag & ECHO) {
+        console_putchar(c);
+      }
+
+      buffer[count++] = (uint8_t)c;
+
+      if (!keyboard_has_char())
+        break;
+    }
+    return count;
   }
-
-  return count;
 }
 
 static int console_vfs_poll(struct vfs_node *node, int events) {

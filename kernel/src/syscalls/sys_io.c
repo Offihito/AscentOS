@@ -77,6 +77,56 @@ struct kstat {
   int64_t __unused[3];  // Unused padding
 };
 
+struct statx_timestamp {
+  int64_t tv_sec;
+  uint32_t tv_nsec;
+  int32_t __reserved;
+};
+
+struct statx {
+  uint32_t stx_mask;
+  uint32_t stx_blksize;
+  uint64_t stx_attributes;
+  uint32_t stx_nlink;
+  uint32_t stx_uid;
+  uint32_t stx_gid;
+  uint16_t stx_mode;
+  uint16_t __spare0[1];
+  uint64_t stx_ino;
+  uint64_t stx_size;
+  uint64_t stx_blocks;
+  uint64_t stx_attributes_mask;
+  struct statx_timestamp stx_atime;
+  struct statx_timestamp stx_btime;
+  struct statx_timestamp stx_ctime;
+  struct statx_timestamp stx_mtime;
+  uint32_t stx_rdev_major;
+  uint32_t stx_rdev_minor;
+  uint32_t stx_dev_major;
+  uint32_t stx_dev_minor;
+  uint64_t __spare2[14];
+};
+
+#define STATX_TYPE 0x0001U
+#define STATX_MODE 0x0002U
+#define STATX_NLINK 0x0004U
+#define STATX_UID 0x0008U
+#define STATX_GID 0x0010U
+#define STATX_ATIME 0x0020U
+#define STATX_MTIME 0x0040U
+#define STATX_CTIME 0x0080U
+#define STATX_INO 0x0100U
+#define STATX_SIZE 0x0200U
+#define STATX_BLOCKS 0x0400U
+#define STATX_BASIC_STATS 0x07ffU
+#define STATX_BTIME 0x0800U
+
+#define AT_STATX_SYNC_AS_STAT 0x0000
+#define AT_STATX_FORCE_SYNC 0x2000
+#define AT_STATX_DONT_SYNC 0x4000
+#define AT_STATX_SYNC_TYPE 0x6000
+#define AT_EMPTY_PATH 0x1000
+
 #include "../fb/terminal.h"
 
 struct termios console_termios;
@@ -573,6 +623,101 @@ static uint64_t sys_fstat(uint64_t fd, uint64_t statbuf_ptr, uint64_t a2,
 
   vfs_node_t *node = t->fds[fd];
   fill_kstat(ks, node);
+  return 0;
+}
+
+// ── sys_statx: statx(dirfd, path, flags, mask, statxbuf) ─────────────────────
+static uint64_t sys_statx(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
+                          uint64_t mask, uint64_t statxbuf_ptr, uint64_t a5) {
+  (void)a5;
+  (void)mask;
+  const char *path = (const char *)path_ptr;
+  struct statx *stx = (struct statx *)statxbuf_ptr;
+
+  if (!stx || !is_user_ptr((uint64_t)stx))
+    return (uint64_t)-14; // EFAULT
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  vfs_node_t *node = NULL;
+
+  if (path && path[0] != '\0') {
+    vfs_node_t *base_dir = fs_root;
+    if (path[0] != '/') {
+      if ((int)dirfd == AT_FDCWD) {
+        base_dir = vfs_resolve_path_at(fs_root, t->cwd_path);
+        if (!base_dir)
+          base_dir = fs_root;
+      } else {
+        if ((int)dirfd < 0 || (int)dirfd >= MAX_FDS || !t->fds[dirfd])
+          return (uint64_t)-9; // EBADF
+        base_dir = t->fds[dirfd];
+      }
+    }
+    node = vfs_resolve_path_at(base_dir, path);
+  } else {
+    // pathname is NULL or empty string
+    if (flags & AT_EMPTY_PATH) {
+      if ((int)dirfd == AT_FDCWD) {
+        node = vfs_resolve_path_at(fs_root, t->cwd_path);
+        if (!node)
+          node = fs_root;
+      } else {
+        if ((int)dirfd < 0 || (int)dirfd >= MAX_FDS || !t->fds[dirfd])
+          return (uint64_t)-9; // EBADF
+        node = t->fds[dirfd];
+      }
+    } else {
+      return (uint64_t)-14; // EFAULT
+    }
+  }
+
+  if (!node)
+    return (uint64_t)-2; // ENOENT
+
+  // Zero the whole structure first
+  memset(stx, 0, sizeof(struct statx));
+
+  // Populate statx
+  stx->stx_mask = STATX_BASIC_STATS; // We support most basic attributes
+  stx->stx_blksize = 4096;
+  stx->stx_nlink = 1;
+  stx->stx_uid = node->uid;
+  stx->stx_gid = node->gid;
+
+  uint32_t mode = node->mask & 0777;
+  switch (node->flags & 0xFF) {
+  case FS_FILE:
+    mode |= 0100000;
+    break;
+  case FS_DIRECTORY:
+    mode |= 0040000;
+    break;
+  case FS_CHARDEV:
+    mode |= 0020000;
+    break;
+  case FS_BLOCKDEV:
+    mode |= 0060000;
+    break;
+  case FS_SYMLINK:
+    mode |= 0120000;
+    break;
+  default:
+    mode |= 0100000;
+    break;
+  }
+  stx->stx_mode = (uint16_t)mode;
+  stx->stx_ino = node->inode;
+  stx->stx_size = node->length;
+  stx->stx_blocks = (node->length + 511) / 512;
+
+  stx->stx_atime.tv_sec = (int64_t)node->atime;
+  stx->stx_mtime.tv_sec = (int64_t)node->mtime;
+  stx->stx_ctime.tv_sec = (int64_t)node->ctime;
+  // stx_btime not supported by VFS, left as 0
+
   return 0;
 }
 
@@ -1514,6 +1659,7 @@ void syscall_register_io(void) {
   syscall_register(SYS_RMDIR, sys_rmdir);
   syscall_register(SYS_CHMOD, sys_chmod);
   syscall_register(SYS_CHOWN, sys_chown);
+  syscall_register(SYS_STATX, sys_statx);
 
   // Initialize console termios with standard defaults:
   console_termios.c_lflag = 0x0000000b; // ISIG | ICANON | ECHO

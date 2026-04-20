@@ -9,7 +9,9 @@
 #include "cpu/idt.h"
 #include "cpu/isr.h"
 #include "cpu/pic.h"
+#include "cpu/tsc.h"
 #include "drivers/audio/ac97.h"
+#include "drivers/audio/audio_dsp.h"
 #include "drivers/audio/sb16.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/input/mouse.h"
@@ -19,11 +21,13 @@
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/block.h"
 #include "drivers/timer/pit.h"
+#include "drivers/timer/rtc.h"
 #include "drivers/virtio/virtio.h"
 #include "drivers/virtio/virtio_gpu.h"
 #include "fb/framebuffer.h"
 #include "fs/ext2.h"
 #include "fs/ramfs.h"
+#include "fs/random.h"
 #include "fs/vfs.h"
 #include "io/io.h"
 #include "mm/heap.h"
@@ -160,6 +164,7 @@ void kmain(void) {
   // ═══════════════════════════════════════════════════════════════════════
   gdt_init();
   cpu_features_init();
+  tsc_init();
   idt_init();
   syscall_init();
   isr_init_exceptions();
@@ -172,7 +177,8 @@ void kmain(void) {
   outb(0xA1, 0xEF); // unmask IRQ12 (Mouse)
 
   pit_init(100);
-  klog_puts("[OK] Legacy PIC Remapped and PIT 100Hz started.\n");
+  rtc_init();
+  klog_puts("[OK] Legacy PIC Remapped, PIT 100Hz and RTC started.\n");
 
   keyboard_init();
   mouse_init();
@@ -348,6 +354,7 @@ void kmain(void) {
   ramfs_init();
   fb_register_vfs();
   mouse_register_vfs();
+  random_register_vfs();
 
   pci_init();
 
@@ -363,6 +370,7 @@ void kmain(void) {
   ac97_register_vfs();
   sb16_init();
   sb16_register_vfs();
+  audio_dsp_register_vfs();
 
   int devs = block_count();
   klog_puts("[DIAG] Available Block Devices (via Block API):\n");

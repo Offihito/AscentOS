@@ -90,6 +90,7 @@
 #define SYS_OPENAT 257
 #define SYS_NEWFSTATAT 262
 #define SYS_FACCESSAT2 439
+#define SYS_STATX 332
 
 #define MAX_SYSCALL 512
 

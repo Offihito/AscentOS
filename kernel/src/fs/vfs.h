@@ -15,11 +15,11 @@
 #define FS_MOUNTPOINT 0x08
 
 // Poll Events
-#define POLLIN     0x0001
-#define POLLOUT    0x0004
-#define POLLERR    0x0008
-#define POLLHUP    0x0010
-#define POLLNVAL   0x0020
+#define POLLIN 0x0001
+#define POLLOUT 0x0004
+#define POLLERR 0x0008
+#define POLLHUP 0x0010
+#define POLLNVAL 0x0020
 
 struct vfs_node;
 struct dirent {
@@ -47,7 +47,8 @@ typedef int (*rename_type_t)(struct vfs_node *, char *old_name, char *new_name);
 typedef int (*chmod_type_t)(struct vfs_node *, uint16_t permission);
 typedef int (*chown_type_t)(struct vfs_node *, uint32_t uid, uint32_t gid);
 typedef int (*truncate_type_t)(struct vfs_node *, uint32_t);
-typedef uint64_t (*mmap_type_t)(struct vfs_node *, uint64_t length, uint64_t prot, uint64_t flags);
+typedef uint64_t (*mmap_type_t)(struct vfs_node *, uint64_t length,
+                                uint64_t prot, uint64_t flags);
 typedef int (*poll_type_t)(struct vfs_node *, int events);
 
 typedef struct vfs_node {
@@ -82,8 +83,8 @@ typedef struct vfs_node {
   chmod_type_t chmod;
   chown_type_t chown;
   truncate_type_t truncate;
-  mmap_type_t mmap;  // Device-specific mmap handler
-  poll_type_t poll;  // Device-specific poll handler
+  mmap_type_t mmap;   // Device-specific mmap handler
+  poll_type_t poll;   // Device-specific poll handler
   ioctl_type_t ioctl; // Device-specific ioctl handler
 
   struct vfs_node *ptr; // Used by mountpoints and symlinks

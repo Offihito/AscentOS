@@ -3,22 +3,22 @@
 #include "../console/klog.h"
 #include "../cpu/idt.h"
 #include "../cpu/msr.h"
+#include "../drivers/timer/pit.h"
 #include "../lib/string.h"
 #include "../lock/spinlock.h"
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../smp/cpu.h"
-#include "../drivers/timer/pit.h"
 
 static uint32_t next_tid = 1;
 spinlock_t tid_lock = SPINLOCK_INIT;
 
 // Deferred reaping structures
 struct dead_thread_info {
-    uint64_t stack_base;
-    uint64_t thread_ptr;
-    struct dead_thread_info *next;
+  uint64_t stack_base;
+  uint64_t thread_ptr;
+  struct dead_thread_info *next;
 };
 struct dead_thread_info *dead_threads = NULL;
 spinlock_t dead_threads_lock = SPINLOCK_INIT;
@@ -208,7 +208,7 @@ void sched_yield(void) {
     if (next_t->state == THREAD_READY || next_t->state == THREAD_RUNNING) {
       break;
     }
-    
+
     // Check for timeout on sleeping/blocked threads
     if ((next_t->state == THREAD_SLEEPING || next_t->state == THREAD_BLOCKED) &&
         next_t->wakeup_ticks != 0 && pit_get_ticks() >= next_t->wakeup_ticks) {
@@ -216,7 +216,7 @@ void sched_yield(void) {
       next_t->wakeup_ticks = 0;
       break;
     }
-    
+
     next_t = next_t->next;
     if (next_t == start_t) {
       // Broken loop gracefully, likely due to runqueue modifications
@@ -549,7 +549,8 @@ void sched_reap_thread(struct thread *t) {
 
   // Deferred Free: Free any previously deferred dead threads.
   // By the time a new thread is being reaped, any previously dead threads
-  // have long been switched away from, guaranteeing their stacks are safe to free.
+  // have long been switched away from, guaranteeing their stacks are safe to
+  // free.
   spinlock_acquire(&dead_threads_lock);
   struct dead_thread_info *curr_dead = dead_threads;
   dead_threads = NULL;

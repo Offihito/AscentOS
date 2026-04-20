@@ -137,6 +137,39 @@ build_sysroot() {
 
 	make -j"$JOBS"
 	make install
+
+	# Create stub linux/vt.h for programs that need it (e.g., nano)
+	mkdir -p "$PREFIX/include/linux"
+	cat > "$PREFIX/include/linux/vt.h" << 'VT_H_EOF'
+/* Stub linux/vt.h for AscentOS */
+#ifndef _LINUX_VT_H
+#define _LINUX_VT_H
+
+#define VT_GETSTATE 0x5603
+#define VT_RELDISP 0x5605
+#define VT_ACTIVATE 0x5606
+#define VT_WAITACTIVE 0x5607
+#define VT_GETMODE 0x5600
+#define VT_SETMODE 0x5602
+#define VT_DISALLOCATE 0x5608
+
+struct vt_stat {
+    unsigned short v_active;
+    unsigned short v_signal;
+    unsigned short v_state;
+};
+
+struct vt_mode {
+    char mode;
+    char waitv;
+    short relsig;
+    short acqsig;
+    short frsig;
+};
+
+#endif /* _LINUX_VT_H */
+VT_H_EOF
+
 	cd "$ROOT_DIR"
 	echo "musl ${MUSL_VERSION} installed to: $PREFIX"
 }

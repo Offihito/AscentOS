@@ -53,7 +53,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/test_arch_prctl.elf userland/test_io.elf userland/test_fork.elf userland/test_execve.elf userland/test_wait_exec.elf userland/test_syscalls.elf userland/test_ioctl.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/test_kilo_asm.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf
+disk.img: test.wav test.bmp userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/test_wolfssl.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf
 	dd if=/dev/zero of=disk.img bs=1M count=256
 	mkfs.ext3 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
@@ -65,17 +65,9 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/t
 	debugfs -w -R "write toolchain/musl-sysroot/lib/libc.so lib/libc.so" disk.img
 	debugfs -w -R "write toolchain/musl-sysroot/lib/libc.so lib/ld-musl-x86_64.so.1" disk.img
 	debugfs -w -R "write /tmp/ascentos_readme.txt docs/readme.txt" disk.img
-	debugfs -w -R "write userland/test_mmap.elf test_mmap.elf" disk.img
-	debugfs -w -R "write userland/test_arch_prctl.elf test_arch_prctl.elf" disk.img
-	debugfs -w -R "write userland/test_io.elf test_io.elf" disk.img
-	debugfs -w -R "write userland/test_fork.elf test_fork.elf" disk.img
-	debugfs -w -R "write userland/test_execve.elf test_execve.elf" disk.img
-	debugfs -w -R "write userland/test_wait_exec.elf test_wait_exec.elf" disk.img
 	debugfs -w -R "write userland/test_syscalls.elf test_syscalls.elf" disk.img
-	debugfs -w -R "write userland/test_ioctl.elf test_ioctl.elf" disk.img
 	debugfs -w -R "write userland/test_kilo_syscalls.elf test_kilo_syscalls.elf" disk.img
 	debugfs -w -R "write userland/test_wait4_complex.elf test_wait4_complex.elf" disk.img
-	debugfs -w -R "write userland/test_kilo_asm.elf test_kilo_asm.elf" disk.img
 	debugfs -w -R "write userland/kilo.elf kilo.elf" disk.img
 	debugfs -w -R "write userland/test_args.elf test_args.elf" disk.img
 	debugfs -w -R "write userland/hello.elf hello.elf" disk.img
@@ -114,7 +106,11 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/t
 	debugfs -w -R "write userland/hello.krx hello.krx" disk.img
 	debugfs -w -R "write userland/doom.elf doom.elf" disk.img
 	debugfs -w -R "write userland/poll_test.elf poll_test.elf" disk.img
+	debugfs -w -R "write userland/test_time.elf test_time.elf" disk.img
+	debugfs -w -R "write userland/test_tsc_manual.elf test_tsc_manual.elf" disk.img
 	debugfs -w -R "write doomu.wad doom1.wad" disk.img
+	debugfs -w -R "write userland/test_wolfssl.elf test_wolfssl.elf" disk.img
+	debugfs -w -R "write userland/wget.elf wget.elf" disk.img
 	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
 	@if [ -d toolchain/musl-sysroot/opt/tcc ]; then \
 		echo "Installing TCC into disk image..."; \
@@ -139,6 +135,8 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_mmap.elf userland/t
 		echo "PS1='\033[0;32mRoot@AscentOS\033[0m:\w\\$$ '" > /tmp/bashrc; \
 		echo "PATH=/opt/coreutils/bin:/opt/bash/bin:/opt/tcc/bin:/" >> /tmp/bashrc; \
 		echo "HOME=/root" >> /tmp/bashrc; \
+		echo "TERM=vt100" >> /tmp/bashrc; \
+		echo "export TERM" >> /tmp/bashrc; \
 		debugfs -w -R "mkdir etc" disk.img 2>/dev/null || true; \
 		debugfs -w -R "write /tmp/passwd etc/passwd" disk.img; \
 		debugfs -w -R "mkdir root" disk.img 2>/dev/null || true; \
@@ -226,45 +224,16 @@ userland/hello.elf: userland/hello.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/hello.c -o userland/hello.elf
 
-userland/test_mmap.elf: userland/test_mmap.asm
-	nasm -f elf64 userland/test_mmap.asm -o userland/test_mmap.o
-	ld -o userland/test_mmap.elf userland/test_mmap.o
-
-userland/test_arch_prctl.elf: userland/test_arch_prctl.asm
-	nasm -f elf64 userland/test_arch_prctl.asm -o userland/test_arch_prctl.o
-	ld -o userland/test_arch_prctl.elf userland/test_arch_prctl.o
-
-userland/test_io.elf: userland/test_io.asm
-	nasm -f elf64 userland/test_io.asm -o userland/test_io.o
-	ld -o userland/test_io.elf userland/test_io.o
-
-userland/test_fork.elf: userland/test_fork.asm
-	nasm -f elf64 userland/test_fork.asm -o userland/test_fork.o
-	ld -o userland/test_fork.elf userland/test_fork.o
-
-userland/test_execve.elf: userland/test_execve.asm
-	nasm -f elf64 userland/test_execve.asm -o userland/test_execve.o
-	ld -o userland/test_execve.elf userland/test_execve.o
-
-userland/test_wait_exec.elf: userland/test_wait_exec.asm
-	nasm -f elf64 userland/test_wait_exec.asm -o userland/test_wait_exec.o
-	ld -o userland/test_wait_exec.elf userland/test_wait_exec.o
 
 userland/test_syscalls.elf: userland/test_syscalls.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_syscalls.c -o userland/test_syscalls.elf
 
-userland/test_ioctl.elf: userland/test_ioctl.asm
-	nasm -f elf64 userland/test_ioctl.asm -o userland/test_ioctl.o
-	ld -o userland/test_ioctl.elf userland/test_ioctl.o
 
 userland/test_kilo_syscalls.elf: userland/test_kilo_syscalls.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_kilo_syscalls.c -o userland/test_kilo_syscalls.elf
 
-userland/test_kilo_asm.elf: userland/test_kilo_asm.asm
-	nasm -f elf64 userland/test_kilo_asm.asm -o userland/test_kilo_asm.o
-	ld -o userland/test_kilo_asm.elf userland/test_kilo_asm.o
 
 userland/kilo.c:
 	curl -L https://raw.githubusercontent.com/antirez/kilo/master/kilo.c -o userland/kilo.c
@@ -364,6 +333,21 @@ userland/test_dynamic.elf: userland/test_dynamic.c $(MUSL_LIBC)
 userland/poll_test.elf: userland/poll_test.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/poll_test.c -o userland/poll_test.elf
+
+userland/test_time.elf: userland/test_time.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_time.c -o userland/test_time.elf
+
+userland/test_tsc_manual.elf: userland/test_tsc_manual.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_tsc_manual.c -o userland/test_tsc_manual.elf
+
+userland/test_wolfssl.elf: userland/test_wolfssl.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_wolfssl.c -lwolfssl -o userland/test_wolfssl.elf
+
+userland/wget.elf: $(MUSL_LIBC)
+	./scripts/build-wget.sh
 
 # Kria programming language (Rust-based, compiled with musl for static linking)
 userland/kria-lang:
