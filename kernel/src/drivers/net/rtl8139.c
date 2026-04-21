@@ -10,6 +10,7 @@
 #include "apic/ioapic.h"
 #include "apic/lapic.h"
 #include "console/console.h"
+#include "console/klog.h"
 #include "cpu/isr.h"
 #include "drivers/pci/pci.h"
 #include "io/io.h"
@@ -151,6 +152,8 @@ static void print_uint32(uint32_t num) {
 }
 
 // ── IRQ Handler ─────────────────────────────────────────────────────────────
+
+static void rtl8139_irq_handler(struct registers *regs);
 
 static void rtl8139_irq_handler(struct registers *regs) {
   (void)regs;
@@ -340,7 +343,13 @@ void rtl8139_init(void) {
   // Check for ACPI IRQ override
   uint32_t gsi = (uint32_t)nic_irq;
   uint16_t irq_flags = 0;
-  acpi_get_irq_override(nic_irq, &gsi, &irq_flags);
+  if (!acpi_get_irq_override(nic_irq, &gsi, &irq_flags)) {
+    // No ACPI ISO for this IRQ — PCI interrupts are level-triggered,
+    // active-low by specification.  Encode that in the MADT flags format:
+    //   polarity  bits [1:0] = 0b11 → active low
+    //   trigger   bits [3:2] = 0b11 → level triggered
+    irq_flags = 0x000F;
+  }
 
   register_interrupt_handler(nic_vector, rtl8139_irq_handler);
   ioapic_route_irq((uint8_t)gsi, nic_vector, (uint8_t)lapic_get_id(),
@@ -420,3 +429,47 @@ int rtl8139_send(const void *data, uint16_t len) {
 uint16_t rtl8139_get_iobase(void) { return nic_iobase; }
 
 uint8_t rtl8139_get_irq(void) { return nic_irq; }
+
+bool rtl8139_poll(void) {
+  if (!nic_present)
+    return false;
+
+  // Check if the NIC has pending interrupt status bits that weren't
+  // delivered via the IOAPIC (missed IRQ, masking, or timing issue).
+  uint16_t status = inw(nic_iobase + RTL_ISR);
+  if (status == 0)
+    return false;
+
+  // Process RX packets from the ring buffer
+  if (status & INT_ROK) {
+    while (!(inb(nic_iobase + RTL_CR) & CR_BUFE)) {
+      uint32_t offset = rx_cur_offset;
+      uint16_t rx_status = *(uint16_t *)(rx_buffer + offset);
+      (void)rx_status;
+      uint16_t rx_length = *(uint16_t *)(rx_buffer + offset + 2);
+
+      if (rx_length == 0 || rx_length > 1536) {
+        stat_rx_errors++;
+        break;
+      }
+
+      uint16_t pkt_len = rx_length - 4;
+      if (pkt_len > 0 && pkt_len <= ETH_FRAME_MAX) {
+        net_rx_enqueue(rx_buffer + offset + 4, pkt_len);
+      }
+      stat_rx_packets++;
+
+      rx_cur_offset = (offset + rx_length + 4 + 3) & ~3u;
+      rx_cur_offset %= RX_BUF_SIZE;
+      outw(nic_iobase + RTL_CAPR, (uint16_t)(rx_cur_offset - 16));
+    }
+  }
+
+  if (status & INT_TOK) {
+    stat_tx_packets++;
+  }
+
+  // Clear all handled status bits
+  outw(nic_iobase + RTL_ISR, status);
+  return true;
+}

@@ -27,7 +27,7 @@ void syscall_dispatcher(struct syscall_regs *regs) {
     klog_puts("\n[SYSCALL] Unimplemented syscall: ");
     klog_uint64(regs->rax);
     klog_puts("\n");
-    regs->rax = (uint64_t)-1; // ENOSYS
+    regs->rax = (uint64_t)-38; // ENOSYS
     return;
   }
 
@@ -42,7 +42,7 @@ void syscall_dispatcher(struct syscall_regs *regs) {
     klog_puts("\n[SYSCALL] Unimplemented syscall: ");
     klog_uint64(regs->rax);
     klog_puts("\n");
-    regs->rax = (uint64_t)-1; // ENOSYS
+    regs->rax = (uint64_t)-38; // ENOSYS
     return;
   }
 

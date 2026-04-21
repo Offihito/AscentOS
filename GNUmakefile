@@ -15,6 +15,7 @@ HOST_LIBS :=
 MUSL_TOOLCHAIN_BIN := $(CURDIR)/toolchain/x86_64-linux-musl/bin
 MUSL_SYSROOT := $(CURDIR)/toolchain/musl-sysroot
 MUSL_LIBC := $(MUSL_SYSROOT)/lib/libc.a
+WOLFSSL_LIB := $(MUSL_SYSROOT)/lib/libwolfssl.a
 MUSL_CC ?= x86_64-linux-musl-gcc
 MUSL_USER_CFLAGS := -static -O2 -Wall -Wextra -fno-stack-protector \
 	-I$(MUSL_SYSROOT)/include -L$(MUSL_SYSROOT)/lib
@@ -137,10 +138,16 @@ disk.img: test.wav test.bmp userland/hello.elf userland/test_syscalls.elf userla
 		echo "TERM=vt100" >> /tmp/bashrc; \
 		echo "export TERM" >> /tmp/bashrc; \
 		debugfs -w -R "mkdir etc" disk.img 2>/dev/null || true; \
+		echo "nameserver 10.0.2.3" > /tmp/resolv.conf; \
+		echo "127.0.0.1 localhost" > /tmp/hosts; \
+		debugfs -w -R "write /tmp/resolv.conf etc/resolv.conf" disk.img; \
+		debugfs -w -R "write /tmp/hosts etc/hosts" disk.img; \
+		debugfs -w -R "mkdir etc/ssl" disk.img 2>/dev/null || true; \
+		debugfs -w -R "mkdir etc/ssl/certs" disk.img 2>/dev/null || true; \
 		debugfs -w -R "write /tmp/passwd etc/passwd" disk.img; \
 		debugfs -w -R "mkdir root" disk.img 2>/dev/null || true; \
 		debugfs -w -R "write /tmp/bashrc root/.bashrc" disk.img; \
-		rm -f /tmp/passwd /tmp/bashrc; \
+		rm -f /tmp/passwd /tmp/bashrc /tmp/resolv.conf /tmp/hosts; \
 	fi
 
 edk2-ovmf:
@@ -185,7 +192,7 @@ $(IMAGE_NAME).iso: limine/limine kernel
 	rm -rf iso_root
 
 .PHONY: clean
-clean: clean-musl clean-doom clean-coreutils
+clean: clean-musl clean-doom clean-coreutils clean-wolfssl
 	$(MAKE) -C kernel clean
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
 
@@ -193,6 +200,12 @@ clean: clean-musl clean-doom clean-coreutils
 clean-coreutils:
 	rm -rf build/coreutils-9.5
 	rm -rf toolchain/musl-sysroot/opt/coreutils
+
+.PHONY: clean-wolfssl
+clean-wolfssl:
+	rm -rf build/wolfssl-5.7.0
+	rm -f $(WOLFSSL_LIB)
+	rm -rf toolchain/musl-sysroot/include/wolfssl
 
 .PHONY: clean-musl
 clean-musl:
@@ -341,7 +354,13 @@ userland/test_tsc_manual.elf: userland/test_tsc_manual.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_tsc_manual.c -o userland/test_tsc_manual.elf
 
-userland/wget.elf: $(MUSL_LIBC)
+$(WOLFSSL_LIB): $(MUSL_LIBC)
+	./scripts/build-wolfssl.sh
+
+.PHONY: wolfssl
+wolfssl: $(WOLFSSL_LIB)
+
+userland/wget.elf: $(MUSL_LIBC) $(WOLFSSL_LIB)
 	./scripts/build-wget.sh
 
 # Kria programming language (Rust-based, compiled with musl for static linking)

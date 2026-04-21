@@ -3,6 +3,8 @@
 #include "../fs/vfs.h"
 #include "../sched/sched.h"
 #include "syscall.h"
+#include "../lib/string.h"
+#include "../net/netif.h"
 #include <stdint.h>
 
 static int alloc_fd(struct thread *t) {
@@ -97,7 +99,21 @@ static uint64_t sys_connect(uint64_t fd, uint64_t addr_ptr, uint64_t addrlen,
     return 0;
   }
 
-  return (uint64_t)-95; // EOPNOTSUPP for now
+  if (sock->type == SOCK_DGRAM) {
+    sock->remote_ip = ip;
+    sock->remote_port = port;
+
+    // Auto-bind to ephemeral port if not already bound
+    if (sock->local_port == 0) {
+      int p = udp_bind(0, udp_global_recv_cb);
+      if (p < 0)
+        return (uint64_t)-98; // EADDRINUSE
+      sock->local_port = p;
+    }
+    return 0;
+  }
+
+  return (uint64_t)-95; // EOPNOTSUPP
 }
 
 static uint64_t sys_bind(uint64_t fd, uint64_t addr_ptr, uint64_t addrlen,
@@ -132,12 +148,11 @@ static uint64_t sys_bind(uint64_t fd, uint64_t addr_ptr, uint64_t addrlen,
   uint16_t port = __builtin_bswap16(addr->sin_port);
 
   if (sock->type == SOCK_DGRAM) {
-    int net_id = udp_bind(port, udp_global_recv_cb);
-    if (net_id < 0) {
+    int p = udp_bind(port, udp_global_recv_cb);
+    if (p < 0) {
       return (uint64_t)-98; // EADDRINUSE
     }
-    sock->net_id = net_id;
-    sock->local_port = port;
+    sock->local_port = p;
     return 0;
   }
 
@@ -165,11 +180,27 @@ static uint64_t sys_sendto(uint64_t fd, uint64_t buf_ptr, uint64_t len,
     return (uint64_t)-22;
 
   if (sock->type == SOCK_DGRAM) {
-    if (!addr_ptr || addrlen < sizeof(struct sockaddr_in))
-      return (uint64_t)-22;
-    struct sockaddr_in *addr = (struct sockaddr_in *)addr_ptr;
-    uint32_t ip = __builtin_bswap32(addr->sin_addr.s_addr);
-    uint16_t dport = __builtin_bswap16(addr->sin_port);
+    uint32_t ip;
+    uint16_t dport;
+
+    if (addr_ptr && addrlen >= sizeof(struct sockaddr_in)) {
+      struct sockaddr_in *addr = (struct sockaddr_in *)addr_ptr;
+      ip = __builtin_bswap32(addr->sin_addr.s_addr);
+      dport = __builtin_bswap16(addr->sin_port);
+    } else if (sock->remote_port != 0) {
+      ip = sock->remote_ip;
+      dport = sock->remote_port;
+    } else {
+      return (uint64_t)-22; // EINVAL
+    }
+
+    // Auto-bind to ephemeral port if not already bound
+    if (sock->local_port == 0) {
+      int p = udp_bind(0, udp_global_recv_cb);
+      if (p < 0) return (uint64_t)-98;
+      sock->local_port = p;
+    }
+
     int w = udp_send_packet(ip, sock->local_port, dport, (const void *)buf_ptr,
                             (uint16_t)len);
     return w == 0 ? len : -1;
@@ -183,16 +214,33 @@ static uint64_t sys_recvfrom(uint64_t fd, uint64_t buf_ptr, uint64_t len,
                              uint64_t flags, uint64_t addr_ptr,
                              uint64_t addrlen_ptr) {
   (void)flags;
-  (void)addr_ptr;
-  (void)addrlen_ptr;
-  // For now we don't return the sender's addr in recvfrom (simplified)
-
   struct thread *t = sched_get_current();
   if (!t || fd >= MAX_FDS || !t->fds[fd])
     return (uint64_t)-9;
 
   vfs_node_t *node = t->fds[fd];
-  return node->read(node, 0, len, (uint8_t *)buf_ptr);
+  struct socket_data *sock = (struct socket_data *)node->device;
+
+  uint32_t bytes_read = node->read(node, 0, len, (uint8_t *)buf_ptr);
+
+  if (bytes_read > 0 && addr_ptr && sock && sock->type == SOCK_DGRAM) {
+    struct sockaddr_in sin;
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_port = __builtin_bswap16(sock->last_src_port);
+    sin.sin_addr.s_addr = __builtin_bswap32(sock->last_src_ip);
+
+    uint32_t addrlen = sizeof(struct sockaddr_in);
+    if (addrlen_ptr) {
+      uint32_t user_addrlen = *(uint32_t *)addrlen_ptr;
+      if (user_addrlen < addrlen)
+        addrlen = user_addrlen;
+      *(uint32_t *)addrlen_ptr = sizeof(struct sockaddr_in);
+    }
+    memcpy((void *)addr_ptr, &sin, addrlen);
+  }
+
+  return bytes_read;
 }
 
 static uint64_t sys_listen(uint64_t fd, uint64_t backlog, uint64_t a2,
@@ -311,14 +359,113 @@ static uint64_t sys_accept(uint64_t fd, uint64_t addr_ptr, uint64_t addrlen_ptr,
   return new_fd;
 }
 
+struct iovec {
+  void *iov_base;
+  uint64_t iov_len;
+};
+
+struct msghdr {
+  void *msg_name;
+  uint32_t msg_namelen;
+  struct iovec *msg_iov;
+  uint64_t msg_iovlen;
+  void *msg_control;
+  uint64_t msg_controllen;
+  int msg_flags;
+};
+
+static uint64_t sys_sendmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
+                            uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct msghdr *msg = (struct msghdr *)msg_ptr;
+  if (!msg || msg->msg_iovlen == 0)
+    return (uint64_t)-22; // EINVAL
+
+  klog_puts("[SENDMSG] fd=");
+  klog_uint64(fd);
+  klog_puts(" iovlen=");
+  klog_uint64(msg->msg_iovlen);
+  klog_puts("\n");
+
+  // Supporting only the first iov for now
+  struct iovec *iov = msg->msg_iov;
+  return sys_sendto(fd, (uint64_t)iov->iov_base, iov->iov_len, flags,
+                    (uint64_t)msg->msg_name, msg->msg_namelen);
+}
+
+static uint64_t sys_recvmsg(uint64_t fd, uint64_t msg_ptr, uint64_t flags,
+                            uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct msghdr *msg = (struct msghdr *)msg_ptr;
+  if (!msg || msg->msg_iovlen == 0)
+    return (uint64_t)-22; // EINVAL
+
+  klog_puts("[RECVMSG] fd=");
+  klog_uint64(fd);
+  klog_puts(" iovlen=");
+  klog_uint64(msg->msg_iovlen);
+  klog_puts("\n");
+
+  // Supporting only the first iov for now
+  struct iovec *iov = msg->msg_iov;
+  uint32_t addrlen = msg->msg_namelen;
+  uint64_t ret = sys_recvfrom(fd, (uint64_t)iov->iov_base, iov->iov_len, flags,
+                              (uint64_t)msg->msg_name, (uint64_t)&addrlen);
+  msg->msg_namelen = addrlen;
+  return ret;
+}
+
+static uint64_t sys_getsockname(uint64_t fd, uint64_t addr_ptr,
+                                uint64_t addrlen_ptr, uint64_t a3,
+                                uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  struct thread *t = sched_get_current();
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
+
+  vfs_node_t *node = t->fds[fd];
+  struct socket_data *sock = (struct socket_data *)node->device;
+  if (!sock)
+    return (uint64_t)-88; // ENOTSOCK
+
+  struct sockaddr_in sin;
+  memset(&sin, 0, sizeof(sin));
+  sin.sin_family = AF_INET;
+  sin.sin_port = __builtin_bswap16(sock->local_port);
+  // Get local netif IP
+  netif_t *nif = netif_get();
+  sin.sin_addr.s_addr = __builtin_bswap32(nif ? nif->ip : 0);
+
+  uint32_t addrlen = sizeof(struct sockaddr_in);
+  if (addrlen_ptr) {
+    uint32_t user_addrlen = *(uint32_t *)addrlen_ptr;
+    if (user_addrlen < addrlen)
+      addrlen = user_addrlen;
+    *(uint32_t *)addrlen_ptr = sizeof(struct sockaddr_in);
+  }
+  memcpy((void *)addr_ptr, &sin, addrlen);
+
+  return 0;
+}
+
 void syscall_register_net(void) {
   syscall_register(SYS_SOCKET, sys_socket);
   syscall_register(SYS_CONNECT, sys_connect);
   syscall_register(SYS_ACCEPT, sys_accept);
   syscall_register(SYS_SENDTO, sys_sendto);
   syscall_register(SYS_RECVFROM, sys_recvfrom);
+  syscall_register(SYS_SENDMSG, sys_sendmsg);
+  syscall_register(SYS_RECVMSG, sys_recvmsg);
   syscall_register(SYS_BIND, sys_bind);
   syscall_register(SYS_LISTEN, sys_listen);
+  syscall_register(SYS_GETSOCKNAME, sys_getsockname);
   klog_puts("[OK] Net Syscalls registered "
-            "(socket/connect/accept/listen/sendto/recvfrom/bind).\n");
+            "(socket/connect/accept/listen/sendto/recvfrom/sendmsg/recvmsg/bind/getsockname).\n");
 }

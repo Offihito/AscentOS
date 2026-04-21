@@ -59,6 +59,10 @@ void net_rx_enqueue(const uint8_t *data, uint16_t len) {
 }
 
 bool net_poll(void) {
+    // Polled-mode fallback: check the NIC hardware directly for any
+    // pending packets that the IRQ handler may have missed.
+    rtl8139_poll();
+
     if (rx_tail == rx_head) return false;  // Queue empty
 
     net_packet_t *pkt = &rx_ring[rx_tail];

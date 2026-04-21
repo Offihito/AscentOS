@@ -39,10 +39,15 @@ struct socket_data {
   int protocol;
   int net_id;          // Maps to TCP or UDP socket ID
   uint16_t local_port; // Local bound port (for UDP unbind)
+  uint32_t remote_ip;  // For connected UDP
+  uint16_t remote_port;
+
+  uint16_t last_src_port;
+  uint32_t last_src_ip;
 
   uint8_t rx_buffer[SOCKET_RX_BUF_SIZE];
-  uint32_t rx_head;
-  uint32_t rx_tail;
+  volatile uint32_t rx_head;
+  volatile uint32_t rx_tail;
   bool closed;
   bool listening; // True if this socket is in listen mode
   wait_queue_t wait_queue;

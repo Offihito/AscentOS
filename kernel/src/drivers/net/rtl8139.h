@@ -26,4 +26,8 @@ uint16_t rtl8139_get_iobase(void);
 // Get the IRQ line assigned to the NIC.
 uint8_t rtl8139_get_irq(void);
 
+// Poll the NIC for pending packets (polled-mode fallback).
+// Returns true if packets were found and enqueued.
+bool rtl8139_poll(void);
+
 #endif

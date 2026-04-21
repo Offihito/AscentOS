@@ -5,12 +5,25 @@
 #include "net/checksum.h"
 #include "net/byteorder.h"
 #include "net/icmp.h"
+#include "net/net.h"
 #include "net/udp.h"
 #include "net/tcp.h"
 #include "lib/string.h"
 #include "console/console.h"
+#include "console/klog.h"
 
 static uint16_t next_id = 1;
+
+static void ipv4_print_ip(uint32_t ip) {
+    int n;
+    n = (ip >> 24) & 0xFF; if (n >= 100) console_putchar('0'+n/100); if (n >= 10) console_putchar('0'+(n/10)%10); console_putchar('0'+n%10);
+    console_putchar('.');
+    n = (ip >> 16) & 0xFF; if (n >= 100) console_putchar('0'+n/100); if (n >= 10) console_putchar('0'+(n/10)%10); console_putchar('0'+n%10);
+    console_putchar('.');
+    n = (ip >> 8) & 0xFF; if (n >= 100) console_putchar('0'+n/100); if (n >= 10) console_putchar('0'+(n/10)%10); console_putchar('0'+n%10);
+    console_putchar('.');
+    n = ip & 0xFF; if (n >= 100) console_putchar('0'+n/100); if (n >= 10) console_putchar('0'+(n/10)%10); console_putchar('0'+n%10);
+}
 
 void ipv4_handle_packet(const uint8_t *data, uint16_t len) {
     if (len < sizeof(ipv4_header_t)) return;
@@ -26,9 +39,10 @@ void ipv4_handle_packet(const uint8_t *data, uint16_t len) {
 
     // Verify Checksum
     uint16_t received_checksum = hdr->checksum;
-    hdr->checksum = 0;
-    if (calculate_checksum(hdr, ihl) != received_checksum) {
-        return; // Invalid checksum
+    ((ipv4_header_t*)hdr)->checksum = 0;
+    uint16_t computed = calculate_checksum(hdr, ihl);
+    if (computed != received_checksum) {
+        return;
     }
     hdr->checksum = received_checksum;
 
@@ -54,6 +68,7 @@ void ipv4_handle_packet(const uint8_t *data, uint16_t len) {
             tcp_handle_packet(payload, payload_len, ntohl(hdr->src_ip), dst_ip);
             break;
         default:
+
             // Ignore protocols we don't handle
             break;
     }
@@ -100,7 +115,15 @@ int ipv4_send_packet(uint32_t dst_ip, uint8_t protocol, const void *data, uint16
         const arp_entry_t *entry = arp_lookup(next_hop);
         if (!entry) {
             arp_send_request(next_hop);
-            return -1;
+            // Wait up to 100ms for reply
+            for (int i = 0; i < 100; i++) {
+                net_poll();
+                entry = arp_lookup(next_hop);
+                if (entry) break;
+                // Small delay (~1ms)
+                for (volatile int d = 0; d < 50000; d++) __asm__ volatile("pause");
+            }
+            if (!entry) return -1;
         }
         memcpy(dst_mac, entry->mac, 6);
     }
@@ -118,6 +141,12 @@ int ipv4_send_packet(uint32_t dst_ip, uint8_t protocol, const void *data, uint16
     hdr.checksum = 0;
     hdr.checksum = calculate_checksum(&hdr, sizeof(ipv4_header_t));
 
+    klog_puts("[IPV4] Sending proto ");
+    klog_uint64(protocol);
+    klog_puts(" to ");
+    klog_uint64(dst_ip);
+    klog_puts("\n");
+
     // Allocate buffer for frame
     uint8_t packet[sizeof(ipv4_header_t) + len];
     memcpy(packet, &hdr, sizeof(ipv4_header_t));
@@ -125,5 +154,6 @@ int ipv4_send_packet(uint32_t dst_ip, uint8_t protocol, const void *data, uint16
         memcpy(packet + sizeof(ipv4_header_t), data, len);
     }
 
-    return eth_send_frame(dst_mac, ETHERTYPE_IPV4, packet, sizeof(ipv4_header_t) + len);
+    int ret = eth_send_frame(dst_mac, ETHERTYPE_IPV4, packet, sizeof(ipv4_header_t) + len);
+    return ret;
 }

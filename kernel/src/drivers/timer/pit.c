@@ -2,6 +2,7 @@
 #include "cpu/isr.h"
 #include "io/io.h"
 #include "console/console.h"
+#include "console/klog.h"
 #include <stdbool.h>
 
 #define PIT_CMD_PORT   0x43
@@ -11,6 +12,9 @@ static uint64_t pit_ticks = 0;
 static void pit_callback(struct registers *regs) {
     (void)regs;
     pit_ticks++;
+    if (pit_ticks % 100 == 0) {
+        klog_putchar('.');
+    }
 }
 
 void pit_init(uint32_t frequency) {

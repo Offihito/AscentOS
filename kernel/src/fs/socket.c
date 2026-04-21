@@ -1,6 +1,8 @@
 #include "socket.h"
+#include "../console/klog.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
+#include "../net/net.h"
 #include "../sched/sched.h"
 
 static struct socket_data *global_socket_list = NULL;
@@ -9,6 +11,9 @@ void socket_push_rx(struct socket_data *sock, const uint8_t *data,
                     uint16_t len) {
   if (!sock || !data || sock->closed)
     return;
+  klog_puts("[SOCK] Pushing ");
+  klog_uint64(len);
+  klog_puts(" bytes to socket\n");
   for (uint16_t i = 0; i < len; i++) {
     uint32_t next_head = (sock->rx_head + 1) % SOCKET_RX_BUF_SIZE;
     if (next_head == sock->rx_tail)
@@ -26,6 +31,7 @@ uint32_t socket_pull_rx(struct socket_data *sock, uint8_t *buffer,
   while (sock->rx_head == sock->rx_tail) {
     if (sock->closed)
       return 0;
+    net_poll();
     sched_yield(); // Blocks waiting for data
   }
   uint32_t read = 0;
@@ -40,7 +46,12 @@ void tcp_global_recv_cb(int sock_id, const uint8_t *payload, uint16_t length) {
   struct socket_data *curr = global_socket_list;
   while (curr) {
     if (curr->type == SOCK_STREAM && curr->net_id == sock_id) {
-      socket_push_rx(curr, payload, length);
+      if (length == 0) {
+        curr->closed = true;
+        wait_queue_wake_all(&curr->wait_queue);
+      } else {
+        socket_push_rx(curr, payload, length);
+      }
       return;
     }
     curr = curr->next;
@@ -54,6 +65,8 @@ void udp_global_recv_cb(uint16_t local_port, const uint8_t *payload,
   struct socket_data *curr = global_socket_list;
   while (curr) {
     if (curr->type == SOCK_DGRAM && curr->local_port == local_port) {
+      curr->last_src_ip = src_ip;
+      curr->last_src_port = src_port;
       socket_push_rx(curr, payload, length);
       return;
     }
@@ -96,10 +109,11 @@ static int socket_poll(struct vfs_node *node, int events) {
     }
   }
   if (events & POLLOUT) {
-    if (!sock->closed) {
-      revents |= POLLOUT; // Sockets are generally writable in this simple stack
+    if (!sock->closed && !sock->listening) {
+      revents |= POLLOUT;
     }
   }
+
   return revents;
 }
 

@@ -118,6 +118,24 @@ static uint64_t sys_clock_gettime(uint64_t clk_id, uint64_t tp_ptr, uint64_t a2,
   }
 }
 
+static uint64_t sys_clock_getres(uint64_t clk_id, uint64_t tp_ptr, uint64_t a2,
+                                  uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)clk_id;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  if (!tp_ptr)
+    return (uint64_t)-14; // EFAULT
+
+  // LAPIC timer has 1ms resolution
+  ((uint64_t *)tp_ptr)[0] = 0;
+  ((uint64_t *)tp_ptr)[1] = 1000000ULL;
+
+  return 0;
+}
+
 // nanosleep(req, rem) - sleep for specified time
 // req and rem are pointers to struct timespec { tv_sec, tv_nsec }
 static uint64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
@@ -152,5 +170,6 @@ static uint64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
 void syscall_register_arch(void) {
   syscall_register(SYS_ARCH_PRCTL, sys_arch_prctl);
   syscall_register(SYS_CLOCK_GETTIME, sys_clock_gettime);
+  syscall_register(SYS_CLOCK_GETRES, sys_clock_getres);
   syscall_register(SYS_NANOSLEEP, sys_nanosleep);
 }

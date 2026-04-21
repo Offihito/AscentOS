@@ -9,6 +9,8 @@
 #include "net/ipv4.h"
 #include "net/byteorder.h"
 #include "drivers/net/rtl8139.h"
+#include "console/console.h"
+#include "console/klog.h"
 #include "lib/string.h"
 
 #include <stddef.h>
@@ -49,7 +51,8 @@ int eth_send_frame(const uint8_t *dst_mac, uint16_t ethertype,
         total_len = 60;
     }
 
-    return rtl8139_send(frame, total_len);
+    int ret = rtl8139_send(frame, total_len);
+    return ret;
 }
 
 // ── Receive dispatch ────────────────────────────────────────────────────────
@@ -62,6 +65,10 @@ void eth_handle_frame(const uint8_t *data, uint16_t len) {
 
     const uint8_t *payload = data + ETH_HEADER_LEN;
     uint16_t payload_len = len - ETH_HEADER_LEN;
+
+    // klog_puts("[ETH] Got frame type 0x");
+    // klog_uint64(ethertype);
+    // klog_putchar('\n');
 
     switch (ethertype) {
     case ETHERTYPE_ARP:

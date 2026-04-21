@@ -10,6 +10,7 @@
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../sched/sched.h"
+#include "../net/net.h"
 #include "syscall.h"
 #include <stdint.h>
 
@@ -833,11 +834,10 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout,
   (void)a4;
   (void)a5;
 
-  if (!is_user_ptr(fds_ptr))
-    return (uint64_t)-14; // EFAULT
-
   struct thread *t = sched_get_current();
   struct pollfd *fds = (struct pollfd *)fds_ptr;
+  if (!t || !fds)
+    return (uint64_t)-1;
 
   uint64_t start_ticks = pit_get_ticks();
   uint64_t timeout_ticks = (timeout == (uint64_t)-1) ? 0 : (timeout / 10);
@@ -849,17 +849,22 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout,
     for (uint64_t i = 0; i < nfds; i++) {
       fds[i].revents = 0;
       int fd = fds[i].fd;
-      if (fd < 0)
-        continue;
 
-      if (fd >= MAX_FDS || !t->fds[fd]) {
+      if (fd < 0 || fd >= MAX_FDS || !t->fds[fd]) {
         fds[i].revents = POLLNVAL;
         count++;
         continue;
       }
 
       int revents = vfs_poll(t->fds[fd], fds[i].events);
-      if (revents != 0) {
+      if (revents) {
+        klog_puts("[POLL] fd=");
+        klog_uint64(fd);
+        klog_puts(" req=");
+        klog_uint64(fds[i].events);
+        klog_puts(" got=");
+        klog_uint64(revents);
+        klog_puts("\n");
         fds[i].revents = revents;
         count++;
       }
@@ -884,8 +889,97 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout,
       t->wakeup_ticks = 0;
     }
 
+    if (net_poll()) {
+      t->state = THREAD_READY;
+      t->wakeup_ticks = 0;
+    }
     sched_yield();
   }
+}
+
+typedef struct {
+  uint64_t fds_bits[1024 / 64];
+} fd_set_t;
+
+struct k_timeval {
+  int64_t tv_sec;
+  int64_t tv_usec;
+};
+
+static uint64_t sys_select(uint64_t nfds, uint64_t readfds_ptr,
+                           uint64_t writefds_ptr, uint64_t exceptfds_ptr,
+                           uint64_t timeout_ptr, uint64_t a5) {
+  (void)a5;
+  struct thread *t = sched_get_current();
+  if (!t) return (uint64_t)-1;
+
+  fd_set_t *readfds = (fd_set_t *)readfds_ptr;
+  fd_set_t *writefds = (fd_set_t *)writefds_ptr;
+  fd_set_t *exceptfds = (fd_set_t *)exceptfds_ptr;
+  struct k_timeval *tv = (struct k_timeval *)timeout_ptr;
+
+  uint64_t timeout_ms = (uint64_t)-1;
+  if (tv) {
+    timeout_ms = (tv->tv_sec * 1000) + (tv->tv_usec / 1000);
+  }
+
+  struct pollfd pfds[MAX_FDS];
+  int pcount = 0;
+  int map[MAX_FDS];
+
+  for (int i = 0; i < (int)nfds && i < MAX_FDS; i++) {
+    int events = 0;
+    if (readfds && (readfds->fds_bits[i / 64] & (1ULL << (i % 64))))
+      events |= POLLIN;
+    if (writefds && (writefds->fds_bits[i / 64] & (1ULL << (i % 64))))
+      events |= POLLOUT;
+    if (exceptfds && (exceptfds->fds_bits[i / 64] & (1ULL << (i % 64))))
+      events |= POLLERR;
+
+    if (events) {
+      pfds[pcount].fd = i;
+      pfds[pcount].events = events;
+      pfds[pcount].revents = 0;
+      map[pcount] = i;
+      pcount++;
+    }
+  }
+
+  if (pcount == 0) {
+    if (timeout_ms == 0) return 0;
+    pit_sleep(timeout_ms);
+    return 0;
+  }
+
+  uint64_t ret = sys_poll((uint64_t)pfds, (uint64_t)pcount, timeout_ms, 0, 0, 0);
+
+  if (ret > 0 && ret != (uint64_t)-1) {
+    if (readfds) memset(readfds, 0, sizeof(fd_set_t));
+    if (writefds) memset(writefds, 0, sizeof(fd_set_t));
+    if (exceptfds) memset(exceptfds, 0, sizeof(fd_set_t));
+
+    int ready = 0;
+    for (int i = 0; i < pcount; i++) {
+      int fd = map[i];
+      bool is_ready = false;
+      if (pfds[i].revents & POLLIN) {
+        if (readfds) readfds->fds_bits[fd / 64] |= (1ULL << (fd % 64));
+        is_ready = true;
+      }
+      if (pfds[i].revents & POLLOUT) {
+        if (writefds) writefds->fds_bits[fd / 64] |= (1ULL << (fd % 64));
+        is_ready = true;
+      }
+      if (pfds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        if (exceptfds) exceptfds->fds_bits[fd / 64] |= (1ULL << (fd % 64));
+        is_ready = true;
+      }
+      if (is_ready) ready++;
+    }
+    return (uint64_t)ready;
+  }
+
+  return ret;
 }
 
 // Simple xorshift64 PRNG state
@@ -1627,6 +1721,39 @@ static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2,
   return newfd;
 }
 
+static uint64_t sys_utimensat(uint64_t dirfd, uint64_t pathname, uint64_t times,
+                               uint64_t flags, uint64_t a4, uint64_t a5) {
+  (void)dirfd;
+  (void)pathname;
+  (void)times;
+  (void)flags;
+  (void)a4;
+  (void)a5;
+  return 0; // successfully mocked
+}
+
+static uint64_t sys_futimesat(uint64_t dirfd, uint64_t pathname, uint64_t times,
+                               uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)dirfd;
+  (void)pathname;
+  (void)times;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0; // successfully mocked
+}
+
+static uint64_t sys_utimes(uint64_t pathname, uint64_t times, uint64_t a2,
+                            uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)pathname;
+  (void)times;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return 0; // successfully mocked
+}
+
 void syscall_register_io(void) {
   syscall_register(SYS_READ, sys_read);
   syscall_register(SYS_WRITE, sys_write);
@@ -1643,6 +1770,7 @@ void syscall_register_io(void) {
   syscall_register(SYS_FSTAT, sys_fstat);
   syscall_register(SYS_GETDENTS64, sys_getdents64);
   syscall_register(SYS_POLL, sys_poll);
+  syscall_register(SYS_SELECT, sys_select);
   syscall_register(SYS_PIPE, sys_pipe);
   syscall_register(SYS_PIPE2, sys_pipe2);
   syscall_register(SYS_GETRANDOM, sys_getrandom);
@@ -1660,6 +1788,9 @@ void syscall_register_io(void) {
   syscall_register(SYS_CHMOD, sys_chmod);
   syscall_register(SYS_CHOWN, sys_chown);
   syscall_register(SYS_STATX, sys_statx);
+  syscall_register(SYS_UTIMENSAT, sys_utimensat);
+  syscall_register(SYS_FUTIMESAT, sys_futimesat);
+  syscall_register(SYS_UTIMES, sys_utimes);
 
   // Initialize console termios with standard defaults:
   console_termios.c_lflag = 0x0000000b; // ISIG | ICANON | ECHO
