@@ -44,6 +44,15 @@ char *strncpy(char *dest, const char *src, size_t n) {
   return dest;
 }
 
+char *strrchr(const char *s, int c) {
+  char *last = 0;
+  do {
+    if (*s == (char)c)
+      last = (char *)s;
+  } while (*s++);
+  return last;
+}
+
 char *strcat(char *dest, const char *src) {
   char *ptr = dest;
   while (*ptr)

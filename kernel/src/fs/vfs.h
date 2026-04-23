@@ -39,6 +39,7 @@ typedef struct vfs_node *(*finddir_type_t)(struct vfs_node *, char *name);
 typedef int (*create_type_t)(struct vfs_node *, char *name,
                              uint16_t permission);
 typedef int (*mkdir_type_t)(struct vfs_node *, char *name, uint16_t permission);
+typedef int (*mknod_type_t)(struct vfs_node *, char *name, uint16_t permission, uint32_t flags, void *device);
 typedef int (*unlink_type_t)(struct vfs_node *, char *name);
 typedef int (*rmdir_type_t)(struct vfs_node *, char *name);
 typedef int (*readlink_type_t)(struct vfs_node *, char *buf, uint32_t size);
@@ -75,6 +76,7 @@ typedef struct vfs_node {
   finddir_type_t finddir;
   create_type_t create;
   mkdir_type_t mkdir;
+  mknod_type_t mknod;
   unlink_type_t unlink;
   rmdir_type_t rmdir;
   readlink_type_t readlink;
@@ -86,6 +88,7 @@ typedef struct vfs_node {
   mmap_type_t mmap;   // Device-specific mmap handler
   poll_type_t poll;   // Device-specific poll handler
   ioctl_type_t ioctl; // Device-specific ioctl handler
+  void *wait_queue;   // Pointer to wait_queue_t for poll() wakeups
 
   struct vfs_node *ptr; // Used by mountpoints and symlinks
 } vfs_node_t;
@@ -113,6 +116,7 @@ int vfs_rename(vfs_node_t *node, char *old_name, char *new_name);
 int vfs_chmod(vfs_node_t *node, uint16_t permission);
 int vfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid);
 int vfs_truncate(vfs_node_t *node, uint32_t size);
+int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags, void *device);
 int vfs_poll(vfs_node_t *node, int events);
 
 #endif

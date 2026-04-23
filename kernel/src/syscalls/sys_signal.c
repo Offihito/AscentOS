@@ -229,6 +229,7 @@ static uint64_t sys_tgkill(uint64_t tgid, uint64_t tid, uint64_t sig,
   (void)a5;
   if (sig > 64)
     return (uint64_t)-22;
+  if (sig == 0) return 0; // Existence check
   // TODO: Implement proper tid lookup and signal sending
   return 0;
 }
@@ -282,6 +283,20 @@ static uint64_t sys_kill(uint64_t pid, uint64_t sig, uint64_t a2, uint64_t a3,
   extern struct thread *global_thread_list;
   extern spinlock_t tid_lock;
   spinlock_acquire(&tid_lock);
+  if (sig == 0) {
+    struct thread *t = global_thread_list;
+    bool found = false;
+    while (t) {
+      if (t->tid == (uint32_t)pid) {
+        found = true;
+        break;
+      }
+      t = t->global_next;
+    }
+    spinlock_release(&tid_lock);
+    return found ? 0 : (uint64_t)-3; // -ESRCH
+  }
+
   struct thread *t = global_thread_list;
   while (t) {
     if (t->tid == (uint32_t)pid) {

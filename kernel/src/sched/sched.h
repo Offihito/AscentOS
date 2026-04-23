@@ -7,6 +7,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Forward declaration for embedded wait queue entry
+struct wait_queue_entry;
+typedef struct wait_queue_entry wait_queue_entry_t;
+
 #define MAX_FDS 32
 
 // Signal constants
@@ -113,6 +117,11 @@ struct thread {
   struct k_sigaction signal_handlers[64];
   uint64_t pending_signals;
   uint64_t signal_mask;
+
+  // Embedded wait queue entry for safe blocking across context switches
+  // Using stack-allocated entries is unsafe because the stack frame becomes
+  // invalid when the thread is descheduled, leading to corrupted wait queues
+  struct wait_queue_entry *wq_entry_next; // For multi-wait (epoll)
 };
 
 void sched_init(void);
@@ -140,6 +149,8 @@ void sched_reap_thread(struct thread *t);
 
 // Reparent children to init
 void sched_reparent_children(struct thread *parent);
+
+int alloc_fd(struct thread *t);
 
 // Userspace Management
 #include "elf.h"

@@ -17,6 +17,8 @@
 #define EXT2_S_IFREG    0x8000  // Regular file
 #define EXT2_S_IFDIR    0x4000  // Directory
 #define EXT2_S_IFLNK    0xA000  // Symbolic link
+#define EXT2_S_IFSOCK   0xC000  // Socket
+#define EXT2_S_IFIFO    0x1000  // FIFO
 
 // Directory entry file type (d_file_type)
 #define EXT2_FT_UNKNOWN  0

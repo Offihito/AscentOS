@@ -167,9 +167,72 @@ static uint64_t sys_nanosleep(uint64_t req_ptr, uint64_t rem_ptr, uint64_t a2,
   return 0;
 }
 
+// gettimeofday(tv, tz) - syscall 97
+// tz is ignored in modern Linux; tv contains {tv_sec, tv_usec}
+static uint64_t sys_gettimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a2,
+                                 uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)tz_ptr;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  if (!tv_ptr)
+    return 0; // Linux allows NULL tv
+
+  uint64_t ms = lapic_timer_get_ms();
+  uint64_t sec = ms / 1000;
+  uint64_t usec = (ms % 1000) * 1000ULL;
+
+  uint64_t *tv = (uint64_t *)tv_ptr;
+  tv[0] = rtc_get_boot_timestamp() + sec; // tv_sec
+  tv[1] = usec;                           // tv_usec
+
+  return 0;
+}
+
+// mlock(addr, len) - syscall 55 (stub)
+// We don't implement memory locking, just return success
+static uint64_t sys_mlock(uint64_t addr, uint64_t len, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)addr;
+  (void)len;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  // Stub: pretend we locked the memory
+  return 0;
+}
+
+// membarrier(cmd, flags, cpu_id) - syscall 302 (stub)
+// Memory barrier syscall - we don't need it for single-core, return success
+static uint64_t sys_membarrier(uint64_t cmd, uint64_t flags, uint64_t cpu_id,
+                               uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)flags;
+  (void)cpu_id;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  // CMD 0 = MEMBARRIER_CMD_QUERY, return supported commands
+  // CMD 1 = MEMBARRIER_CMD_GLOBAL (shared)
+  // For a hobby OS, just return success for common commands
+  if (cmd == 0) {
+    return 1; // Report support for MEMBARRIER_CMD_GLOBAL
+  }
+  if (cmd == 1) {
+    return 0; // Success for MEMBARRIER_CMD_GLOBAL
+  }
+  return (uint64_t)-38; // ENOSYS for unknown commands
+}
+
 void syscall_register_arch(void) {
   syscall_register(SYS_ARCH_PRCTL, sys_arch_prctl);
   syscall_register(SYS_CLOCK_GETTIME, sys_clock_gettime);
   syscall_register(SYS_CLOCK_GETRES, sys_clock_getres);
   syscall_register(SYS_NANOSLEEP, sys_nanosleep);
+  syscall_register(SYS_GETTIMEOFDAY, sys_gettimeofday);
+  syscall_register(SYS_MLOCK, sys_mlock);
+  syscall_register(SYS_MEMBARRIER, sys_membarrier);
 }

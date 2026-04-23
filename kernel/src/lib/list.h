@@ -2,6 +2,7 @@
 #define LIB_LIST_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 struct list_head {
     struct list_head *next, *prev;
@@ -33,6 +34,10 @@ static inline void __list_del(struct list_head *prev, struct list_head *next) {
 }
 
 static inline void list_del(struct list_head *entry) {
+    if (!entry || !entry->next || !entry->prev) return;
+    // Validate pointers are in kernel higher-half space to catch corruption
+    if ((uint64_t)entry->next < 0xFFFF800000000000ULL ||
+        (uint64_t)entry->prev < 0xFFFF800000000000ULL) return;
     __list_del(entry->prev, entry->next);
     entry->next = NULL;
     entry->prev = NULL;

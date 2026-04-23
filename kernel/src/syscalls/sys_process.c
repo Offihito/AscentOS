@@ -758,6 +758,44 @@ static uint64_t sys_getresgid(struct syscall_regs *regs) {
   return 0;
 }
 
+// ── sys_setresuid ───────────────────────────────────────────────────────────
+static uint64_t sys_setresuid(struct syscall_regs *regs) {
+  (void)regs;
+  // Stub: accept any uid changes silently (we're always root)
+  return 0;
+}
+
+// ── sys_setresgid ───────────────────────────────────────────────────────────
+static uint64_t sys_setresgid(struct syscall_regs *regs) {
+  (void)regs;
+  // Stub: accept any gid changes silently (we're always root)
+  return 0;
+}
+
+// ── sys_setuid (syscall 105) ────────────────────────────────────────────────
+static uint64_t sys_setuid(struct syscall_regs *regs) {
+  uint32_t uid = (uint32_t)regs->rdi;
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+  t->uid = uid;
+  t->euid = uid;
+  t->suid = uid;
+  return 0;
+}
+
+// ── sys_setgid (syscall 106) ────────────────────────────────────────────────
+static uint64_t sys_setgid(struct syscall_regs *regs) {
+  uint32_t gid = (uint32_t)regs->rdi;
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+  t->gid = gid;
+  t->egid = gid;
+  t->sgid = gid;
+  return 0;
+}
+
 // ── sys_getppid ─────────────────────────────────────────────────────────────
 static uint64_t sys_getppid(struct syscall_regs *regs) {
   (void)regs;
@@ -845,8 +883,12 @@ void syscall_register_process(void) {
   syscall_register_raw(SYS_GETEGID, sys_getegid);
   syscall_register_raw(SYS_GETRESUID, sys_getresuid);
   syscall_register_raw(SYS_GETRESGID, sys_getresgid);
+  syscall_register_raw(SYS_SETRESUID, sys_setresuid);
+  syscall_register_raw(SYS_SETRESGID, sys_setresgid);
   syscall_register_raw(SYS_GETPPID, sys_getppid);
   syscall_register_raw(SYS_SETPGID, sys_setpgid);
   syscall_register_raw(SYS_GETPGRP, sys_getpgrp);
   syscall_register_raw(SYS_SETSID, sys_setsid);
+  syscall_register_raw(SYS_SETUID, sys_setuid);
+  syscall_register_raw(SYS_SETGID, sys_setgid);
 }

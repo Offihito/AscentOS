@@ -2,7 +2,9 @@
 #include "console/klog.h"
 #include "lock/spinlock.h"
 #include "lib/list.h"
+#include "lib/string.h"
 #include <stdint.h>
+#include <stdbool.h>
 
 #define MAX_ORDER 20
 
@@ -20,6 +22,7 @@ static struct buddy_zone b_zone;
 static spinlock_t pmm_lock = SPINLOCK_INIT;
 
 static uint8_t *bitmap = NULL;
+static uint8_t *managed_bitmap = NULL;
 static size_t bitmap_size = 0; // in bytes
 static uint64_t highest_page = 0;
 static uint64_t usable_memory = 0;
@@ -27,16 +30,66 @@ static uint64_t total_memory = 0;
 static uint64_t physical_memory_offset = 0;
 static struct limine_memmap_response *internal_memmap = NULL;
 
-static inline void bitmap_set(size_t bit) {
-    bitmap[bit / 8] |= (1 << (bit % 8));
+static inline void bitmap_clear(uint8_t *bm, size_t bit) {
+    bm[bit / 8] &= ~(1 << (bit % 8));
 }
 
-static inline void bitmap_clear(size_t bit) {
-    bitmap[bit / 8] &= ~(1 << (bit % 8));
+static inline int bitmap_test(uint8_t *bm, size_t bit) {
+    return (bm[bit / 8] & (1 << (bit % 8))) != 0;
 }
 
-static inline int bitmap_test(size_t bit) {
-    return (bitmap[bit / 8] & (1 << (bit % 8))) != 0;
+static inline void bitmap_set(uint8_t *bm, size_t bit) {
+    bm[bit / 8] |= (1 << (bit % 8));
+}
+
+static void bitmap_set_range(uint8_t *bm, size_t start_bit, size_t count) {
+    if (count == 0) return;
+    if (start_bit >= highest_page) return;
+    if (start_bit + count > highest_page) count = highest_page - start_bit;
+    size_t end_bit = start_bit + count;
+    
+    while (start_bit < end_bit && (start_bit % 8) != 0) {
+        bitmap_set(bm, start_bit);
+        start_bit++;
+    }
+    
+    if (end_bit > start_bit) {
+        size_t full_bytes = (end_bit - start_bit) / 8;
+        if (full_bytes > 0) {
+            memset(&bm[start_bit / 8], 0xFF, full_bytes);
+            start_bit += full_bytes * 8;
+        }
+    }
+    
+    while (start_bit < end_bit) {
+        bitmap_set(bm, start_bit);
+        start_bit++;
+    }
+}
+
+static void bitmap_clear_range(uint8_t *bm, size_t start_bit, size_t count) {
+    if (count == 0) return;
+    if (start_bit >= highest_page) return;
+    if (start_bit + count > highest_page) count = highest_page - start_bit;
+    size_t end_bit = start_bit + count;
+    
+    while (start_bit < end_bit && (start_bit % 8) != 0) {
+        bitmap_clear(bm, start_bit);
+        start_bit++;
+    }
+    
+    if (end_bit > start_bit) {
+        size_t full_bytes = (end_bit - start_bit) / 8;
+        if (full_bytes > 0) {
+            memset(&bm[start_bit / 8], 0, full_bytes);
+            start_bit += full_bytes * 8;
+        }
+    }
+    
+    while (start_bit < end_bit) {
+        bitmap_clear(bm, start_bit);
+        start_bit++;
+    }
 }
 
 static inline struct buddy_block *virt_to_buddy(uint64_t phys) {
@@ -70,28 +123,26 @@ size_t pmm_get_free_pages(void) {
     return free_pages;
 }
 
+static void buddy_free_internal(uint64_t phys, size_t order);
+
 // Internal function to add a free block to the buddy system
 static void buddy_free_internal(uint64_t phys, size_t order) {
     uint64_t pfn = phys / PAGE_SIZE;
 
     // Clear bitmap for this block
-    for (size_t i = 0; i < (1ULL << order); i++) {
-        if (pfn + i < highest_page) {
-            bitmap_clear(pfn + i);
-        }
-    }
+    bitmap_clear_range(bitmap, pfn, (1ULL << order));
 
     while (order < MAX_ORDER - 1) {
         uint64_t buddy_pfn = pfn ^ (1ULL << order);
         
         bool buddy_free = true;
-        if (buddy_pfn >= highest_page || bitmap_test(buddy_pfn)) {
+        if (buddy_pfn >= highest_page || !bitmap_test(managed_bitmap, buddy_pfn) || bitmap_test(bitmap, buddy_pfn)) {
             buddy_free = false;
         }
         if (!buddy_free) break;
 
         struct buddy_block *buddy = virt_to_buddy(buddy_pfn * PAGE_SIZE);
-        if (buddy->order == order) {
+        if (buddy->order == order && buddy->node.next && buddy->node.prev) {
             // It's in the same order list, coalesce
             list_del(&buddy->node);
             pfn = (pfn < buddy_pfn) ? pfn : buddy_pfn;
@@ -135,11 +186,11 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
 
     for (uint64_t i = 0; i < memmap->entry_count; i++) {
         struct limine_memmap_entry *entry = memmap->entries[i];
-        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= bitmap_size) {
+        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= bitmap_size * 2) {
             bitmap = (uint8_t *)(entry->base + hhdm_offset);
-            for (size_t b = 0; b < bitmap_size; b++) {
-                bitmap[b] = 0xFF; // Mark all used initially
-            }
+            managed_bitmap = bitmap + bitmap_size;
+            memset(bitmap, 0xFF, bitmap_size);
+            memset(managed_bitmap, 0, bitmap_size);
             break;
         }
     }
@@ -198,6 +249,8 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
                     order++;
                 }
 
+                bitmap_set_range(managed_bitmap, pfn, (1ULL << order));
+
                 buddy_free_internal(phys, order);
                 usable_memory += (1ULL << order) * PAGE_SIZE;
                 p += (1ULL << order) * PAGE_SIZE;
@@ -239,12 +292,7 @@ void *pmm_alloc_pages(size_t count) {
     }
 
     // Mark as used in bitmap
-    size_t actual_pages = 1ULL << order;
-    for (size_t i = 0; i < actual_pages; i++) {
-        if (pfn + i < highest_page) {
-            bitmap_set(pfn + i);
-        }
-    }
+    bitmap_set_range(bitmap, pfn, 1ULL << order);
 
     spinlock_release(&b_zone.lock);
     return (void *)(pfn * PAGE_SIZE);
@@ -285,12 +333,7 @@ void *pmm_alloc_pages_constrained(size_t count, uint64_t max_phys_addr) {
             }
 
             // Mark as used in bitmap
-            size_t actual_pages = 1ULL << order;
-            for (size_t i = 0; i < actual_pages; i++) {
-                if (pfn + i < highest_page) {
-                    bitmap_set(pfn + i);
-                }
-            }
+            bitmap_set_range(bitmap, pfn, 1ULL << order);
 
             spinlock_release(&b_zone.lock);
             return (void *)(pfn * PAGE_SIZE);
@@ -312,6 +355,16 @@ void pmm_free_pages(void *ptr, size_t count) {
     if (order >= MAX_ORDER) return;
 
     uint64_t addr = (uint64_t)ptr;
+    uint64_t pfn = addr / PAGE_SIZE;
+
+    if (pfn >= highest_page || !bitmap_test(managed_bitmap, pfn)) {
+        return; // Not managed by buddy allocator (e.g. MMIO, framebuffer)
+    }
+
+    if (!bitmap_test(bitmap, pfn)) {
+        return; // Already free (prevents double-free list corruption)
+    }
+
     if ((addr & (PAGE_SIZE - 1)) != 0) {
         klog_puts("[PMM] Warning: ignoring unaligned free addr=");
         klog_uint64(addr);
@@ -341,14 +394,7 @@ void pmm_mark_used(void *ptr, size_t count) {
     if (!ptr || count == 0) return;
     uint64_t addr = (uint64_t)ptr;
     size_t start_bit = addr / PAGE_SIZE;
-
-    // This is primarily an early boot mechanism and won't safely remove
-    // memory that is already actively being managed by Buddy Lists.
-    for (size_t i = start_bit; i < start_bit + count; i++) {
-        if (i < highest_page) {
-            bitmap_set(i);
-        }
-    }
+    bitmap_set_range(bitmap, start_bit, count);
 }
 
 void pmm_reclaim_bootloader(void) {
@@ -381,14 +427,18 @@ void pmm_reclaim_bootloader(void) {
     for (uint64_t i = 0; i < internal_memmap->entry_count; i++) {
         struct limine_memmap_entry *entry = internal_memmap->entries[i];
         if (entry->type == LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE) {
-            for (uint64_t p = 0; p < entry->length; p += PAGE_SIZE) {
-                uint64_t phys = entry->base + p;
-                if (phys < 0x100000) continue; 
-                
-                uint64_t pfn = phys / PAGE_SIZE;
-                temp_bitmap[pfn / 8] |= (1 << (pfn % 8)); // Mark in temp
-                bitmap_clear(pfn);                        // Clear in main
+            uint64_t start = entry->base;
+            uint64_t len = entry->length;
+            if (start < 0x100000) {
+                uint64_t diff = 0x100000 - start;
+                if (diff >= len) continue;
+                start = 0x100000;
+                len -= diff;
             }
+            size_t pfn_start = start / PAGE_SIZE;
+            size_t pfn_count = len / PAGE_SIZE;
+            bitmap_set_range(temp_bitmap, pfn_start, pfn_count);
+            bitmap_clear_range(bitmap, pfn_start, pfn_count);
         }
     }
 
@@ -406,8 +456,8 @@ void pmm_reclaim_bootloader(void) {
             for (int i = 0; i < 8; i++) {
                 if (temp_bitmap[b] & (1 << i)) {
                     uint64_t pfn = b * 8 + i;
-                    if (!bitmap_test(pfn)) {
-                        bitmap_set(pfn); // Prevent uninitialized coalescing
+                    if (!bitmap_test(bitmap, pfn)) {
+                        bitmap_set(bitmap, pfn); // Prevent uninitialized coalescing
                     } else {
                         temp_bitmap[b] &= ~(1 << i); // Protected, don't free later
                     }

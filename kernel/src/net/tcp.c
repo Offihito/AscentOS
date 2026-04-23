@@ -7,7 +7,9 @@
 #include "net/ipv4.h"
 #include "net/net.h"
 #include "net/netif.h"
+#include "mm/heap.h"
 #include "sched/sched.h"
+#include "sched/wait.h"
 
 static inline uint32_t tcp_generate_isn(void) {
   uint64_t tsc;
@@ -164,12 +166,13 @@ int tcp_connect(uint32_t ip, uint16_t port, tcp_recv_cb_t on_recv) {
   sock->ack_num = 0;
   sock->recv_callback = on_recv;
 
-  wait_queue_entry_t wq_entry;
+  // Heap-allocate wait queue entry to persist across context switches
+  wait_queue_entry_t *wq_entry = kmalloc(sizeof(wait_queue_entry_t));
   struct thread *current = sched_get_current();
-  if (current) {
-    wq_entry.thread = current;
-    wq_entry.next = NULL;
-    wait_queue_add(&sock->wait_queue, &wq_entry);
+  if (current && wq_entry) {
+    wq_entry->thread = current;
+    wq_entry->next = NULL;
+    wait_queue_add(&sock->wait_queue, wq_entry);
   }
 
   uint64_t start_ticks = pit_get_ticks();
@@ -197,8 +200,9 @@ int tcp_connect(uint32_t ip, uint16_t port, tcp_recv_cb_t on_recv) {
     sched_yield();
   }
 
-  if (current) {
-    wait_queue_remove(&sock->wait_queue, &wq_entry);
+  if (current && wq_entry) {
+    wait_queue_remove(&sock->wait_queue, wq_entry);
+    kfree(wq_entry);
   }
 
   if (sock->state == TCP_STATE_ESTABLISHED) {
@@ -218,12 +222,13 @@ int tcp_send(int sock_id, const void *data, uint16_t len) {
 
   uint32_t start_seq = sock->seq_num;
 
-  wait_queue_entry_t wq_entry;
+  // Heap-allocate wait queue entry to persist across context switches
+  wait_queue_entry_t *wq_entry = kmalloc(sizeof(wait_queue_entry_t));
   struct thread *current = sched_get_current();
-  if (current) {
-    wq_entry.thread = current;
-    wq_entry.next = NULL;
-    wait_queue_add(&sock->wait_queue, &wq_entry);
+  if (current && wq_entry) {
+    wq_entry->thread = current;
+    wq_entry->next = NULL;
+    wait_queue_add(&sock->wait_queue, wq_entry);
   }
 
   uint64_t start_ticks = pit_get_ticks();
@@ -252,8 +257,9 @@ int tcp_send(int sock_id, const void *data, uint16_t len) {
     sched_yield();
   }
 
-  if (current) {
-    wait_queue_remove(&sock->wait_queue, &wq_entry);
+  if (current && wq_entry) {
+    wait_queue_remove(&sock->wait_queue, wq_entry);
+    kfree(wq_entry);
   }
 
   if (sock->seq_num == start_seq + len) {
@@ -273,12 +279,13 @@ void tcp_close(int sock_id) {
     tcp_send_segment(sock, TCP_FLAG_FIN | TCP_FLAG_ACK, NULL, 0);
     sock->state = TCP_STATE_FIN_WAIT1;
 
-    wait_queue_entry_t wq_entry;
+    // Heap-allocate wait queue entry to persist across context switches
+    wait_queue_entry_t *wq_entry = kmalloc(sizeof(wait_queue_entry_t));
     struct thread *current = sched_get_current();
-    if (current) {
-      wq_entry.thread = current;
-      wq_entry.next = NULL;
-      wait_queue_add(&sock->wait_queue, &wq_entry);
+    if (current && wq_entry) {
+      wq_entry->thread = current;
+      wq_entry->next = NULL;
+      wait_queue_add(&sock->wait_queue, wq_entry);
     }
 
     uint64_t start_ticks = pit_get_ticks();
@@ -309,8 +316,9 @@ void tcp_close(int sock_id) {
       }
     }
 
-    if (current) {
-      wait_queue_remove(&sock->wait_queue, &wq_entry);
+    if (current && wq_entry) {
+      wait_queue_remove(&sock->wait_queue, wq_entry);
+      kfree(wq_entry);
     }
   }
 

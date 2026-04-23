@@ -230,6 +230,21 @@ static int ramfs_create(vfs_node_t *node, char *name, uint16_t permission) {
   return 0;
 }
 
+static int ramfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags, void *device) {
+  if (!node || (node->flags & 0x7) != FS_DIRECTORY)
+    return -1;
+  if (ramfs_finddir(node, name) != 0)
+    return -1; // Node exists
+
+  vfs_node_t *new_node = ramfs_make_node(name, permission, flags);
+  if (!new_node)
+    return -1;
+  
+  new_node->device = device;
+  ramfs_add_child(node, new_node);
+  return 0;
+}
+
 static int ramfs_unlink(vfs_node_t *node, char *name);
 static int ramfs_rename(vfs_node_t *node, char *old_name, char *new_name);
 
@@ -248,6 +263,7 @@ static int ramfs_mkdir(vfs_node_t *node, char *name, uint16_t permission) {
   new_node->mkdir = ramfs_mkdir;
   new_node->unlink = ramfs_unlink;
   new_node->rename = ramfs_rename;
+  new_node->mknod = ramfs_mknod;
 
   ramfs_add_child(node, new_node);
   return 0;
@@ -327,6 +343,7 @@ void ramfs_init(void) {
   root->mkdir = ramfs_mkdir;
   root->unlink = ramfs_unlink;
   root->rename = ramfs_rename;
+  root->mknod = ramfs_mknod;
 
   fs_root = root;
 
@@ -344,4 +361,27 @@ void ramfs_mount_node(vfs_node_t *root, vfs_node_t *node) {
 
   ramfs_add_child(root, node);
 }
+void ramfs_mount_on(vfs_node_t *node) {
+  if (!node)
+    return;
 
+  // Initialize a ramfs directory structure
+  ramfs_dir_t *dir = kmalloc(sizeof(ramfs_dir_t));
+  if (!dir)
+    return;
+  memset(dir, 0, sizeof(ramfs_dir_t));
+
+  // Transform the existing node into a ramfs directory
+  node->device = dir;
+  node->flags = (node->flags & ~0x07) | FS_DIRECTORY;
+
+  node->read = 0;
+  node->write = 0;
+  node->readdir = ramfs_readdir;
+  node->finddir = ramfs_finddir;
+  node->create = ramfs_create;
+  node->mkdir = ramfs_mkdir;
+  node->unlink = ramfs_unlink;
+  node->rename = ramfs_rename;
+  node->mknod = ramfs_mknod;
+}

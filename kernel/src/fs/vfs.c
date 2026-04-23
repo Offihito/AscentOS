@@ -109,6 +109,13 @@ int vfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid) {
   return -1;
 }
 
+int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags, void *device) {
+  if ((node->flags & 0x7) == FS_DIRECTORY && node->mknod) {
+    return node->mknod(node, name, permission, flags, device);
+  }
+  return -1;
+}
+
 int vfs_truncate(vfs_node_t *node, uint32_t size) {
   if (node && node->truncate) {
     return node->truncate(node, size);

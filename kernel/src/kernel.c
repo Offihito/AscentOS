@@ -15,6 +15,7 @@
 #include "drivers/audio/sb16.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/input/mouse.h"
+#include "drivers/input/evdev.h"
 #include "drivers/net/rtl8139.h"
 #include "drivers/pci/pci.h"
 #include "drivers/serial.h"
@@ -115,7 +116,7 @@ void restart_main_session(void) {
 
 static void init_thread_entry(void) {
   while (1) {
-    const char *bash_argv[] = {"/bash.elf", NULL};
+    const char *bash_argv[] = {"/bin/bash", NULL};
 
     struct thread *current = sched_get_current();
     if (current) {
@@ -354,6 +355,7 @@ void kmain(void) {
   ramfs_init();
   fb_register_vfs();
   mouse_register_vfs();
+  evdev_init();
   random_register_vfs();
 
   pci_init();
@@ -399,8 +401,13 @@ void kmain(void) {
       vfs_node_t *tmp_dir = vfs_finddir(fs_root, "tmp");
       if (!tmp_dir) {
         vfs_mkdir(fs_root, "tmp", 0777);
-      } else {
-        kfree(tmp_dir);
+        tmp_dir = vfs_finddir(fs_root, "tmp");
+      }
+      
+      // Mount ramfs on /tmp for socket support and performance
+      if (tmp_dir) {
+        ramfs_mount_on(tmp_dir);
+        klog_puts("[OK] Mounted ramfs on /tmp\n");
       }
       // Re-register block devices to the new /dev
       block_repopulate_devices();

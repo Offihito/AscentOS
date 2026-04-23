@@ -23,6 +23,7 @@ static int ext2_symlink_impl(vfs_node_t *node, char *name, char *target);
 static int ext2_rename_impl(vfs_node_t *node, char *old_name, char *new_name);
 static int ext2_chmod_impl(vfs_node_t *node, uint16_t permission);
 static int ext2_chown_impl(vfs_node_t *node, uint32_t uid, uint32_t gid);
+static int ext2_mknod_impl(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags, void *device);
 
 // ── Timestamp helper ────────────────────────────────────────────────────────
 
@@ -595,6 +596,7 @@ static vfs_node_t *ext2_make_vfs_node(ext2_mount_t *mnt, uint32_t inode_num,
     node->rename = ext2_rename_impl;
     node->chmod = ext2_chmod_impl;
     node->chown = ext2_chown_impl;
+    node->mknod = ext2_mknod_impl;
   } else if ((inode->i_mode & 0xF000) == EXT2_S_IFREG) {
     node->flags = FS_FILE;
     node->read = ext2_read_impl;
@@ -607,6 +609,11 @@ static vfs_node_t *ext2_make_vfs_node(ext2_mount_t *mnt, uint32_t inode_num,
     node->readlink = ext2_readlink_impl;
     node->chmod = ext2_chmod_impl;
     node->chown = ext2_chown_impl;
+  } else if ((inode->i_mode & 0xF000) == EXT2_S_IFSOCK) {
+    node->flags = FS_SOCKET;
+    node->chmod = ext2_chmod_impl;
+    node->chown = ext2_chown_impl;
+    // We don't set read/write/poll here because rendezvous sockets are distinct from data sockets
   }
 
   return node;
@@ -1839,4 +1846,29 @@ int ext2_mount_root(struct block_device *dev) {
 
   klog_puts("[OK] Ext2/3 filesystem mounted as root (/)\n");
   return 0;
+}
+
+static int ext2_mknod_impl(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags, void *device) {
+    if (flags != FS_SOCKET) return -1;
+    
+    int err = ext2_create_impl(node, name, permission);
+    if (err < 0) return err;
+    
+    vfs_node_t *new_node = ext2_finddir_impl(node, name);
+    if (!new_node) return -1;
+    
+    ext2_mount_t *mnt = (ext2_mount_t *)node->device;
+    ext2_inode_t inode;
+    if (ext2_read_inode(mnt, new_node->inode, &inode) != 0) {
+        kfree(new_node);
+        return -1;
+    }
+    
+    inode.i_mode = (inode.i_mode & 0x0FFF) | EXT2_S_IFSOCK;
+    ext2_write_inode(mnt, new_node->inode, &inode);
+    
+    new_node->flags = FS_SOCKET;
+    new_node->device = device;
+    kfree(new_node); 
+    return 0;
 }

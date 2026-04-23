@@ -573,6 +573,8 @@ static void console_putchar_unlocked(char c) {
 // ── Public API ───────────────────────────────────────────────────────────────
 
 void console_putchar(char c) {
+  if (fb_get_kd_mode() == KD_GRAPHICS)
+    return;
   spinlock_acquire(&console_lock);
   console_putchar_unlocked(c);
   spinlock_release(&console_lock);
@@ -600,6 +602,8 @@ void console_puts(const char *s) {
 // Batch write used by the VFS console node and fd 1/2 in sys_write.
 // Renders all characters then swaps the backbuffer exactly once.
 void console_write_batch(const char *buf, size_t len) {
+  if (fb_get_kd_mode() == KD_GRAPHICS)
+    return;
   spinlock_acquire(&console_lock);
 
   fb_set_backbuffer_mode(true);
@@ -673,6 +677,8 @@ static void console_refresh_cursor_unlocked(void) {
 }
 
 void console_refresh_cursor(void) {
+  if (fb_get_kd_mode() == KD_GRAPHICS)
+    return;
   spinlock_acquire(&console_lock);
   console_refresh_cursor_unlocked();
   spinlock_release(&console_lock);

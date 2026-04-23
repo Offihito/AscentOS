@@ -1,0 +1,400 @@
+// ── evdev.c — Linux-compatible evdev input subsystem for X11 ─────────────────
+//
+// Provides /dev/input/event0 (keyboard) and /dev/input/event1 (mouse) device
+// nodes that speak the standard Linux evdev protocol. This allows unmodified
+// Xorg/kdrive to discover and read input devices.
+//
+// Events are pushed from the PS/2 keyboard and mouse IRQ handlers into
+// per-device ring buffers, then delivered to userspace via read() as
+// struct input_event packets (24 bytes each on x86_64).
+//
+// The ioctl() interface implements the EVIOC* commands that Xorg's evdev
+// driver uses during device probing (EVIOCGVERSION, EVIOCGID, EVIOCGNAME,
+// EVIOCGBIT, EVIOCGABS).
+
+#include "drivers/input/evdev.h"
+#include "../../console/klog.h"
+#include "../../drivers/timer/rtc.h"
+#include "../../fb/framebuffer.h"
+#include "../../fs/vfs.h"
+#include "../../lib/string.h"
+#include "../../mm/heap.h"
+#include "../../sched/sched.h"
+#include "../../sched/wait.h"
+#include "../../lock/spinlock.h"
+#include <stdbool.h>
+#include <stdint.h>
+
+// ── Two global evdev devices ────────────────────────────────────────────────
+static evdev_device_t kbd_evdev;
+static evdev_device_t mouse_evdev;
+
+evdev_device_t *evdev_get_keyboard(void) { return &kbd_evdev; }
+evdev_device_t *evdev_get_mouse(void) { return &mouse_evdev; }
+
+// ── Timestamp helper ────────────────────────────────────────────────────────
+extern uint64_t pit_get_ticks(void);
+
+static void evdev_timestamp(uint64_t *sec, uint64_t *usec) {
+  uint64_t ticks = pit_get_ticks();
+  *sec = ticks / 100;        // PIT runs at 100 Hz
+  *usec = (ticks % 100) * 10000;
+}
+
+// ── Push an event into the ring buffer ──────────────────────────────────────
+void evdev_push_event(evdev_device_t *dev, uint16_t type, uint16_t code,
+                      int32_t value) {
+  spinlock_acquire(&dev->lock);
+  uint32_t next = (dev->head + 1) % EVDEV_RING_SIZE;
+  if (next == dev->tail) {
+    // Ring full — drop oldest event
+    dev->tail = (dev->tail + 1) % EVDEV_RING_SIZE;
+  }
+
+  struct input_event *ev = &dev->ring[dev->head];
+  evdev_timestamp(&ev->time_sec, &ev->time_usec);
+  ev->type = type;
+  ev->code = code;
+  ev->value = value;
+  dev->head = next;
+  spinlock_release(&dev->lock);
+
+  // Wake any threads blocked on read() or poll()
+  wait_queue_wake_all(&dev->wait);
+}
+
+// ── VFS read callback ───────────────────────────────────────────────────────
+// Returns one or more struct input_event records.
+// If the ring is empty, blocks until events arrive.
+static uint32_t evdev_vfs_read(struct vfs_node *node, uint32_t offset,
+                               uint32_t size, uint8_t *buffer) {
+  (void)offset;
+  evdev_device_t *dev = (evdev_device_t *)node->device;
+  struct thread *t = sched_get_current();
+  if (!dev || !t)
+    return 0;
+
+  if (size < sizeof(struct input_event))
+    return 0;
+
+  // Heap-allocate wait queue entry to persist across context switches
+  wait_queue_entry_t *entry = kmalloc(sizeof(wait_queue_entry_t));
+  if (!entry)
+    return 0;
+  entry->thread = t;
+  entry->next = NULL;
+
+  klog_puts("[EVDEV] read from "); klog_puts(dev->name); klog_puts("\n");
+
+  while (1) {
+    __asm__ volatile("cli");
+    spinlock_acquire(&dev->lock);
+    if (dev->head != dev->tail) {
+      // Data available
+      uint32_t copied = 0;
+      uint32_t max_events = size / sizeof(struct input_event);
+      while (copied < max_events && dev->tail != dev->head) {
+        memcpy(buffer + copied * sizeof(struct input_event),
+               &dev->ring[dev->tail], sizeof(struct input_event));
+        dev->tail = (dev->tail + 1) % EVDEV_RING_SIZE;
+        copied++;
+      }
+      spinlock_release(&dev->lock);
+      __asm__ volatile("sti");
+      kfree(entry);
+      return copied * sizeof(struct input_event);
+    }
+
+    // No data, must block. Add to wait queue BEFORE releasing lock to avoid race.
+    wait_queue_add(&dev->wait, entry);
+    t->state = THREAD_BLOCKED;
+    spinlock_release(&dev->lock);
+    __asm__ volatile("sti");
+
+    sched_yield();
+
+    // After waking up, remove from queue and try again
+    wait_queue_remove(&dev->wait, entry);
+  }
+}
+
+// ── VFS poll callback ───────────────────────────────────────────────────────
+static int evdev_vfs_poll(struct vfs_node *node, int events) {
+  evdev_device_t *dev = (evdev_device_t *)node->device;
+  if (!dev)
+    return 0;
+
+  __asm__ volatile("cli");
+  spinlock_acquire(&dev->lock);
+  int revents = 0;
+  if ((events & POLLIN) && dev->head != dev->tail)
+    revents |= POLLIN;
+  spinlock_release(&dev->lock);
+  __asm__ volatile("sti");
+  return revents;
+}
+
+// ── Helper: set a bit in a bitmask array ────────────────────────────────────
+static void set_bit(uint8_t *mask, int bit) {
+  mask[bit / 8] |= (1 << (bit % 8));
+}
+
+// ── VFS ioctl callback ─────────────────────────────────────────────────────
+static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
+                           uint64_t arg) {
+  evdev_device_t *dev = (evdev_device_t *)node->device;
+  if (!dev)
+    return -1;
+
+  klog_puts("[EVDEV] ioctl: "); klog_uint64(request); klog_puts(" on "); klog_puts(dev->name); klog_puts("\n");
+
+  // Decode the ioctl command
+  // EVIOCGVERSION = 0x80044501
+  if (request == 0x80044501) {
+    int *version = (int *)arg;
+    if (!version) return -14;
+    *version = 0x010001; // Linux input driver version 1.0.1
+    return 0;
+  }
+
+  // EVIOCGID = 0x80084502
+  if (request == 0x80084502) {
+    struct input_id *id = (struct input_id *)arg;
+    if (!id) return -14;
+    *id = dev->id;
+    return 0;
+  }
+
+  // EVIOCGRAB = 0x40044590
+  if (request == 0x40044590) {
+    // Accept grab/ungrab but do nothing (single-user OS)
+    return 0;
+  }
+
+  // EVIOCGNAME(len) — command byte 0x06 in the 0x45xx range
+  // Format: 0x8000_4506 | (len << 16)
+  if ((request & 0xC000FFFF) == 0x80004506) {
+    char *buf = (char *)arg;
+    if (!buf) return -14;
+    uint32_t len = (request >> 16) & 0x3FFF;
+    uint32_t name_len = strlen(dev->name);
+    if (name_len >= len) name_len = len - 1;
+    memcpy(buf, dev->name, name_len);
+    buf[name_len] = '\0';
+    return (int)name_len;
+  }
+
+  // EVIOCGPHYS(len)
+  if ((request & 0xC000FFFF) == 0x80004507) {
+    char *buf = (char *)arg;
+    if (!buf) return -14;
+    uint32_t len = (request >> 16) & 0x3FFF;
+    uint32_t phys_len = strlen(dev->phys);
+    if (phys_len >= len) phys_len = len - 1;
+    memcpy(buf, dev->phys, phys_len);
+    buf[phys_len] = '\0';
+    return (int)phys_len;
+  }
+
+  // EVIOCGBIT(ev, len) — 0x80004520 | (ev << 8) | (len << 16)
+  // Returns which event codes are supported for a given event type.
+  if ((request & 0xC00000FF) == 0x80000020 &&
+      ((request >> 8) & 0xFF) >= 0x45) {
+    // Reparse: the low 16 bits are 0x45EE where EE = event type field
+    // Actually the encoding for EVIOCGBIT is complex. Let's match directly.
+  }
+
+  // Simpler approach: match the fixed bottom byte pattern
+  // EVIOCGBIT(0, len)  = 0x80xx4520  — supported event types
+  // EVIOCGBIT(1, len)  = 0x80xx4521  — supported KEY codes
+  // EVIOCGBIT(2, len)  = 0x80xx4522  — supported REL codes
+  // EVIOCGBIT(3, len)  = 0x80xx4523  — supported ABS codes
+  uint32_t cmd_base = request & 0xC000FFFF;
+  if (cmd_base >= 0x80004520 && cmd_base <= 0x80004540) {
+    uint8_t *buf = (uint8_t *)arg;
+    if (!buf) return -14;
+    uint32_t len = (request >> 16) & 0x3FFF;
+    uint32_t ev_type = (request & 0xFF) - 0x20;  // 0x20 offsets from 0x4520
+
+    // Zero-fill the output
+    memset(buf, 0, len);
+
+    if (ev_type == 0) {
+      // EV_SYN bitmask (which event types this device supports)
+      set_bit(buf, EV_SYN);
+      set_bit(buf, EV_KEY);
+      if (dev->type == EVDEV_MOUSE)
+        set_bit(buf, EV_REL);
+      return 0;
+    }
+
+    if (ev_type == EV_KEY) {
+      // Supported key/button codes
+      if (dev->type == EVDEV_KEYBOARD) {
+        // Report all standard keys
+        for (int i = 0; i < 256; i++) {
+          if (i / 8 < (int)len) set_bit(buf, i);
+        }
+      } else if (dev->type == EVDEV_MOUSE) {
+        // BTN_LEFT (0x110) / BTN_MOUSE = 272
+        if (272 / 8 < (int)len) set_bit(buf, 272);
+        if (273 / 8 < (int)len) set_bit(buf, 273);
+        if (274 / 8 < (int)len) set_bit(buf, 274);
+      }
+      return 0;
+    }
+
+    if (ev_type == EV_REL) {
+      if (dev->type == EVDEV_MOUSE) {
+        set_bit(buf, REL_X);
+        set_bit(buf, REL_Y);
+      }
+      return 0;
+    }
+
+    if (ev_type == EV_REL) {
+      if (dev->type == EVDEV_MOUSE) {
+        set_bit(buf, REL_X);
+        set_bit(buf, REL_Y);
+      }
+      return 0;
+    }
+
+    // Other event types (including EV_ABS): return zero-filled
+    return 0;
+  }
+
+  // EVIOCGABS(axis) = 0x8018_4540 | axis
+  if ((request & 0xC0FFFF00) == 0x80184500 && ((request & 0xFF) >= 0x40)) {
+    uint32_t abs_axis = (request & 0xFF) - 0x40;
+    struct input_absinfo *abs = (struct input_absinfo *)arg;
+    if (!abs) return -14;
+
+    memset(abs, 0, sizeof(*abs));
+    if (dev->type == EVDEV_MOUSE) {
+      if (abs_axis == ABS_X) {
+        abs->minimum = 0;
+        abs->maximum = (int32_t)fb_get_width() - 1;
+        abs->value = 0;
+        return 0;
+      }
+      if (abs_axis == ABS_Y) {
+        abs->minimum = 0;
+        abs->maximum = (int32_t)fb_get_height() - 1;
+        abs->value = 0;
+        return 0;
+      }
+    }
+    return 0;
+  }
+
+  klog_puts("[EVDEV] unknown ioctl 0x");
+  klog_uint64(request);
+  klog_puts("\n");
+  return -25; // ENOTTY
+}
+
+// ── PS/2 scancode → Linux evdev keycode translation ─────────────────────────
+// For the base range (scancode 0x00–0x58), the PS/2 set-1 scancode equals
+// the Linux evdev keycode. Extended scancodes (0xE0 prefix) need a lookup.
+static const uint8_t extended_scancode_to_keycode[] = {
+  // Index = PS/2 scancode (after E0 prefix), value = Linux keycode
+  // We only populate the ones we care about; rest are 0.
+  [0x1C] = KEY_KPENTER_EV,
+  [0x1D] = KEY_RIGHTCTRL,
+  [0x35] = KEY_KPSLASH_EV,
+  [0x38] = KEY_RIGHTALT,
+  [0x47] = KEY_HOME_EV,
+  [0x48] = KEY_UP_EV,
+  [0x49] = KEY_PAGEUP_EV,
+  [0x4B] = KEY_LEFT_EV,
+  [0x4D] = KEY_RIGHT_EV,
+  [0x4F] = KEY_END_EV,
+  [0x50] = KEY_DOWN_EV,
+  [0x51] = KEY_PAGEDOWN_EV,
+  [0x52] = KEY_INSERT_EV,
+  [0x53] = KEY_DELETE_EV,
+};
+
+// Convert a PS/2 scancode to a Linux evdev keycode.
+// Returns 0 if unmapped.
+uint16_t evdev_ps2_to_keycode(uint8_t scancode, bool is_extended) {
+  if (is_extended) {
+    if (scancode < sizeof(extended_scancode_to_keycode))
+      return extended_scancode_to_keycode[scancode];
+    return 0;
+  }
+  // Base scancodes 1-88 map directly to Linux keycodes 1-88
+  if (scancode >= 1 && scancode <= 88)
+    return scancode;
+  return 0;
+}
+
+// ── Create a VFS node for an evdev device ───────────────────────────────────
+static void evdev_create_node(evdev_device_t *dev, const char *node_name) {
+  vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
+  if (!node) return;
+
+  memset(node, 0, sizeof(vfs_node_t));
+  strcpy(node->name, node_name);
+  node->flags  = FS_CHARDEV;
+  node->mask   = 0666;
+  node->device = dev;
+  node->read   = evdev_vfs_read;
+  node->poll   = evdev_vfs_poll;
+  node->ioctl  = evdev_vfs_ioctl;
+  node->wait_queue = &dev->wait;
+
+  dev->vfs_node = node;
+
+  // Register in the device registry so open("/dev/input/eventN") works
+  // We register with the full sub-path that do_sys_open strips "/dev/" from
+  char reg_name[64];
+  // Register as "input/eventN"
+  strcpy(reg_name, "input/");
+  strcat(reg_name, node_name);
+  fb_register_device_node(reg_name, node);
+
+  // Also register the flat name (e.g. "event0") for simpler access
+  fb_register_device_node(node_name, node);
+
+  // If this is the mouse (event1), add standard aliases for X11
+  if (strcmp(node_name, "event1") == 0) {
+    fb_register_device_node("input/mice", node);
+    fb_register_device_node("psaux", node);
+    fb_register_device_node("mouse", node);
+  }
+}
+
+// ── Initialization ──────────────────────────────────────────────────────────
+void evdev_init(void) {
+  // ── Keyboard device (event0) ────────────────────────────────────────────
+  memset(&kbd_evdev, 0, sizeof(kbd_evdev));
+  kbd_evdev.type = EVDEV_KEYBOARD;
+  strcpy(kbd_evdev.name, "AT Translated Set 2 keyboard");
+  strcpy(kbd_evdev.phys, "isa0060/serio0/input0");
+  kbd_evdev.id.bustype = BUS_I8042;
+  kbd_evdev.id.vendor  = 0x0001;
+  kbd_evdev.id.product = 0x0001;
+  kbd_evdev.id.version = 0xAB41;
+  wait_queue_init(&kbd_evdev.wait);
+  spinlock_init(&kbd_evdev.lock);
+
+  evdev_create_node(&kbd_evdev, "event0");
+
+  // ── Mouse device (event1) ──────────────────────────────────────────────
+  memset(&mouse_evdev, 0, sizeof(mouse_evdev));
+  mouse_evdev.type = EVDEV_MOUSE;
+  strcpy(mouse_evdev.name, "ImExPS/2 Generic Explorer Mouse");
+  strcpy(mouse_evdev.phys, "isa0060/serio1/input0");
+  mouse_evdev.id.bustype = BUS_I8042;
+  mouse_evdev.id.vendor  = 0x0002;
+  mouse_evdev.id.product = 0x0005;
+  mouse_evdev.id.version = 0x0000;
+  wait_queue_init(&mouse_evdev.wait);
+  spinlock_init(&mouse_evdev.lock);
+
+  evdev_create_node(&mouse_evdev, "event1");
+
+  klog_puts("[OK] evdev input subsystem initialized (event0=kbd, event1=mouse)\n");
+}

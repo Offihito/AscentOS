@@ -9,8 +9,9 @@
 #include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
-#include "../sched/sched.h"
 #include "../net/net.h"
+#include "../sched/sched.h"
+#include "../sched/wait.h"
 #include "syscall.h"
 #include <stdint.h>
 
@@ -30,6 +31,38 @@ typedef struct {
 #define TCSETSW 0x5403
 #define TCSETSF 0x5404
 #define TIOCGWINSZ 0x5413
+
+// VT (Virtual Terminal) ioctl constants
+#define VT_OPENQRY     0x5600
+#define VT_GETMODE     0x5601
+#define VT_SETMODE     0x5602
+#define VT_GETSTATE    0x5603
+#define VT_RELDISP     0x5605
+#define VT_ACTIVATE    0x5606
+#define VT_WAITACTIVE  0x5607
+#define VT_DISALLOCATE 0x5608
+
+// KD (Keyboard Display) ioctl constants
+#define KDSETMODE      0x4B3A
+#define KDGETMODE      0x4B3B
+#define KDGKBMODE      0x4B44
+#define KDSKBMODE      0x4B45
+#define KD_TEXT        0x00
+#define KD_GRAPHICS    0x01
+
+struct vt_mode {
+  char mode;
+  char waitv;
+  short relsig;
+  short acqsig;
+  short frsig;
+};
+
+struct vt_stat {
+  unsigned short v_active;
+  unsigned short v_signal;
+  unsigned short v_state;
+};
 
 // OSS /dev/dsp ioctls
 #define SNDCTL_DSP_RESET 0x00005000
@@ -132,7 +165,7 @@ struct statx {
 
 struct termios console_termios;
 
-static int alloc_fd(struct thread *t) {
+int alloc_fd(struct thread *t) {
   for (int i = 0; i < MAX_FDS; i++) {
     if (t->fds[i] == NULL)
       return i;
@@ -170,14 +203,58 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
 
   // Check if this is a device file path (/dev/...)
   vfs_node_t *node = NULL;
-  if (strncmp(path, "/dev/", 5) == 0) {
+  const char *dev_path = NULL;
+  if (strncmp(path, "/dev/", 5) == 0) dev_path = path + 5;
+  else if (strncmp(path, "dev/", 4) == 0) dev_path = path + 4;
+
+  if (dev_path) {
     // Try to get from device registry first
-    node = fb_lookup_device((char *)path + 5); // Skip "/dev/"
+    node = fb_lookup_device((char *)dev_path);
+    if (node) {
+      klog_puts("[SYSCALL] sys_open: found registry node for: ");
+      klog_puts(path);
+      klog_puts("\n");
+    }
   }
 
   // Fall back to normal VFS path resolution
   if (!node) {
-    node = vfs_resolve_path_at(base_dir, path);
+    // Special hack for /proc
+    if (strncmp(path, "/proc/", 6) == 0) {
+      const char *p = path + 6;
+      if (strncmp(p, "self/", 5) == 0) p += 5;
+      else {
+        // Skip pid if present
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p == '/') p++;
+      }
+
+      if (strcmp(p, "cmdline") == 0) {
+        // Create a temporary ramfs-like node for cmdline
+        vfs_node_t *proc_node = kmalloc(sizeof(vfs_node_t));
+        if (proc_node) {
+          memset(proc_node, 0, sizeof(vfs_node_t));
+          ramfs_file_t *rf = kmalloc(sizeof(ramfs_file_t));
+          if (rf) {
+            rf->data = kmalloc(7); 
+            memcpy(rf->data, "Xfbdev", 7); // Mock cmdline
+            rf->capacity = 7;
+            proc_node->flags = FS_FILE;
+            proc_node->device = rf;
+            proc_node->length = 7;
+            proc_node->read = ramfs_read;
+            proc_node->write = NULL;
+            proc_node->close = NULL;
+            node = proc_node;
+          } else {
+            kfree(proc_node);
+          }
+        }
+      }
+    }
+
+    if (!node)
+      node = vfs_resolve_path_at(base_dir, path);
   }
 
   if (!node) {
@@ -445,6 +522,49 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     }
     return 0; // No scancode available (would block in non-blocking mode)
   }
+  // VT ioctl stubs for X11 server support
+  case VT_OPENQRY: {
+    int *vt = (int *)arg;
+    if (!vt) return (uint64_t)-14;
+    *vt = 1;
+    return 0;
+  }
+  case VT_GETMODE: {
+    struct vt_mode *vtm = (struct vt_mode *)arg;
+    if (!vtm) return (uint64_t)-14;
+    memset(vtm, 0, sizeof(struct vt_mode));
+    return 0;
+  }
+  case VT_SETMODE:
+    return 0;
+  case VT_GETSTATE: {
+    struct vt_stat *vts = (struct vt_stat *)arg;
+    if (!vts) return (uint64_t)-14;
+    memset(vts, 0, sizeof(struct vt_stat));
+    vts->v_active = 1;
+    vts->v_state = 0x02;
+    return 0;
+  }
+  case VT_RELDISP:
+  case VT_ACTIVATE:
+  case VT_WAITACTIVE:
+  case VT_DISALLOCATE:
+    return 0;
+  case KDSETMODE:
+  case KDSKBMODE:
+    return 0;
+  case KDGETMODE: {
+    int *mode = (int *)arg;
+    if (!mode) return (uint64_t)-14;
+    *mode = KD_TEXT;
+    return 0;
+  }
+  case KDGKBMODE: {
+    int *mode = (int *)arg;
+    if (!mode) return (uint64_t)-14;
+    *mode = 0; // K_XLATE
+    return 0;
+  }
   default:
     return (uint64_t)-25; // ENOTTY
   }
@@ -544,6 +664,9 @@ static void fill_kstat(struct kstat *ks, vfs_node_t *node) {
   case FS_SYMLINK:
     mode |= 0120000;
     break; // S_IFLNK
+  case FS_SOCKET:
+    mode |= 0140000;
+    break; // S_IFSOCK
   default:
     mode |= 0100000;
     break; // Default to regular file
@@ -584,14 +707,23 @@ static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
     return (uint64_t)-14; // EFAULT
 
   struct thread *t = sched_get_current();
-  vfs_node_t *cwd_node = fs_root;
-  if (t && t->cwd_path[0]) {
-    cwd_node = vfs_resolve_path_at(fs_root, t->cwd_path);
-    if (!cwd_node)
-      cwd_node = fs_root;
+  vfs_node_t *node = NULL;
+
+  // Check device registry for /dev/ paths
+  if (strncmp(path, "/dev/", 5) == 0) {
+    node = fb_lookup_device((char *)path + 5);
   }
 
-  vfs_node_t *node = vfs_resolve_path_at(cwd_node, path);
+  if (!node) {
+    vfs_node_t *cwd_node = fs_root;
+    if (t && t->cwd_path[0]) {
+      cwd_node = vfs_resolve_path_at(fs_root, t->cwd_path);
+      if (!cwd_node)
+        cwd_node = fs_root;
+    }
+    node = vfs_resolve_path_at(cwd_node, path);
+  }
+
   if (!node) {
     klog_puts("[SYSCALL] sys_stat: not found: ");
     klog_puts(path);
@@ -601,6 +733,18 @@ static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
 
   fill_kstat(ks, node);
   return 0;
+}
+
+// ── sys_lstat: lstat(path, statbuf) - like stat but doesn't follow symlinks
+// For now we treat it the same as stat since we don't follow symlinks yet.
+static uint64_t sys_lstat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
+                          uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  // For now, identical to stat (we don't follow symlinks)
+  return sys_stat(path_ptr, statbuf_ptr, a2, a3, a4, a5);
 }
 
 // ── sys_fstat: fstat(fd, statbuf)
@@ -844,8 +988,24 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout,
   if (timeout != (uint64_t)-1 && timeout_ticks == 0 && timeout > 0)
     timeout_ticks = 1;
 
+  // Pre-allocate wait queue entries and add to queues BEFORE checking
+  // to avoid race condition where interrupt fires between check and blocking
+  wait_queue_entry_t entries[nfds];
+  for (uint64_t i = 0; i < nfds; i++) {
+    int fd = fds[i].fd;
+    if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
+      entries[i].thread = t;
+      entries[i].next = NULL;
+      wait_queue_add((wait_queue_t *)t->fds[fd]->wait_queue, &entries[i]);
+    }
+  }
+
   while (1) {
     int count = 0;
+
+    // Disable interrupts while checking to avoid race with wakeup
+    __asm__ volatile("cli");
+
     for (uint64_t i = 0; i < nfds; i++) {
       fds[i].revents = 0;
       int fd = fds[i].fd;
@@ -858,27 +1018,48 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout,
 
       int revents = vfs_poll(t->fds[fd], fds[i].events);
       if (revents) {
-        klog_puts("[POLL] fd=");
-        klog_uint64(fd);
-        klog_puts(" req=");
-        klog_uint64(fds[i].events);
-        klog_puts(" got=");
-        klog_uint64(revents);
-        klog_puts("\n");
         fds[i].revents = revents;
         count++;
       }
     }
 
-    if (count > 0)
+    if (count > 0) {
+      __asm__ volatile("sti");
+      // Remove from wait queues before returning
+      for (uint64_t i = 0; i < nfds; i++) {
+        int fd = fds[i].fd;
+        if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
+          wait_queue_remove((wait_queue_t *)t->fds[fd]->wait_queue, &entries[i]);
+        }
+      }
       return (uint64_t)count;
-    if (timeout == 0)
+    }
+
+    if (timeout == 0) {
+      __asm__ volatile("sti");
+      // Remove from wait queues before returning
+      for (uint64_t i = 0; i < nfds; i++) {
+        int fd = fds[i].fd;
+        if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
+          wait_queue_remove((wait_queue_t *)t->fds[fd]->wait_queue, &entries[i]);
+        }
+      }
       return 0;
+    }
 
     uint64_t current_ticks = pit_get_ticks();
     if (timeout != (uint64_t)-1 &&
-        (current_ticks - start_ticks) >= timeout_ticks)
+        (current_ticks - start_ticks) >= timeout_ticks) {
+      __asm__ volatile("sti");
+      // Remove from wait queues before returning
+      for (uint64_t i = 0; i < nfds; i++) {
+        int fd = fds[i].fd;
+        if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
+          wait_queue_remove((wait_queue_t *)t->fds[fd]->wait_queue, &entries[i]);
+        }
+      }
       return 0;
+    }
 
     // Block the thread. We'll be woken up by a driver's wait_queue_wake_all
     // or by the scheduler timer if we set wakeup_ticks.
@@ -893,7 +1074,10 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout,
       t->state = THREAD_READY;
       t->wakeup_ticks = 0;
     }
+
+    // Yield with interrupts disabled - scheduler will restore them
     sched_yield();
+    __asm__ volatile("sti");
   }
 }
 
@@ -911,7 +1095,8 @@ static uint64_t sys_select(uint64_t nfds, uint64_t readfds_ptr,
                            uint64_t timeout_ptr, uint64_t a5) {
   (void)a5;
   struct thread *t = sched_get_current();
-  if (!t) return (uint64_t)-1;
+  if (!t)
+    return (uint64_t)-1;
 
   fd_set_t *readfds = (fd_set_t *)readfds_ptr;
   fd_set_t *writefds = (fd_set_t *)writefds_ptr;
@@ -946,35 +1131,44 @@ static uint64_t sys_select(uint64_t nfds, uint64_t readfds_ptr,
   }
 
   if (pcount == 0) {
-    if (timeout_ms == 0) return 0;
+    if (timeout_ms == 0)
+      return 0;
     pit_sleep(timeout_ms);
     return 0;
   }
 
-  uint64_t ret = sys_poll((uint64_t)pfds, (uint64_t)pcount, timeout_ms, 0, 0, 0);
+  uint64_t ret =
+      sys_poll((uint64_t)pfds, (uint64_t)pcount, timeout_ms, 0, 0, 0);
 
   if (ret > 0 && ret != (uint64_t)-1) {
-    if (readfds) memset(readfds, 0, sizeof(fd_set_t));
-    if (writefds) memset(writefds, 0, sizeof(fd_set_t));
-    if (exceptfds) memset(exceptfds, 0, sizeof(fd_set_t));
+    if (readfds)
+      memset(readfds, 0, sizeof(fd_set_t));
+    if (writefds)
+      memset(writefds, 0, sizeof(fd_set_t));
+    if (exceptfds)
+      memset(exceptfds, 0, sizeof(fd_set_t));
 
     int ready = 0;
     for (int i = 0; i < pcount; i++) {
       int fd = map[i];
       bool is_ready = false;
       if (pfds[i].revents & POLLIN) {
-        if (readfds) readfds->fds_bits[fd / 64] |= (1ULL << (fd % 64));
+        if (readfds)
+          readfds->fds_bits[fd / 64] |= (1ULL << (fd % 64));
         is_ready = true;
       }
       if (pfds[i].revents & POLLOUT) {
-        if (writefds) writefds->fds_bits[fd / 64] |= (1ULL << (fd % 64));
+        if (writefds)
+          writefds->fds_bits[fd / 64] |= (1ULL << (fd % 64));
         is_ready = true;
       }
       if (pfds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-        if (exceptfds) exceptfds->fds_bits[fd / 64] |= (1ULL << (fd % 64));
+        if (exceptfds)
+          exceptfds->fds_bits[fd / 64] |= (1ULL << (fd % 64));
         is_ready = true;
       }
-      if (is_ready) ready++;
+      if (is_ready)
+        ready++;
     }
     return (uint64_t)ready;
   }
@@ -1059,6 +1253,12 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
   if (!path)
     return (uint64_t)-14; // EFAULT
 
+  klog_puts("[MKDIR] path=");
+  klog_puts(path);
+  klog_puts(" mode=");
+  klog_uint64(mode);
+  klog_puts("\n");
+
   // Split path into parent directory + new dir name
   char parent_path[128];
   char dir_name[128];
@@ -1097,6 +1297,151 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
 
   if (vfs_mkdir(parent, dir_name, (uint16_t)mode) != 0)
     return (uint64_t)-17; // EEXIST
+
+  return 0;
+}
+
+// ── sys_mkdirat: mkdirat(dirfd, pathname, mode) — syscall 258 ────────────────
+static uint64_t sys_mkdirat(uint64_t dirfd, uint64_t pathname, uint64_t mode,
+                            uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  const char *path = (const char *)pathname;
+  if (!path)
+    return (uint64_t)-14; // EFAULT
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  // Resolve base directory from dirfd
+  vfs_node_t *base_dir = fs_root;
+  if (path[0] != '/') {
+    if ((int64_t)dirfd == AT_FDCWD) {
+      base_dir = vfs_resolve_path_at(fs_root, t->cwd_path);
+      if (!base_dir)
+        base_dir = fs_root;
+    } else if (dirfd < MAX_FDS && t->fds[dirfd]) {
+      base_dir = t->fds[dirfd];
+      if ((base_dir->flags & 0xFF) != FS_DIRECTORY)
+        return (uint64_t)-20; // ENOTDIR
+    } else {
+      return (uint64_t)-9; // EBADF
+    }
+  }
+
+  // Split path into parent directory + new dir name
+  char parent_path[128];
+  char dir_name[128];
+  size_t len = strlen(path);
+  if (len == 0 || len >= sizeof(dir_name))
+    return (uint64_t)-14;
+
+  const char *slash = 0;
+  for (const char *p = path; *p; p++)
+    if (*p == '/')
+      slash = p;
+
+  vfs_node_t *parent = base_dir;
+  if (slash) {
+    size_t parent_len = (size_t)(slash - path);
+    if (parent_len == 0) {
+      parent = fs_root;
+    } else {
+      if (parent_len >= sizeof(parent_path))
+        return (uint64_t)-14;
+      for (size_t i = 0; i < parent_len; i++)
+        parent_path[i] = path[i];
+      parent_path[parent_len] = '\0';
+      parent = vfs_resolve_path_at(base_dir, parent_path);
+    }
+    size_t dlen = strlen(slash + 1);
+    if (dlen == 0 || dlen >= sizeof(dir_name))
+      return (uint64_t)-22; // EINVAL
+    strcpy(dir_name, slash + 1);
+  } else {
+    strcpy(dir_name, path);
+  }
+
+  if (!parent || (parent->flags & 0x07) != FS_DIRECTORY)
+    return (uint64_t)-20; // ENOTDIR
+
+  if (vfs_mkdir(parent, dir_name, (uint16_t)mode) != 0)
+    return (uint64_t)-17; // EEXIST
+
+  return 0;
+}
+
+// ── sys_unlinkat: unlinkat(dirfd, pathname, flags) — syscall 263 ────────────
+static uint64_t sys_unlinkat(uint64_t dirfd, uint64_t pathname, uint64_t flags,
+                             uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)flags;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  const char *path = (const char *)pathname;
+  if (!path)
+    return (uint64_t)-14; // EFAULT
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  // Resolve base directory from dirfd
+  vfs_node_t *base_dir = fs_root;
+  if (path[0] != '/') {
+    if ((int64_t)dirfd == AT_FDCWD) {
+      base_dir = vfs_resolve_path_at(fs_root, t->cwd_path);
+      if (!base_dir)
+        base_dir = fs_root;
+    } else if (dirfd < MAX_FDS && t->fds[dirfd]) {
+      base_dir = t->fds[dirfd];
+      if ((base_dir->flags & 0xFF) != FS_DIRECTORY)
+        return (uint64_t)-20; // ENOTDIR
+    } else {
+      return (uint64_t)-9; // EBADF
+    }
+  }
+
+  // Split path into parent directory + file name
+  char parent_path[128];
+  char file_name[128];
+  size_t len = strlen(path);
+  if (len == 0 || len >= sizeof(file_name))
+    return (uint64_t)-14;
+
+  const char *slash = 0;
+  for (const char *p = path; *p; p++)
+    if (*p == '/')
+      slash = p;
+
+  vfs_node_t *parent = base_dir;
+  if (slash) {
+    size_t parent_len = (size_t)(slash - path);
+    if (parent_len == 0) {
+      parent = fs_root;
+    } else {
+      if (parent_len >= sizeof(parent_path))
+        return (uint64_t)-14;
+      for (size_t i = 0; i < parent_len; i++)
+        parent_path[i] = path[i];
+      parent_path[parent_len] = '\0';
+      parent = vfs_resolve_path_at(base_dir, parent_path);
+    }
+    size_t flen = strlen(slash + 1);
+    if (flen == 0 || flen >= sizeof(file_name))
+      return (uint64_t)-22; // EINVAL
+    strcpy(file_name, slash + 1);
+  } else {
+    strcpy(file_name, path);
+  }
+
+  if (!parent || (parent->flags & 0x07) != FS_DIRECTORY)
+    return (uint64_t)-20; // ENOTDIR
+
+  if (vfs_unlink(parent, file_name) != 0)
+    return (uint64_t)-2; // ENOENT
 
   return 0;
 }
@@ -1284,6 +1629,76 @@ static uint64_t sys_faccessat2(uint64_t dirfd, uint64_t pathname_ptr,
                        (int)flags);
 }
 
+static uint64_t sys_fchmodat(uint64_t dirfd, uint64_t pathname_ptr,
+                               uint64_t mode, uint64_t flags, uint64_t a4,
+                               uint64_t a5) {
+  (void)flags; // flags like AT_SYMLINK_NOFOLLOW largely ignored for now
+  (void)a4;
+  (void)a5;
+  const char *path = (const char *)pathname_ptr;
+  if (!path)
+    return (uint64_t)-14;
+
+  struct thread *t = sched_get_current();
+  vfs_node_t *base = fs_root;
+  if (path[0] != '/') {
+    if ((int)dirfd == AT_FDCWD) {
+      if (t && t->cwd_path[0]) {
+        base = vfs_resolve_path_at(fs_root, t->cwd_path);
+        if (!base)
+          base = fs_root;
+      }
+    } else {
+      if (dirfd >= MAX_FDS || !t->fds[dirfd])
+        return (uint64_t)-9;
+      base = t->fds[dirfd];
+    }
+  }
+
+  vfs_node_t *node = vfs_resolve_path_at(base, path);
+  if (!node)
+    return (uint64_t)-2;
+
+  int ret = vfs_chmod(node, (uint16_t)mode);
+  return ret == 0 ? 0 : (uint64_t)-1;
+}
+
+static uint64_t sys_fchownat(uint64_t dirfd, uint64_t pathname_ptr,
+                               uint64_t owner, uint64_t group, uint64_t flags,
+                               uint64_t a5) {
+  (void)flags;
+  (void)a5;
+  const char *path = (const char *)pathname_ptr;
+  if (!path)
+    return (uint64_t)-14;
+
+  struct thread *t = sched_get_current();
+  vfs_node_t *base = fs_root;
+  if (path[0] != '/') {
+    if ((int)dirfd == AT_FDCWD) {
+      if (t && t->cwd_path[0]) {
+        base = vfs_resolve_path_at(fs_root, t->cwd_path);
+        if (!base)
+          base = fs_root;
+      }
+    } else {
+      if (dirfd >= MAX_FDS || !t->fds[dirfd])
+        return (uint64_t)-9;
+      base = t->fds[dirfd];
+    }
+  }
+
+  vfs_node_t *node = vfs_resolve_path_at(base, path);
+  if (!node)
+    return (uint64_t)-2;
+
+  uint32_t uid = (owner == (uint64_t)-1) ? node->uid : (uint32_t)owner;
+  uint32_t gid = (group == (uint64_t)-1) ? node->gid : (uint32_t)group;
+
+  int ret = vfs_chown(node, uid, gid);
+  return ret == 0 ? 0 : (uint64_t)-1;
+}
+
 // ── sys_newfstatat: fstatat(dirfd, pathname, statbuf, flags) — syscall 262 ──
 #define AT_EMPTY_PATH 0x1000
 
@@ -1332,9 +1747,18 @@ static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
     }
   }
 
-  vfs_node_t *node = vfs_resolve_path_at(base_dir, path);
+  vfs_node_t *node = NULL;
+
+  // Check device registry for /dev/ paths
+  if (strncmp(path, "/dev/", 5) == 0) {
+    node = fb_lookup_device((char *)path + 5);
+  }
+
   if (!node) {
-    return (uint64_t)-2; // ENOENT
+    node = vfs_resolve_path_at(base_dir, path);
+    if (!node) {
+      return (uint64_t)-2; // ENOENT
+    }
   }
 
   fill_kstat(ks, node);
@@ -1722,7 +2146,7 @@ static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2,
 }
 
 static uint64_t sys_utimensat(uint64_t dirfd, uint64_t pathname, uint64_t times,
-                               uint64_t flags, uint64_t a4, uint64_t a5) {
+                              uint64_t flags, uint64_t a4, uint64_t a5) {
   (void)dirfd;
   (void)pathname;
   (void)times;
@@ -1733,7 +2157,7 @@ static uint64_t sys_utimensat(uint64_t dirfd, uint64_t pathname, uint64_t times,
 }
 
 static uint64_t sys_futimesat(uint64_t dirfd, uint64_t pathname, uint64_t times,
-                               uint64_t a3, uint64_t a4, uint64_t a5) {
+                              uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)dirfd;
   (void)pathname;
   (void)times;
@@ -1744,7 +2168,7 @@ static uint64_t sys_futimesat(uint64_t dirfd, uint64_t pathname, uint64_t times,
 }
 
 static uint64_t sys_utimes(uint64_t pathname, uint64_t times, uint64_t a2,
-                            uint64_t a3, uint64_t a4, uint64_t a5) {
+                           uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)pathname;
   (void)times;
   (void)a2;
@@ -1752,6 +2176,464 @@ static uint64_t sys_utimes(uint64_t pathname, uint64_t times, uint64_t a2,
   (void)a4;
   (void)a5;
   return 0; // successfully mocked
+}
+
+// ── sys_fchmod: fchmod(fd, mode) — syscall 91 ────────────────────────────────
+static uint64_t sys_fchmod(uint64_t fd, uint64_t mode, uint64_t a2, uint64_t a3,
+                           uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct thread *t = sched_get_current();
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
+
+  vfs_node_t *node = t->fds[fd];
+  node->mask = (uint32_t)(mode & 0777);
+  return 0;
+}
+
+// ── sys_link: link(oldpath, newpath) — syscall 86 ────────────────────────────
+// Minimal implementation: since ramfs/ext2 don't support hard links natively,
+// we create a new file at newpath with the same content as oldpath.
+// This is sufficient for Xorg's lock file mechanism.
+static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
+                         uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  const char *oldpath = (const char *)oldpath_ptr;
+  const char *newpath = (const char *)newpath_ptr;
+
+  if (!oldpath || !newpath)
+    return (uint64_t)-14; // EFAULT
+
+  // Resolve the source file
+  vfs_node_t *src = vfs_resolve_path(oldpath);
+  if (!src)
+    return (uint64_t)-2; // ENOENT
+
+  if ((src->flags & 0xFF) != FS_FILE)
+    return (uint64_t)-1; // EPERM - can only link regular files
+
+  // Parse newpath to find parent directory and filename
+  char parent_path[128];
+  char file_name[128];
+  size_t len = strlen(newpath);
+  if (len == 0 || len >= sizeof(file_name))
+    return (uint64_t)-36; // ENAMETOOLONG
+
+  const char *slash = 0;
+  for (const char *p = newpath; *p; p++)
+    if (*p == '/')
+      slash = p;
+
+  vfs_node_t *parent = fs_root;
+  if (slash) {
+    size_t parent_len = (size_t)(slash - newpath);
+    if (parent_len == 0) {
+      parent = fs_root;
+    } else {
+      if (parent_len >= sizeof(parent_path))
+        return (uint64_t)-36;
+      memcpy(parent_path, newpath, parent_len);
+      parent_path[parent_len] = '\0';
+      parent = vfs_resolve_path(parent_path);
+    }
+    strcpy(file_name, slash + 1);
+  } else {
+    strcpy(file_name, newpath);
+  }
+
+  if (!parent || (parent->flags & 0xFF) != FS_DIRECTORY)
+    return (uint64_t)-20; // ENOTDIR
+
+  // Check if target already exists
+  if (vfs_finddir(parent, file_name))
+    return (uint64_t)-17; // EEXIST
+
+  // Create the new file
+  if (vfs_create(parent, file_name, src->mask & 0777) != 0)
+    return (uint64_t)-1;
+
+  // Copy content from source to destination
+  vfs_node_t *dst = vfs_finddir(parent, file_name);
+  if (!dst)
+    return (uint64_t)-1;
+
+  if (src->length > 0) {
+    uint8_t buf[512];
+    uint32_t offset = 0;
+    while (offset < src->length) {
+      uint32_t chunk = src->length - offset;
+      if (chunk > sizeof(buf))
+        chunk = sizeof(buf);
+      uint32_t rd = vfs_read(src, offset, chunk, buf);
+      if (rd == 0)
+        break;
+      vfs_write(dst, offset, rd, buf);
+      offset += rd;
+    }
+  }
+
+  return 0;
+}
+
+// ── Epoll implementation
+// ────────────────────────────────────────────────────── Syscalls 291
+// (epoll_create1), 233 (epoll_ctl), 232 (epoll_wait),
+//          281 (epoll_pwait)
+
+#define EPOLL_CTL_ADD 1
+#define EPOLL_CTL_MOD 3
+#define EPOLL_CTL_DEL 2
+
+// Epoll event flags (matching Linux)
+#define EPOLLIN 0x001
+#define EPOLLPRI 0x002
+#define EPOLLOUT 0x004
+#define EPOLLERR 0x008
+#define EPOLLHUP 0x010
+#define EPOLLRDHUP 0x2000
+#define EPOLLET (1U << 31)
+
+struct epoll_event {
+  uint32_t events;
+  uint64_t data;
+} __attribute__((packed));
+
+#define EPOLL_MAX_WATCH 64
+
+struct epoll_watch {
+  int fd;          // User fd being monitored
+  uint32_t events; // Events of interest
+  uint64_t data;   // User data (returned in epoll_wait)
+  bool active;
+};
+
+struct epoll_instance {
+  struct epoll_watch watches[EPOLL_MAX_WATCH];
+  int count;
+};
+
+// Custom close handler: free the epoll instance when the fd is closed
+static void epoll_vfs_close(struct vfs_node *node) {
+  if (node && node->device) {
+    kfree(node->device);
+    node->device = NULL;
+  }
+}
+
+// Custom poll for the epoll fd itself (epoll fds are rarely polled, but be
+// safe)
+static int epoll_vfs_poll(struct vfs_node *node, int events) {
+  (void)node;
+  (void)events;
+  return 0; // epoll fds don't report readiness on themselves
+}
+
+// ── epoll_create1(flags) — syscall 291
+// ────────────────────────────────────────
+static uint64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
+                                  uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)flags; // EPOLL_CLOEXEC ignored (no exec-close tracking yet)
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  int fd = alloc_fd(t);
+  if (fd < 0)
+    return (uint64_t)-24; // EMFILE
+
+  // Allocate the epoll instance
+  struct epoll_instance *ep = kmalloc(sizeof(struct epoll_instance));
+  if (!ep)
+    return (uint64_t)-12; // ENOMEM
+  memset(ep, 0, sizeof(struct epoll_instance));
+
+  // Allocate a VFS node to represent this epoll fd
+  vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
+  if (!node) {
+    kfree(ep);
+    return (uint64_t)-12;
+  }
+  memset(node, 0, sizeof(vfs_node_t));
+
+  strcpy(node->name, "[epoll]");
+  node->flags = FS_FILE; // Treated as a special file
+  node->device = ep;
+  node->close = epoll_vfs_close;
+  node->poll = epoll_vfs_poll;
+
+  t->fds[fd] = node;
+  t->fd_offsets[fd] = 0;
+
+  klog_puts("[EPOLL] Created epoll instance, fd=");
+  klog_uint64(fd);
+  klog_puts("\n");
+
+  return (uint64_t)fd;
+}
+
+// ── epoll_ctl(epfd, op, fd, event) — syscall 233 ─────────────────────────────
+static uint64_t sys_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd,
+                              uint64_t event_ptr, uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  if (epfd >= MAX_FDS || !t->fds[epfd])
+    return (uint64_t)-9; // EBADF
+
+  vfs_node_t *epoll_node = t->fds[epfd];
+  struct epoll_instance *ep = (struct epoll_instance *)epoll_node->device;
+  if (!ep)
+    return (uint64_t)-9; // EBADF — not an epoll fd
+
+  // Validate the target fd
+  if (fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9; // EBADF
+
+  struct epoll_event *ev = (struct epoll_event *)event_ptr;
+
+  klog_puts("[EPOLL] ctl: epfd="); klog_uint64(epfd);
+  klog_puts(" op="); klog_uint64(op);
+  klog_puts(" fd="); klog_uint64(fd);
+  if (ev) {
+    klog_puts(" events="); klog_uint64(ev->events);
+  }
+  klog_puts("\n");
+
+  switch (op) {
+  case EPOLL_CTL_ADD: {
+    // Check if fd already exists in the interest list
+    for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
+      if (ep->watches[i].active && ep->watches[i].fd == (int)fd)
+        return (uint64_t)-17; // EEXIST
+    }
+    // Find an empty slot
+    int slot = -1;
+    for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
+      if (!ep->watches[i].active) {
+        slot = i;
+        break;
+      }
+    }
+    if (slot < 0)
+      return (uint64_t)-28; // ENOSPC
+    if (!ev)
+      return (uint64_t)-14; // EFAULT
+
+    ep->watches[slot].fd = (int)fd;
+    ep->watches[slot].events = ev->events;
+    ep->watches[slot].data = ev->data;
+    ep->watches[slot].active = true;
+    ep->count++;
+    return 0;
+  }
+  case EPOLL_CTL_MOD: {
+    if (!ev)
+      return (uint64_t)-14;
+    for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
+      if (ep->watches[i].active && ep->watches[i].fd == (int)fd) {
+        ep->watches[i].events = ev->events;
+        ep->watches[i].data = ev->data;
+        return 0;
+      }
+    }
+    return (uint64_t)-2; // ENOENT
+  }
+  case EPOLL_CTL_DEL: {
+    for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
+      if (ep->watches[i].active && ep->watches[i].fd == (int)fd) {
+        ep->watches[i].active = false;
+        ep->count--;
+        return 0;
+      }
+    }
+    return (uint64_t)-2; // ENOENT
+  }
+  default:
+    return (uint64_t)-22; // EINVAL
+  }
+}
+
+// ── epoll_wait(epfd, events, maxevents, timeout) — syscall 232
+// ────────────────
+static uint64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr,
+                               uint64_t maxevents, uint64_t timeout,
+                               uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  if (epfd >= MAX_FDS || !t->fds[epfd])
+    return (uint64_t)-9; // EBADF
+
+  vfs_node_t *epoll_node = t->fds[epfd];
+  struct epoll_instance *ep = (struct epoll_instance *)epoll_node->device;
+  if (!ep)
+    return (uint64_t)-9;
+
+  struct epoll_event *events = (struct epoll_event *)events_ptr;
+  if (!events || maxevents <= 0)
+    return (uint64_t)-22; // EINVAL
+
+  int timeout_ms = (int)(int64_t)timeout; // -1 = infinite, 0 = non-blocking
+
+  uint64_t start_ticks = pit_get_ticks();
+  uint64_t timeout_ticks = 0;
+  if (timeout_ms > 0)
+    timeout_ticks = (uint64_t)timeout_ms / 10;
+  if (timeout_ms > 0 && timeout_ticks == 0)
+    timeout_ticks = 1;
+
+  // Pre-allocate wait queue entries outside the loop
+  wait_queue_entry_t wq_entries[EPOLL_MAX_WATCH];
+  int wq_fds[EPOLL_MAX_WATCH];
+  int nwatch = 0;
+
+  // Add to wait queues BEFORE the first check to avoid race condition
+  for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
+    if (!ep->watches[i].active)
+      continue;
+    int wfd = ep->watches[i].fd;
+    if (wfd >= 0 && wfd < MAX_FDS && t->fds[wfd] && t->fds[wfd]->wait_queue) {
+      wq_entries[nwatch].thread = t;
+      wq_entries[nwatch].next = NULL;
+      wq_fds[nwatch] = wfd;
+      wait_queue_add((wait_queue_t *)t->fds[wfd]->wait_queue,
+                     &wq_entries[nwatch]);
+      nwatch++;
+    }
+  }
+
+  while (1) {
+    int ready = 0;
+
+    // Disable interrupts while checking to avoid race with wakeup
+    __asm__ volatile("cli");
+
+    for (int i = 0; i < EPOLL_MAX_WATCH && (uint64_t)ready < maxevents; i++) {
+      if (!ep->watches[i].active)
+        continue;
+
+      int wfd = ep->watches[i].fd;
+      if (wfd < 0 || wfd >= MAX_FDS || !t->fds[wfd]) {
+        // fd was closed — report POLLHUP
+        events[ready].events = EPOLLHUP;
+        events[ready].data = ep->watches[i].data;
+        ready++;
+        continue;
+      }
+
+      // Translate epoll events to VFS poll events
+      int poll_events = 0;
+      if (ep->watches[i].events & EPOLLIN)
+        poll_events |= POLLIN;
+      if (ep->watches[i].events & EPOLLOUT)
+        poll_events |= POLLOUT;
+
+      int revents = vfs_poll(t->fds[wfd], poll_events);
+      if (revents) {
+        // Translate back to epoll events
+        uint32_t epoll_revents = 0;
+        if (revents & POLLIN)
+          epoll_revents |= EPOLLIN;
+        if (revents & POLLOUT)
+          epoll_revents |= EPOLLOUT;
+        if (revents & POLLERR)
+          epoll_revents |= EPOLLERR;
+        if (revents & POLLHUP)
+          epoll_revents |= EPOLLHUP;
+
+        events[ready].events = epoll_revents;
+        events[ready].data = ep->watches[i].data;
+        ready++;
+      }
+    }
+
+    if (ready > 0) {
+      __asm__ volatile("sti");
+      // Remove from wait queues before returning
+      for (int j = 0; j < nwatch; j++) {
+        int wfd = wq_fds[j];
+        if (wfd >= 0 && wfd < MAX_FDS && t->fds[wfd] && t->fds[wfd]->wait_queue) {
+          wait_queue_remove((wait_queue_t *)t->fds[wfd]->wait_queue,
+                            &wq_entries[j]);
+        }
+      }
+      return (uint64_t)ready;
+    }
+
+    // Non-blocking: return immediately
+    if (timeout_ms == 0) {
+      __asm__ volatile("sti");
+      // Remove from wait queues before returning
+      for (int j = 0; j < nwatch; j++) {
+        int wfd = wq_fds[j];
+        if (wfd >= 0 && wfd < MAX_FDS && t->fds[wfd] && t->fds[wfd]->wait_queue) {
+          wait_queue_remove((wait_queue_t *)t->fds[wfd]->wait_queue,
+                            &wq_entries[j]);
+        }
+      }
+      return 0;
+    }
+
+    // Check timeout
+    if (timeout_ms > 0) {
+      uint64_t now = pit_get_ticks();
+      if ((now - start_ticks) >= timeout_ticks) {
+        __asm__ volatile("sti");
+        // Remove from wait queues before returning
+        for (int j = 0; j < nwatch; j++) {
+          int wfd = wq_fds[j];
+          if (wfd >= 0 && wfd < MAX_FDS && t->fds[wfd] && t->fds[wfd]->wait_queue) {
+            wait_queue_remove((wait_queue_t *)t->fds[wfd]->wait_queue,
+                              &wq_entries[j]);
+          }
+        }
+        return 0;
+      }
+    }
+
+    // Block the thread until something happens
+    t->state = THREAD_BLOCKED;
+    if (timeout_ms > 0) {
+      t->wakeup_ticks = start_ticks + timeout_ticks;
+    } else {
+      t->wakeup_ticks = 0; // Infinite wait
+    }
+
+    // Re-enable interrupts and yield atomically
+    // The scheduler will restore interrupts when it switches context
+    sched_yield();
+    __asm__ volatile("sti");
+  }
+}
+
+// ── epoll_pwait(epfd, events, maxevents, timeout, sigmask, sigsetsize) — 281 ─
+static uint64_t sys_epoll_pwait(uint64_t epfd, uint64_t events_ptr,
+                                uint64_t maxevents, uint64_t timeout,
+                                uint64_t sigmask, uint64_t sigsetsize) {
+  // For now, ignore the signal mask (matches our minimal signal support)
+  (void)sigmask;
+  (void)sigsetsize;
+  return sys_epoll_wait(epfd, events_ptr, maxevents, timeout, 0, 0);
 }
 
 void syscall_register_io(void) {
@@ -1764,10 +2646,13 @@ void syscall_register_io(void) {
   syscall_register(SYS_CLOSE, sys_close);
   syscall_register(SYS_LSEEK, sys_lseek);
   syscall_register(SYS_MKDIR, sys_mkdir);
+  syscall_register(SYS_MKDIRAT, sys_mkdirat);
+  syscall_register(SYS_UNLINKAT, sys_unlinkat);
   syscall_register(SYS_FTRUNCATE, sys_ftruncate);
   syscall_register(SYS_FCNTL, sys_fcntl);
   syscall_register(SYS_STAT, sys_stat);
   syscall_register(SYS_FSTAT, sys_fstat);
+  syscall_register(SYS_LSTAT, sys_lstat);
   syscall_register(SYS_GETDENTS64, sys_getdents64);
   syscall_register(SYS_POLL, sys_poll);
   syscall_register(SYS_SELECT, sys_select);
@@ -1777,6 +2662,8 @@ void syscall_register_io(void) {
   syscall_register(SYS_ACCESS, sys_access);
   syscall_register(SYS_FACCESSAT2, sys_faccessat2);
   syscall_register(SYS_OPENAT, sys_openat);
+  syscall_register(SYS_FCHMODAT, sys_fchmodat);
+  syscall_register(SYS_FCHOWNAT, sys_fchownat);
   syscall_register(SYS_NEWFSTATAT, sys_newfstatat);
   syscall_register(SYS_UNLINK, sys_unlink);
   syscall_register(SYS_RENAME, sys_rename);
@@ -1791,6 +2678,12 @@ void syscall_register_io(void) {
   syscall_register(SYS_UTIMENSAT, sys_utimensat);
   syscall_register(SYS_FUTIMESAT, sys_futimesat);
   syscall_register(SYS_UTIMES, sys_utimes);
+  syscall_register(SYS_FCHMOD, sys_fchmod);
+  syscall_register(SYS_LINK, sys_link);
+  syscall_register(SYS_EPOLL_CREATE1, sys_epoll_create1);
+  syscall_register(SYS_EPOLL_CTL, sys_epoll_ctl);
+  syscall_register(SYS_EPOLL_WAIT, sys_epoll_wait);
+  syscall_register(SYS_EPOLL_PWAIT, sys_epoll_pwait);
 
   // Initialize console termios with standard defaults:
   console_termios.c_lflag = 0x0000000b; // ISIG | ICANON | ECHO
