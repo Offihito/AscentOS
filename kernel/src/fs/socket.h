@@ -62,8 +62,8 @@ struct socket_data {
 
   // AF_UNIX specific
   char sun_path[108];
-  struct socket_data *peer;       // For connected stream sockets
-  struct socket_data **accept_q;  // For listening sockets
+  struct socket_data *peer;      // For connected stream sockets
+  struct socket_data **accept_q; // For listening sockets
   uint32_t accept_q_len;
   uint32_t accept_q_max;
 

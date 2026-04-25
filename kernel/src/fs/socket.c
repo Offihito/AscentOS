@@ -1,10 +1,10 @@
 #include "socket.h"
 #include "../console/klog.h"
+#include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../net/net.h"
 #include "../sched/sched.h"
-#include "../fs/vfs.h"
 
 static struct socket_data *global_socket_list = NULL;
 
@@ -12,7 +12,7 @@ void socket_push_rx(struct socket_data *sock, const uint8_t *data,
                     uint16_t len) {
   if (!sock || !data || sock->closed)
     return;
-  
+
   for (uint16_t i = 0; i < len; i++) {
     uint32_t next_head = (sock->rx_head + 1) % SOCKET_RX_BUF_SIZE;
     if (next_head == sock->rx_tail)
@@ -117,11 +117,12 @@ static int socket_poll(struct vfs_node *node, int events) {
       revents |= POLLIN;
     }
     if (sock->listening) {
-        if (sock->domain == AF_INET) {
-            revents |= POLLIN; 
-        } else if (sock->domain == AF_UNIX) {
-            if (sock->accept_q_len > 0) revents |= POLLIN;
-        }
+      if (sock->domain == AF_INET) {
+        revents |= POLLIN;
+      } else if (sock->domain == AF_UNIX) {
+        if (sock->accept_q_len > 0)
+          revents |= POLLIN;
+      }
     }
   }
   if (events & POLLOUT) {
@@ -139,7 +140,7 @@ static void socket_close(vfs_node_t *node) {
   struct socket_data *data = (struct socket_data *)node->device;
   if (data) {
     data->closed = true;
-    
+
     // Wake up wait queues
     wait_queue_wake_all(&data->wait_queue);
 
@@ -201,25 +202,28 @@ struct socket_data *socket_find_unix(const char *path) {
 }
 
 void socket_list_add(struct socket_data *data) {
-  if (!data) return;
+  if (!data)
+    return;
   data->next = global_socket_list;
   global_socket_list = data;
 }
 
 vfs_node_t *socket_create_node_from_data(struct socket_data *data) {
-  if (!data) return NULL;
+  if (!data)
+    return NULL;
 
   vfs_node_t *node = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
-  if (!node) return NULL;
+  if (!node)
+    return NULL;
   memset(node, 0, sizeof(vfs_node_t));
 
   node->flags = FS_SOCKET;
   node->mask = 0666;
   strcpy(node->name, "socket");
   node->close = socket_close;
-  node->read  = socket_read;
+  node->read = socket_read;
   node->write = socket_write;
-  node->poll  = socket_poll;
+  node->poll = socket_poll;
   node->device = data;
 
   return node;
@@ -228,7 +232,8 @@ vfs_node_t *socket_create_node_from_data(struct socket_data *data) {
 vfs_node_t *socket_create_node(int domain, int type, int protocol) {
   struct socket_data *data =
       (struct socket_data *)kmalloc(sizeof(struct socket_data));
-  if (!data) return NULL;
+  if (!data)
+    return NULL;
 
   memset(data, 0, sizeof(struct socket_data));
   data->domain = domain;

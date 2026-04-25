@@ -463,11 +463,32 @@ build_libfontenc
 build_libXfont2
 build_libxkbfile
 
+# ── Build xkbcomp (Keyboard Compiler) ───────────────────────────────────
+build_xkbcomp() {
+    fetch_pkg "xkbcomp" "1.4.7" "https://www.x.org/pub/individual/app/xkbcomp-1.4.7.tar.gz"
+    echo ">>> Building xkbcomp ..."
+    ./configure \
+        --host="$HOST_TRIPLET" \
+        --prefix="$SYSROOT" \
+        --enable-static \
+        --disable-shared \
+        CFLAGS="-static -O2 -I$SYSROOT/include" \
+        LDFLAGS="-static -L$SYSROOT/lib" \
+        LIBS="-lxcb -lXau -lXdmcp"
+    make -j"$JOBS"
+    make install
+    # Also copy to userland/xkbcomp.elf as expected by GNUmakefile
+    cp xkbcomp "$ROOT_DIR/userland/xkbcomp.elf"
+}
+
 # Build XKB keyboard data
 build_xkeyboard_config
 
 # Build fonts
 build_basic_fonts
+
+# Build xkbcomp
+build_xkbcomp
 
 # Finally the server
 build_xserver

@@ -54,7 +54,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/lua.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/xeyes.elf userland/test_x11_simple.elf initrd/startx.sh
+disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/lua.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xkbcomp.elf initrd/startx.sh
 	dd if=/dev/zero of=disk.img bs=1M count=256
 	mkfs.ext3 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
@@ -139,9 +139,6 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_syscalls.e
 		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/opt/bash opt/bash; \
 		debugfs -w -R "write toolchain/musl-sysroot/opt/bash/bin/bash bin/bash" disk.img; \
 		debugfs -w -R "write toolchain/musl-sysroot/opt/bash/bin/bash bin/sh" disk.img; \
-		if [ -f userland/xkbcomp.elf ]; then \
-			debugfs -w -R "write userland/xkbcomp.elf bin/xkbcomp" disk.img; \
-		fi; \
 		echo "root:x:0:0:root:/root:/bin/bash" > /tmp/passwd; \
 		echo "PS1='\033[0;32mRoot@AscentOS\033[0m:\w\\$$ '" > /tmp/bashrc; \
 		echo "PATH=/opt/coreutils/bin:/bin:/opt/bash/bin:/opt/tcc/bin" >> /tmp/bashrc; \
@@ -170,6 +167,10 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_syscalls.e
 	elif [ -f toolchain/musl-sysroot/bin/Xfbdev ]; then \
 		echo "Installing X11 server into disk image..."; \
 		debugfs -w -R "write toolchain/musl-sysroot/bin/Xfbdev bin/Xfbdev" disk.img; \
+	fi
+	@if [ -f userland/xkbcomp.elf ]; then \
+		echo "Installing xkbcomp into disk image..."; \
+		debugfs -w -R "write userland/xkbcomp.elf bin/xkbcomp" disk.img; \
 	fi
 	@if [ -f toolchain/musl-sysroot/bin/Xfbdev ] || [ -f userland/Xfbdev.elf ]; then \
 		echo "Installing XKB keyboard data..."; \
@@ -462,5 +463,8 @@ userland/test_events.elf: userland/test_events.c $(MUSL_LIBC)
 userland/test_x11_simple.elf: userland/test_x11_simple.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_x11_simple.c -L$(MUSL_SYSROOT)/lib -lX11 -lxcb -lXau -lXdmcp -o userland/test_x11_simple.elf
+
+userland/xkbcomp.elf: scripts/port-x11.sh
+	./scripts/port-x11.sh
 
 .PHONY: all qemu clean
