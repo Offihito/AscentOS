@@ -46,9 +46,19 @@ void syscall_dispatcher(struct syscall_regs *regs) {
     return;
   }
 
-  syscall_handler_t handler = syscall_table[regs->rax];
+  uint64_t syscall_num = regs->rax; // Save syscall number before overwrite
+  syscall_handler_t handler = syscall_table[syscall_num];
   regs->rax =
       handler(regs->rdi, regs->rsi, regs->rdx, regs->r10, regs->r8, regs->r9);
+
+  // Log syscall errors (negative return values)
+  if ((int64_t)regs->rax < 0) {
+    klog_puts("[SYSCALL ERR] syscall ");
+    klog_uint64(syscall_num);
+    klog_puts(" returned error: -");
+    klog_uint64((uint64_t)(-(int64_t)regs->rax)); // Print positive error code
+    klog_puts("\n");
+  }
 
   // Delivery signals before returning to usermode
   signal_deliver_syscall(regs);
@@ -62,7 +72,8 @@ void syscall_init(void) {
   syscall_register_mm();
   syscall_register_arch();
   syscall_register_signal();
-  syscall_register_net();
+  syscall_register_socket();
+  syscall_register_epoll();
 
   // 1. Enable System Call Extensions and No-Execute
   uint64_t efer = rdmsr(IA32_EFER);

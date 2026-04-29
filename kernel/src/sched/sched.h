@@ -11,7 +11,7 @@
 struct wait_queue_entry;
 typedef struct wait_queue_entry wait_queue_entry_t;
 
-#define MAX_FDS 32
+#define MAX_FDS 256
 
 // Signal constants
 #define SIGHUP 1
@@ -90,9 +90,9 @@ struct thread {
   bool is_forked_child;         // True for forked children (affects sys_exit)
   bool is_idle;                 // True for idle thread (cannot be terminated)
   void *fork_ctx;               // Saved register state for child entry
-  bool is_main_session;        // True if this is the primary user session (Bash)
-  struct thread *parent;        // Pointer to parent thread (for wait4)
-  struct thread *children;      // Head of children list
+  bool is_main_session;    // True if this is the primary user session (Bash)
+  struct thread *parent;   // Pointer to parent thread (for wait4)
+  struct thread *children; // Head of children list
   struct thread *sibling_next; // Link to next sibling in parent's children list
   uint32_t pgid;               // Process group ID
   int exit_status;             // Status code when exiting (for wait4)

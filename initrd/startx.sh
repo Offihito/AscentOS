@@ -9,7 +9,7 @@ Xfbdev :0 -retro -xkbdir /share/X11/xkb \
     -keybd evdev,,device=/dev/input/event0 &
 
 # X server'ın tam olarak başlaması için kısa bir bekleme
-sleep 3
+sleep 1
 
 echo "X server hazır, xeyes başlatılıyor..."
 

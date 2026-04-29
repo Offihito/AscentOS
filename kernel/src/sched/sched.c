@@ -496,13 +496,13 @@ void sched_reap_thread(struct thread *t) {
   klog_uint64(t->tid);
   klog_puts("\n");
 
-  // 1. Remove from runqueue
+  // 1. Remove from lists (global, parent hierarchy, runqueue)
+  // We do runqueue first as it uses CPU locks, then global/parent using
+  // tid_lock.
   klog_puts("[REAP] Step 1: remove from runqueue\n");
   remove_from_runqueue(t);
 
   // 1.25 Ensure the thread is not currently active on any CPU (race prevention)
-  // Although remove_from_runqueue unlinks it, a CPU might still be in the
-  // middle of switching AWAY from this thread.
   for (uint32_t i = 0; i < cpu_get_count(); i++) {
     struct cpu_info *cpu_local = cpu_get_info(i);
     while (cpu_local->current_thread == t) {
@@ -510,33 +510,36 @@ void sched_reap_thread(struct thread *t) {
     }
   }
 
-  // 1.5 Remove from parent's children list
+  klog_puts("[REAP] Step 2: remove from lists\n");
+  spinlock_acquire(&tid_lock);
+
+  // 1.5 Remove from global thread list
+  if (global_thread_list == t) {
+    global_thread_list = t->global_next;
+  } else {
+    struct thread *prev_g = global_thread_list;
+    while (prev_g && prev_g->global_next != t)
+      prev_g = prev_g->global_next;
+    if (prev_g)
+      prev_g->global_next = t->global_next;
+  }
+
+  // 1.75 Remove from parent's children list
   if (t->parent) {
-    spinlock_acquire(&tid_lock);
     if (t->parent->children == t) {
       t->parent->children = t->sibling_next;
     } else {
       struct thread *p = t->parent->children;
-      while (p && p->sibling_next != t) {
+      while (p && p->sibling_next != t)
         p = p->sibling_next;
-      }
-      if (p) {
+      if (p)
         p->sibling_next = t->sibling_next;
-      }
     }
-    spinlock_release(&tid_lock);
   }
-
-  // 2. Remove from global thread list
-  klog_puts("[REAP] Step 2: remove from global list\n");
-  remove_from_global_list(t);
+  spinlock_release(&tid_lock);
 
   // 3. Free fork_ctx (saved register state)
   klog_puts("[REAP] Step 3: free fork_ctx\n");
-  if (t->fork_ctx) {
-    kfree(t->fork_ctx);
-    t->fork_ctx = NULL;
-  }
 
   // 4. Free user page tables (CR3) if still set
   klog_puts("[REAP] Step 4: free CR3=");

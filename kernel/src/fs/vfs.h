@@ -13,6 +13,7 @@
 #define FS_SYMLINK 0x06
 #define FS_SOCKET 0x07
 #define FS_MOUNTPOINT 0x08
+#define FS_EPOLL 0x09
 
 // Poll Events
 #define POLLIN 0x0001
@@ -39,7 +40,8 @@ typedef struct vfs_node *(*finddir_type_t)(struct vfs_node *, char *name);
 typedef int (*create_type_t)(struct vfs_node *, char *name,
                              uint16_t permission);
 typedef int (*mkdir_type_t)(struct vfs_node *, char *name, uint16_t permission);
-typedef int (*mknod_type_t)(struct vfs_node *, char *name, uint16_t permission, uint32_t flags, void *device);
+typedef int (*mknod_type_t)(struct vfs_node *, char *name, uint16_t permission,
+                            uint32_t flags, void *device);
 typedef int (*unlink_type_t)(struct vfs_node *, char *name);
 typedef int (*rmdir_type_t)(struct vfs_node *, char *name);
 typedef int (*readlink_type_t)(struct vfs_node *, char *buf, uint32_t size);
@@ -116,7 +118,8 @@ int vfs_rename(vfs_node_t *node, char *old_name, char *new_name);
 int vfs_chmod(vfs_node_t *node, uint16_t permission);
 int vfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid);
 int vfs_truncate(vfs_node_t *node, uint32_t size);
-int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags, void *device);
+int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags,
+              void *device);
 int vfs_poll(vfs_node_t *node, int events);
 
 #endif

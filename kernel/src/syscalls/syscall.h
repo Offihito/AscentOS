@@ -34,23 +34,11 @@
 #define SYS_WRITEV 20
 #define SYS_ACCESS 21
 #define SYS_PIPE 22
-#define SYS_SELECT 23
 #define SYS_DUP 32
 #define SYS_DUP2 33
 #define SYS_NANOSLEEP 35
+#define SYS_SETITIMER 38
 #define SYS_MLOCK 149
-#define SYS_SOCKET 41
-#define SYS_CONNECT 42
-#define SYS_ACCEPT 43
-#define SYS_SENDTO 44
-#define SYS_RECVFROM 45
-#define SYS_SENDMSG 46
-#define SYS_RECVMSG 47
-#define SYS_BIND 49
-#define SYS_LISTEN 50
-#define SYS_GETSOCKNAME 51
-#define SYS_SETSOCKOPT 54
-#define SYS_GETSOCKOPT 55
 #define SYS_SETUID 105
 #define SYS_SETGID 106
 #define SYS_FCNTL 72
@@ -110,15 +98,35 @@
 #define SYS_UTIMENSAT 235
 #define SYS_UTIMES 280
 #define SYS_FACCESSAT2 439
-#define SYS_EPOLL_WAIT 232
-#define SYS_EPOLL_CTL 233
-#define SYS_EPOLL_PWAIT 281
-#define SYS_EPOLL_CREATE1 291
 #define SYS_STATX 332
 #define SYS_SETRESUID 117
 #define SYS_SETRESGID 121
 #define SYS_FCHMOD 91
 #define SYS_LINK 86
+
+// Socket syscalls
+#define SYS_SOCKET 41
+#define SYS_CONNECT 42
+#define SYS_ACCEPT 43
+#define SYS_SENDTO 44
+#define SYS_RECVFROM 45
+#define SYS_SHUTDOWN 48
+#define SYS_BIND 49
+#define SYS_LISTEN 50
+#define SYS_GETSOCKNAME 51
+#define SYS_GETPEERNAME 52
+#define SYS_SOCKETPAIR 53
+#define SYS_SETSOCKOPT 54
+#define SYS_GETSOCKOPT 55
+#define SYS_SENDMSG 46
+#define SYS_RECVMSG 47
+
+// Epoll syscalls
+#define SYS_EPOLL_CREATE 213
+#define SYS_EPOLL_CREATE1 291
+#define SYS_EPOLL_CTL 233
+#define SYS_EPOLL_WAIT 232
+#define SYS_EPOLL_PWAIT 281
 
 #define MAX_SYSCALL 512
 
@@ -151,7 +159,8 @@ void syscall_register_arch(void);
 void syscall_register_signal(void);
 void signal_deliver_syscall(struct syscall_regs *regs);
 void syscall_register_media(void);
-void syscall_register_net(void);
+void syscall_register_socket(void);
+void syscall_register_epoll(void);
 
 // ── Core init (MSRs + calls subsystem registrations) ────────────────────────
 void syscall_init(void);

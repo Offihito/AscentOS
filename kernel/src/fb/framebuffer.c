@@ -439,20 +439,24 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     var->green.offset = fb->green_mask_shift;
     var->blue.length = fb->blue_mask_size;
     var->blue.offset = fb->blue_mask_shift;
-    
-    // For 32-bit framebuffer, explicitly specify the 8-bit transparency/alpha padding
+
+    // For 32-bit framebuffer, explicitly specify the 8-bit transparency/alpha
+    // padding
     if (fb->bpp == 32) {
       var->transp.length = 8;
       // Assume alpha is the remaining byte not used by RGB
       uint32_t used_mask = ((1 << fb->red_mask_size) - 1) << fb->red_mask_shift;
       used_mask |= ((1 << fb->green_mask_size) - 1) << fb->green_mask_shift;
       used_mask |= ((1 << fb->blue_mask_size) - 1) << fb->blue_mask_shift;
-      
-      if ((used_mask & 0xFF000000) == 0) var->transp.offset = 24;
-      else if ((used_mask & 0x000000FF) == 0) var->transp.offset = 0;
-      else var->transp.offset = 24; // Default fallback
+
+      if ((used_mask & 0xFF000000) == 0)
+        var->transp.offset = 24;
+      else if ((used_mask & 0x000000FF) == 0)
+        var->transp.offset = 0;
+      else
+        var->transp.offset = 24; // Default fallback
     }
-    
+
     return 0;
   }
   case FBIOGET_FSCREENINFO: {
@@ -472,7 +476,7 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     // hardware configuration and return success. This informs the
     // fbdev driver of the clamped/enforced parameters.
     struct fb_var_screeninfo *var = (struct fb_var_screeninfo *)arg;
-    
+
     var->xres = (uint32_t)fb->width;
     var->yres = (uint32_t)fb->height;
     var->xres_virtual = (uint32_t)(fb->pitch / (fb->bpp / 8));
@@ -485,15 +489,18 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     var->green.offset = fb->green_mask_shift;
     var->blue.length = fb->blue_mask_size;
     var->blue.offset = fb->blue_mask_shift;
-    
+
     if (fb->bpp == 32) {
       var->transp.length = 8;
       uint32_t used_mask = ((1 << fb->red_mask_size) - 1) << fb->red_mask_shift;
       used_mask |= ((1 << fb->green_mask_size) - 1) << fb->green_mask_shift;
       used_mask |= ((1 << fb->blue_mask_size) - 1) << fb->blue_mask_shift;
-      if ((used_mask & 0xFF000000) == 0) var->transp.offset = 24;
-      else if ((used_mask & 0x000000FF) == 0) var->transp.offset = 0;
-      else var->transp.offset = 24;
+      if ((used_mask & 0xFF000000) == 0)
+        var->transp.offset = 24;
+      else if ((used_mask & 0x000000FF) == 0)
+        var->transp.offset = 0;
+      else
+        var->transp.offset = 24;
     }
 
     return 0;

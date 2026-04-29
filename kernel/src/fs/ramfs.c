@@ -230,7 +230,8 @@ static int ramfs_create(vfs_node_t *node, char *name, uint16_t permission) {
   return 0;
 }
 
-static int ramfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags, void *device) {
+static int ramfs_mknod(vfs_node_t *node, char *name, uint16_t permission,
+                       uint32_t flags, void *device) {
   if (!node || (node->flags & 0x7) != FS_DIRECTORY)
     return -1;
   if (ramfs_finddir(node, name) != 0)
@@ -239,7 +240,7 @@ static int ramfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32
   vfs_node_t *new_node = ramfs_make_node(name, permission, flags);
   if (!new_node)
     return -1;
-  
+
   new_node->device = device;
   ramfs_add_child(node, new_node);
   return 0;

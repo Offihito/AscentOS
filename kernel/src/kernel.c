@@ -39,6 +39,8 @@
 #include "shell/shell.h"
 #include "smp/cpu.h"
 #include "syscalls/syscall.h"
+#include "socket/socket.h"
+#include "socket/epoll.h"
 #include <limine.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -168,6 +170,8 @@ void kmain(void) {
   tsc_init();
   idt_init();
   syscall_init();
+  socket_init();
+  epoll_init();
   isr_init_exceptions();
 
   // ═══════════════════════════════════════════════════════════════════════

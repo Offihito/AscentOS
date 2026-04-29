@@ -110,34 +110,40 @@ void process_do_exit(uint64_t status) {
     }
   }
 
-  if (current && current->is_forked_child) {
-    // Ensure kernel data segments are loaded
-    __asm__ volatile("mov $0x10, %%ax\n"
-                     "mov %%ax, %%ds\n"
-                     "mov %%ax, %%es\n" ::
-                         : "eax");
-    __asm__ volatile("sti");
+  // ── Common Cleanup ────────────────────────────────────────────────────────
+  // Close all open file descriptors to prevent resource leaks.
+  if (current) {
+    for (int i = 0; i < MAX_FDS; i++) {
+      if (current->fds[i]) {
+        vfs_node_t *node = current->fds[i];
+        current->fds[i] = NULL;
 
-    // Pre-free the user address space NOW, while we're still on our own
-    // kernel stack. This avoids the parent having to do heavy page-table
-    // walking during reap (which risks corrupting the parent's execution
-    // context). Switch to kernel CR3 first so we don't pull the rug from
-    // under ourselves.
+        // Dedup: check if same node pointer appears at a higher index
+        for (int j = i + 1; j < MAX_FDS; j++) {
+          if (current->fds[j] == node) {
+            current->fds[j] = NULL;
+          }
+        }
+
+        vfs_close(node);
+      }
+    }
+    
+    // Switch to kernel CR3 and free the user address space.
     if (current->cr3) {
-      extern uint64_t *vmm_get_active_pml4(void);
-      // Read the kernel CR3 from our CPU
       struct cpu_info *cpu = cpu_get_current();
       uint64_t saved_cr3 = current->cr3;
-      // Switch to kernel address space
       __asm__ volatile("mov %0, %%cr3" ::"r"(cpu->kernel_cr3) : "memory");
       current->cr3 = 0;
-      // Now safely free the child's user pages
       vmm_free_user_pages(saved_cr3);
     }
 
-    // Free VMA tree nodes (vma_list_init just NULLs root, leaking them)
+    // Free VMA tree nodes
     vma_list_destroy(&current->vmas);
+    mm_reset_mmap_state(current);
+  }
 
+  if (current && current->is_forked_child) {
     current->exit_status = (int)status;
     current->state = THREAD_ZOMBIE;
 
@@ -145,58 +151,13 @@ void process_do_exit(uint64_t status) {
       current->parent->state = THREAD_READY;
     }
 
-    // Spin-yield forever; the parent will reap us.
+    // Sleep forever; the parent will reap us.
     while (1) {
       sched_yield();
     }
   }
 
   // ── Non-forked (main) process exit ──────────────────────────────────────
-  // Close all open file descriptors to prevent resource leaks.
-  // Must deduplicate: dup/dup2 can make multiple fds share the same node.
-  // Closing a node twice would use-after-free and corrupt kernel memory.
-  if (current) {
-    for (int i = 3; i < MAX_FDS; i++) {
-      if (current->fds[i]) {
-        vfs_node_t *node = current->fds[i];
-        current->fds[i] = NULL;
-
-        // Skip if this node is the console (shared with stdin/stdout/stderr)
-        if (node == current->fds[0] || node == current->fds[1] ||
-            node == current->fds[2]) {
-          current->fds[i] = NULL;
-          continue;
-        }
-
-        // Check if this same node pointer appears at a higher index (dup'd)
-        // and NULL those out too, so we only close once
-        for (int j = i + 1; j < MAX_FDS; j++) {
-          if (current->fds[j] == node) {
-            current->fds[j] = NULL;
-          }
-        }
-
-        if (node->close)
-          node->close(node);
-      }
-    }
-
-    // Switch to kernel CR3 and free the user address space BEFORE longjmp.
-    // Without this, the longjmp returns with the dead process's page tables
-    // still active, risking page faults during bash restart.
-    if (current->cr3) {
-      struct cpu_info *cpu = cpu_get_current();
-      uint64_t saved_cr3 = current->cr3;
-      __asm__ volatile("mov %0, %%cr3" ::"r"(cpu->kernel_cr3) : "memory");
-      current->cr3 = 0;
-      vmm_free_user_pages(saved_cr3);
-    }
-
-    // Free VMA tree nodes and reset mmap state
-    vma_list_destroy(&current->vmas);
-    mm_reset_mmap_state(current);
-  }
-
   extern void restart_main_session(void);
   restart_main_session();
   while (1)
@@ -371,7 +332,22 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
       }
       uint32_t reaped_pid = zombie->tid;
 
-      // Fully reap the zombie (remove from runqueue, free resources)
+      // Unlink from parent's children list while holding lock
+      // (This prevents other threads in the same parent from reaping it)
+      if (current->children == zombie) {
+        current->children = zombie->sibling_next;
+      } else {
+        struct thread *p = current->children;
+        while (p && p->sibling_next != zombie)
+          p = p->sibling_next;
+        if (p)
+          p->sibling_next = zombie->sibling_next;
+      }
+
+      spinlock_release(&tid_lock);
+
+      // Fully reap the zombie (already unlinked from parent, will be unlinked
+      // from global list)
       sched_reap_thread(zombie);
 
       return (uint64_t)reaped_pid;
@@ -589,11 +565,15 @@ static uint64_t sys_fork(struct syscall_regs *regs) {
   child->is_forked_child = true;
   child->fork_ctx = child_regs;
 
-  // 6. Copy file descriptors from parent to child
+  // 6. Copy file descriptors from parent to child (with reference counting)
   if (parent) {
     for (int i = 0; i < MAX_FDS; i++) {
-      child->fds[i] = parent->fds[i];
-      child->fd_offsets[i] = parent->fd_offsets[i];
+      if (parent->fds[i]) {
+        child->fds[i] = parent->fds[i];
+        child->fd_offsets[i] = parent->fd_offsets[i];
+        // Increment reference count for each inherited FD
+        vfs_open(child->fds[i]);
+      }
     }
     // 7. Copy VMA list, cwd, and TLS base from parent to child
     vma_list_clone(&child->vmas, &parent->vmas);
@@ -862,6 +842,21 @@ static uint64_t sys_setsid(struct syscall_regs *regs) {
   return t->tid; // Return own PID as new session ID
 }
 
+// ── sys_setitimer (stub) ───────────────────────────────────────────────────
+// X11 uses this but can work without real timer support
+static uint64_t sys_setitimer(uint64_t which, uint64_t new_val_ptr,
+                              uint64_t old_val_ptr, uint64_t _a3, uint64_t _a4,
+                              uint64_t _a5) {
+  (void)which;
+  (void)new_val_ptr;
+  (void)old_val_ptr;
+  (void)_a3;
+  (void)_a4;
+  (void)_a5;
+  // Stub: just return 0 success without actually setting a timer
+  return 0;
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 void syscall_register_process(void) {
   syscall_register(SYS_EXIT, sys_exit);
@@ -873,6 +868,7 @@ void syscall_register_process(void) {
   syscall_register(SYS_GETCWD, sys_getcwd);
   syscall_register(SYS_CHDIR, sys_chdir);
   syscall_register(SYS_PRCTL, sys_prctl);
+  syscall_register(SYS_SETITIMER, sys_setitimer);
   syscall_register_raw(SYS_FORK, sys_fork);
   syscall_register_raw(SYS_CLONE, sys_clone);
   syscall_register_raw(SYS_EXECVE, sys_execve);

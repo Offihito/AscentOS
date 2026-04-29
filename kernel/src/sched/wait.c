@@ -51,3 +51,20 @@ void wait_queue_wake_all(wait_queue_t *wq) {
     }
     spinlock_release(&wq->lock);
 }
+
+void wait_queue_wake_one(wait_queue_t *wq) {
+    if (!wq) return;
+    
+    spinlock_acquire(&wq->lock);
+    wait_queue_entry_t *curr = wq->head;
+    while (curr) {
+        if (curr->thread && curr->thread->state == THREAD_BLOCKED) {
+            curr->thread->state = THREAD_READY;
+            curr->thread->wakeup_ticks = 0;
+            spinlock_release(&wq->lock);
+            return; // Only wake one thread
+        }
+        curr = curr->next;
+    }
+    spinlock_release(&wq->lock);
+}

@@ -12,6 +12,8 @@
 #include "../net/net.h"
 #include "../sched/sched.h"
 #include "../sched/wait.h"
+#include "../socket/socket.h"
+#include "../socket/af_unix.h"
 #include "syscall.h"
 #include <stdint.h>
 
@@ -33,22 +35,22 @@ typedef struct {
 #define TIOCGWINSZ 0x5413
 
 // VT (Virtual Terminal) ioctl constants
-#define VT_OPENQRY     0x5600
-#define VT_GETMODE     0x5601
-#define VT_SETMODE     0x5602
-#define VT_GETSTATE    0x5603
-#define VT_RELDISP     0x5605
-#define VT_ACTIVATE    0x5606
-#define VT_WAITACTIVE  0x5607
+#define VT_OPENQRY 0x5600
+#define VT_GETMODE 0x5601
+#define VT_SETMODE 0x5602
+#define VT_GETSTATE 0x5603
+#define VT_RELDISP 0x5605
+#define VT_ACTIVATE 0x5606
+#define VT_WAITACTIVE 0x5607
 #define VT_DISALLOCATE 0x5608
 
 // KD (Keyboard Display) ioctl constants
-#define KDSETMODE      0x4B3A
-#define KDGETMODE      0x4B3B
-#define KDGKBMODE      0x4B44
-#define KDSKBMODE      0x4B45
-#define KD_TEXT        0x00
-#define KD_GRAPHICS    0x01
+#define KDSETMODE 0x4B3A
+#define KDGETMODE 0x4B3B
+#define KDGKBMODE 0x4B44
+#define KDSKBMODE 0x4B45
+#define KD_TEXT 0x00
+#define KD_GRAPHICS 0x01
 
 struct vt_mode {
   char mode;
@@ -80,9 +82,20 @@ struct vt_stat {
 #define O_CREAT 0x40
 #define O_TRUNC 0x200
 #define O_APPEND 0x400
+#define O_NONBLOCK 0x800
+#define O_CLOEXEC 0x80000
 
+// fcntl commands
+#define F_DUPFD 0
+#define F_GETFD 1
+#define F_SETFD 2
 #define F_GETFL 3
 #define F_SETFL 4
+#define F_SETOWN 8
+#define F_DUPFD_CLOEXEC 1030  // F_LINUX_SPECIFIC_BASE + 0
+
+// File descriptor flags
+#define FD_CLOEXEC 1
 
 #define AT_FDCWD -100
 
@@ -204,8 +217,10 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
   // Check if this is a device file path (/dev/...)
   vfs_node_t *node = NULL;
   const char *dev_path = NULL;
-  if (strncmp(path, "/dev/", 5) == 0) dev_path = path + 5;
-  else if (strncmp(path, "dev/", 4) == 0) dev_path = path + 4;
+  if (strncmp(path, "/dev/", 5) == 0)
+    dev_path = path + 5;
+  else if (strncmp(path, "dev/", 4) == 0)
+    dev_path = path + 4;
 
   if (dev_path) {
     // Try to get from device registry first
@@ -222,11 +237,14 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
     // Special hack for /proc
     if (strncmp(path, "/proc/", 6) == 0) {
       const char *p = path + 6;
-      if (strncmp(p, "self/", 5) == 0) p += 5;
+      if (strncmp(p, "self/", 5) == 0)
+        p += 5;
       else {
         // Skip pid if present
-        while (*p >= '0' && *p <= '9') p++;
-        if (*p == '/') p++;
+        while (*p >= '0' && *p <= '9')
+          p++;
+        if (*p == '/')
+          p++;
       }
 
       if (strcmp(p, "cmdline") == 0) {
@@ -236,7 +254,7 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
           memset(proc_node, 0, sizeof(vfs_node_t));
           ramfs_file_t *rf = kmalloc(sizeof(ramfs_file_t));
           if (rf) {
-            rf->data = kmalloc(7); 
+            rf->data = kmalloc(7);
             memcpy(rf->data, "Xfbdev", 7); // Mock cmdline
             rf->capacity = 7;
             proc_node->flags = FS_FILE;
@@ -525,13 +543,15 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
   // VT ioctl stubs for X11 server support
   case VT_OPENQRY: {
     int *vt = (int *)arg;
-    if (!vt) return (uint64_t)-14;
+    if (!vt)
+      return (uint64_t)-14;
     *vt = 1;
     return 0;
   }
   case VT_GETMODE: {
     struct vt_mode *vtm = (struct vt_mode *)arg;
-    if (!vtm) return (uint64_t)-14;
+    if (!vtm)
+      return (uint64_t)-14;
     memset(vtm, 0, sizeof(struct vt_mode));
     return 0;
   }
@@ -539,7 +559,8 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     return 0;
   case VT_GETSTATE: {
     struct vt_stat *vts = (struct vt_stat *)arg;
-    if (!vts) return (uint64_t)-14;
+    if (!vts)
+      return (uint64_t)-14;
     memset(vts, 0, sizeof(struct vt_stat));
     vts->v_active = 1;
     vts->v_state = 0x02;
@@ -555,13 +576,15 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     return 0;
   case KDGETMODE: {
     int *mode = (int *)arg;
-    if (!mode) return (uint64_t)-14;
+    if (!mode)
+      return (uint64_t)-14;
     *mode = KD_TEXT;
     return 0;
   }
   case KDGKBMODE: {
     int *mode = (int *)arg;
-    if (!mode) return (uint64_t)-14;
+    if (!mode)
+      return (uint64_t)-14;
     *mode = 0; // K_XLATE
     return 0;
   }
@@ -622,19 +645,74 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
-  (void)arg;
 
   struct thread *t = sched_get_current();
   if (!t || fd >= MAX_FDS || !t->fds[fd])
     return (uint64_t)-9; // EBADF
 
   switch (cmd) {
-  case F_GETFL:
-    // Minimal compatibility: descriptors are treated as read/write.
-    return O_RDWR;
-  case F_SETFL:
-    // Accept common status-flag updates (non-blocking/append/etc.) as no-op.
+  case F_DUPFD:
+  case F_DUPFD_CLOEXEC: {
+    // Duplicate fd to lowest available >= arg
+    int newfd = alloc_fd(t);
+    if (newfd < 0)
+      return (uint64_t)-24; // EMFILE
+    if ((uint64_t)newfd < arg) {
+      // Find lowest available >= arg
+      for (int i = (int)arg; i < MAX_FDS; i++) {
+        if (t->fds[i] == NULL) {
+          newfd = i;
+          break;
+        }
+      }
+      if ((uint64_t)newfd < arg)
+        return (uint64_t)-24; // EMFILE
+    }
+    t->fds[newfd] = t->fds[fd];
+    // For F_DUPFD_CLOEXEC, we'd set FD_CLOEXEC but we don't track per-FD flags yet
+    return (uint64_t)newfd;
+  }
+  case F_GETFD: {
+    // Get file descriptor flags (we don't track per-FD flags yet, return 0)
+    (void)arg;
     return 0;
+  }
+  case F_SETFD: {
+    // Set file descriptor flags (FD_CLOEXEC)
+    // We don't track per-FD flags yet, just succeed
+    (void)arg;
+    return 0;
+  }
+  case F_GETFL: {
+    uint64_t flags = O_RDWR;
+    vfs_node_t *node = t->fds[fd];
+    if ((node->flags & 0xFF) == FS_SOCKET) {
+      socket_t *sock = (socket_t *)node->device;
+      if (sock && (sock->flags & SOCK_NONBLOCK)) {
+        flags |= O_NONBLOCK;
+      }
+    }
+    return flags;
+  }
+  case F_SETFL: {
+    vfs_node_t *node = t->fds[fd];
+    if ((node->flags & 0xFF) == FS_SOCKET) {
+      socket_t *sock = (socket_t *)node->device;
+      if (sock) {
+        if (arg & O_NONBLOCK) {
+          sock->flags |= SOCK_NONBLOCK;
+        } else {
+          sock->flags &= ~SOCK_NONBLOCK;
+        }
+      }
+    }
+    return 0;
+  }
+  case F_SETOWN: {
+    // Set owner for SIGIO - not implemented, just succeed
+    (void)arg;
+    return 0;
+  }
   default:
     return (uint64_t)-22; // EINVAL
   }
@@ -965,217 +1043,6 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
   return written;
 }
 
-// Stub for poll(2) - used by musl stdio for detecting tty
-struct pollfd {
-  int fd;
-  short events;
-  short revents;
-};
-
-static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout,
-                         uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a3;
-  (void)a4;
-  (void)a5;
-
-  struct thread *t = sched_get_current();
-  struct pollfd *fds = (struct pollfd *)fds_ptr;
-  if (!t || !fds)
-    return (uint64_t)-1;
-
-  uint64_t start_ticks = pit_get_ticks();
-  uint64_t timeout_ticks = (timeout == (uint64_t)-1) ? 0 : (timeout / 10);
-  if (timeout != (uint64_t)-1 && timeout_ticks == 0 && timeout > 0)
-    timeout_ticks = 1;
-
-  // Pre-allocate wait queue entries and add to queues BEFORE checking
-  // to avoid race condition where interrupt fires between check and blocking
-  wait_queue_entry_t entries[nfds];
-  for (uint64_t i = 0; i < nfds; i++) {
-    int fd = fds[i].fd;
-    if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
-      entries[i].thread = t;
-      entries[i].next = NULL;
-      wait_queue_add((wait_queue_t *)t->fds[fd]->wait_queue, &entries[i]);
-    }
-  }
-
-  while (1) {
-    int count = 0;
-
-    // Disable interrupts while checking to avoid race with wakeup
-    __asm__ volatile("cli");
-
-    for (uint64_t i = 0; i < nfds; i++) {
-      fds[i].revents = 0;
-      int fd = fds[i].fd;
-
-      if (fd < 0 || fd >= MAX_FDS || !t->fds[fd]) {
-        fds[i].revents = POLLNVAL;
-        count++;
-        continue;
-      }
-
-      int revents = vfs_poll(t->fds[fd], fds[i].events);
-      if (revents) {
-        fds[i].revents = revents;
-        count++;
-      }
-    }
-
-    if (count > 0) {
-      __asm__ volatile("sti");
-      // Remove from wait queues before returning
-      for (uint64_t i = 0; i < nfds; i++) {
-        int fd = fds[i].fd;
-        if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
-          wait_queue_remove((wait_queue_t *)t->fds[fd]->wait_queue, &entries[i]);
-        }
-      }
-      return (uint64_t)count;
-    }
-
-    if (timeout == 0) {
-      __asm__ volatile("sti");
-      // Remove from wait queues before returning
-      for (uint64_t i = 0; i < nfds; i++) {
-        int fd = fds[i].fd;
-        if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
-          wait_queue_remove((wait_queue_t *)t->fds[fd]->wait_queue, &entries[i]);
-        }
-      }
-      return 0;
-    }
-
-    uint64_t current_ticks = pit_get_ticks();
-    if (timeout != (uint64_t)-1 &&
-        (current_ticks - start_ticks) >= timeout_ticks) {
-      __asm__ volatile("sti");
-      // Remove from wait queues before returning
-      for (uint64_t i = 0; i < nfds; i++) {
-        int fd = fds[i].fd;
-        if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
-          wait_queue_remove((wait_queue_t *)t->fds[fd]->wait_queue, &entries[i]);
-        }
-      }
-      return 0;
-    }
-
-    // Block the thread. We'll be woken up by a driver's wait_queue_wake_all
-    // or by the scheduler timer if we set wakeup_ticks.
-    t->state = THREAD_BLOCKED;
-    if (timeout != (uint64_t)-1) {
-      t->wakeup_ticks = start_ticks + timeout_ticks;
-    } else {
-      t->wakeup_ticks = 0;
-    }
-
-    if (net_poll()) {
-      t->state = THREAD_READY;
-      t->wakeup_ticks = 0;
-    }
-
-    // Yield with interrupts disabled - scheduler will restore them
-    sched_yield();
-    __asm__ volatile("sti");
-  }
-}
-
-typedef struct {
-  uint64_t fds_bits[1024 / 64];
-} fd_set_t;
-
-struct k_timeval {
-  int64_t tv_sec;
-  int64_t tv_usec;
-};
-
-static uint64_t sys_select(uint64_t nfds, uint64_t readfds_ptr,
-                           uint64_t writefds_ptr, uint64_t exceptfds_ptr,
-                           uint64_t timeout_ptr, uint64_t a5) {
-  (void)a5;
-  struct thread *t = sched_get_current();
-  if (!t)
-    return (uint64_t)-1;
-
-  fd_set_t *readfds = (fd_set_t *)readfds_ptr;
-  fd_set_t *writefds = (fd_set_t *)writefds_ptr;
-  fd_set_t *exceptfds = (fd_set_t *)exceptfds_ptr;
-  struct k_timeval *tv = (struct k_timeval *)timeout_ptr;
-
-  uint64_t timeout_ms = (uint64_t)-1;
-  if (tv) {
-    timeout_ms = (tv->tv_sec * 1000) + (tv->tv_usec / 1000);
-  }
-
-  struct pollfd pfds[MAX_FDS];
-  int pcount = 0;
-  int map[MAX_FDS];
-
-  for (int i = 0; i < (int)nfds && i < MAX_FDS; i++) {
-    int events = 0;
-    if (readfds && (readfds->fds_bits[i / 64] & (1ULL << (i % 64))))
-      events |= POLLIN;
-    if (writefds && (writefds->fds_bits[i / 64] & (1ULL << (i % 64))))
-      events |= POLLOUT;
-    if (exceptfds && (exceptfds->fds_bits[i / 64] & (1ULL << (i % 64))))
-      events |= POLLERR;
-
-    if (events) {
-      pfds[pcount].fd = i;
-      pfds[pcount].events = events;
-      pfds[pcount].revents = 0;
-      map[pcount] = i;
-      pcount++;
-    }
-  }
-
-  if (pcount == 0) {
-    if (timeout_ms == 0)
-      return 0;
-    pit_sleep(timeout_ms);
-    return 0;
-  }
-
-  uint64_t ret =
-      sys_poll((uint64_t)pfds, (uint64_t)pcount, timeout_ms, 0, 0, 0);
-
-  if (ret > 0 && ret != (uint64_t)-1) {
-    if (readfds)
-      memset(readfds, 0, sizeof(fd_set_t));
-    if (writefds)
-      memset(writefds, 0, sizeof(fd_set_t));
-    if (exceptfds)
-      memset(exceptfds, 0, sizeof(fd_set_t));
-
-    int ready = 0;
-    for (int i = 0; i < pcount; i++) {
-      int fd = map[i];
-      bool is_ready = false;
-      if (pfds[i].revents & POLLIN) {
-        if (readfds)
-          readfds->fds_bits[fd / 64] |= (1ULL << (fd % 64));
-        is_ready = true;
-      }
-      if (pfds[i].revents & POLLOUT) {
-        if (writefds)
-          writefds->fds_bits[fd / 64] |= (1ULL << (fd % 64));
-        is_ready = true;
-      }
-      if (pfds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-        if (exceptfds)
-          exceptfds->fds_bits[fd / 64] |= (1ULL << (fd % 64));
-        is_ready = true;
-      }
-      if (is_ready)
-        ready++;
-    }
-    return (uint64_t)ready;
-  }
-
-  return ret;
-}
-
 // Simple xorshift64 PRNG state
 static uint64_t prng_state = 0;
 
@@ -1440,6 +1307,28 @@ static uint64_t sys_unlinkat(uint64_t dirfd, uint64_t pathname, uint64_t flags,
   if (!parent || (parent->flags & 0x07) != FS_DIRECTORY)
     return (uint64_t)-20; // ENOTDIR
 
+  // Build full path for socket unbinding
+  char full_path[256];
+  if (path[0] == '/') {
+    // Absolute path
+    strncpy(full_path, path, sizeof(full_path) - 1);
+    full_path[sizeof(full_path) - 1] = '\0';
+  } else {
+    // Relative path - construct from cwd
+    if (t->cwd_path[0]) {
+      strncpy(full_path, t->cwd_path, sizeof(full_path) - 1);
+      full_path[sizeof(full_path) - 1] = '\0';
+      strncat(full_path, "/", sizeof(full_path) - strlen(full_path) - 1);
+      strncat(full_path, path, sizeof(full_path) - strlen(full_path) - 1);
+    } else {
+      strncpy(full_path, "/", sizeof(full_path) - 1);
+      strncat(full_path, path, sizeof(full_path) - strlen(full_path) - 1);
+    }
+  }
+
+  // Unbind socket from internal list before filesystem unlink
+  unix_unbind_by_path(full_path);
+
   if (vfs_unlink(parent, file_name) != 0)
     return (uint64_t)-2; // ENOENT
 
@@ -1630,8 +1519,8 @@ static uint64_t sys_faccessat2(uint64_t dirfd, uint64_t pathname_ptr,
 }
 
 static uint64_t sys_fchmodat(uint64_t dirfd, uint64_t pathname_ptr,
-                               uint64_t mode, uint64_t flags, uint64_t a4,
-                               uint64_t a5) {
+                             uint64_t mode, uint64_t flags, uint64_t a4,
+                             uint64_t a5) {
   (void)flags; // flags like AT_SYMLINK_NOFOLLOW largely ignored for now
   (void)a4;
   (void)a5;
@@ -1664,8 +1553,8 @@ static uint64_t sys_fchmodat(uint64_t dirfd, uint64_t pathname_ptr,
 }
 
 static uint64_t sys_fchownat(uint64_t dirfd, uint64_t pathname_ptr,
-                               uint64_t owner, uint64_t group, uint64_t flags,
-                               uint64_t a5) {
+                             uint64_t owner, uint64_t group, uint64_t flags,
+                             uint64_t a5) {
   (void)flags;
   (void)a5;
   const char *path = (const char *)pathname_ptr;
@@ -1904,6 +1793,9 @@ static uint64_t sys_unlink(uint64_t pathname_ptr, uint64_t a1, uint64_t a2,
       }
     }
   }
+
+  // Unbind socket from internal list before filesystem unlink
+  unix_unbind_by_path(path);
 
   int ret = vfs_unlink(parent, name);
   if (ret != 0)
@@ -2281,66 +2173,16 @@ static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
   return 0;
 }
 
-// ── Epoll implementation
-// ────────────────────────────────────────────────────── Syscalls 291
-// (epoll_create1), 233 (epoll_ctl), 232 (epoll_wait),
-//          281 (epoll_pwait)
-
-#define EPOLL_CTL_ADD 1
-#define EPOLL_CTL_MOD 3
-#define EPOLL_CTL_DEL 2
-
-// Epoll event flags (matching Linux)
-#define EPOLLIN 0x001
-#define EPOLLPRI 0x002
-#define EPOLLOUT 0x004
-#define EPOLLERR 0x008
-#define EPOLLHUP 0x010
-#define EPOLLRDHUP 0x2000
-#define EPOLLET (1U << 31)
-
-struct epoll_event {
-  uint32_t events;
-  uint64_t data;
-} __attribute__((packed));
-
-#define EPOLL_MAX_WATCH 64
-
-struct epoll_watch {
-  int fd;          // User fd being monitored
-  uint32_t events; // Events of interest
-  uint64_t data;   // User data (returned in epoll_wait)
-  bool active;
+// ── sys_poll: poll(fds, nfds, timeout) — syscall 7
+// ────────────────────────────
+struct pollfd {
+  int fd;
+  short events;
+  short revents;
 };
 
-struct epoll_instance {
-  struct epoll_watch watches[EPOLL_MAX_WATCH];
-  int count;
-};
-
-// Custom close handler: free the epoll instance when the fd is closed
-static void epoll_vfs_close(struct vfs_node *node) {
-  if (node && node->device) {
-    kfree(node->device);
-    node->device = NULL;
-  }
-}
-
-// Custom poll for the epoll fd itself (epoll fds are rarely polled, but be
-// safe)
-static int epoll_vfs_poll(struct vfs_node *node, int events) {
-  (void)node;
-  (void)events;
-  return 0; // epoll fds don't report readiness on themselves
-}
-
-// ── epoll_create1(flags) — syscall 291
-// ────────────────────────────────────────
-static uint64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
-                                  uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)flags; // EPOLL_CLOEXEC ignored (no exec-close tracking yet)
-  (void)a1;
-  (void)a2;
+static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
+                         uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a3;
   (void)a4;
   (void)a5;
@@ -2349,291 +2191,94 @@ static uint64_t sys_epoll_create1(uint64_t flags, uint64_t a1, uint64_t a2,
   if (!t)
     return (uint64_t)-1;
 
-  int fd = alloc_fd(t);
-  if (fd < 0)
-    return (uint64_t)-24; // EMFILE
-
-  // Allocate the epoll instance
-  struct epoll_instance *ep = kmalloc(sizeof(struct epoll_instance));
-  if (!ep)
-    return (uint64_t)-12; // ENOMEM
-  memset(ep, 0, sizeof(struct epoll_instance));
-
-  // Allocate a VFS node to represent this epoll fd
-  vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
-  if (!node) {
-    kfree(ep);
-    return (uint64_t)-12;
-  }
-  memset(node, 0, sizeof(vfs_node_t));
-
-  strcpy(node->name, "[epoll]");
-  node->flags = FS_FILE; // Treated as a special file
-  node->device = ep;
-  node->close = epoll_vfs_close;
-  node->poll = epoll_vfs_poll;
-
-  t->fds[fd] = node;
-  t->fd_offsets[fd] = 0;
-
-  klog_puts("[EPOLL] Created epoll instance, fd=");
-  klog_uint64(fd);
-  klog_puts("\n");
-
-  return (uint64_t)fd;
-}
-
-// ── epoll_ctl(epfd, op, fd, event) — syscall 233 ─────────────────────────────
-static uint64_t sys_epoll_ctl(uint64_t epfd, uint64_t op, uint64_t fd,
-                              uint64_t event_ptr, uint64_t a4, uint64_t a5) {
-  (void)a4;
-  (void)a5;
-
-  struct thread *t = sched_get_current();
-  if (!t)
-    return (uint64_t)-1;
-
-  if (epfd >= MAX_FDS || !t->fds[epfd])
-    return (uint64_t)-9; // EBADF
-
-  vfs_node_t *epoll_node = t->fds[epfd];
-  struct epoll_instance *ep = (struct epoll_instance *)epoll_node->device;
-  if (!ep)
-    return (uint64_t)-9; // EBADF — not an epoll fd
-
-  // Validate the target fd
-  if (fd >= MAX_FDS || !t->fds[fd])
-    return (uint64_t)-9; // EBADF
-
-  struct epoll_event *ev = (struct epoll_event *)event_ptr;
-
-  klog_puts("[EPOLL] ctl: epfd="); klog_uint64(epfd);
-  klog_puts(" op="); klog_uint64(op);
-  klog_puts(" fd="); klog_uint64(fd);
-  if (ev) {
-    klog_puts(" events="); klog_uint64(ev->events);
-  }
-  klog_puts("\n");
-
-  switch (op) {
-  case EPOLL_CTL_ADD: {
-    // Check if fd already exists in the interest list
-    for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
-      if (ep->watches[i].active && ep->watches[i].fd == (int)fd)
-        return (uint64_t)-17; // EEXIST
-    }
-    // Find an empty slot
-    int slot = -1;
-    for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
-      if (!ep->watches[i].active) {
-        slot = i;
-        break;
+  // poll(NULL, 0, timeout) is valid - just sleep
+  if (nfds == 0) {
+    if (timeout_ms > 0) {
+      // Simple delay by yielding multiple times
+      uint64_t iterations = timeout_ms / 10; // Approximate 10ms per yield
+      for (uint64_t i = 0; i < iterations; i++) {
+        sched_yield();
       }
     }
-    if (slot < 0)
-      return (uint64_t)-28; // ENOSPC
-    if (!ev)
-      return (uint64_t)-14; // EFAULT
-
-    ep->watches[slot].fd = (int)fd;
-    ep->watches[slot].events = ev->events;
-    ep->watches[slot].data = ev->data;
-    ep->watches[slot].active = true;
-    ep->count++;
     return 0;
   }
-  case EPOLL_CTL_MOD: {
-    if (!ev)
-      return (uint64_t)-14;
-    for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
-      if (ep->watches[i].active && ep->watches[i].fd == (int)fd) {
-        ep->watches[i].events = ev->events;
-        ep->watches[i].data = ev->data;
-        return 0;
-      }
-    }
-    return (uint64_t)-2; // ENOENT
+
+  // Validate fds pointer
+  if (!is_user_ptr(fds_ptr)) {
+    return (uint64_t)-14; // EFAULT
   }
-  case EPOLL_CTL_DEL: {
-    for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
-      if (ep->watches[i].active && ep->watches[i].fd == (int)fd) {
-        ep->watches[i].active = false;
-        ep->count--;
-        return 0;
-      }
-    }
-    return (uint64_t)-2; // ENOENT
-  }
-  default:
+
+  if (nfds > 1024) {
     return (uint64_t)-22; // EINVAL
   }
-}
 
-// ── epoll_wait(epfd, events, maxevents, timeout) — syscall 232
-// ────────────────
-static uint64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr,
-                               uint64_t maxevents, uint64_t timeout,
-                               uint64_t a4, uint64_t a5) {
-  (void)a4;
-  (void)a5;
+  struct pollfd *fds = (struct pollfd *)fds_ptr;
+  int ready = 0;
 
-  struct thread *t = sched_get_current();
-  if (!t)
-    return (uint64_t)-1;
+  // Simple polling implementation (no blocking for now)
+  // For each fd, check if any requested events are ready
+  for (uint64_t i = 0; i < nfds; i++) {
+    int fd = fds[i].fd;
+    short events = fds[i].events;
+    short revents = 0;
 
-  if (epfd >= MAX_FDS || !t->fds[epfd])
-    return (uint64_t)-9; // EBADF
-
-  vfs_node_t *epoll_node = t->fds[epfd];
-  struct epoll_instance *ep = (struct epoll_instance *)epoll_node->device;
-  if (!ep)
-    return (uint64_t)-9;
-
-  struct epoll_event *events = (struct epoll_event *)events_ptr;
-  if (!events || maxevents <= 0)
-    return (uint64_t)-22; // EINVAL
-
-  int timeout_ms = (int)(int64_t)timeout; // -1 = infinite, 0 = non-blocking
-
-  uint64_t start_ticks = pit_get_ticks();
-  uint64_t timeout_ticks = 0;
-  if (timeout_ms > 0)
-    timeout_ticks = (uint64_t)timeout_ms / 10;
-  if (timeout_ms > 0 && timeout_ticks == 0)
-    timeout_ticks = 1;
-
-  // Pre-allocate wait queue entries outside the loop
-  wait_queue_entry_t wq_entries[EPOLL_MAX_WATCH];
-  int wq_fds[EPOLL_MAX_WATCH];
-  int nwatch = 0;
-
-  // Add to wait queues BEFORE the first check to avoid race condition
-  for (int i = 0; i < EPOLL_MAX_WATCH; i++) {
-    if (!ep->watches[i].active)
+    // Negative fd is ignored per POSIX (revents stays 0)
+    if (fd < 0) {
+      fds[i].revents = 0;
       continue;
-    int wfd = ep->watches[i].fd;
-    if (wfd >= 0 && wfd < MAX_FDS && t->fds[wfd] && t->fds[wfd]->wait_queue) {
-      wq_entries[nwatch].thread = t;
-      wq_entries[nwatch].next = NULL;
-      wq_fds[nwatch] = wfd;
-      wait_queue_add((wait_queue_t *)t->fds[wfd]->wait_queue,
-                     &wq_entries[nwatch]);
-      nwatch++;
-    }
-  }
-
-  while (1) {
-    int ready = 0;
-
-    // Disable interrupts while checking to avoid race with wakeup
-    __asm__ volatile("cli");
-
-    for (int i = 0; i < EPOLL_MAX_WATCH && (uint64_t)ready < maxevents; i++) {
-      if (!ep->watches[i].active)
-        continue;
-
-      int wfd = ep->watches[i].fd;
-      if (wfd < 0 || wfd >= MAX_FDS || !t->fds[wfd]) {
-        // fd was closed — report POLLHUP
-        events[ready].events = EPOLLHUP;
-        events[ready].data = ep->watches[i].data;
-        ready++;
-        continue;
-      }
-
-      // Translate epoll events to VFS poll events
-      int poll_events = 0;
-      if (ep->watches[i].events & EPOLLIN)
-        poll_events |= POLLIN;
-      if (ep->watches[i].events & EPOLLOUT)
-        poll_events |= POLLOUT;
-
-      int revents = vfs_poll(t->fds[wfd], poll_events);
-      if (revents) {
-        // Translate back to epoll events
-        uint32_t epoll_revents = 0;
-        if (revents & POLLIN)
-          epoll_revents |= EPOLLIN;
-        if (revents & POLLOUT)
-          epoll_revents |= EPOLLOUT;
-        if (revents & POLLERR)
-          epoll_revents |= EPOLLERR;
-        if (revents & POLLHUP)
-          epoll_revents |= EPOLLHUP;
-
-        events[ready].events = epoll_revents;
-        events[ready].data = ep->watches[i].data;
-        ready++;
-      }
     }
 
-    if (ready > 0) {
-      __asm__ volatile("sti");
-      // Remove from wait queues before returning
-      for (int j = 0; j < nwatch; j++) {
-        int wfd = wq_fds[j];
-        if (wfd >= 0 && wfd < MAX_FDS && t->fds[wfd] && t->fds[wfd]->wait_queue) {
-          wait_queue_remove((wait_queue_t *)t->fds[wfd]->wait_queue,
-                            &wq_entries[j]);
-        }
-      }
-      return (uint64_t)ready;
+    // Invalid fd (out of range or not open)
+    if (fd >= MAX_FDS || !t->fds[fd]) {
+      fds[i].revents = POLLNVAL;
+      ready++;
+      continue;
     }
 
-    // Non-blocking: return immediately
-    if (timeout_ms == 0) {
-      __asm__ volatile("sti");
-      // Remove from wait queues before returning
-      for (int j = 0; j < nwatch; j++) {
-        int wfd = wq_fds[j];
-        if (wfd >= 0 && wfd < MAX_FDS && t->fds[wfd] && t->fds[wfd]->wait_queue) {
-          wait_queue_remove((wait_queue_t *)t->fds[wfd]->wait_queue,
-                            &wq_entries[j]);
-        }
-      }
-      return 0;
-    }
-
-    // Check timeout
-    if (timeout_ms > 0) {
-      uint64_t now = pit_get_ticks();
-      if ((now - start_ticks) >= timeout_ticks) {
-        __asm__ volatile("sti");
-        // Remove from wait queues before returning
-        for (int j = 0; j < nwatch; j++) {
-          int wfd = wq_fds[j];
-          if (wfd >= 0 && wfd < MAX_FDS && t->fds[wfd] && t->fds[wfd]->wait_queue) {
-            wait_queue_remove((wait_queue_t *)t->fds[wfd]->wait_queue,
-                              &wq_entries[j]);
-          }
-        }
-        return 0;
-      }
-    }
-
-    // Block the thread until something happens
-    t->state = THREAD_BLOCKED;
-    if (timeout_ms > 0) {
-      t->wakeup_ticks = start_ticks + timeout_ticks;
+    // Call VFS poll handler
+    vfs_node_t *node = t->fds[fd];
+    int ret = vfs_poll(node, events);
+    if (ret < 0) {
+      fds[i].revents = POLLNVAL;
+      ready++;
+    } else if (ret > 0) {
+      fds[i].revents = (short)ret;
+      ready++;
     } else {
-      t->wakeup_ticks = 0; // Infinite wait
+      fds[i].revents = 0;
     }
-
-    // Re-enable interrupts and yield atomically
-    // The scheduler will restore interrupts when it switches context
-    sched_yield();
-    __asm__ volatile("sti");
   }
-}
 
-// ── epoll_pwait(epfd, events, maxevents, timeout, sigmask, sigsetsize) — 281 ─
-static uint64_t sys_epoll_pwait(uint64_t epfd, uint64_t events_ptr,
-                                uint64_t maxevents, uint64_t timeout,
-                                uint64_t sigmask, uint64_t sigsetsize) {
-  // For now, ignore the signal mask (matches our minimal signal support)
-  (void)sigmask;
-  (void)sigsetsize;
-  return sys_epoll_wait(epfd, events_ptr, maxevents, timeout, 0, 0);
+  // If nothing ready and timeout > 0, yield and try again
+  // (Simplified: real implementation would block on wait queues)
+  if (ready == 0 && timeout_ms > 0) {
+    // Yield multiple times based on timeout (approx 10ms per yield)
+    uint64_t max_iterations = timeout_ms / 10;
+    if (max_iterations < 1) max_iterations = 1;
+    if (max_iterations > 100) max_iterations = 100; // Cap at ~1 second
+    
+    for (uint64_t iter = 0; iter < max_iterations && ready == 0; iter++) {
+      sched_yield();
+      
+      for (uint64_t i = 0; i < nfds; i++) {
+        int fd = fds[i].fd;
+        short events = fds[i].events;
+
+        if (fd < 0 || fd >= MAX_FDS || !t->fds[fd]) {
+          continue; // Already marked POLLNVAL
+        }
+
+        vfs_node_t *node = t->fds[fd];
+        int ret = vfs_poll(node, events);
+        if (ret > 0) {
+          fds[i].revents = (short)ret;
+          ready++;
+        }
+      }
+    }
+  }
+
+  return (uint64_t)ready;
 }
 
 void syscall_register_io(void) {
@@ -2644,6 +2289,7 @@ void syscall_register_io(void) {
   syscall_register(SYS_IOCTL, sys_ioctl);
   syscall_register(SYS_OPEN, sys_open);
   syscall_register(SYS_CLOSE, sys_close);
+  syscall_register(SYS_POLL, sys_poll);
   syscall_register(SYS_LSEEK, sys_lseek);
   syscall_register(SYS_MKDIR, sys_mkdir);
   syscall_register(SYS_MKDIRAT, sys_mkdirat);
@@ -2654,8 +2300,6 @@ void syscall_register_io(void) {
   syscall_register(SYS_FSTAT, sys_fstat);
   syscall_register(SYS_LSTAT, sys_lstat);
   syscall_register(SYS_GETDENTS64, sys_getdents64);
-  syscall_register(SYS_POLL, sys_poll);
-  syscall_register(SYS_SELECT, sys_select);
   syscall_register(SYS_PIPE, sys_pipe);
   syscall_register(SYS_PIPE2, sys_pipe2);
   syscall_register(SYS_GETRANDOM, sys_getrandom);
@@ -2680,10 +2324,6 @@ void syscall_register_io(void) {
   syscall_register(SYS_UTIMES, sys_utimes);
   syscall_register(SYS_FCHMOD, sys_fchmod);
   syscall_register(SYS_LINK, sys_link);
-  syscall_register(SYS_EPOLL_CREATE1, sys_epoll_create1);
-  syscall_register(SYS_EPOLL_CTL, sys_epoll_ctl);
-  syscall_register(SYS_EPOLL_WAIT, sys_epoll_wait);
-  syscall_register(SYS_EPOLL_PWAIT, sys_epoll_pwait);
 
   // Initialize console termios with standard defaults:
   console_termios.c_lflag = 0x0000000b; // ISIG | ICANON | ECHO

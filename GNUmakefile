@@ -54,7 +54,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/lua.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xkbcomp.elf initrd/startx.sh
+disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/lua.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_socket_stress.elf userland/test_socket_phase2.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/test_socket_advanced.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xkbcomp.elf initrd/startx.sh
 	dd if=/dev/zero of=disk.img bs=1M count=256
 	mkfs.ext3 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
@@ -117,6 +117,26 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_syscalls.e
 	debugfs -w -R "write userland/test_unix_fdpass.elf bin/test_unix_fdpass" disk.img
 	debugfs -w -R "write userland/test_fb.elf bin/test_fb" disk.img
 	debugfs -w -R "write userland/test_events.elf bin/test_events" disk.img
+	debugfs -w -R "write userland/test_socket_stress.elf bin/test_socket_stress" disk.img
+
+	debugfs -w -R "write userland/test_socket_phase2.elf bin/test_socket_phase2" disk.img
+	debugfs -w -R "write userland/test_socket_phase3.elf bin/test_socket_phase3" disk.img
+	debugfs -w -R "write userland/test_socket_phase3_advanced.elf bin/test_socket_phase3_advanced" disk.img
+	debugfs -w -R "write userland/test_socket_phase3_megastress.elf bin/test_socket_phase3_megastress" disk.img
+	debugfs -w -R "write userland/test_socket_phase4.elf bin/test_socket_phase4" disk.img
+	debugfs -w -R "write userland/test_socket_phase4_detailed.elf bin/test_socket_phase4_detailed" disk.img
+	debugfs -w -R "write userland/test_socket_phase5.elf bin/test_socket_phase5" disk.img
+	debugfs -w -R "write userland/test_socket_phase6.elf bin/test_socket_phase6" disk.img
+	debugfs -w -R "write userland/test_socket_phase7.elf bin/test_socket_phase7" disk.img
+	debugfs -w -R "write userland/test_socket_phase7_advanced.elf bin/test_socket_phase7_advanced" disk.img
+	debugfs -w -R "write userland/test_socket_phase8.elf bin/test_socket_phase8" disk.img
+	debugfs -w -R "write userland/test_socket_phase9.elf bin/test_socket_phase9" disk.img
+	debugfs -w -R "write userland/test_socket_phase10.elf bin/test_socket_phase10" disk.img
+	debugfs -w -R "write userland/test_socket_phase11.elf bin/test_socket_phase11" disk.img
+	debugfs -w -R "write userland/test_socket_advanced.elf bin/test_socket_advanced" disk.img
+
+
+
 	debugfs -w -R "write test.tar test.tar" disk.img
 	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
 	@if [ -d toolchain/musl-sysroot/opt/tcc ]; then \
@@ -189,6 +209,8 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_syscalls.e
 		debugfs -w -R "write userland/xeyes.elf xeyes" disk.img; \
 		debugfs -w -R "write initrd/startx.sh bin/startx.sh" disk.img; \
 		debugfs -w -R "write userland/test_x11_simple.elf bin/test_x11_simple" disk.img; \
+		debugfs -w -R "mkdir root" disk.img 2>/dev/null || true; \
+		debugfs -w -R "write initrd/.Xauthority root/.Xauthority" disk.img; \
 	fi
 
 edk2-ovmf:
@@ -347,6 +369,58 @@ userland/test_uname_pipe.elf: userland/test_uname_pipe.c $(MUSL_LIBC)
 userland/test_pipe_fork.elf: userland/test_pipe_fork.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_pipe_fork.c -o userland/test_pipe_fork.elf
+
+userland/test_socket_phase3.elf: userland/test_socket_phase3.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_socket_phase3.c -o userland/test_socket_phase3.elf
+
+userland/test_socket_phase3_advanced.elf: userland/test_socket_phase3_advanced.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_socket_phase3_advanced.c -o userland/test_socket_phase3_advanced.elf
+
+userland/test_socket_phase3_megastress.elf: userland/test_socket_phase3_megastress.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_socket_phase3_megastress.c -o userland/test_socket_phase3_megastress.elf
+
+userland/test_socket_phase4.elf: userland/test_socket_phase4.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_socket_phase4.c -o userland/test_socket_phase4.elf
+
+userland/test_socket_phase4_detailed.elf: userland/test_socket_phase4_detailed.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_socket_phase4_detailed.c -o userland/test_socket_phase4_detailed.elf
+
+userland/test_socket_phase5.elf: userland/test_socket_phase5.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_socket_phase5.c -o userland/test_socket_phase5.elf
+
+userland/test_socket_phase6.elf: userland/test_socket_phase6.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_socket_phase6.c -o userland/test_socket_phase6.elf
+
+userland/test_socket_phase7.elf: userland/test_socket_phase7.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_socket_phase7.c -o userland/test_socket_phase7.elf
+
+userland/test_socket_phase7_advanced.elf: userland/test_socket_phase7_advanced.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_socket_phase7_advanced.c -o userland/test_socket_phase7_advanced.elf
+
+userland/test_socket_phase8.elf: userland/test_socket_phase8.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_socket_phase8.c -o userland/test_socket_phase8.elf
+
+userland/test_socket_phase9.elf: userland/test_socket_phase9.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_socket_phase9.c -o userland/test_socket_phase9.elf
+
+userland/test_socket_phase10.elf: userland/test_socket_phase10.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_socket_phase10.c -o userland/test_socket_phase10.elf
+
+userland/test_socket_phase11.elf: userland/test_socket_phase11.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_socket_phase11.c -o userland/test_socket_phase11.elf
 
 userland/test_sys_access.elf: userland/test_sys_access.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \

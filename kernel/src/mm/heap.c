@@ -1,5 +1,6 @@
 #include "mm/heap.h"
 #include "console/console.h"
+#include "console/klog.h"
 #include "lib/string.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
@@ -288,6 +289,13 @@ void kfree(void *ptr) {
     }
 
     console_puts("[WARN] kfree: Fatal validation failure. Invalid pointer space.\n");
+    klog_puts("  ptr=");
+    klog_uint64((uint64_t)ptr);
+    klog_puts(" page_base=");
+    klog_uint64(page_base);
+    klog_puts(" magic=");
+    klog_uint64(magic_check);
+    klog_puts("\n");
     spinlock_release(&heap_lock);
 }
 
