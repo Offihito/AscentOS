@@ -15,7 +15,8 @@ static void console_refresh_cursor_unlocked(void);
 static uint32_t console_history_row(uint32_t screen_row);
 static void console_process_escape_sequence(void);
 static void console_clear_line_from_cursor(void);
-static void draw_char_colored(char c, uint32_t col, uint32_t row, uint32_t fg, uint32_t bg);
+static void draw_char_colored(char c, uint32_t col, uint32_t row, uint32_t fg,
+                              uint32_t bg);
 static void draw_history_char(uint32_t col, uint32_t row);
 
 static bool terminal_escape = false;
@@ -146,9 +147,7 @@ void console_scroll_view(int delta) {
   spinlock_release(&console_lock);
 }
 
-uint32_t console_get_rows(void) {
-  return max_rows;
-}
+uint32_t console_get_rows(void) { return max_rows; }
 
 static void scroll_up(void) {
   uint32_t fb_w = fb_get_width();
@@ -205,8 +204,10 @@ static void console_clear_line_from_cursor(void) {
 
 // ── SGR escape sequence handler ─────────────────────────────────────────────
 static void console_process_escape_sequence(void) {
-  if (terminal_escape_len == 0) return;
-  if (terminal_escape_buffer[0] != '[') return;
+  if (terminal_escape_len == 0)
+    return;
+  if (terminal_escape_buffer[0] != '[')
+    return;
 
   bool question = false;
   int params[16] = {0};
@@ -222,39 +223,46 @@ static void console_process_escape_sequence(void) {
     if (*p >= '0' && *p <= '9') {
       params[param_count - 1] = params[param_count - 1] * 10 + (*p - '0');
     } else if (*p == ';') {
-      if (param_count < 16) param_count++;
+      if (param_count < 16)
+        param_count++;
     }
     p++;
   }
 
   char final = *p;
-  int value  = params[0];
+  int value = params[0];
   int value2 = (param_count > 1) ? params[1] : 0;
 
   switch (final) {
   // ── Cursor movement ────────────────────────────────────────────────────────
   case 'A':
-    if (value == 0) value = 1;
+    if (value == 0)
+      value = 1;
     cursor_y = (cursor_y >= (uint32_t)value) ? cursor_y - value : 0;
     break;
   case 'B':
     cursor_y += value ? value : 1;
-    if (cursor_y >= max_rows) cursor_y = max_rows - 1;
+    if (cursor_y >= max_rows)
+      cursor_y = max_rows - 1;
     break;
   case 'C':
     cursor_x += value ? value : 1;
-    if (cursor_x >= max_cols) cursor_x = max_cols - 1;
+    if (cursor_x >= max_cols)
+      cursor_x = max_cols - 1;
     break;
   case 'D':
-    if (value == 0) value = 1;
+    if (value == 0)
+      value = 1;
     cursor_x = (cursor_x >= (uint32_t)value) ? cursor_x - value : 0;
     break;
   case 'H':
   case 'f':
-    cursor_y = (value  > 0) ? (uint32_t)(value  - 1) : 0;
+    cursor_y = (value > 0) ? (uint32_t)(value - 1) : 0;
     cursor_x = (value2 > 0) ? (uint32_t)(value2 - 1) : 0;
-    if (cursor_y >= max_rows) cursor_y = max_rows - 1;
-    if (cursor_x >= max_cols) cursor_x = max_cols - 1;
+    if (cursor_y >= max_rows)
+      cursor_y = max_rows - 1;
+    if (cursor_x >= max_cols)
+      cursor_x = max_cols - 1;
     break;
 
   // ── Erase ─────────────────────────────────────────────────────────────────
@@ -299,8 +307,12 @@ static void console_process_escape_sequence(void) {
       } else {
         int digits = 0;
         uint32_t v = row;
-        while (v > 0) { temp[digits++] = '0' + (v % 10); v /= 10; }
-        while (digits--) resp[len++] = temp[digits];
+        while (v > 0) {
+          temp[digits++] = '0' + (v % 10);
+          v /= 10;
+        }
+        while (digits--)
+          resp[len++] = temp[digits];
       }
       resp[len++] = ';';
       if (col == 0) {
@@ -308,8 +320,12 @@ static void console_process_escape_sequence(void) {
       } else {
         int digits = 0;
         uint32_t v = col;
-        while (v > 0) { temp[digits++] = '0' + (v % 10); v /= 10; }
-        while (digits--) resp[len++] = temp[digits];
+        while (v > 0) {
+          temp[digits++] = '0' + (v % 10);
+          v /= 10;
+        }
+        while (digits--)
+          resp[len++] = temp[digits];
       }
       resp[len++] = 'R';
       keyboard_push_bytes(resp, (uint32_t)len);
@@ -350,14 +366,20 @@ static void console_process_escape_sequence(void) {
         current_fg = ansi_colors_normal[code - 30];
       } else if (code == 38) {
         // 256-color or truecolor fg — consume extra params
-        if (pi + 1 < param_count && params[pi + 1] == 5 && pi + 2 < param_count) {
-          // ESC[38;5;Nm — 256-color: map index to our palette for 0-15, else grey
+        if (pi + 1 < param_count && params[pi + 1] == 5 &&
+            pi + 2 < param_count) {
+          // ESC[38;5;Nm — 256-color: map index to our palette for 0-15, else
+          // grey
           int idx = params[pi + 2];
-          if (idx >= 0 && idx <= 7)       current_fg = ansi_colors_normal[idx];
-          else if (idx >= 8 && idx <= 15) current_fg = ansi_colors_bright[idx - 8];
-          else                            current_fg = FG_COLOR;
+          if (idx >= 0 && idx <= 7)
+            current_fg = ansi_colors_normal[idx];
+          else if (idx >= 8 && idx <= 15)
+            current_fg = ansi_colors_bright[idx - 8];
+          else
+            current_fg = FG_COLOR;
           pi += 2;
-        } else if (pi + 1 < param_count && params[pi + 1] == 2 && pi + 4 < param_count) {
+        } else if (pi + 1 < param_count && params[pi + 1] == 2 &&
+                   pi + 4 < param_count) {
           // ESC[38;2;R;G;Bm — truecolor
           uint8_t r = (uint8_t)params[pi + 2];
           uint8_t g = (uint8_t)params[pi + 3];
@@ -371,13 +393,18 @@ static void console_process_escape_sequence(void) {
         current_bg = ansi_colors_normal[code - 40];
       } else if (code == 48) {
         // 256-color or truecolor bg
-        if (pi + 1 < param_count && params[pi + 1] == 5 && pi + 2 < param_count) {
+        if (pi + 1 < param_count && params[pi + 1] == 5 &&
+            pi + 2 < param_count) {
           int idx = params[pi + 2];
-          if (idx >= 0 && idx <= 7)       current_bg = ansi_colors_normal[idx];
-          else if (idx >= 8 && idx <= 15) current_bg = ansi_colors_bright[idx - 8];
-          else                            current_bg = BG_COLOR;
+          if (idx >= 0 && idx <= 7)
+            current_bg = ansi_colors_normal[idx];
+          else if (idx >= 8 && idx <= 15)
+            current_bg = ansi_colors_bright[idx - 8];
+          else
+            current_bg = BG_COLOR;
           pi += 2;
-        } else if (pi + 1 < param_count && params[pi + 1] == 2 && pi + 4 < param_count) {
+        } else if (pi + 1 < param_count && params[pi + 1] == 2 &&
+                   pi + 4 < param_count) {
           uint8_t r = (uint8_t)params[pi + 2];
           uint8_t g = (uint8_t)params[pi + 3];
           uint8_t b = (uint8_t)params[pi + 4];
@@ -402,18 +429,15 @@ static void console_process_escape_sequence(void) {
 
 // ── Character drawing helpers ────────────────────────────────────────────────
 
-static void draw_char_colored(char c, uint32_t col, uint32_t row,
-                              uint32_t fg, uint32_t bg) {
+static void draw_char_colored(char c, uint32_t col, uint32_t row, uint32_t fg,
+                              uint32_t bg) {
   const uint8_t *glyph = font_get_glyph(c);
   uint32_t px = col * FONT_WIDTH;
   uint32_t py = row * FONT_HEIGHT;
 
+  // Draw each scanline using batched rendering (8 pixels per call)
   for (uint32_t y = 0; y < FONT_HEIGHT; y++) {
-    uint8_t bits = glyph[y];
-    for (uint32_t x = 0; x < FONT_WIDTH; x++) {
-      uint32_t color = (bits & (0x80 >> x)) ? fg : bg;
-      fb_put_pixel(px + x, py + y, color);
-    }
+    fb_draw_glyph_scanline(px, py + y, glyph[y], fg, bg);
   }
 }
 
@@ -457,9 +481,9 @@ static void console_putchar_unlocked(char c) {
   serial_putchar(c);
 
   // Scroll to bottom on any new output if we were viewing history,
-  // or at least reset the offset if desired. 
-  // Standard terminal behavior is usually to scroll on output only if 
-  // we weren't scrolled far back, but for simplicity we can just reset it 
+  // or at least reset the offset if desired.
+  // Standard terminal behavior is usually to scroll on output only if
+  // we weren't scrolled far back, but for simplicity we can just reset it
   // if it's user input (echoed).
   // For now, let's just ensure manual scrolling works first.
 
@@ -470,9 +494,9 @@ static void console_putchar_unlocked(char c) {
     // Clear the new history line
     uint32_t row = console_history_row(cursor_y);
     for (uint32_t i = 0; i < COLS_MAX; i++) {
-      history[row][i].c   = 0;
-      history[row][i].fg  = FG_COLOR;
-      history[row][i].bg  = BG_COLOR;
+      history[row][i].c = 0;
+      history[row][i].fg = FG_COLOR;
+      history[row][i].bg = BG_COLOR;
     }
 
     if (view_scroll_offset == 0 && cursor_y < max_rows) {
@@ -485,9 +509,9 @@ static void console_putchar_unlocked(char c) {
         scroll_up();
         uint32_t new_row = history_write_row % HISTORY_MAX;
         for (uint32_t i = 0; i < COLS_MAX; i++) {
-          history[new_row][i].c   = 0;
-          history[new_row][i].fg  = FG_COLOR;
-          history[new_row][i].bg  = BG_COLOR;
+          history[new_row][i].c = 0;
+          history[new_row][i].fg = FG_COLOR;
+          history[new_row][i].bg = BG_COLOR;
         }
       } else {
         cursor_y--;
@@ -513,9 +537,9 @@ static void console_putchar_unlocked(char c) {
     }
 
     uint32_t row = console_history_row(cursor_y);
-    history[row][cursor_x].c   = ' ';
-    history[row][cursor_x].fg  = FG_COLOR;
-    history[row][cursor_x].bg  = BG_COLOR;
+    history[row][cursor_x].c = ' ';
+    history[row][cursor_x].fg = FG_COLOR;
+    history[row][cursor_x].bg = BG_COLOR;
 
     if (view_scroll_offset == 0) {
       fb_fill_rect(cursor_x * FONT_WIDTH, cursor_y * FONT_HEIGHT, FONT_WIDTH,
@@ -533,9 +557,9 @@ static void console_putchar_unlocked(char c) {
   // Standard printable character — store with current SGR colors
   if (cursor_x < COLS_MAX) {
     uint32_t row = console_history_row(cursor_y);
-    history[row][cursor_x].c   = c;
-    history[row][cursor_x].fg  = current_fg;
-    history[row][cursor_x].bg  = current_bg;
+    history[row][cursor_x].c = c;
+    history[row][cursor_x].fg = current_fg;
+    history[row][cursor_x].bg = current_bg;
   }
 
   if (view_scroll_offset == 0) {
@@ -549,9 +573,9 @@ static void console_putchar_unlocked(char c) {
     history_write_row++;
     uint32_t new_row = history_write_row % HISTORY_MAX;
     for (uint32_t i = 0; i < COLS_MAX; i++) {
-      history[new_row][i].c   = 0;
-      history[new_row][i].fg  = FG_COLOR;
-      history[new_row][i].bg  = BG_COLOR;
+      history[new_row][i].c = 0;
+      history[new_row][i].fg = FG_COLOR;
+      history[new_row][i].bg = BG_COLOR;
     }
 
     if (view_scroll_offset == 0 && cursor_y < max_rows) {
@@ -687,10 +711,10 @@ void console_refresh_cursor(void) {
 void console_clear(void) {
   spinlock_acquire(&console_lock);
   fb_clear(BG_COLOR);
-  // To simulate a clear while keeping history, we just "scroll" the current 
+  // To simulate a clear while keeping history, we just "scroll" the current
   // output out of view by incrementing history_write_row.
   if (history_write_row > 0 || cursor_y > 0) {
-      history_write_row += (max_rows - cursor_y);
+    history_write_row += (max_rows - cursor_y);
   }
 
   cursor_x = 0;

@@ -12,8 +12,8 @@
 #include "../net/net.h"
 #include "../sched/sched.h"
 #include "../sched/wait.h"
-#include "../socket/socket.h"
 #include "../socket/af_unix.h"
+#include "../socket/socket.h"
 #include "syscall.h"
 #include <stdint.h>
 
@@ -92,7 +92,7 @@ struct vt_stat {
 #define F_GETFL 3
 #define F_SETFL 4
 #define F_SETOWN 8
-#define F_DUPFD_CLOEXEC 1030  // F_LINUX_SPECIFIC_BASE + 0
+#define F_DUPFD_CLOEXEC 1030 // F_LINUX_SPECIFIC_BASE + 0
 
 // File descriptor flags
 #define FD_CLOEXEC 1
@@ -669,7 +669,8 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
         return (uint64_t)-24; // EMFILE
     }
     t->fds[newfd] = t->fds[fd];
-    // For F_DUPFD_CLOEXEC, we'd set FD_CLOEXEC but we don't track per-FD flags yet
+    // For F_DUPFD_CLOEXEC, we'd set FD_CLOEXEC but we don't track per-FD flags
+    // yet
     return (uint64_t)newfd;
   }
   case F_GETFD: {
@@ -2254,12 +2255,14 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
   if (ready == 0 && timeout_ms > 0) {
     // Yield multiple times based on timeout (approx 10ms per yield)
     uint64_t max_iterations = timeout_ms / 10;
-    if (max_iterations < 1) max_iterations = 1;
-    if (max_iterations > 100) max_iterations = 100; // Cap at ~1 second
-    
+    if (max_iterations < 1)
+      max_iterations = 1;
+    if (max_iterations > 100)
+      max_iterations = 100; // Cap at ~1 second
+
     for (uint64_t iter = 0; iter < max_iterations && ready == 0; iter++) {
       sched_yield();
-      
+
       for (uint64_t i = 0; i < nfds; i++) {
         int fd = fds[i].fd;
         short events = fds[i].events;

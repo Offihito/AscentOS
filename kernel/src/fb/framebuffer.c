@@ -4,11 +4,11 @@
 #include "../drivers/input/keyboard.h"
 #include "../fs/ramfs.h"
 #include "../fs/vfs.h"
+#include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
 #include "../syscalls/syscall.h"
-#include "lib/string.h"
 #include "terminal.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -55,19 +55,136 @@ vfs_node_t *fb_lookup_device(const char *name) {
 }
 
 static struct limine_framebuffer *fb;
-static void *backbuffer = 0;
-static bool backbuffer_enabled = false;
+static void *backbuffer = NULL;
+static size_t current_backbuffer_size = 0;
+static volatile bool backbuffer_enabled = false;
 
-// 1920 * 1200 * 4 = ~9.2 MB — enough for any common resolution
-#define BACKBUFFER_SIZE (1920 * 1200 * 4)
-static uint8_t static_backbuffer[BACKBUFFER_SIZE];
+// X11 double buffering - separate backbuffer for graphics mode
+static void *x11_backbuffer = NULL;
+static uint32_t x11_yoffset = 0;  // Virtual Y offset for panning
+
+// Dirty region tracking - bounding box of changed pixels
+static uint32_t dirty_x1 = UINT32_MAX;
+static uint32_t dirty_y1 = UINT32_MAX;
+static uint32_t dirty_x2 = 0;
+static uint32_t dirty_y2 = 0;
+static bool dirty_valid = false;
+
+static inline void fb_mark_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+  if (!backbuffer_enabled) return;
+  
+  if (x < dirty_x1) dirty_x1 = x;
+  if (y < dirty_y1) dirty_y1 = y;
+  if (x + w > dirty_x2) dirty_x2 = x + w;
+  if (y + h > dirty_y2) dirty_y2 = y + h;
+  dirty_valid = true;
+}
 
 void fb_init(struct limine_framebuffer *framebuffer) {
   fb = framebuffer;
-  backbuffer = static_backbuffer;
-  // Initialize backbuffer to match current framebuffer state
-  uint32_t fb_size = fb->height * fb->pitch;
-  memcpy((uint8_t *)backbuffer, (uint8_t *)fb->address, fb_size);
+
+  if (!fb)
+    return;
+
+  klog_puts("[FB] Initializing Framebuffer:\n");
+  klog_puts("     Resolution: ");
+  klog_uint64(fb->width);
+  klog_puts("x");
+  klog_uint64(fb->height);
+  klog_puts("\n");
+  klog_puts("     Pitch:      ");
+  klog_uint64(fb->pitch);
+  klog_puts("\n");
+  klog_puts("     BPP:        ");
+  klog_uint64(fb->bpp);
+  klog_puts("\n");
+  klog_puts("     Address:    0x");
+  klog_uint64((uint64_t)fb->address);
+  klog_puts("\n");
+  klog_puts("     Red:        size=");
+  klog_uint64(fb->red_mask_size);
+  klog_puts(" shift=");
+  klog_uint64(fb->red_mask_shift);
+  klog_puts("\n");
+  klog_puts("     Green:      size=");
+  klog_uint64(fb->green_mask_size);
+  klog_puts(" shift=");
+  klog_uint64(fb->green_mask_shift);
+  klog_puts("\n");
+  klog_puts("     Blue:       size=");
+  klog_uint64(fb->blue_mask_size);
+  klog_puts(" shift=");
+  klog_uint64(fb->blue_mask_shift);
+  klog_puts("\n");
+
+  uint64_t fb_size = (uint64_t)fb->height * fb->pitch;
+
+  // Re-map the virtual address provided by Limine with strict PCD/PWT
+  // (Uncacheable) to avoid aliasing conflicts with the HHDM or bootloader
+  // mappings.
+  {
+    uint64_t virt = (uint64_t)fb->address;
+    uint64_t phys = virt - pmm_get_hhdm_offset();
+    uint64_t *pml4 = vmm_get_active_pml4();
+    uint64_t num_pages = (fb_size + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    // PCD (bit 4) + PWT (bit 3) = Uncacheable
+    uint64_t flags =
+        PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_PCD | PAGE_FLAG_PWT;
+
+    for (uint64_t i = 0; i < num_pages; i++) {
+      vmm_map_page(pml4, virt + i * PAGE_SIZE, phys + i * PAGE_SIZE, flags);
+    }
+
+    // Nuclear flush: ensures no stale WB lines exist in the cache for this
+    // range.
+    __asm__ volatile("wbinvd" ::: "memory");
+    klog_puts("[FB] PAT synchronized (PCD|PWT) and cache flushed.\n");
+  }
+
+  // Allocate backbuffer if not already allocated or if size changed
+  if (!backbuffer || current_backbuffer_size < fb_size) {
+    if (backbuffer)
+      kfree(backbuffer);
+    backbuffer = kmalloc(fb_size);
+    if (backbuffer) {
+      current_backbuffer_size = fb_size;
+      memset(backbuffer, 0, fb_size);
+    }
+  }
+
+  // Allocate X11 backbuffer for double buffering (graphics mode)
+  if (!x11_backbuffer) {
+    x11_backbuffer = kmalloc(fb_size);
+    if (x11_backbuffer) {
+      memset(x11_backbuffer, 0, fb_size);
+      klog_puts("[FB] X11 double buffer allocated\n");
+    }
+  }
+
+  // 4. Full TLB flush via CR3 reload — after the huge-page split above, stale
+  // 2MB TLB entries may reference the old WB mapping for pages we haven't
+  // individually flushed yet.  A CR3 reload invalidates the entire TLB.
+  {
+    uint64_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile("mov %0, %%cr3" ::"r"(cr3) : "memory");
+  }
+
+  // Clear the hardware framebuffer to solid black (now strictly uncached)
+  if (fb->address) {
+    volatile uint32_t *dest = (volatile uint32_t *)fb->address;
+    for (uint32_t i = 0; i < fb_size / 4; i++) {
+      dest[i] = 0x00000000;
+    }
+  }
+
+  // Ensure all writes hit RAM
+  __asm__ volatile("wbinvd" ::: "memory");
+
+  if (backbuffer && fb->address) {
+    memset(backbuffer, 0, fb_size);
+  }
 }
 
 void fb_set_backbuffer_mode(bool enabled) { backbuffer_enabled = enabled; }
@@ -75,10 +192,39 @@ bool fb_is_backbuffer_enabled(void) { return backbuffer_enabled; }
 void *fb_get_backbuffer(void) { return backbuffer; }
 
 void fb_swap_buffer(void) {
-  if (!backbuffer)
+  if (!backbuffer || fb_get_kd_mode() == KD_GRAPHICS)
     return;
-  uint32_t fb_size = fb->height * fb->pitch;
-  memcpy((uint8_t *)fb->address, (uint8_t *)backbuffer, fb_size);
+  
+  // No dirty region - nothing to swap
+  if (!dirty_valid) return;
+  
+  // Clamp dirty region to screen bounds
+  if (dirty_x1 >= fb->width || dirty_y1 >= fb->height) {
+    dirty_valid = false;
+    return;
+  }
+  
+  uint32_t x1 = dirty_x1;
+  uint32_t y1 = dirty_y1;
+  uint32_t x2 = (dirty_x2 < fb->width) ? dirty_x2 : fb->width;
+  uint32_t y2 = (dirty_y2 < fb->height) ? dirty_y2 : fb->height;
+  
+  // Reset dirty region for next frame
+  dirty_x1 = UINT32_MAX;
+  dirty_y1 = UINT32_MAX;
+  dirty_x2 = 0;
+  dirty_y2 = 0;
+  dirty_valid = false;
+  
+  // Copy only the dirty region scanlines
+  uint32_t copy_width = x2 - x1;
+  if (copy_width == 0) return;
+  
+  for (uint32_t y = y1; y < y2; y++) {
+    uint8_t *src = (uint8_t *)backbuffer + y * fb->pitch + x1 * 4;
+    uint8_t *dst = (uint8_t *)fb->address + y * fb->pitch + x1 * 4;
+    memcpy(dst, src, copy_width * 4);
+  }
 }
 
 void fb_copy_to_backbuffer(void) {
@@ -102,8 +248,15 @@ static uint32_t fb_vfs_write(struct vfs_node *node, uint32_t offset,
   if (offset + size > fb_size)
     size = fb_size - offset;
 
-  // Write directly to framebuffer, bypass backbuffer to avoid console
-  // interference
+  if (fb_get_kd_mode() == KD_GRAPHICS) {
+    // In graphics mode, write to X11 backbuffer (double buffering)
+    if (x11_backbuffer) {
+      memcpy((uint8_t *)x11_backbuffer + offset, buffer, size);
+    }
+    return size;
+  }
+
+  // Write directly to framebuffer for text mode
   memcpy((uint8_t *)fb->address + offset, buffer, size);
 
   return size;
@@ -125,6 +278,10 @@ static uint32_t fb_vfs_write(struct vfs_node *node, uint32_t offset,
 static uint64_t fb_vfs_mmap(struct vfs_node *node, uint64_t length,
                             uint64_t prot, uint64_t flags) {
   (void)node;
+  klog_puts("\n[FB_MMAP] length=");
+  klog_uint64(length);
+  klog_puts("\n");
+
   if (!fb)
     return (uint64_t)-1; // MAP_FAILED
 
@@ -142,6 +299,17 @@ static uint64_t fb_vfs_mmap(struct vfs_node *node, uint64_t length,
     return (uint64_t)-1;
   }
 
+  // In graphics mode (X11), map the X11 backbuffer for double buffering
+  // In text mode, map the hardware framebuffer directly
+  void *buffer_to_map;
+  if (fb_get_kd_mode() == KD_GRAPHICS && x11_backbuffer) {
+    buffer_to_map = x11_backbuffer;
+    klog_puts("[FB_MMAP] Mapping X11 backbuffer (double buffer mode)\n");
+  } else {
+    buffer_to_map = fb->address;
+    klog_puts("[FB_MMAP] Mapping hardware framebuffer (direct mode)\n");
+  }
+
 // Allocate a virtual address range in user space
 // Use the mmap bump allocator from sys_mm.c
 #define PAGE_SIZE 4096
@@ -154,38 +322,46 @@ static uint64_t fb_vfs_mmap(struct vfs_node *node, uint64_t length,
     return (uint64_t)-1;
   }
 
-  // Build page flags from prot
+  // Build page flags from prot - Using PCD|PWT for strict Uncacheable (UC)
+  // For X11 backbuffer (heap memory), use WB (write-back) caching for speed
   uint64_t page_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER;
+  if (buffer_to_map == fb->address) {
+    // Hardware framebuffer - use uncached
+    page_flags |= PAGE_FLAG_PCD | PAGE_FLAG_PWT;
+  }
   if (prot & FB_MMAP_PROT_WRITE)
     page_flags |= PAGE_FLAG_RW;
   if (!(prot & FB_MMAP_PROT_EXEC))
     page_flags |= PAGE_FLAG_NX;
 
-  // Map each page of the framebuffer directly (physical -> user virtual)
-  // fb->address from Limine is a virtual address in HHDM - convert to physical
+  // Resolve physical address of the buffer to map
   uint64_t *pml4 = vmm_get_active_pml4();
-  uint64_t fb_phys = (uint64_t)fb->address - pmm_get_hhdm_offset();
-  uint64_t num_pages = aligned_len / PAGE_SIZE;
+  uint64_t real_phys = vmm_virt_to_phys(pml4, (uint64_t)buffer_to_map);
+  if (real_phys == 0) {
+    klog_puts("[FB_MMAP] Error: failed to resolve physical address\n");
+    return (uint64_t)-1;
+  }
+
+  uint64_t phys_offset = real_phys & (PAGE_SIZE - 1);
+  uint64_t aligned_phys = real_phys & PAGE_MASK;
+  uint64_t num_pages = (length + phys_offset + PAGE_SIZE - 1) / PAGE_SIZE;
 
   for (uint64_t i = 0; i < num_pages; i++) {
-    uint64_t phys_page = fb_phys + i * PAGE_SIZE;
+    uint64_t phys_page = aligned_phys + i * PAGE_SIZE;
     uint64_t virt_page = vaddr + i * PAGE_SIZE;
 
     if (!vmm_map_page(pml4, virt_page, phys_page, page_flags)) {
       klog_puts("[FB_MMAP] Error: vmm_map_page failed\n");
       return (uint64_t)-1;
     }
+    vmm_flush_tlb(virt_page);
   }
 
-  klog_puts("[FB_MMAP] Mapped framebuffer ");
-  klog_uint64(aligned_len);
-  klog_puts(" bytes at ");
-  klog_uint64(vaddr);
-  klog_puts(" (phys ");
-  klog_uint64(fb_phys);
-  klog_puts(")\n");
+  klog_puts("[FB_MMAP] Mapped buffer at ");
+  klog_uint64(vaddr + phys_offset);
+  klog_puts("\n");
 
-  return vaddr;
+  return vaddr + phys_offset;
 }
 
 static uint32_t fb_vfs_read(struct vfs_node *node, uint32_t offset,
@@ -388,8 +564,9 @@ static void setup_chardev(
     uint32_t (*write_fn)(struct vfs_node *, uint32_t, uint32_t, uint8_t *),
     void (*open_fn)(struct vfs_node *), void (*close_fn)(struct vfs_node *),
     int (*poll_fn)(struct vfs_node *, int),
-    int (*ioctl_fn)(struct vfs_node *, uint32_t, uint64_t), void *device,
-    uint32_t length) {
+    int (*ioctl_fn)(struct vfs_node *, uint32_t, uint64_t),
+    uint64_t (*mmap_fn)(struct vfs_node *, uint64_t, uint64_t, uint64_t),
+    void *device, uint32_t length) {
   (void)dev_dir; // Not needed - we use the device registry
 
   // Create virtual device node
@@ -409,6 +586,7 @@ static void setup_chardev(
   node->close = close_fn;
   node->poll = poll_fn;
   node->ioctl = ioctl_fn;
+  node->mmap = mmap_fn;
 
   // Register in device registry for persistent lookups
   // This ensures device callbacks are always available,
@@ -423,6 +601,10 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   if (!fb)
     return -1;
 
+  klog_puts("[FB_IOCTL] request=0x");
+  klog_hex32(request);
+  klog_puts("\n");
+
   switch (request) {
   case FBIOGET_VSCREENINFO: {
     struct fb_var_screeninfo *var = (struct fb_var_screeninfo *)arg;
@@ -431,7 +613,8 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     var->yres = (uint32_t)fb->height;
     var->xres_virtual = (uint32_t)(fb->pitch / (fb->bpp / 8));
     var->yres_virtual = (uint32_t)fb->height;
-    var->bits_per_pixel = (uint32_t)fb->bpp;
+    var->bits_per_pixel = 32; // !!! FORCE 32-BIT !!!
+    klog_puts("[!!! FB_VSCREENINFO !!!] Forced 32bpp\n");
 
     var->red.length = fb->red_mask_size;
     var->red.offset = fb->red_mask_shift;
@@ -463,10 +646,15 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     struct fb_fix_screeninfo *fix = (struct fb_fix_screeninfo *)arg;
     memset(fix, 0, sizeof(struct fb_fix_screeninfo));
     strcpy(fix->id, "ascentos-fb");
-    fix->smem_start = (unsigned long)fb->address - pmm_get_hhdm_offset();
+
+    // Resolve exact physical address
+    uint64_t phys =
+        vmm_virt_to_phys(vmm_get_active_pml4(), (uint64_t)fb->address);
+    fix->smem_start = (unsigned long)phys;
     fix->smem_len = (uint32_t)(fb->height * fb->pitch);
     fix->line_length = (uint32_t)fb->pitch;
     fix->visual = 2; // FB_VISUAL_TRUECOLOR
+    fix->accel = 0;  // No hardware acceleration
     return 0;
   }
   case FBIOPUT_VSCREENINFO: {
@@ -506,7 +694,24 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     return 0;
   }
   case FBIOPAN_DISPLAY: {
-    // Scrolling/Panning - return success but do nothing (fallback to software)
+    // Page flip: copy X11 backbuffer to hardware framebuffer
+    // This is called by X11 after rendering a frame to the mmap'd buffer
+    if (!x11_backbuffer || !fb) {
+      return -1;
+    }
+    
+    uint32_t fb_size = fb->height * fb->pitch;
+    
+    // Copy entire X11 backbuffer to hardware framebuffer
+    // This is the "page flip" - atomic swap of entire frame
+    memcpy((uint8_t *)fb->address, (uint8_t *)x11_backbuffer, fb_size);
+    
+    // Update yoffset if requested (for virtual screen panning)
+    struct fb_var_screeninfo *var = (struct fb_var_screeninfo *)arg;
+    if (var) {
+      x11_yoffset = var->yoffset;
+    }
+    
     return 0;
   }
   default:
@@ -547,7 +752,7 @@ struct vt_mode {
   short frsig;  // unused
 };
 
-static int current_kd_mode = KD_TEXT;
+static volatile int current_kd_mode = KD_TEXT;
 static int current_kb_mode = K_XLATE;
 
 static int tty0_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
@@ -608,6 +813,29 @@ static int tty0_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   }
   case KDSETMODE: {
     current_kd_mode = (int)arg;
+    if (current_kd_mode == KD_GRAPHICS) {
+      // 1. Flush all caches to RAM
+      __asm__ volatile("wbinvd" ::: "memory");
+
+      // 2. Full TLB flush via CR3 reload
+      {
+        uint64_t cr3;
+        __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+        __asm__ volatile("mov %0, %%cr3" ::"r"(cr3) : "memory");
+      }
+
+      // 3. Clear the physical framebuffer via volatile access
+      if (fb && fb->address) {
+        volatile uint32_t *target = (volatile uint32_t *)fb->address;
+        uint32_t size = (fb->height * fb->pitch) / 4;
+        for (uint32_t i = 0; i < size; i++) {
+          target[i] = 0x00000000;
+        }
+      }
+
+      // 3. Final flush to ensure zeroing reached RAM
+      __asm__ volatile("wbinvd" ::: "memory");
+    }
     return 0;
   }
   case KDGKBMODE: {
@@ -635,77 +863,67 @@ void fb_register_vfs(void) {
   if (!dev_dir)
     return;
 
-  // /dev/fb0 - special handling for framebuffer size
-  vfs_node_t *fb_node = kmalloc(sizeof(vfs_node_t));
-  if (fb_node) {
-    memset(fb_node, 0, sizeof(vfs_node_t));
-    strcpy(fb_node->name, "fb0");
-    fb_node->flags = FS_CHARDEV;
-    fb_node->mask = 0666;
-    fb_node->length = fb->height * fb->pitch;
-    fb_node->device = fb;
-    fb_node->read = fb_vfs_read;
-    fb_node->write = fb_vfs_write;
-    fb_node->mmap = fb_vfs_mmap;
-    fb_node->ioctl = fb_ioctl;
+  uint32_t fb_size = fb->height * fb->pitch;
 
-    // Register in device registry (no filesystem manipulation needed)
-    fb_register_device_node("fb0", fb_node);
-  }
+  // /dev/fb0 - Framebuffer device
+  setup_chardev(dev_dir, "fb0", fb_vfs_read, fb_vfs_write, NULL, NULL, NULL,
+                fb_ioctl, fb_vfs_mmap, fb, fb_size);
 
   // /dev/console
   setup_chardev(dev_dir, "console", console_vfs_read, console_vfs_write,
-                console_vfs_open, console_vfs_close, console_vfs_poll, 0, 0, 0);
+                console_vfs_open, console_vfs_close, console_vfs_poll, 0, NULL,
+                NULL, 0);
 
   // /dev/tty (alias to console for now)
   setup_chardev(dev_dir, "tty", console_vfs_read, console_vfs_write,
-                console_vfs_open, console_vfs_close, console_vfs_poll, 0, 0, 0);
+                console_vfs_open, console_vfs_close, console_vfs_poll, 0, NULL,
+                NULL, 0);
 
   // /dev/stdin
   setup_chardev(dev_dir, "stdin", console_vfs_read, 0, console_vfs_open,
-                console_vfs_close, console_vfs_poll, 0, 0, 0);
+                console_vfs_close, console_vfs_poll, 0, NULL, NULL, 0);
 
   // /dev/stdout
   setup_chardev(dev_dir, "stdout", 0, console_vfs_write, console_vfs_open,
-                console_vfs_close, 0, 0, 0, 0);
+                console_vfs_close, NULL, 0, NULL, NULL, 0);
 
   // /dev/stderr
   setup_chardev(dev_dir, "stderr", 0, console_vfs_write, console_vfs_open,
-                console_vfs_close, 0, 0, 0, 0);
+                console_vfs_close, NULL, 0, NULL, NULL, 0);
 
   // /dev/null
-  setup_chardev(dev_dir, "null", null_vfs_read, null_vfs_write, 0, 0, 0, 0, 0,
-                0);
+  setup_chardev(dev_dir, "null", null_vfs_read, null_vfs_write, NULL, NULL,
+                NULL, NULL, NULL, NULL, 0);
 
   // /dev/zero
-  setup_chardev(dev_dir, "zero", zero_vfs_read, zero_vfs_write, 0, 0, 0, 0, 0,
-                0);
+  setup_chardev(dev_dir, "zero", zero_vfs_read, zero_vfs_write, NULL, NULL,
+                NULL, NULL, NULL, NULL, 0);
 
   // /dev/tty0 — virtual terminal device for Xfbdev/Xorg VT management
   setup_chardev(dev_dir, "tty0", console_vfs_read, console_vfs_write,
                 console_vfs_open, console_vfs_close, console_vfs_poll,
-                tty0_ioctl, 0, 0);
+                tty0_ioctl, NULL, NULL, 0);
 
   // /dev/tty1-tty7 — individual virtual terminals (X server opens tty1)
   setup_chardev(dev_dir, "tty1", console_vfs_read, console_vfs_write,
                 console_vfs_open, console_vfs_close, console_vfs_poll,
-                tty0_ioctl, 0, 0);
+                tty0_ioctl, NULL, NULL, 0);
   setup_chardev(dev_dir, "tty2", console_vfs_read, console_vfs_write,
                 console_vfs_open, console_vfs_close, console_vfs_poll,
-                tty0_ioctl, 0, 0);
+                tty0_ioctl, NULL, NULL, 0);
   setup_chardev(dev_dir, "tty3", console_vfs_read, console_vfs_write,
                 console_vfs_open, console_vfs_close, console_vfs_poll,
-                tty0_ioctl, 0, 0);
+                tty0_ioctl, NULL, NULL, 0);
 
   // /dev/apm_bios (Power management probes in X11)
-  setup_chardev(dev_dir, "apm_bios", zero_vfs_read, zero_vfs_write, 0, 0, 0, 0,
-                0, 0);
+  setup_chardev(dev_dir, "apm_bios", zero_vfs_read, zero_vfs_write, NULL, NULL,
+                NULL, NULL, NULL, NULL, 0);
 
   // /dev/misc/apm_bios
   vfs_node_t *misc_dir = vfs_finddir(dev_dir, "misc");
   if (misc_dir) {
-    setup_chardev(misc_dir, "apm_bios", zero_vfs_read, zero_vfs_write, 0, 0, 0,
-                  0, 0, 0);
+    setup_chardev(misc_dir, "apm_bios", zero_vfs_read, zero_vfs_write, NULL,
+                  NULL, NULL, NULL, NULL, NULL, 0);
   }
 
   // Note: don't free dev_dir - it still points to a valid VFS node
@@ -719,24 +937,64 @@ void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color) {
     return;
 
   void *target = backbuffer_enabled ? backbuffer : fb->address;
-  volatile uint32_t *pixel =
-      (volatile uint32_t *)((uint8_t *)target + y * fb->pitch + x * 4);
+  uint32_t *pixel = (uint32_t *)((uint8_t *)target + y * fb->pitch + x * 4);
   *pixel = color;
+  fb_mark_dirty(x, y, 1, 1);
+}
+
+// Fast 32-bit fill for aligned regions
+static inline void fill_scanline32(uint32_t *dst, uint32_t count, uint32_t color) {
+  // Unroll for speed
+  while (count >= 8) {
+    dst[0] = color; dst[1] = color; dst[2] = color; dst[3] = color;
+    dst[4] = color; dst[5] = color; dst[6] = color; dst[7] = color;
+    dst += 8;
+    count -= 8;
+  }
+  while (count--) {
+    *dst++ = color;
+  }
 }
 
 void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                   uint32_t color) {
+  if (x >= fb->width || y >= fb->height)
+    return;
+  if (x + w > fb->width) w = fb->width - x;
+  if (y + h > fb->height) h = fb->height - y;
+
   void *target = backbuffer_enabled ? backbuffer : fb->address;
 
-  for (uint32_t row = y; row < y + h && row < fb->height; row++) {
+  for (uint32_t row = y; row < y + h; row++) {
     uint32_t *line = (uint32_t *)((uint8_t *)target + row * fb->pitch + x * 4);
-    for (uint32_t col = 0; col < w && (x + col) < fb->width; col++)
-      line[col] = color;
+    fill_scanline32(line, w, color);
   }
+  fb_mark_dirty(x, y, w, h);
 }
 
 void fb_clear(uint32_t color) {
-  fb_fill_rect(0, 0, fb->width, fb->height, color);
+  void *target = backbuffer_enabled ? backbuffer : fb->address;
+  uint32_t total_pixels = fb->width * fb->height;
+  uint32_t *pixels = (uint32_t *)target;
+  fill_scanline32(pixels, total_pixels, color);
+  fb_mark_dirty(0, 0, fb->width, fb->height);
+}
+
+// Draw a single glyph scanline (8 pixels) with fg/bg colors in one operation
+// This replaces 8 individual fb_put_pixel calls per scanline
+void fb_draw_glyph_scanline(uint32_t x, uint32_t y, uint8_t bits, uint32_t fg, uint32_t bg) {
+  if (x >= fb->width || y >= fb->height)
+    return;
+
+  void *target = backbuffer_enabled ? backbuffer : fb->address;
+  uint32_t *line = (uint32_t *)((uint8_t *)target + y * fb->pitch + x * 4);
+
+  // Process all 8 pixels in one pass
+  for (int i = 0; i < 8; i++) {
+    line[i] = (bits & (0x80 >> i)) ? fg : bg;
+  }
+  // Mark 8x1 region dirty (caller will batch multiple scanlines for full char)
+  fb_mark_dirty(x, y, 8, 1);
 }
 
 uint32_t fb_get_width(void) { return fb->width; }

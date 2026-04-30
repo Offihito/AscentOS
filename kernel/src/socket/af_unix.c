@@ -8,11 +8,11 @@
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../sched/sched.h"
+#include "epoll.h"
 #include "socket.h"
 #include "socket_internal.h"
-#include "epoll.h"
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 // ── AF_UNIX Bound Sockets Tracking ───────────────────────────────────────────
 
@@ -22,8 +22,7 @@ static spinlock_t unix_bound_lock;
 /**
  * Find an AF_UNIX socket bound to a specific address.
  */
-unix_sock_t *unix_find_socket_by_addr(struct sockaddr_un *addr,
-                                             int addrlen) {
+unix_sock_t *unix_find_socket_by_addr(struct sockaddr_un *addr, int addrlen) {
   struct list_head *pos;
 
   // Lock list for searching
@@ -101,8 +100,9 @@ int unix_unbind_by_path(const char *path) {
 static net_family_t unix_family = {
     .family = AF_UNIX, .create = unix_create, .next = NULL};
 
-// ── Local structure definitions for socket options ─────────────────────────────
-// These are used for SO_PEERCRED and SO_RCVTIMEO/SO_SNDTIMEO
+// ── Local structure definitions for socket options
+// ───────────────────────────── These are used for SO_PEERCRED and
+// SO_RCVTIMEO/SO_SNDTIMEO
 struct ucred_local {
   int pid;
   int uid;
@@ -346,7 +346,8 @@ static int unix_connect(socket_t *sock, struct sockaddr *addr, int addrlen) {
   dusk->accept_queue_len++;
 
   // Notify epoll watchers that listener has pending connection
-  // Check is_abstract FIRST - abstract sockets have a VFS node but need FD-based notification
+  // Check is_abstract FIRST - abstract sockets have a VFS node but need
+  // FD-based notification
   if (dusk->is_abstract) {
     // Abstract socket - notify by FD
     klog_puts("[UNIX_CONNECT] notifying epoll for abstract socket fd=");
@@ -440,10 +441,11 @@ static int unix_accept(socket_t *sock, socket_t **newsock) {
 
   // Handle orphaned connection (client closed before accept)
   if (client_usk->orphaned) {
-    // Client already closed - create an accepted socket that immediately shows EOF
+    // Client already closed - create an accepted socket that immediately shows
+    // EOF
     new_sock->state = SS_DISCONNECTING;
     new_usk->peer = NULL;
-    new_usk->accepted_orphaned = true;  // Signal POLLIN for EOF
+    new_usk->accepted_orphaned = true; // Signal POLLIN for EOF
     kfree(client_usk);
     *newsock = new_sock;
     klog_puts("[OK] unix_accept: accepted orphaned connection (EOF)\n");
@@ -555,7 +557,7 @@ static ssize_t unix_send(socket_t *sock, const void *buf, size_t len,
 
     // Wake up peer (they might be blocked on recv)
     wait_queue_wake_all(&peer->wait);
-    
+
     // Notify epoll watchers on peer socket that data is available
     if (peer->parent && peer->parent->node) {
       epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLRDNORM);
@@ -605,6 +607,7 @@ static ssize_t unix_recv(socket_t *sock, void *buf, size_t len, int flags) {
       }
 
       if (sock->flags & SOCK_NONBLOCK) {
+        sched_yield(); // Slow down busy-waiting clients to stabilize system
         return -11; // EAGAIN
       }
 
@@ -639,7 +642,7 @@ static ssize_t unix_recv(socket_t *sock, void *buf, size_t len, int flags) {
 
     // Wake up any senders waiting for space in our buffer
     wait_queue_wake_all(&usk->wait);
-    
+
     // Notify peer that their send buffer has space (POLLOUT)
     if (usk->peer && usk->peer->parent && usk->peer->parent->node) {
       epoll_notify_event(usk->peer->parent->node, EPOLLOUT | EPOLLWRNORM);
@@ -681,8 +684,8 @@ static ssize_t unix_recvfrom(socket_t *sock, void *buf, size_t len, int flags,
   return ret;
 }
 
-static int unix_getsockopt(socket_t *sock, int level, int optname,
-                           void *optval, int *optlen) {
+static int unix_getsockopt(socket_t *sock, int level, int optname, void *optval,
+                           int *optlen) {
   if (!sock || !sock->sk || !optval || !optlen)
     return -22; // EINVAL
 
@@ -1026,11 +1029,10 @@ static int unix_poll(socket_t *sock, int events) {
   }
 
   // Check for hangup - peer closed or shutdown
-  if (sock->state == SS_DISCONNECTING ||
-      sock->state == SS_UNCONNECTED ||
+  if (sock->state == SS_DISCONNECTING || sock->state == SS_UNCONNECTED ||
       (usk->read_shutdown && usk->write_shutdown) ||
       (usk->peer == NULL && sock->state != SS_LISTENING)) {
-    revents |= 0x010; // POLLHUP
+    revents |= 0x010;  // POLLHUP
     revents |= 0x2000; // EPOLLRDHUP - peer closed
     // POLLIN for EOF only set for accepted orphaned sockets with no data
     if (usk->accepted_orphaned && available == 0) {
@@ -1041,9 +1043,10 @@ static int unix_poll(socket_t *sock, int events) {
   // If peer did shutdown(SHUT_WR), treat as hangup
   // Also report EPOLLRDHUP for peer write-side close
   if (usk->peer && usk->peer->write_shutdown && available == 0) {
-    revents |= 0x010; // POLLHUP
+    revents |= 0x010;  // POLLHUP
     revents |= 0x2000; // EPOLLRDHUP - peer closed write side
-    // Note: POLLIN for EOF not set - use POLLHUP/EPOLLRDHUP to detect peer close
+    // Note: POLLIN for EOF not set - use POLLHUP/EPOLLRDHUP to detect peer
+    // close
   }
 
   // Check for writability (connected, peer exists, and not shutdown for write)
@@ -1130,8 +1133,8 @@ int unix_create(socket_t *sock, int protocol) {
 
   // Initialize socket options (Phase 6)
   usk->passcred = false;
-  usk->rcvtimeo_ms = 0;  // No timeout by default
-  usk->sndtimeo_ms = 0;  // No timeout by default
+  usk->rcvtimeo_ms = 0; // No timeout by default
+  usk->sndtimeo_ms = 0; // No timeout by default
 
   // Initialize address
   usk->addr.sun_family = AF_UNIX;
@@ -1249,7 +1252,7 @@ void unix_destroy(socket_t *sock) {
   // If we're in a listener's accept queue, don't free yet
   // Mark as orphaned - accept() will handle and free it
   if (usk->listener) {
-    usk->orphaned = true;  // Mark for accept() to clean up
+    usk->orphaned = true; // Mark for accept() to clean up
     usk->parent = NULL;
     // Keep in queue but mark as orphaned
     // Don't free - accept() will do it

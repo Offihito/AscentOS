@@ -7,7 +7,10 @@
 
 #define PAGE_FLAG_PRESENT ((uint64_t)1 << 0)
 #define PAGE_FLAG_RW ((uint64_t)1 << 1)
+#define PAGE_FLAG_RW ((uint64_t)1 << 1)
 #define PAGE_FLAG_USER ((uint64_t)1 << 2)
+#define PAGE_FLAG_PWT ((uint64_t)1 << 3)
+#define PAGE_FLAG_PCD ((uint64_t)1 << 4)
 #define PAGE_FLAG_A ((uint64_t)1 << 5)
 #define PAGE_FLAG_D ((uint64_t)1 << 6)
 #define PAGE_FLAG_PS ((uint64_t)1 << 7)

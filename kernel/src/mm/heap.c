@@ -242,22 +242,23 @@ void kfree(void *ptr) {
             c->partial = s;
         }
         
-        // If it's completely empty, immediately release it back to PMM
+        // If it's completely empty, move to the free list for later reuse.
+        // We do NOT unmap/free the underlying page because kernel heap
+        // page tables are shallow-copied (shared) across all process PML4s.
+        // Calling vmm_unmap_page → vmm_free_empty_tables would destroy
+        // shared intermediate PT/PD/PDPT pages, corrupting other processes'
+        // page table walks and causing kfree magic validation failures.
         if (s->free_count == s->total_count) {
-            // Remove from partial (or full if somehow it skipped)
+            // Remove from partial list
             if (s->prev) s->prev->next = s->next;
             else c->partial = s->next;
             if (s->next) s->next->prev = s->prev;
 
-            // Unmap and free Native limits dynamically
-            uint64_t *pml4 = vmm_get_active_pml4();
-            uint64_t phys = vmm_virt_to_phys(pml4, page_base);
-            
-            // Only unmap if it actually existed
-            if (phys) {
-                 vmm_unmap_page(pml4, page_base);
-                 pmm_free_page((void*)phys);
-            }
+            // Move to the cache's free list for reuse
+            s->next = c->free;
+            s->prev = NULL;
+            if (c->free) c->free->prev = s;
+            c->free = s;
         }
 
         spinlock_release(&heap_lock);

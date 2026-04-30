@@ -346,12 +346,13 @@ void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
   pt_virt[pt_index] = 0;
   vmm_flush_tlb(virtual_addr);
 
-  // Only free empty intermediate tables for kernel-space addresses.
-  // User-space page tables (PML4 entries 0-255) must NOT be eagerly freed:
-  // doing so destroys the PD/PDPT/PML4 entries that subsequent mmap calls
-  // rely on, causing page faults.  They are cleaned up in bulk by
-  // vmm_free_user_pages() when the process exits.
-  if (pml4_index >= 256) {
+  // Only free empty intermediate tables for kernel-space addresses that are
+  // NOT in the shared kernel heap region.  Kernel heap page tables (entries
+  // 256-511) are shallow-copied across every process PML4 — freeing a shared
+  // PT / PD / PDPT would corrupt page-table walks in every other process.
+  // The heap uses a bump allocator for virtual addresses, so intermediate
+  // tables are long-lived and recycling them is both unnecessary and dangerous.
+  if (pml4_index >= 256 && virtual_addr < KERNEL_HEAP_BASE) {
     vmm_free_empty_tables(pml4, virtual_addr);
   }
 

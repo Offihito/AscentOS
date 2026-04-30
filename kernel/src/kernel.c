@@ -147,7 +147,6 @@ void kmain(void) {
 
   struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
   serial_init();
-  console_init(fb);
 
   if (paging_mode_request.response != NULL) {
     if (paging_mode_request.response->mode == LIMINE_PAGING_MODE_X86_64_4LVL) {
@@ -211,6 +210,8 @@ void kmain(void) {
   klog_puts("[OK] Initializing Virtual Memory Manager (VMM)...\n");
   vmm_init();
   klog_puts("     Active CR3 Page Map hooked.\n");
+  heap_init();
+  console_init(fb);
 
   klog_puts("[OK] Testing VMM mapping... (0xCAFEBABE000)\n");
   void *test_phys = pmm_alloc();
@@ -334,8 +335,6 @@ void kmain(void) {
   // ═══════════════════════════════════════════════════════════════════════
   //  Phase 6: Kernel heap
   // ═══════════════════════════════════════════════════════════════════════
-  klog_puts("[OK] Initializing Kernel Heap...\n");
-  heap_init();
   char *heap_test = kmalloc(64);
   if (heap_test) {
     const char *test_msg = "     Heap allocation SUCCESSFUL!\n";

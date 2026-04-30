@@ -15,12 +15,7 @@ static struct virtio_gpu_device gpu_dev;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-static void klog_hex32(uint32_t val) {
-  const char *hex = "0123456789ABCDEF";
-  klog_puts("0x");
-  for (int i = 28; i >= 0; i -= 4)
-    klog_putchar(hex[(val >> i) & 0xF]);
-}
+
 
 // ── Command submission helpers ──────────────────────────────────────────────
 

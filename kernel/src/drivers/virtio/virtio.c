@@ -6,12 +6,6 @@
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-static void klog_hex64(uint64_t val) {
-  const char *hex = "0123456789ABCDEF";
-  klog_puts("0x");
-  for (int i = 60; i >= 0; i -= 4)
-    klog_putchar(hex[(val >> i) & 0xF]);
-}
 
 // ── Alignment helpers per VirtIO 1.0 spec ───────────────────────────────────
 // Descriptor table:  16-byte aligned

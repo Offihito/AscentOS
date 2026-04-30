@@ -11,19 +11,7 @@
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-static void klog_hex32(uint32_t val) {
-  const char *hex = "0123456789ABCDEF";
-  klog_puts("0x");
-  for (int i = 28; i >= 0; i -= 4)
-    klog_putchar(hex[(val >> i) & 0xF]);
-}
 
-static void klog_hex64(uint64_t val) {
-  const char *hex = "0123456789ABCDEF";
-  klog_puts("0x");
-  for (int i = 60; i >= 0; i -= 4)
-    klog_putchar(hex[(val >> i) & 0xF]);
-}
 
 // ── BAR Mapping ─────────────────────────────────────────────────────────────
 

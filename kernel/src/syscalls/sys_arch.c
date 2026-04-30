@@ -119,7 +119,7 @@ static uint64_t sys_clock_gettime(uint64_t clk_id, uint64_t tp_ptr, uint64_t a2,
 }
 
 static uint64_t sys_clock_getres(uint64_t clk_id, uint64_t tp_ptr, uint64_t a2,
-                                  uint64_t a3, uint64_t a4, uint64_t a5) {
+                                 uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)clk_id;
   (void)a2;
   (void)a3;
@@ -193,8 +193,8 @@ static uint64_t sys_gettimeofday(uint64_t tv_ptr, uint64_t tz_ptr, uint64_t a2,
 
 // mlock(addr, len) - syscall 55 (stub)
 // We don't implement memory locking, just return success
-static uint64_t sys_mlock(uint64_t addr, uint64_t len, uint64_t a2,
-                          uint64_t a3, uint64_t a4, uint64_t a5) {
+static uint64_t sys_mlock(uint64_t addr, uint64_t len, uint64_t a2, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
   (void)addr;
   (void)len;
   (void)a2;

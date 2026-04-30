@@ -74,6 +74,7 @@ void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color);
 void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                   uint32_t color);
 void fb_clear(uint32_t color);
+void fb_draw_glyph_scanline(uint32_t x, uint32_t y, uint8_t bits, uint32_t fg, uint32_t bg);
 uint32_t fb_get_width(void);
 uint32_t fb_get_height(void);
 void *fb_get_base(void);

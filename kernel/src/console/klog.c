@@ -38,3 +38,25 @@ void klog_uint64(uint64_t num) {
   }
   spinlock_release(&klog_lock);
 }
+
+void klog_hex64(uint64_t num) {
+  spinlock_acquire(&klog_lock);
+  const char *hex = "0123456789ABCDEF";
+  serial_putchar('0');
+  serial_putchar('x');
+  for (int i = 60; i >= 0; i -= 4) {
+    serial_putchar(hex[(num >> i) & 0xF]);
+  }
+  spinlock_release(&klog_lock);
+}
+
+void klog_hex32(uint32_t num) {
+  spinlock_acquire(&klog_lock);
+  const char *hex = "0123456789ABCDEF";
+  serial_putchar('0');
+  serial_putchar('x');
+  for (int i = 28; i >= 0; i -= 4) {
+    serial_putchar(hex[(num >> i) & 0xF]);
+  }
+  spinlock_release(&klog_lock);
+}

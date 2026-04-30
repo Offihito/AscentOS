@@ -256,11 +256,10 @@ void socket_destroy(socket_t *sock) {
     sock->wait_queue = NULL;
   }
 
-  // Free family-specific data
-  if (sock->sk) {
-    kfree(sock->sk);
-    sock->sk = NULL;
-  }
+  // NOTE: Family-specific data (sock->sk) is freed by the destroy handler
+  // above (e.g., unix_destroy).  Do NOT kfree(sock->sk) here — doing so
+  // would be a double-free if the handler already released it.
+  sock->sk = NULL;
 
   // Free VFS node
   if (sock->node) {

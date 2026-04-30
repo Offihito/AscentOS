@@ -113,6 +113,7 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
                          uint64_t flags, uint64_t fd, uint64_t offset) {
   (void)offset;
 
+/*
   klog_puts("[MMAP] addr=");
   klog_uint64(addr);
   klog_puts(" len=");
@@ -122,6 +123,7 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
   klog_puts(" flags=0x");
   klog_uint64(flags);
   klog_puts("\n");
+*/
 
   // ── Validate flags ───────────────────────────────────────────────────────
   bool is_shared = (flags & MAP_SHARED) != 0;
@@ -346,11 +348,13 @@ static uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2,
   struct vma *first_vma = vma_find(&current->vmas, addr);
   bool is_shared = first_vma && (first_vma->flags & MAP_SHARED);
 
+/*
   klog_puts("[MUNMAP] [");
-  klog_uint64(addr);
+  klog_hex64(addr);
   klog_puts(", ");
-  klog_uint64(addr + aligned_len);
+  klog_hex64(addr + aligned_len);
   klog_puts(")\n");
+*/
 
   // ── Unmap and free ───────────────────────────────────────────────────────
   // teardown_range handles the unmap-before-free ordering and guards.
