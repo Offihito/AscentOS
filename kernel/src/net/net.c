@@ -9,7 +9,7 @@
 #include "net/udp.h"
 #include "net/tcp.h"
 #include "net/dhcp.h"
-#include "drivers/net/rtl8139.h"
+#include "drivers/net/nic.h"
 #include "console/console.h"
 #include "lib/string.h"
 
@@ -61,7 +61,7 @@ void net_rx_enqueue(const uint8_t *data, uint16_t len) {
 bool net_poll(void) {
     // Polled-mode fallback: check the NIC hardware directly for any
     // pending packets that the IRQ handler may have missed.
-    rtl8139_poll();
+    nic_poll();
 
     if (rx_tail == rx_head) return false;  // Queue empty
 
@@ -87,7 +87,7 @@ void net_init(void) {
     memset(rx_ring, 0, sizeof(rx_ring));
 
     // Copy MAC from the NIC driver into the netif
-    const uint8_t *mac = rtl8139_get_mac();
+    const uint8_t *mac = nic_get_mac();
     if (mac) {
         memcpy(g_netif.mac, mac, 6);
     }

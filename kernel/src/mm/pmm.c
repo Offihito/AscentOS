@@ -344,6 +344,54 @@ void *pmm_alloc_pages_constrained(size_t count, uint64_t max_phys_addr) {
     return NULL; // No block found within constraints
 }
 
+void *pmm_alloc_pages_range(size_t count, uint64_t min_phys_addr, uint64_t max_phys_addr) {
+    if (count == 0) return NULL;
+
+    size_t order = get_order(count);
+    if (order >= MAX_ORDER) return NULL;
+
+    spinlock_acquire(&b_zone.lock);
+
+    for (size_t cur_order = order; cur_order < MAX_ORDER; cur_order++) {
+        struct buddy_block *found_block = NULL;
+        struct list_head *pos;
+        
+        list_for_each(pos, &b_zone.free_list[cur_order]) {
+            struct buddy_block *block = list_entry(pos, struct buddy_block, node);
+            uint64_t phys = buddy_to_phys(block);
+            uint64_t block_end = phys + (1ULL << cur_order) * PAGE_SIZE;
+            // Check both min and max constraints
+            if (phys >= min_phys_addr && block_end <= max_phys_addr) {
+                found_block = block;
+                break;
+            }
+        }
+
+        if (found_block) {
+            list_del(&found_block->node);
+            uint64_t pfn = buddy_to_phys(found_block) / PAGE_SIZE;
+
+            // Split down to requested order
+            while (cur_order > order) {
+                cur_order--;
+                uint64_t buddy_pfn = pfn + (1ULL << cur_order);
+                struct buddy_block *buddy = virt_to_buddy(buddy_pfn * PAGE_SIZE);
+                buddy->order = cur_order;
+                list_add_tail(&buddy->node, &b_zone.free_list[cur_order]);
+            }
+
+            // Mark as used in bitmap
+            bitmap_set_range(bitmap, pfn, 1ULL << order);
+
+            spinlock_release(&b_zone.lock);
+            return (void *)(pfn * PAGE_SIZE);
+        }
+    }
+
+    spinlock_release(&b_zone.lock);
+    return NULL; // No block found within constraints
+}
+
 void *pmm_alloc_page(void) {
     return pmm_alloc_pages(1);
 }

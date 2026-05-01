@@ -16,7 +16,7 @@
 #include "drivers/input/keyboard.h"
 #include "drivers/input/mouse.h"
 #include "drivers/input/evdev.h"
-#include "drivers/net/rtl8139.h"
+#include "drivers/net/nic.h"
 #include "drivers/pci/pci.h"
 #include "drivers/serial.h"
 #include "drivers/storage/ahci.h"
@@ -33,6 +33,7 @@
 #include "io/io.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
+#include "mm/dma_alloc.h"
 #include "mm/vmm.h"
 #include "net/net.h"
 #include "sched/sched.h"
@@ -211,6 +212,7 @@ void kmain(void) {
   vmm_init();
   klog_puts("     Active CR3 Page Map hooked.\n");
   heap_init();
+  dma_alloc_init();
   console_init(fb);
 
   klog_puts("[OK] Testing VMM mapping... (0xCAFEBABE000)\n");
@@ -369,7 +371,7 @@ void kmain(void) {
   virtio_gpu_self_test(); // Phase 2: GPU device tests
 
   ahci_init();
-  rtl8139_init();
+  nic_init();
   net_init();
   ac97_init();
   ac97_register_vfs();

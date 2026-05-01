@@ -4,7 +4,7 @@
 #include "console/klog.h"
 #include "drivers/audio/pcspeaker.h"
 #include "drivers/input/keyboard.h"
-#include "drivers/net/rtl8139.h"
+#include "drivers/net/nic.h"
 #include "drivers/serial.h"
 #include "drivers/storage/block.h"
 #include "fs/ext2.h"
@@ -1497,12 +1497,12 @@ static void execute_command(char *cmd) {
       }
     }
   } else if (strcmp(cmd, "netinfo") == 0) {
-    if (!rtl8139_is_present()) {
-      console_puts("No RTL8139 NIC detected.\n");
+    if (!nic_is_present()) {
+      console_puts("No NIC detected.\n");
     } else {
-      const uint8_t *mac = rtl8139_get_mac();
+      const uint8_t *mac = nic_get_mac();
       const char *hex = "0123456789ABCDEF";
-      console_puts("RTL8139 Network Interface\n");
+      console_puts("Network Interface\n");
       console_puts("  MAC Address: ");
       for (int i = 0; i < 6; i++) {
         console_putchar(hex[(mac[i] >> 4) & 0xF]);
@@ -1511,15 +1511,7 @@ static void execute_command(char *cmd) {
           console_putchar(':');
       }
       console_puts("\n  Link: ");
-      console_puts(rtl8139_link_up() ? "UP" : "DOWN");
-      console_puts("\n  I/O Base: 0x");
-      uint16_t iobase = rtl8139_get_iobase();
-      console_putchar(hex[(iobase >> 12) & 0xF]);
-      console_putchar(hex[(iobase >> 8) & 0xF]);
-      console_putchar(hex[(iobase >> 4) & 0xF]);
-      console_putchar(hex[iobase & 0xF]);
-      console_puts("\n  IRQ: ");
-      shell_print_uint64(rtl8139_get_irq());
+      console_puts(nic_link_up() ? "UP" : "DOWN");
       console_puts("\n");
     }
   } else if (strcmp(cmd, "ifconfig") == 0) {

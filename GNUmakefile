@@ -36,7 +36,7 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-smp 4 \
 		-serial stdio \
 		-audiodev pa,id=snd0 \
-		-device rtl8139,netdev=net0 \
+		-device e1000,netdev=net0 \
 		-device sb16,audiodev=snd0 \
 		-device AC97,audiodev=snd0 \
 		-netdev user,id=net0 \
@@ -46,6 +46,7 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 run-bios: $(IMAGE_NAME).iso disk.img
 	qemu-system-$(ARCH) \
 		-M q35,pcspk-audiodev=snd0 \
+		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
 		-cdrom $(IMAGE_NAME).iso \
 		-hda disk.img \
 		-boot d \
@@ -63,6 +64,7 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_syscalls.e
 	debugfs -w -R "write /tmp/ascentos_hello.txt hello.txt" disk.img
 	debugfs -w -R "mkdir docs" disk.img
 	debugfs -w -R "mkdir bin" disk.img
+	debugfs -w -R "write initrd/startx.sh bin/startx.sh" disk.img
 	debugfs -w -R "mkdir lib" disk.img
 	debugfs -w -R "write toolchain/musl-sysroot/lib/libc.so lib/libc.so" disk.img
 	debugfs -w -R "write toolchain/musl-sysroot/lib/libc.so lib/ld-musl-x86_64.so.1" disk.img
@@ -206,7 +208,6 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_syscalls.e
 	@if [ -f userland/twm.elf ]; then \
 		echo "Installing twm into disk image..."; \
 		debugfs -w -R "write userland/twm.elf twm" disk.img; \
-		debugfs -w -R "write initrd/startx.sh bin/startx.sh" disk.img; \
 	fi
 	@if [ -f userland/xeyes.elf ] || [ -f userland/twm.elf ]; then \
 		debugfs -w -R "write userland/test_x11_simple.elf bin/test_x11_simple" disk.img; \

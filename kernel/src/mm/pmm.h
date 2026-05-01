@@ -14,7 +14,8 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset);
 // New Buddy Allocator API
 void *pmm_alloc_page(void);                    // Allocate single page
 void *pmm_alloc_pages(size_t count);           // Allocate multiple (will allocate ceil(log2(count)))
-void *pmm_alloc_pages_constrained(size_t count, uint64_t max_phys_addr); 
+void *pmm_alloc_pages_constrained(size_t count, uint64_t max_phys_addr);
+void *pmm_alloc_pages_range(size_t count, uint64_t min_phys_addr, uint64_t max_phys_addr); 
 void pmm_free_page(void *ptr);                 // Free single page
 void pmm_free_pages(void *ptr, size_t count);  // Free multiple pages
 

@@ -20,10 +20,10 @@ typedef struct net_packet {
 // ── Public API ──────────────────────────────────────────────────────────────
 
 // Initialize the network subsystem: packet queue, netif, ARP.
-// Must be called after rtl8139_init().
+// Must be called after nic_init().
 void net_init(void);
 
-// Called from the RTL8139 IRQ handler to enqueue a received Ethernet frame.
+// Called from the NIC IRQ handler to enqueue a received Ethernet frame.
 // Copies `len` bytes from `data` into the RX ring. IRQ-safe.
 void net_rx_enqueue(const uint8_t *data, uint16_t len);
 

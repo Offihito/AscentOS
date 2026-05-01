@@ -61,7 +61,7 @@ static volatile bool backbuffer_enabled = false;
 
 // X11 double buffering - separate backbuffer for graphics mode
 static void *x11_backbuffer = NULL;
-static uint32_t x11_yoffset = 0;  // Virtual Y offset for panning
+static uint32_t x11_yoffset = 0; // Virtual Y offset for panning
 
 // Dirty region tracking - bounding box of changed pixels
 static uint32_t dirty_x1 = UINT32_MAX;
@@ -70,13 +70,19 @@ static uint32_t dirty_x2 = 0;
 static uint32_t dirty_y2 = 0;
 static bool dirty_valid = false;
 
-static inline void fb_mark_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
-  if (!backbuffer_enabled) return;
-  
-  if (x < dirty_x1) dirty_x1 = x;
-  if (y < dirty_y1) dirty_y1 = y;
-  if (x + w > dirty_x2) dirty_x2 = x + w;
-  if (y + h > dirty_y2) dirty_y2 = y + h;
+static inline void fb_mark_dirty(uint32_t x, uint32_t y, uint32_t w,
+                                 uint32_t h) {
+  if (!backbuffer_enabled)
+    return;
+
+  if (x < dirty_x1)
+    dirty_x1 = x;
+  if (y < dirty_y1)
+    dirty_y1 = y;
+  if (x + w > dirty_x2)
+    dirty_x2 = x + w;
+  if (y + h > dirty_y2)
+    dirty_y2 = y + h;
   dirty_valid = true;
 }
 
@@ -194,32 +200,34 @@ void *fb_get_backbuffer(void) { return backbuffer; }
 void fb_swap_buffer(void) {
   if (!backbuffer || fb_get_kd_mode() == KD_GRAPHICS)
     return;
-  
+
   // No dirty region - nothing to swap
-  if (!dirty_valid) return;
-  
+  if (!dirty_valid)
+    return;
+
   // Clamp dirty region to screen bounds
   if (dirty_x1 >= fb->width || dirty_y1 >= fb->height) {
     dirty_valid = false;
     return;
   }
-  
+
   uint32_t x1 = dirty_x1;
   uint32_t y1 = dirty_y1;
   uint32_t x2 = (dirty_x2 < fb->width) ? dirty_x2 : fb->width;
   uint32_t y2 = (dirty_y2 < fb->height) ? dirty_y2 : fb->height;
-  
+
   // Reset dirty region for next frame
   dirty_x1 = UINT32_MAX;
   dirty_y1 = UINT32_MAX;
   dirty_x2 = 0;
   dirty_y2 = 0;
   dirty_valid = false;
-  
+
   // Copy only the dirty region scanlines
   uint32_t copy_width = x2 - x1;
-  if (copy_width == 0) return;
-  
+  if (copy_width == 0)
+    return;
+
   for (uint32_t y = y1; y < y2; y++) {
     uint8_t *src = (uint8_t *)backbuffer + y * fb->pitch + x1 * 4;
     uint8_t *dst = (uint8_t *)fb->address + y * fb->pitch + x1 * 4;
@@ -699,19 +707,19 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     if (!x11_backbuffer || !fb) {
       return -1;
     }
-    
+
     uint32_t fb_size = fb->height * fb->pitch;
-    
+
     // Copy entire X11 backbuffer to hardware framebuffer
     // This is the "page flip" - atomic swap of entire frame
     memcpy((uint8_t *)fb->address, (uint8_t *)x11_backbuffer, fb_size);
-    
+
     // Update yoffset if requested (for virtual screen panning)
     struct fb_var_screeninfo *var = (struct fb_var_screeninfo *)arg;
     if (var) {
       x11_yoffset = var->yoffset;
     }
-    
+
     return 0;
   }
   default:
@@ -943,11 +951,18 @@ void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color) {
 }
 
 // Fast 32-bit fill for aligned regions
-static inline void fill_scanline32(uint32_t *dst, uint32_t count, uint32_t color) {
+static inline void fill_scanline32(uint32_t *dst, uint32_t count,
+                                   uint32_t color) {
   // Unroll for speed
   while (count >= 8) {
-    dst[0] = color; dst[1] = color; dst[2] = color; dst[3] = color;
-    dst[4] = color; dst[5] = color; dst[6] = color; dst[7] = color;
+    dst[0] = color;
+    dst[1] = color;
+    dst[2] = color;
+    dst[3] = color;
+    dst[4] = color;
+    dst[5] = color;
+    dst[6] = color;
+    dst[7] = color;
     dst += 8;
     count -= 8;
   }
@@ -960,8 +975,10 @@ void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                   uint32_t color) {
   if (x >= fb->width || y >= fb->height)
     return;
-  if (x + w > fb->width) w = fb->width - x;
-  if (y + h > fb->height) h = fb->height - y;
+  if (x + w > fb->width)
+    w = fb->width - x;
+  if (y + h > fb->height)
+    h = fb->height - y;
 
   void *target = backbuffer_enabled ? backbuffer : fb->address;
 
@@ -982,7 +999,8 @@ void fb_clear(uint32_t color) {
 
 // Draw a single glyph scanline (8 pixels) with fg/bg colors in one operation
 // This replaces 8 individual fb_put_pixel calls per scanline
-void fb_draw_glyph_scanline(uint32_t x, uint32_t y, uint8_t bits, uint32_t fg, uint32_t bg) {
+void fb_draw_glyph_scanline(uint32_t x, uint32_t y, uint8_t bits, uint32_t fg,
+                            uint32_t bg) {
   if (x >= fb->width || y >= fb->height)
     return;
 

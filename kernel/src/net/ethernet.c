@@ -8,7 +8,7 @@
 #include "net/arp.h"
 #include "net/ipv4.h"
 #include "net/byteorder.h"
-#include "drivers/net/rtl8139.h"
+#include "drivers/net/nic.h"
 #include "console/console.h"
 #include "console/klog.h"
 #include "lib/string.h"
@@ -51,7 +51,7 @@ int eth_send_frame(const uint8_t *dst_mac, uint16_t ethertype,
         total_len = 60;
     }
 
-    int ret = rtl8139_send(frame, total_len);
+    int ret = nic_send(frame, total_len);
     return ret;
 }
 
