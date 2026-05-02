@@ -11,6 +11,7 @@
  * Reference: Intel UHCI Design Guide, Revision 1.1 (March 1996)
  */
 
+#include "usb.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -60,6 +61,46 @@
 #define UHCI_PORT_PR (1 << 9)    // Port Reset
 #define UHCI_PORT_SUSP (1 << 12) // Suspend
 
+// ── UHCI Transfer Descriptor (TD) ──────────────────────────────────────────
+// Must be 16-byte aligned.
+struct uhci_td {
+  volatile uint32_t link;
+  volatile uint32_t status;
+  volatile uint32_t token;
+  volatile uint32_t buffer;
+} __attribute__((packed, aligned(16)));
+
+#define TD_LINK_TERMINATE (1 << 0)
+#define TD_LINK_QH (1 << 1)
+#define TD_LINK_VF (1 << 2)
+
+#define TD_STATUS_BITSTUFF (1 << 17)
+#define TD_STATUS_TIMEOUT (1 << 18)
+#define TD_STATUS_NAK (1 << 19)
+#define TD_STATUS_BABBLE (1 << 20)
+#define TD_STATUS_DBUFFER (1 << 21)
+#define TD_STATUS_HALTED (1 << 22)
+#define TD_STATUS_ACTIVE (1 << 23)
+#define TD_STATUS_IOC (1 << 24)
+#define TD_STATUS_IOS (1 << 25)
+#define TD_STATUS_LS (1 << 26)
+#define TD_STATUS_C_ERR (3 << 27)
+#define TD_STATUS_SPD (1 << 29)
+
+#define TD_PID_SETUP 0x2D
+#define TD_PID_IN 0x69
+#define TD_PID_OUT 0xE1
+
+// ── UHCI Queue Head (QH) ───────────────────────────────────────────────────
+// Must be 16-byte aligned.
+struct uhci_qh {
+  volatile uint32_t head;
+  volatile uint32_t element;
+} __attribute__((packed, aligned(16)));
+
+#define QH_LINK_TERMINATE (1 << 0)
+#define QH_LINK_QH (1 << 1)
+
 // ── PCI class/subclass/progif for UHCI ──────────────────────────────────────
 #define PCI_CLASS_SERIAL_BUS 0x0C
 #define PCI_SUBCLASS_USB 0x03
@@ -76,7 +117,27 @@ struct uhci_controller {
   uint16_t device_id; // PCI device ID
   uint8_t num_ports;  // Number of root hub ports (usually 2)
   bool present;       // Controller discovered and initialized
+
+  // Phase 2: Frame List & IRQ
+  uint32_t *frame_list;     // Virtual address (1024 * 4 bytes)
+  uint32_t frame_list_phys; // Physical address (4KB aligned)
+  bool irq_registered;
+
+  // Phase 3: Transfer Pools
+  struct uhci_td *td_pool;
+  uint32_t td_pool_phys;
+  struct uhci_qh *qh_pool;
+  uint32_t qh_pool_phys;
+
+  // DMA buffer for control requests and small data transfers
+  void *transfer_buffer;
+  uint32_t transfer_buffer_phys;
 };
+
+struct usb_control_request;
+int uhci_control_transfer(struct uhci_controller *hc, uint8_t addr,
+                          struct usb_control_request *req, void *data,
+                          uint16_t len, bool low_speed);
 
 #define UHCI_MAX_CONTROLLERS 8
 

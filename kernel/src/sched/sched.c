@@ -183,9 +183,10 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
   // Initialize FPU state
   memset(t->fpu_state, 0, 512);
 
-  // We can't easily call fninit here for the child buffer without clobbering 
-  // current FPU state. However, we can just let switch_context handle it 
-  // if we ensure it's zeroed (most CPUs treat zero as okay) or use a static init.
+  // We can't easily call fninit here for the child buffer without clobbering
+  // current FPU state. However, we can just let switch_context handle it
+  // if we ensure it's zeroed (most CPUs treat zero as okay) or use a static
+  // init.
   static uint8_t fpu_init_done = 0;
   static uint8_t initial_fpu_state[512] __attribute__((aligned(16)));
   if (!fpu_init_done) {

@@ -41,6 +41,7 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-device AC97,audiodev=snd0 \
 		-netdev user,id=net0 \
 		-usb \
+		-device usb-kbd -device usb-mouse \
 		$(QEMUFLAGS)
 
 .PHONY: run-bios
@@ -53,6 +54,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		-boot d \
 		-audiodev pa,id=snd0 \
 		-device AC97,audiodev=snd0 \
+		-usb -device usb-kbd -device usb-mouse \
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing

@@ -9,11 +9,16 @@
  * register access and enumerates root hub port status.
  */
 
-#include "drivers/usb/uhci.h"
-#include "console/console.h"
-#include "console/klog.h"
-#include "drivers/pci/pci.h"
-#include "io/io.h"
+#include "uhci.h"
+#include "../../console/console.h"
+#include "../../console/klog.h"
+#include "../../cpu/irq.h"
+#include "../../io/io.h"
+#include "../../mm/dma_alloc.h"
+#include "../pci/pci.h"
+#include "usb.h"
+#include "usb_kbd.h"
+#include "usb_mouse.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -78,6 +83,48 @@ static inline uint8_t uhci_read8(struct uhci_controller *hc, uint16_t reg) {
   return inb(hc->io_base + reg);
 }
 
+static inline void uhci_write8(struct uhci_controller *hc, uint16_t reg,
+                               uint8_t val) {
+  outb(hc->io_base + reg, val);
+}
+
+// ── IRQ Handler ─────────────────────────────────────────────────────────────
+
+static void uhci_irq_handler(struct registers *regs) {
+  (void)regs;
+  bool handled = false;
+
+  for (int i = 0; i < controller_count; i++) {
+    struct uhci_controller *hc = &controllers[i];
+    if (!hc->present)
+      continue;
+
+    uint16_t sts = uhci_read16(hc, UHCI_REG_USBSTS);
+    if (sts == 0)
+      continue;
+
+    // Acknowledge the interrupt by writing 1 to the status bits
+    uhci_write16(hc, UHCI_REG_USBSTS, sts);
+    handled = true;
+
+    if (sts & (UHCI_STS_HSE | UHCI_STS_HCPE)) {
+      klog_puts("[UHCI] Fatal Status: 0x");
+      klog_hex32(sts);
+      klog_puts("\n");
+    }
+
+    // Phase 5: Poll USB HID devices for completed interrupt transfers
+    if (sts & UHCI_STS_USBINT) {
+      usb_kbd_poll();
+      usb_mouse_poll();
+    }
+  }
+
+  if (!handled) {
+    // Shared interrupt handled elsewhere or spurious
+  }
+}
+
 // ── Controller silence ──────────────────────────────────────────────────────
 // Ensure the controller is stopped and won't fire spurious IRQs before we're
 // ready. This is critical during early boot when IRQ routing may not be set up.
@@ -92,11 +139,11 @@ static void uhci_silence(struct uhci_controller *hc) {
   // 1. More aggressive reset: Toggle Global Reset and Host Controller Reset
   //    This ensures the hardware is in a known clean state.
   uhci_write16(hc, UHCI_REG_USBCMD, UHCI_CMD_GRESET);
-  for (int i = 0; i < 1000; i++)
-    io_wait(); // Wait for reset to propagate
+  for (int i = 0; i < 50000; i++)
+    io_wait(); // Wait 50ms for reset
   uhci_write16(hc, UHCI_REG_USBCMD, 0x0000);
-  for (int i = 0; i < 1000; i++)
-    io_wait();
+  for (int i = 0; i < 20000; i++)
+    io_wait(); // 20ms recovery
 
   uhci_write16(hc, UHCI_REG_USBCMD, UHCI_CMD_HCRESET);
   for (int i = 0; i < 1000; i++) {
@@ -125,6 +172,202 @@ static void uhci_silence(struct uhci_controller *hc) {
   klog_puts("[UHCI] Warning: controller did not halt cleanly\n");
 }
 
+void uhci_run(struct uhci_controller *hc) {
+  uint16_t cmd = uhci_read16(hc, UHCI_REG_USBCMD);
+  cmd |= UHCI_CMD_RS | UHCI_CMD_CF;
+  uhci_write16(hc, UHCI_REG_USBCMD, cmd);
+}
+
+static void uhci_init_pools(struct uhci_controller *hc) {
+  uint64_t fl_phys, td_phys, qh_phys, buf_phys;
+
+  hc->frame_list = (uint32_t *)dma_alloc_pages(1, &fl_phys);
+  hc->frame_list_phys = (uint32_t)fl_phys;
+
+  hc->td_pool = (struct uhci_td *)dma_alloc_pages(1, &td_phys);
+  hc->td_pool_phys = (uint32_t)td_phys;
+
+  hc->qh_pool = (struct uhci_qh *)dma_alloc_pages(1, &qh_phys);
+  hc->qh_pool_phys = (uint32_t)qh_phys;
+
+  hc->transfer_buffer = dma_alloc_pages(1, &buf_phys);
+  hc->transfer_buffer_phys = (uint32_t)buf_phys;
+
+  // Zero the pools
+  for (int i = 0; i < 1024; i++)
+    hc->frame_list[i] = 1; // Terminate
+  for (int i = 0; i < 256; i++) {
+    hc->td_pool[i].link = 1;
+    hc->td_pool[i].status = 0;
+    hc->qh_pool[i].head = 1;
+    hc->qh_pool[i].element = 1;
+  }
+
+  // Point all frames to the same first QH
+  for (int i = 0; i < 1024; i++) {
+    hc->frame_list[i] = hc->qh_pool_phys | TD_LINK_QH;
+  }
+}
+
+static struct uhci_td *uhci_alloc_td(struct uhci_controller *hc,
+                                     uint32_t *phys) {
+  for (int i = 0; i < 256; i++) {
+    if (!(hc->td_pool[i].status & TD_STATUS_ACTIVE) &&
+        (hc->td_pool[i].link & TD_LINK_TERMINATE)) {
+      if (phys)
+        *phys = hc->td_pool_phys + (i * sizeof(struct uhci_td));
+      // Mark as allocated so the next call doesn't return the same slot
+      hc->td_pool[i].link = 0;
+      hc->td_pool[i].status = 0;
+      hc->td_pool[i].token = 0;
+      hc->td_pool[i].buffer = 0;
+      return &hc->td_pool[i];
+    }
+  }
+  return NULL;
+}
+
+// ── Control Transfers (Phase 4) ─────────────────────────────────────────────
+
+int uhci_control_transfer(struct uhci_controller *hc, uint8_t addr,
+                          struct usb_control_request *req, void *data,
+                          uint16_t len, bool low_speed) {
+  // ── 1. Copy request into DMA buffer ────────────────────────────────────
+  struct usb_control_request *dma_req =
+      (struct usb_control_request *)hc->transfer_buffer;
+  *dma_req = *req;
+
+  uint8_t *dma_data = (uint8_t *)hc->transfer_buffer + 64;
+  if (data && len > 0 && !(req->request_type & 0x80)) {
+    for (uint16_t i = 0; i < len; i++)
+      dma_data[i] = ((uint8_t *)data)[i];
+  }
+
+  // ── 2. Allocate TDs ────────────────────────────────────────────────────
+  uint32_t setup_phys, data_phys = 0, status_phys;
+  struct uhci_td *setup_td = uhci_alloc_td(hc, &setup_phys);
+  struct uhci_td *status_td = uhci_alloc_td(hc, &status_phys);
+  struct uhci_td *data_td = NULL;
+
+  if (len > 0)
+    data_td = uhci_alloc_td(hc, &data_phys);
+
+  if (!setup_td || !status_td || (len > 0 && !data_td))
+    return -1;
+
+  // ── 3. Build Setup TD ─────────────────────────────────────────────────
+  //   MaxLen=7 (8 bytes), Data Toggle=0, Endpoint=0, Address=addr
+  setup_td->status = TD_STATUS_ACTIVE | TD_STATUS_C_ERR;
+  if (low_speed)
+    setup_td->status |= TD_STATUS_LS;
+  setup_td->token =
+      (7 << 21) | (0 << 19) | (0 << 15) | (addr << 8) | TD_PID_SETUP;
+  setup_td->buffer = hc->transfer_buffer_phys;
+
+  // ── 4. Build Data TD (optional) ────────────────────────────────────────
+  if (data_td) {
+    setup_td->link = data_phys | TD_LINK_VF;  // depth-first
+    data_td->link = status_phys | TD_LINK_VF; // depth-first
+    data_td->status = TD_STATUS_ACTIVE | TD_STATUS_C_ERR;
+    if (low_speed)
+      data_td->status |= TD_STATUS_LS;
+
+    uint8_t pid = (req->request_type & 0x80) ? TD_PID_IN : TD_PID_OUT;
+    data_td->token =
+        ((uint32_t)(len - 1) << 21) | (1 << 19) | (0 << 15) | (addr << 8) | pid;
+    data_td->buffer = hc->transfer_buffer_phys + 64;
+  } else {
+    setup_td->link = status_phys | TD_LINK_VF;
+  }
+
+  // ── 5. Build Status TD ─────────────────────────────────────────────────
+  //   MaxLen=0x7FF (zero-length), Data Toggle=1, IOC=1
+  uint8_t status_pid =
+      (len == 0 || !(req->request_type & 0x80)) ? TD_PID_IN : TD_PID_OUT;
+  status_td->link = TD_LINK_TERMINATE;
+  status_td->status = TD_STATUS_ACTIVE | TD_STATUS_IOC | TD_STATUS_C_ERR;
+  if (low_speed)
+    status_td->status |= TD_STATUS_LS;
+  status_td->token =
+      (0x7FF << 21) | (1 << 19) | (0 << 15) | (addr << 8) | status_pid;
+  status_td->buffer = 0;
+
+  // ── 6. Link into schedule ─────────────────────────────────────────────
+  //   qh_pool[0] is already in every frame list slot.
+  //   Point its element directly to our first TD.
+  asm volatile("mfence" ::: "memory");
+  hc->qh_pool[0].element = setup_phys;
+  asm volatile("mfence" ::: "memory");
+
+  // ── 7. Poll for completion ─────────────────────────────────────────────
+  bool timed_out = true;
+  for (int i = 0; i < 2000000; i++) {
+    if (!(status_td->status & TD_STATUS_ACTIVE)) {
+      timed_out = false;
+      break;
+    }
+    // Also check if setup or data TD halted (error)
+    if (setup_td->status & TD_STATUS_HALTED) {
+      timed_out = false;
+      break;
+    }
+    if (data_td && (data_td->status & TD_STATUS_HALTED)) {
+      timed_out = false;
+      break;
+    }
+    for (int j = 0; j < 10; j++)
+      io_wait();
+  }
+
+  // ── 8. Unlink from schedule ────────────────────────────────────────────
+  hc->qh_pool[0].element = TD_LINK_TERMINATE;
+  asm volatile("mfence" ::: "memory");
+
+  // ── 9. Check result ────────────────────────────────────────────────────
+  if (timed_out || (setup_td->status & TD_STATUS_HALTED) ||
+      (data_td && (data_td->status & TD_STATUS_HALTED))) {
+    klog_puts("[UHCI] Xfer fail. SETUP=0x");
+    klog_hex32(setup_td->status);
+    if (data_td) {
+      klog_puts(" DATA=0x");
+      klog_hex32(data_td->status);
+    }
+    klog_puts(" STS=0x");
+    klog_hex32(status_td->status);
+    klog_puts(" USBSTS=0x");
+    klog_hex32(uhci_read16(hc, UHCI_REG_USBSTS));
+    klog_puts("\n");
+    // Return TDs to pool
+    setup_td->link = TD_LINK_TERMINATE;
+    setup_td->status = 0;
+    status_td->link = TD_LINK_TERMINATE;
+    status_td->status = 0;
+    if (data_td) {
+      data_td->link = TD_LINK_TERMINATE;
+      data_td->status = 0;
+    }
+    return -2;
+  }
+
+  // ── 10. Copy received data ─────────────────────────────────────────────
+  if (data && len > 0 && (req->request_type & 0x80)) {
+    for (uint16_t i = 0; i < len; i++)
+      ((uint8_t *)data)[i] = dma_data[i];
+  }
+
+  // ── 11. Free TDs ───────────────────────────────────────────────────────
+  setup_td->link = TD_LINK_TERMINATE;
+  setup_td->status = 0;
+  status_td->link = TD_LINK_TERMINATE;
+  status_td->status = 0;
+  if (data_td) {
+    data_td->link = TD_LINK_TERMINATE;
+    data_td->status = 0;
+  }
+
+  return 0;
+}
+
 // ── Detect number of root-hub ports ─────────────────────────────────────────
 // UHCI spec says ports start at offset 0x10 and each is 2 bytes.
 // We probe up to 8 ports; a non-existent port reads as 0xFFFF or has
@@ -143,6 +386,74 @@ static uint8_t uhci_detect_ports(struct uhci_controller *hc) {
     count++;
   }
   return count ? count : 2; // Default to 2 if detection fails
+}
+
+// ── Root Hub Port Control (Phase 3) ─────────────────────────────────────────
+
+void uhci_reset_port(struct uhci_controller *hc, uint8_t port) {
+  uint16_t reg = UHCI_REG_PORTSC1 + (port * 2);
+
+  // 1. Assert Port Reset
+  uint16_t portsc = uhci_read16(hc, reg);
+  portsc |= UHCI_PORT_PR;
+  uhci_write16(hc, reg, portsc);
+
+  // 2. Wait for reset to complete (USB spec: 10ms-50ms)
+  for (int i = 0; i < 50000; i++)
+    io_wait();
+
+  // 3. Clear Port Reset
+  portsc = uhci_read16(hc, reg);
+  portsc &= ~UHCI_PORT_PR;
+  uhci_write16(hc, reg, portsc);
+
+  // 4. Recovery time (USB spec: 10ms)
+  for (int i = 0; i < 20000; i++)
+    io_wait();
+
+  // 5. Wait for Port Enable (hardware enables it if successful)
+  // If hardware doesn't enable it, WE try to enable it (older HCs need this)
+  for (int i = 0; i < 1000; i++) {
+    portsc = uhci_read16(hc, reg);
+    if (portsc & UHCI_PORT_PE)
+      break;
+
+    if (i == 500) {
+      // Halfway through, try to force it
+      portsc |= UHCI_PORT_PE;
+      uhci_write16(hc, reg, portsc);
+    }
+    io_wait();
+  }
+}
+
+void uhci_probe_ports(struct uhci_controller *hc) {
+  for (uint8_t i = 0; i < hc->num_ports; i++) {
+    uint16_t reg = UHCI_REG_PORTSC1 + (i * 2);
+    uint16_t portsc = uhci_read16(hc, reg);
+
+    // Initial check: if connected but not enabled, try a reset.
+    // Also check for Connect Status Change (CSC).
+    if ((portsc & UHCI_PORT_CSC) ||
+        ((portsc & UHCI_PORT_CCS) && !(portsc & UHCI_PORT_PE))) {
+      klog_puts("[UHCI] Connection activity on port ");
+      klog_uint64(i + 1);
+      klog_puts("\n");
+
+      // Clear the CSC bit (it's write-1-to-clear)
+      uhci_write16(hc, reg, portsc | UHCI_PORT_CSC);
+
+      if (portsc & UHCI_PORT_CCS) {
+        uhci_reset_port(hc, i);
+
+        // Re-read status to check speed
+        portsc = uhci_read16(hc, reg);
+        bool low_speed = (portsc & UHCI_PORT_LSDA) != 0;
+
+        usb_device_discovered(hc, i, low_speed);
+      }
+    }
+  }
 }
 
 // ── PCI Discovery ───────────────────────────────────────────────────────────
@@ -180,10 +491,33 @@ static bool uhci_probe_pci_device(struct pci_device *pci) {
   hc->present = true;
 
   // Silence the controller before anything else
-  uhci_silence(hc);
+  outw(hc->io_base + UHCI_REG_USBINTR, 0x0000);
+  outw(hc->io_base + UHCI_REG_USBCMD, 0x0000);
+  outw(hc->io_base + UHCI_REG_USBSTS, 0x003F); // Clear all status bits
+
+  // Initialize transfer pools and schedule
+  uhci_init_pools(hc);
 
   // Detect how many root hub ports this controller has
   hc->num_ports = uhci_detect_ports(hc);
+
+  // Register IRQ Handler
+  if (!hc->irq_registered) {
+    if (irq_install_handler(hc->irq_line, uhci_irq_handler, 0x000F)) {
+      hc->irq_registered = true;
+    }
+  }
+
+  // Re-enable PCI bus mastering and IO
+  pci_config_write32(hc->pci_bus, hc->pci_slot, hc->pci_func, 0x04, 0x07);
+
+  // Set the frame list base address
+  uhci_write32(hc, UHCI_REG_FLBASEADD, hc->frame_list_phys);
+  uhci_write16(hc, UHCI_REG_FRNUM, 0x0000);
+  uhci_write16(hc, UHCI_REG_USBINTR, 0x000F); // Enable all interrupts
+
+  // Start the controller
+  uhci_run(hc);
 
   controller_count++;
   return true;
@@ -257,6 +591,8 @@ void uhci_init(void) {
   print_uint32(controller_count);
   console_puts(" controller(s):\n");
 
+  usb_init();
+
   for (int i = 0; i < controller_count; i++) {
     struct uhci_controller *hc = &controllers[i];
     console_puts("     uhci");
@@ -274,6 +610,9 @@ void uhci_init(void) {
     console_puts(" ports=");
     print_uint32(hc->num_ports);
     console_putchar('\n');
+
+    // Initial root hub probe
+    uhci_probe_ports(hc);
   }
 }
 
@@ -314,43 +653,45 @@ void uhci_self_test(void) {
     //    state where USBCMD.RS=0 and USBSTS is clean (0x0000).
     uint16_t sts = uhci_read16(hc, UHCI_REG_USBSTS);
     uint16_t cmd_chk = uhci_read16(hc, UHCI_REG_USBCMD);
-    bool halted =
-        (sts & UHCI_STS_HCH) || (!(cmd_chk & UHCI_CMD_RS) && sts == 0x0000);
-    if (halted) {
-      console_puts("    [PASS] Controller is stopped (USBSTS=0x");
+    // If it's the second pass, it SHOULD be running
+    bool running = (cmd_chk & UHCI_CMD_RS);
+    if (running) {
+      console_puts("    [PASS] Controller is running (USBSTS=0x");
       print_hex16(sts);
       console_puts(")\n");
       pass++;
     } else {
-      console_puts("    [FAIL] Controller NOT stopped (USBSTS=0x");
+      console_puts("    [FAIL] Controller NOT running (USBSTS=0x");
       print_hex16(sts);
       console_puts(")\n");
       fail++;
     }
 
-    // ── Test 2: USBCMD should be 0 after silence ───────────────────────
+    // ── Test 2: USBCMD should have CF (Configure Flag) set (Phase 2) ───
     uint16_t cmd = uhci_read16(hc, UHCI_REG_USBCMD);
-    if (cmd == 0x0000) {
-      console_puts("    [PASS] USBCMD is cleared (0x");
+    if (cmd & UHCI_CMD_CF) {
+      console_puts("    [PASS] USBCMD configure flag set (0x");
       print_hex16(cmd);
       console_puts(")\n");
       pass++;
     } else {
-      console_puts("    [FAIL] USBCMD not cleared (0x");
+      console_puts("    [FAIL] USBCMD configure flag NOT set (0x");
       print_hex16(cmd);
       console_puts(")\n");
       fail++;
     }
 
-    // ── Test 3: USBINTR should be 0 (interrupts disabled) ──────────────
+    // ── Test 3: USBINTR should have Phase 2 interrupts enabled ─────────
     uint16_t intr = uhci_read16(hc, UHCI_REG_USBINTR);
-    if (intr == 0x0000) {
-      console_puts("    [PASS] Interrupts disabled (USBINTR=0x");
+    uint16_t expected_intr =
+        UHCI_INTR_IOC | UHCI_INTR_TIMEOUT | UHCI_INTR_SP | UHCI_INTR_RESUME;
+    if (intr == expected_intr) {
+      console_puts("    [PASS] Interrupts enabled (USBINTR=0x");
       print_hex16(intr);
       console_puts(")\n");
       pass++;
     } else {
-      console_puts("    [FAIL] Interrupts not disabled (USBINTR=0x");
+      console_puts("    [FAIL] Interrupt mask mismatch (USBINTR=0x");
       print_hex16(intr);
       console_puts(")\n");
       fail++;
@@ -412,6 +753,28 @@ void uhci_self_test(void) {
 
       console_putchar('\n');
     }
+
+    // ── Test 7: Frame List allocation ──────────────────────────────────
+    if (hc->frame_list && (hc->frame_list_phys & 0xFFF) == 0) {
+      console_puts("    [PASS] Frame List allocated at 0x");
+      print_hex32(hc->frame_list_phys);
+      console_putchar('\n');
+      pass++;
+    } else {
+      console_puts("    [FAIL] Frame List allocation/alignment error\n");
+      fail++;
+    }
+
+    // ── Test 8: IRQ registration ───────────────────────────────────────
+    if (hc->irq_registered) {
+      console_puts("    [PASS] IRQ handler registered (IRQ ");
+      print_uint32(hc->irq_line);
+      console_puts(")\n");
+      pass++;
+    } else {
+      console_puts("    [FAIL] IRQ handler NOT registered\n");
+      fail++;
+    }
   }
 
   // ── Summary ─────────────────────────────────────────────────────────────
@@ -423,9 +786,9 @@ void uhci_self_test(void) {
   console_puts(" failed\n");
 
   if (fail == 0) {
-    console_puts("  ✓ UHCI Phase 1 PASSED\n");
+    console_puts("  ✓ UHCI Phase 2 PASSED\n");
   } else {
-    console_puts("  ✗ UHCI Phase 1 FAILED\n");
+    console_puts("  ✗ UHCI Phase 2 FAILED\n");
   }
   console_puts("─────────────────────────────────────────\n\n");
 }
