@@ -4,6 +4,7 @@
 #include "../../console/console.h"
 #include "../../console/klog.h"
 #include "../../cpu/isr.h"
+#include "../../cpu/irq.h"
 #include "../../fb/framebuffer.h"
 #include "../../fs/vfs.h"
 #include "../../io/io.h"
@@ -239,22 +240,8 @@ void ac97_init(void) {
   // Set BDL base address
   ac97_nabm_write32(AC97_PO_BBA, (uint32_t)ac97_bdl_phys);
 
-  // Route Interrupt
   uint8_t irq = ac97_dev->irq_line;
-  uint8_t vector = 32 + irq;
-  // Assuming standard PCI IRQ routing if no ACPI override
-  // In many QEMU setups, PCI IRQs start at 11 or 16.
-  klog_puts("[AC97] Routing IRQ ");
-  klog_uint64(irq);
-  klog_puts(" to Vector ");
-  klog_uint64(vector);
-  klog_puts("\n");
-
-  register_interrupt_handler(vector, ac97_isr);
-  // Note: ioapic_route_irq might need specific flags for PCI (level triggered,
-  // active low)
-  ioapic_route_irq(irq, vector, (uint8_t)lapic_get_id(),
-                   0x01 | (0x01 << 1)); // Level, Active Low?
+  irq_install_handler(irq, ac97_isr, 0x000F);
   // Wait, let's check what others use. Usually PCI is Level, Active Low.
   // In kernel.c, I saw 0 used for PIT/KBD.
   // ioapic.c: flags bit 0 is polarity (1=low), bit 1 is trigger (1=level).

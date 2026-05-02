@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdbool.h>
 
 // ── I/O APIC Register Indices (accessed indirectly via IOREGSEL / IOWIN) ────
 #define IOAPIC_REG_ID       0x00    // I/O APIC ID
@@ -31,5 +32,6 @@ void ioapic_route_irq(uint8_t gsi, uint8_t vector, uint8_t dest_apic_id,
 // Mask / unmask a single GSI pin on the I/O APIC.
 void ioapic_mask_irq(uint8_t gsi);
 void ioapic_unmask_irq(uint8_t gsi);
+bool ioapic_is_ready(void);
 
 #endif

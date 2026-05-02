@@ -1,10 +1,11 @@
 #include "drivers/input/keyboard.h"
-#include "drivers/input/evdev.h"
 #include "../../console/console.h"
 #include "../../console/klog.h"
 #include "../../cpu/isr.h"
+#include "../../cpu/irq.h"
 #include "../../io/io.h"
 #include "../../sched/sched.h"
+#include "drivers/input/evdev.h"
 #include "drivers/input/scancode.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -188,7 +189,8 @@ static void keyboard_callback(struct registers *regs) {
   }
 
   // Always push evdev events (whether in normal or extended mode)
-  // This ensures Xorg gets key events even when the console isn't in scancode mode
+  // This ensures Xorg gets key events even when the console isn't in scancode
+  // mode
   {
     uint16_t kc;
     if (extended_scancode) {
@@ -410,5 +412,5 @@ void keyboard_init(void) {
     inb(0x60);
   }
   wait_queue_init(&keyboard_wait_queue);
-  register_interrupt_handler(33, keyboard_callback);
+  irq_install_handler(1, keyboard_callback, 0);
 }

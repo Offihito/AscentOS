@@ -2,6 +2,7 @@
 #define APIC_LAPIC_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 // ── Local APIC Register Offsets ──────────────────────────────────────────────
 #define LAPIC_ID 0x020            // Local APIC ID
@@ -77,6 +78,9 @@ void lapic_send_eoi(void);
 // Raw MMIO read/write for the LAPIC register space.
 uint32_t lapic_read(uint32_t reg);
 void lapic_write(uint32_t reg, uint32_t value);
+
+// Returns true if the LAPIC MMIO is mapped and ready for use.
+bool lapic_is_ready(void);
 
 // Returns the BSP's APIC ID.
 uint32_t lapic_get_id(void);

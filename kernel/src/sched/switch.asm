@@ -3,9 +3,9 @@ global thread_stub
 
 section .text
 
-; void switch_context(uint64_t *old_sp, uint64_t new_sp)
-; rdi = pointer to old thread's rsp storage address
-; rsi = new thread's rsp value
+; void switch_context(struct thread *old_t, struct thread *new_t)
+; rdi = pointer to old thread struct
+; rsi = pointer to new thread struct
 switch_context:
     ; Push callee-saved registers according to System V AMD64 ABI
     push rbx
@@ -15,11 +15,17 @@ switch_context:
     push r14
     push r15
 
-    ; Save current stack pointer into old_sp
+    ; Save FPU state (at offset 16 in struct thread)
+    fxsave64 [rdi + 16]
+
+    ; Save current stack pointer into old_t->rsp (offset 0)
     mov [rdi], rsp
 
-    ; Load new stack pointer
-    mov rsp, rsi
+    ; Load new stack pointer from new_t->rsp (offset 0)
+    mov rsp, [rsi]
+
+    ; Restore FPU state from new thread (at offset 16 in struct thread)
+    fxrstor64 [rsi + 16]
 
     ; Pop callee-saved registers for the arriving thread
     pop r15

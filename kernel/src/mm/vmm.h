@@ -14,6 +14,7 @@
 #define PAGE_FLAG_A ((uint64_t)1 << 5)
 #define PAGE_FLAG_D ((uint64_t)1 << 6)
 #define PAGE_FLAG_PS ((uint64_t)1 << 7)
+#define PAGE_FLAG_COW ((uint64_t)1 << 9)
 #define PAGE_FLAG_NX ((uint64_t)1 << 63)
 
 // Mask to extract the physical address from a page table entry.
@@ -91,6 +92,10 @@ void vmm_protect_active_tables(void);
 // The PML4 physical page itself is also freed.
 // Uses PAGE_MASK to properly strip NX/available bits from PTEs.
 void vmm_free_user_pages(uint64_t cr3);
+
+// VMA-aware version: consults vmas to skip freeing physical pages
+// that belong to MAP_SHARED mappings (e.g. device MMIO like framebuffer).
+void vmm_free_user_pages_vma(uint64_t cr3, struct vma_list *vmas);
 
 struct registers;
 

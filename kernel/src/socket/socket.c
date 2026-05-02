@@ -421,7 +421,7 @@ int socket_alloc_fd(socket_t *sock) {
     return -12; // ENOMEM
   }
 
-  memset(node, 0, sizeof(vfs_node_t));
+  vfs_node_init(node);
   node->flags = FS_SOCKET;
   node->inode = (uint32_t)(uint64_t)sock; // Use socket pointer as inode
   node->device = sock;

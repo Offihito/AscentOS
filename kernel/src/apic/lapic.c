@@ -28,6 +28,10 @@ void lapic_send_eoi(void) {
   }
 }
 
+bool lapic_is_ready(void) {
+    return lapic_base != NULL;
+}
+
 // ── APIC ID ──────────────────────────────────────────────────────────────────
 
 uint32_t lapic_get_id(void) { return lapic_read(LAPIC_ID) >> 24; }

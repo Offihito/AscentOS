@@ -607,8 +607,7 @@ static ssize_t unix_recv(socket_t *sock, void *buf, size_t len, int flags) {
       }
 
       if (sock->flags & SOCK_NONBLOCK) {
-        sched_yield(); // Slow down busy-waiting clients to stabilize system
-        return -11; // EAGAIN
+        return -11;    // EAGAIN
       }
 
       // Block until data available
@@ -1034,10 +1033,8 @@ static int unix_poll(socket_t *sock, int events) {
       (usk->peer == NULL && sock->state != SS_LISTENING)) {
     revents |= 0x010;  // POLLHUP
     revents |= 0x2000; // EPOLLRDHUP - peer closed
-    // POLLIN for EOF only set for accepted orphaned sockets with no data
-    if (usk->accepted_orphaned && available == 0) {
-      revents |= 0x001; // POLLIN - EOF readable (read returns 0)
-    }
+    // POSIX: POLLIN should be set on hangup so read() returns EOF (0)
+    revents |= 0x001;  // POLLIN
   }
 
   // If peer did shutdown(SHUT_WR), treat as hangup
@@ -1233,12 +1230,17 @@ void unix_destroy(socket_t *sock) {
   // Notify peer and wake up any waiters
   if (usk->peer) {
     unix_sock_t *peer = usk->peer;
+    // Safely notify peer
+    spinlock_acquire(&peer->parent->lock);
     peer->peer = NULL;
     if (peer->parent) {
       peer->parent->state = SS_UNCONNECTED;
       peer->parent->error = 104; // ECONNRESET
     }
+    spinlock_release(&peer->parent->lock);
+    
     wait_queue_wake_all(&peer->wait);
+    
     // Notify peer's epoll watchers that connection is closed
     if (peer->parent && peer->parent->node) {
       epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLHUP | EPOLLRDHUP);

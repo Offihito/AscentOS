@@ -1,5 +1,7 @@
 #include "drivers/timer/pit.h"
 #include "cpu/isr.h"
+#include <stdint.h>
+#include "cpu/irq.h"
 #include "io/io.h"
 #include "console/console.h"
 #include "console/klog.h"
@@ -19,7 +21,7 @@ static void pit_callback(struct registers *regs) {
 
 void pit_init(uint32_t frequency) {
     // Register our callback for IRQ0 (Interrupt 32)
-    register_interrupt_handler(32, pit_callback);
+    irq_install_handler(0, pit_callback, 0);
 
     // Hardware clock is 1193180 Hz
     uint32_t divisor = 1193180 / frequency;

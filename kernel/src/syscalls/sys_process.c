@@ -128,17 +128,18 @@ void process_do_exit(uint64_t status) {
         vfs_close(node);
       }
     }
-    
+
     // Switch to kernel CR3 and free the user address space.
     if (current->cr3) {
       struct cpu_info *cpu = cpu_get_current();
       uint64_t saved_cr3 = current->cr3;
       __asm__ volatile("mov %0, %%cr3" ::"r"(cpu->kernel_cr3) : "memory");
       current->cr3 = 0;
-      vmm_free_user_pages(saved_cr3);
+      // Use VMA-aware free to skip MAP_SHARED device pages (e.g. framebuffer)
+      vmm_free_user_pages_vma(saved_cr3, &current->vmas);
     }
 
-    // Free VMA tree nodes
+    // Free VMA tree nodes (AFTER vmm_free_user_pages_vma which reads them)
     vma_list_destroy(&current->vmas);
     mm_reset_mmap_state(current);
   }
@@ -425,11 +426,15 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
   struct thread *current = sched_get_current();
   uint64_t old_cr3 = current->cr3;
 
+  // Save the old VMA list before destroying it — we need it to
+  // identify MAP_SHARED pages when freeing the old address space.
+  struct vma_list old_vmas = current->vmas;
+  vma_list_init(&current->vmas); // Reset to empty for the new program
+
   current->cr3 = (uint64_t)new_pml4;
   __asm__ volatile("mov %0, %%cr3" ::"r"(current->cr3) : "memory");
 
   // Reset memory management state for the new program
-  vma_list_destroy(&current->vmas);
   mm_reset_mmap_state(current);
   current->fs_base = 0;
 
@@ -445,6 +450,8 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
     // Revert CR3
     current->cr3 = old_cr3;
     __asm__ volatile("mov %0, %%cr3" ::"r"(current->cr3) : "memory");
+    // Restore old VMA list
+    current->vmas = old_vmas;
     kfree(path);
     return (uint64_t)-8; // ENOEXEC
   }
@@ -463,9 +470,12 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
 
   // Free the old address space (from fork) now that the new one is loaded.
   // We've already switched CR3, so this is safe.
+  // Use the saved old_vmas to avoid freeing MAP_SHARED device pages.
   if (old_cr3 != 0) {
-    vmm_free_user_pages(old_cr3);
+    vmm_free_user_pages_vma(old_cr3, &old_vmas);
   }
+  // Now destroy the old VMA tree nodes
+  vma_list_destroy(&old_vmas);
 
   // Cleanup kernel-side copies
   for (int i = 0; i < argc; i++)
@@ -518,7 +528,7 @@ static void fork_child_entry(void) {
 }
 
 // ── sys_fork (raw handler — receives full register frame) ───────────────────
-static uint64_t sys_fork(struct syscall_regs *regs) {
+uint64_t sys_fork(struct syscall_regs *regs) {
   klog_puts("[FORK] Fork requested\n");
 
   // 1. Get current parent state
@@ -632,9 +642,9 @@ static uint64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2,
   strcpy(buf->release, "0.1");
   strcpy(buf->version, "1.0");
   strcpy(buf->machine, "x86_64");
-  strcpy(buf->domainname, "");
+  strcpy(buf->domainname, "Ascent");
 
-  strcpy(buf->domainname, "");
+  strcpy(buf->domainname, "Ascent");
 
   return 0;
 }

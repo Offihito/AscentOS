@@ -55,7 +55,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/lua.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xkbcomp.elf initrd/startx.sh
+disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/lua.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xkbcomp.elf userland/test_shared_irq.elf initrd/startx.sh
 	dd if=/dev/zero of=disk.img bs=1M count=256
 	mkfs.ext3 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
@@ -75,6 +75,7 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_syscalls.e
 	debugfs -w -R "write userland/kilo.elf bin/kilo" disk.img
 	debugfs -w -R "write userland/test_args.elf bin/test_args" disk.img
 	debugfs -w -R "write userland/hello.elf bin/hello" disk.img
+	debugfs -w -R "write userland/test_cow.elf bin/test_cow" disk.img
 	debugfs -w -R "write userland/test_stat.elf bin/test_stat" disk.img
 	debugfs -w -R "write userland/ls.elf bin/ls" disk.img
 	debugfs -w -R "write userland/readelf.elf bin/readelf" disk.img
@@ -119,6 +120,7 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_syscalls.e
 	debugfs -w -R "write userland/test_unix_fdpass.elf bin/test_unix_fdpass" disk.img
 	debugfs -w -R "write userland/test_fb.elf bin/test_fb" disk.img
 	debugfs -w -R "write userland/test_events.elf bin/test_events" disk.img
+	debugfs -w -R "write userland/test_shared_irq.elf bin/test_shared_irq" disk.img
 
 	debugfs -w -R "write userland/test_socket_phase3.elf bin/test_socket_phase3" disk.img
 	debugfs -w -R "write userland/test_socket_phase3_advanced.elf bin/test_socket_phase3_advanced" disk.img
@@ -306,6 +308,10 @@ userland/hello.elf: userland/hello.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/hello.c -o userland/hello.elf
 
+userland/test_cow.elf: userland/test_cow.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_cow.c -o userland/test_cow.elf
+
 
 userland/test_syscalls.elf: userland/test_syscalls.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
@@ -489,6 +495,7 @@ wolfssl: $(WOLFSSL_LIB)
 userland/wget.elf: $(MUSL_LIBC) $(WOLFSSL_LIB)
 	./scripts/build-wget.sh
 
+
 # Kria programming language (Rust-based, compiled with musl for static linking)
 userland/kria-lang:
 	rm -rf userland/kria-lang
@@ -542,5 +549,9 @@ userland/test_x11_simple.elf: userland/test_x11_simple.c $(MUSL_LIBC)
 
 userland/xkbcomp.elf: scripts/port-x11.sh
 	./scripts/port-x11.sh
+
+userland/test_shared_irq.elf: userland/test_shared_irq.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/test_shared_irq.c -o userland/test_shared_irq.elf
 
 .PHONY: all qemu clean

@@ -71,6 +71,7 @@ typedef struct epitem {
   
   int fd;                      // File descriptor being watched
   struct vfs_node *node;       // VFS node for the FD
+  struct list_head ep_node_link; // Link to vfs_node_t's epitem_list
   struct epoll_event event;    // Event mask and user data
   
   struct eventpoll *ep;        // Parent epoll instance

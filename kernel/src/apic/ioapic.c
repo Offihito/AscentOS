@@ -14,6 +14,10 @@
 static volatile uint32_t *ioapic_base = NULL;
 static uint32_t ioapic_gsi_base = 0;
 
+bool ioapic_is_ready(void) {
+    return ioapic_base != NULL;
+}
+
 // ── Helper: print 32-bit hex ─────────────────────────────────────────────────
 static void print_hex32(uint32_t num) {
     const char *hex = "0123456789ABCDEF";

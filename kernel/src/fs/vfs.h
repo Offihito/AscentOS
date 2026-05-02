@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "../lib/list.h"
+#include "../lock/spinlock.h"
 
 #define FS_FILE 0x01
 #define FS_DIRECTORY 0x02
@@ -92,6 +94,9 @@ typedef struct vfs_node {
   ioctl_type_t ioctl; // Device-specific ioctl handler
   void *wait_queue;   // Pointer to wait_queue_t for poll() wakeups
 
+  struct list_head ep_watchers; // List of epitem_t watching this node
+  spinlock_t ep_lock;           // Lock for ep_watchers
+  
   struct vfs_node *ptr; // Used by mountpoints and symlinks
 } vfs_node_t;
 
@@ -121,5 +126,6 @@ int vfs_truncate(vfs_node_t *node, uint32_t size);
 int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags,
               void *device);
 int vfs_poll(vfs_node_t *node, int events);
+void vfs_node_init(vfs_node_t *node);
 
 #endif

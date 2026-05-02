@@ -109,21 +109,21 @@ static void teardown_range(uint64_t *pml4, struct thread *t, uint64_t base,
 // Linux ABI: mmap(addr, length, prot, flags, fd, offset)
 //   rdi=addr  rsi=length  rdx=prot  r10=flags  r8=fd  r9=offset
 // ════════════════════════════════════════════════════════════════════════════
-static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
-                         uint64_t flags, uint64_t fd, uint64_t offset) {
+uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
+                 uint64_t flags, uint64_t fd, uint64_t offset) {
   (void)offset;
 
-/*
-  klog_puts("[MMAP] addr=");
-  klog_uint64(addr);
-  klog_puts(" len=");
-  klog_uint64(length);
-  klog_puts(" prot=0x");
-  klog_uint64(prot);
-  klog_puts(" flags=0x");
-  klog_uint64(flags);
-  klog_puts("\n");
-*/
+  /*
+    klog_puts("[MMAP] addr=");
+    klog_uint64(addr);
+    klog_puts(" len=");
+    klog_uint64(length);
+    klog_puts(" prot=0x");
+    klog_uint64(prot);
+    klog_puts(" flags=0x");
+    klog_uint64(flags);
+    klog_puts("\n");
+  */
 
   // ── Validate flags ───────────────────────────────────────────────────────
   bool is_shared = (flags & MAP_SHARED) != 0;
@@ -177,7 +177,6 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
 
   // ── Anonymous mapping ────────────────────────────────────────────────────
   uint64_t aligned_len = PAGE_ALIGN_UP(length);
-  uint64_t num_pages = aligned_len / PAGE_SIZE;
 
   struct thread *current = sched_get_current();
   uint64_t *pml4 = vmm_get_active_pml4();
@@ -216,12 +215,14 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     // Non-fixed: allocate dynamically utilizing AVL Interval Gap Finding.
     // Automatically drops disjoint chunks inside explicitly unmapped holes
     // rather than blindly advancing the ceiling ceiling!
-    vaddr = vma_find_gap(&current->vmas, aligned_len, MMAP_REGION_BASE, MMAP_REGION_LIMIT);
+    vaddr = vma_find_gap(&current->vmas, aligned_len, MMAP_REGION_BASE,
+                         MMAP_REGION_LIMIT);
     if (vaddr == 0 || vaddr + aligned_len > MMAP_REGION_LIMIT) {
-      klog_puts("[MMAP] Error: mmap region exhausted (no mapping gaps found)\n");
+      klog_puts(
+          "[MMAP] Error: mmap region exhausted (no mapping gaps found)\n");
       return MAP_FAILED;
     }
-    
+
     // We update the bump tracker loosely for legacy device-mmaps
     current->mmap_next_addr = MAX(current->mmap_next_addr, vaddr + aligned_len);
   }
@@ -234,50 +235,14 @@ static uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
   // PROT_NONE behaviour.
   if (prot == PROT_NONE) {
     klog_puts("[MMAP] PROT_NONE: reserving VMA only (no PTEs)\n");
-    goto register_vma;
   }
 
-  // ── Allocate frames and map them ─────────────────────────────────────────
-  // We record every physical frame we allocate so that OOM rollback can free
-  // them precisely — no guessing, no leaks.
-  //
-  // Ordering contract: pmm_alloc → vmm_map_page → memset (via HHDM).
-  // We never touch vmm_unmap_page before the frame is mapped; there is
-  // nothing to unmap until the PTE exists.
+  // ── Demand Paging: register VMA only, no physical allocation ─────────────
+  // For anonymous mappings we simply record the VMA.  Physical frames are
+  // allocated lazily by vmm_handle_page_fault() on first access.  This
+  // dramatically reduces memory consumption for large mappings that are
+  // only partially touched (e.g. musl's mmap-backed malloc arenas).
 
-  uint64_t page_flags = build_page_flags(prot);
-
-  uint64_t mapped_count = 0; // How many pages have a live PTE so far.
-
-  for (uint64_t i = 0; i < num_pages; i++) {
-    // Step A: allocate a physical frame.
-    void *phys = pmm_alloc();
-    if (!phys) {
-      klog_puts("[MMAP] OOM at page ");
-      klog_uint64(i);
-      klog_puts(" — rolling back\n");
-      goto oom_rollback;
-    }
-
-    // Step B: install the PTE.
-    if (!vmm_map_page(pml4, vaddr + i * PAGE_SIZE, (uint64_t)phys,
-                      page_flags)) {
-      klog_puts("[MMAP] vmm_map_page failed at page ");
-      klog_uint64(i);
-      klog_puts(" — rolling back\n");
-      // The frame at index i has no PTE yet; free it directly.
-      pmm_free(phys);
-      goto oom_rollback;
-    }
-    mapped_count = i + 1;
-
-    // Step C: zero the frame through the HHDM kernel alias.
-    // We must NOT use the user-space VA from kernel context.
-    void *kva = (void *)((uint64_t)phys + HHDM_OFFSET);
-    memset(kva, 0, PAGE_SIZE);
-  }
-
-register_vma:
   // ── Register VMA ─────────────────────────────────────────────────────────
   if (current) {
     int vma_idx =
@@ -291,22 +256,10 @@ register_vma:
   klog_uint64(aligned_len);
   klog_puts(" bytes at ");
   klog_uint64(vaddr);
-  klog_puts(is_shared ? " SHARED\n" : " PRIVATE\n");
+  klog_puts(is_shared ? " SHARED" : " PRIVATE");
+  klog_puts(" (demand-paged)\n");
 
   return vaddr;
-
-oom_rollback:
-  // Undo every PTE we installed, then free the backing frames.
-  // Ordering: unmap FIRST (PTE gone), free SECOND (frame recyclable).
-  for (uint64_t j = 0; j < mapped_count; j++) {
-    uint64_t phys = vmm_virt_to_phys(pml4, vaddr + j * PAGE_SIZE);
-    if (phys != 0) {
-      phys = PAGE_ALIGN_DOWN(phys);
-      vmm_unmap_page(pml4, vaddr + j * PAGE_SIZE);
-      pmm_free((void *)phys);
-    }
-  }
-  return MAP_FAILED;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -314,8 +267,8 @@ oom_rollback:
 // Linux ABI: munmap(addr, length)
 //   rdi=addr  rsi=length
 // ════════════════════════════════════════════════════════════════════════════
-static uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2,
-                           uint64_t a3, uint64_t a4, uint64_t a5) {
+uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2,
+                   uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a2;
   (void)a3;
   (void)a4;
@@ -348,13 +301,13 @@ static uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2,
   struct vma *first_vma = vma_find(&current->vmas, addr);
   bool is_shared = first_vma && (first_vma->flags & MAP_SHARED);
 
-/*
-  klog_puts("[MUNMAP] [");
-  klog_hex64(addr);
-  klog_puts(", ");
-  klog_hex64(addr + aligned_len);
-  klog_puts(")\n");
-*/
+  /*
+    klog_puts("[MUNMAP] [");
+    klog_hex64(addr);
+    klog_puts(", ");
+    klog_hex64(addr + aligned_len);
+    klog_puts(")\n");
+  */
 
   // ── Unmap and free ───────────────────────────────────────────────────────
   // teardown_range handles the unmap-before-free ordering and guards.
@@ -364,7 +317,7 @@ static uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2,
   // ── Remove VMAs ──────────────────────────────────────────────────────────
   // Do this after teardown so teardown_range can still query them above.
   vma_remove(&current->vmas, addr, addr + aligned_len);
-  
+
   // ── Consolidate Fragmented Memory ────────────────────────────────────────
   vma_merge_adjacent(&current->vmas);
 
@@ -411,7 +364,8 @@ static uint64_t sys_brk(uint64_t addr, uint64_t a1, uint64_t a2, uint64_t a3,
   uint64_t *pml4 = vmm_get_active_pml4();
 
   if (addr > current->brk_current) {
-    // Expand heap
+    // Expand heap — demand paged: register VMA only, no physical alloc.
+    // Pages are allocated lazily by vmm_handle_page_fault() on first access.
     uint64_t old_end = PAGE_ALIGN_UP(current->brk_current);
     uint64_t new_end = PAGE_ALIGN_UP(addr);
 
@@ -419,36 +373,13 @@ static uint64_t sys_brk(uint64_t addr, uint64_t a1, uint64_t a2, uint64_t a3,
     klog_uint64(current->brk_current);
     klog_puts(" → ");
     klog_uint64(addr);
-    klog_puts(" (base=");
-    klog_uint64(current->brk_base);
-    klog_puts(", pages ");
+    klog_puts(" (demand-paged, pages ");
     klog_uint64(old_end);
     klog_puts("→");
     klog_uint64(new_end);
     klog_puts(")\n");
 
-    for (uint64_t page = old_end; page < new_end; page += PAGE_SIZE) {
-      void *phys = pmm_alloc();
-      if (!phys) {
-        klog_puts("[BRK] OOM at page ");
-        klog_uint64(page);
-        klog_puts("\n");
-        return current->brk_current; // Return unchanged break on OOM.
-      }
-
-      if (!vmm_map_page(pml4, page, (uint64_t)phys,
-                        PAGE_FLAG_PRESENT | PAGE_FLAG_USER | PAGE_FLAG_RW |
-                            PAGE_FLAG_NX)) {
-        klog_puts("[BRK] vmm_map_page failed\n");
-        pmm_free(phys);
-        return current->brk_current;
-      }
-
-      void *kva = (void *)((uint64_t)phys + HHDM_OFFSET);
-      memset(kva, 0, PAGE_SIZE);
-    }
-
-    // Add VMA for the expanded region so it's tracked.
+    // Add VMA for the expanded region so page faults can resolve it.
     if (new_end > old_end) {
       vma_add(&current->vmas, old_end, new_end, PROT_READ | PROT_WRITE,
               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -548,7 +479,7 @@ static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
 //   rdi=old_addr  rsi=old_size  rdx=new_size  r10=flags  r8=new_addr
 // ════════════════════════════════════════════════════════════════════════════
 #define MREMAP_MAYMOVE 1
-#define MREMAP_FIXED   2
+#define MREMAP_FIXED 2
 
 static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
                            uint64_t new_size, uint64_t flags,
@@ -640,8 +571,8 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
   if (!(flags & MREMAP_MAYMOVE))
     return MAP_FAILED;
 
-  uint64_t new_addr =
-      vma_find_gap(&current->vmas, aligned_new, MMAP_REGION_BASE, MMAP_REGION_LIMIT);
+  uint64_t new_addr = vma_find_gap(&current->vmas, aligned_new,
+                                   MMAP_REGION_BASE, MMAP_REGION_LIMIT);
   if (new_addr == 0 || new_addr + aligned_new > MMAP_REGION_LIMIT)
     return MAP_FAILED;
 
@@ -675,10 +606,11 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
   vma_remove(&current->vmas, old_addr, old_addr + aligned_old);
 
   // Register new VMA.
-  vma_add(&current->vmas, new_addr, new_addr + aligned_new, prot, vma_flags,
-          -1, 0);
+  vma_add(&current->vmas, new_addr, new_addr + aligned_new, prot, vma_flags, -1,
+          0);
 
-  current->mmap_next_addr = MAX(current->mmap_next_addr, new_addr + aligned_new);
+  current->mmap_next_addr =
+      MAX(current->mmap_next_addr, new_addr + aligned_new);
 
   return new_addr;
 }

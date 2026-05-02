@@ -23,6 +23,7 @@ static spinlock_t pmm_lock = SPINLOCK_INIT;
 
 static uint8_t *bitmap = NULL;
 static uint8_t *managed_bitmap = NULL;
+static uint16_t *refcounts = NULL; // Array of refcounts per page
 static size_t bitmap_size = 0; // in bytes
 static uint64_t highest_page = 0;
 static uint64_t usable_memory = 0;
@@ -184,22 +185,35 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
     if (highest_page % 8 != 0)
         bitmap_size++;
 
+    size_t refcount_table_size = highest_page * sizeof(uint16_t);
+    size_t total_metadata_size = bitmap_size * 2 + refcount_table_size;
+
     for (uint64_t i = 0; i < memmap->entry_count; i++) {
         struct limine_memmap_entry *entry = memmap->entries[i];
-        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= bitmap_size * 2) {
+        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= total_metadata_size) {
             bitmap = (uint8_t *)(entry->base + hhdm_offset);
             managed_bitmap = bitmap + bitmap_size;
+            refcounts = (uint16_t *)((uint64_t)managed_bitmap + bitmap_size);
+            
             memset(bitmap, 0xFF, bitmap_size);
             memset(managed_bitmap, 0, bitmap_size);
+            // We'll zero the refcount table per-range to avoid slow global memset on sparse maps
             break;
         }
     }
 
-    uint64_t bitmap_phys_base = (uint64_t)bitmap - hhdm_offset;
-
     for (int i = 0; i < MAX_ORDER; i++) {
         INIT_LIST_HEAD(&b_zone.free_list[i]);
     }
+
+    uint64_t bitmap_phys_base = (uint64_t)bitmap - hhdm_offset;
+
+    klog_puts("[PMM] Identified Physical Memory: ");
+    klog_uint64(total_memory / 1024 / 1024);
+    klog_puts(" MB\n");
+    klog_puts("[PMM] Metadata overhead (Bitmaps + Refcounts): ");
+    klog_uint64(total_metadata_size / 1024);
+    klog_puts(" KB\n");
 
     for (uint64_t i = 0; i < memmap->entry_count; i++) {
         struct limine_memmap_entry *entry = memmap->entries[i];
@@ -214,13 +228,13 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
                 
                 // Skip first 1MB
                 if (phys < 0x100000) {
-                    p += PAGE_SIZE;
+                    p += (0x100000 - phys);
                     continue;
                 }
                 
-                // Skip bitmap region
-                if (phys >= bitmap_phys_base && phys < bitmap_phys_base + bitmap_size) {
-                    p += PAGE_SIZE;
+                // Skip full metadata region (bitmap + managed_bitmap + refcounts)
+                if (phys >= bitmap_phys_base && phys < bitmap_phys_base + total_metadata_size) {
+                    p += (bitmap_phys_base + total_metadata_size - phys);
                     continue;
                 }
 
@@ -242,21 +256,34 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
                     
                     // Check if next order would overlap with bitmap
                     uint64_t phys_end = phys + next_order_size;
-                    if (!(phys_end <= bitmap_phys_base || phys >= bitmap_phys_base + bitmap_size)) {
+                    if (!(phys_end <= bitmap_phys_base || phys >= bitmap_phys_base + total_metadata_size)) {
                         break;
                     }
 
                     order++;
                 }
 
+                // Mark as managed and free in one go
                 bitmap_set_range(managed_bitmap, pfn, (1ULL << order));
+                bitmap_clear_range(bitmap, pfn, (1ULL << order));
+                
+                // Sparse zeroing of the refcount table
+                memset(&refcounts[pfn], 0, (1ULL << order) * sizeof(uint16_t));
 
-                buddy_free_internal(phys, order);
+                // Direct insert into Buddy free list (Boot optimization: avoid coalescing logic)
+                struct buddy_block *block = virt_to_buddy(phys);
+                block->order = order;
+                list_add_tail(&block->node, &b_zone.free_list[order]);
+
                 usable_memory += (1ULL << order) * PAGE_SIZE;
                 p += (1ULL << order) * PAGE_SIZE;
             }
         }
     }
+
+    klog_puts("[PMM] Initialized. Usable memory: ");
+    klog_uint64(usable_memory / 1024 / 1024);
+    klog_puts(" MB\n");
 }
 
 void *pmm_alloc_pages(size_t count) {
@@ -293,6 +320,11 @@ void *pmm_alloc_pages(size_t count) {
 
     // Mark as used in bitmap
     bitmap_set_range(bitmap, pfn, 1ULL << order);
+
+    // Initialize refcounts to 1 for the allocated pages
+    for (size_t i = 0; i < (1ULL << order); i++) {
+        refcounts[pfn + i] = 1;
+    }
 
     spinlock_release(&b_zone.lock);
     return (void *)(pfn * PAGE_SIZE);
@@ -413,29 +445,70 @@ void pmm_free_pages(void *ptr, size_t count) {
         return; // Already free (prevents double-free list corruption)
     }
 
-    if ((addr & (PAGE_SIZE - 1)) != 0) {
-        klog_puts("[PMM] Warning: ignoring unaligned free addr=");
-        klog_uint64(addr);
-        klog_puts("\n");
-        return;
-    }
-
-    // Safety check for active PML4
-    uint64_t cr3;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-    uint64_t pml4_phys = cr3 & 0x000FFFFFFFFFF000ULL;
-    if (addr == pml4_phys) {
-        klog_puts("[PMM] CRITICAL ERROR: Attempted to free active PML4 page table!\n");
-        return;
-    }
-
     spinlock_acquire(&b_zone.lock);
-    buddy_free_internal(addr, order);
+    
+    // Check refcounts for the range. We only free pages whose refcount hits zero.
+    // NOTE: pmm_free_pages with count > 1 is currently only used for non-refcounted 
+    // internal kernel allocations (like reclaiming bootloader memory).
+    // For user pages (CoW), we always use pmm_decref (which calls pmm_free_page).
+    for (size_t i = 0; i < (1ULL << order); i++) {
+        if (refcounts[pfn + i] > 0) {
+            refcounts[pfn + i]--;
+        }
+    }
+
+    if (refcounts[pfn] == 0) {
+        buddy_free_internal(addr, order);
+    }
+    
     spinlock_release(&b_zone.lock);
 }
 
 void pmm_free_page(void *ptr) {
-    pmm_free_pages(ptr, 1);
+    pmm_decref(ptr);
+}
+
+bool pmm_is_managed(uint64_t phys) {
+    uint64_t pfn = phys / PAGE_SIZE;
+    if (pfn >= highest_page || managed_bitmap == NULL) return false;
+    return bitmap_test(managed_bitmap, pfn);
+}
+
+void pmm_incref(void *ptr) {
+    if (!ptr) return;
+    if (!pmm_is_managed((uint64_t)ptr)) return;
+    uint64_t pfn = (uint64_t)ptr / PAGE_SIZE;
+
+    spinlock_acquire(&pmm_lock);
+    refcounts[pfn]++;
+    spinlock_release(&pmm_lock);
+}
+
+void pmm_decref(void *ptr) {
+    if (!ptr) return;
+    if (!pmm_is_managed((uint64_t)ptr)) return;
+    uint64_t pfn = (uint64_t)ptr / PAGE_SIZE;
+
+    spinlock_acquire(&pmm_lock);
+    if (refcounts[pfn] > 0) {
+        refcounts[pfn]--;
+        if (refcounts[pfn] == 0) {
+            spinlock_release(&pmm_lock);
+            
+            spinlock_acquire(&b_zone.lock);
+            buddy_free_internal((uint64_t)ptr, 0);
+            spinlock_release(&b_zone.lock);
+            return;
+        }
+    }
+    spinlock_release(&pmm_lock);
+}
+
+uint16_t pmm_get_ref(void *ptr) {
+    if (!ptr) return 0;
+    if (!pmm_is_managed((uint64_t)ptr)) return 1; // Hardware is always "referenced"
+    uint64_t pfn = (uint64_t)ptr / PAGE_SIZE;
+    return refcounts[pfn];
 }
 
 void pmm_mark_used(void *ptr, size_t count) {

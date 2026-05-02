@@ -12,6 +12,7 @@
 #include "console/console.h"
 #include "console/klog.h"
 #include "cpu/isr.h"
+#include "cpu/irq.h"
 #include "drivers/pci/pci.h"
 #include "io/io.h"
 #include "lib/string.h"
@@ -336,31 +337,12 @@ void rtl8139_init(void) {
   outl(nic_iobase + RTL_TCR, TCR_IFG96 | TCR_MXDMA_2048);
 
   // ── Step 12: Install IRQ handler and route through I/O APIC ─────────
-  // The PCI IRQ line tells us the GSI. We'll pick a vector above the
-  // existing ones (PIT=32, KBD=33). We use 43 for the NIC.
-  uint8_t nic_vector = 32 + nic_irq; // e.g. IRQ 11 → vector 43
-
-  // Check for ACPI IRQ override
-  uint32_t gsi = (uint32_t)nic_irq;
-  uint16_t irq_flags = 0;
-  if (!acpi_get_irq_override(nic_irq, &gsi, &irq_flags)) {
-    // No ACPI ISO for this IRQ — PCI interrupts are level-triggered,
-    // active-low by specification.  Encode that in the MADT flags format:
-    //   polarity  bits [1:0] = 0b11 → active low
-    //   trigger   bits [3:2] = 0b11 → level triggered
-    irq_flags = 0x000F;
-  }
-
-  register_interrupt_handler(nic_vector, rtl8139_irq_handler);
-  ioapic_route_irq((uint8_t)gsi, nic_vector, (uint8_t)lapic_get_id(),
-                   irq_flags);
+  irq_install_handler(nic_irq, rtl8139_irq_handler, 0x000F);
 
   console_puts("     IRQ ");
   print_uint32(nic_irq);
-  console_puts(" -> GSI ");
-  print_uint32(gsi);
   console_puts(" -> Vector ");
-  print_uint32(nic_vector);
+  print_uint32(32 + nic_irq);
   console_putchar('\n');
 
   // ── Step 13: Enable RX and TX ───────────────────────────────────────

@@ -80,6 +80,7 @@ struct context {
 struct thread {
   uint64_t rsp; // Must be first field (offset 0) for optimal assembly
   uint32_t tid;
+  uint8_t fpu_state[512] __attribute__((aligned(16))); // Saved SSE/FPU state
   uint64_t stack_base;
   uint64_t stack_size;
   thread_state_t state;

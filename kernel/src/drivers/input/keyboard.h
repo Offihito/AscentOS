@@ -1,10 +1,10 @@
 #ifndef KEYBOARD_H
 #define KEYBOARD_H
 
+#include "../../sched/wait.h"
+#include "drivers/input/scancode.h"
 #include <stdbool.h>
 #include <stdint.h>
-#include "drivers/input/scancode.h"
-#include "../../sched/wait.h"
 
 extern wait_queue_t keyboard_wait_queue;
 
@@ -24,13 +24,13 @@ bool keyboard_get_scancode(scancode_event_t *event);
 void keyboard_set_scancode_mode(bool enabled);
 bool keyboard_is_scancode_mode(void);
 
-#define KEY_UP    0xE0
-#define KEY_DOWN  0xE1
-#define KEY_LEFT  0xE2
+#define KEY_UP 0xE0
+#define KEY_DOWN 0xE1
+#define KEY_LEFT 0xE2
 #define KEY_RIGHT 0xE3
-#define KEY_PGUP  0xE4
-#define KEY_PGDN  0xE5
-#define KEY_HOME  0xE6
-#define KEY_END   0xE7
+#define KEY_PGUP 0xE4
+#define KEY_PGDN 0xE5
+#define KEY_HOME 0xE6
+#define KEY_END 0xE7
 
 #endif

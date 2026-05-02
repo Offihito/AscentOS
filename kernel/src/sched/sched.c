@@ -26,7 +26,7 @@ spinlock_t dead_threads_lock = SPINLOCK_INIT;
 // Global list of all threads (for wait4)
 struct thread *global_thread_list = NULL;
 
-extern void switch_context(uint64_t *old_sp, uint64_t new_sp);
+extern void switch_context(struct thread *old_t, struct thread *new_t);
 extern void thread_stub(void); // Defined in switch.asm
 
 void sched_init(void) {
@@ -180,6 +180,20 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
 
   t->rsp = stack_top;
 
+  // Initialize FPU state
+  memset(t->fpu_state, 0, 512);
+
+  // We can't easily call fninit here for the child buffer without clobbering 
+  // current FPU state. However, we can just let switch_context handle it 
+  // if we ensure it's zeroed (most CPUs treat zero as okay) or use a static init.
+  static uint8_t fpu_init_done = 0;
+  static uint8_t initial_fpu_state[512] __attribute__((aligned(16)));
+  if (!fpu_init_done) {
+    __asm__ volatile("fninit; fxsave64 %0" : "=m"(initial_fpu_state));
+    fpu_init_done = 1;
+  }
+  memcpy(t->fpu_state, initial_fpu_state, 512);
+
   // Balance and add to a CPU's runqueue conditionally
   if (enqueue) {
     sched_enqueue_thread(t, explicit_cpu);
@@ -250,7 +264,7 @@ void sched_yield(void) {
     wrmsr(0xC0000100, next_t->fs_base);
 
     spinlock_release(&cpu->queue_lock);
-    switch_context(&prev->rsp, next_t->rsp);
+    switch_context(prev, next_t);
   } else {
     spinlock_release(&cpu->queue_lock);
   }

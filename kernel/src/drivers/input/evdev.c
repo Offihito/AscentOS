@@ -18,10 +18,11 @@
 #include "../../fb/framebuffer.h"
 #include "../../fs/vfs.h"
 #include "../../lib/string.h"
+#include "../../lock/spinlock.h"
 #include "../../mm/heap.h"
 #include "../../sched/sched.h"
 #include "../../sched/wait.h"
-#include "../../lock/spinlock.h"
+#include "../../socket/epoll.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -37,14 +38,15 @@ extern uint64_t pit_get_ticks(void);
 
 static void evdev_timestamp(uint64_t *sec, uint64_t *usec) {
   uint64_t ticks = pit_get_ticks();
-  *sec = ticks / 100;        // PIT runs at 100 Hz
+  *sec = ticks / 100; // PIT runs at 100 Hz
   *usec = (ticks % 100) * 10000;
 }
 
 // ── Push an event into the ring buffer ──────────────────────────────────────
 void evdev_push_event(evdev_device_t *dev, uint16_t type, uint16_t code,
                       int32_t value) {
-  spinlock_acquire(&dev->lock);
+  uint64_t flags;
+  spinlock_acquire_save(&dev->lock, &flags);
   uint32_t next = (dev->head + 1) % EVDEV_RING_SIZE;
   if (next == dev->tail) {
     // Ring full — drop oldest event
@@ -57,10 +59,15 @@ void evdev_push_event(evdev_device_t *dev, uint16_t type, uint16_t code,
   ev->code = code;
   ev->value = value;
   dev->head = next;
-  spinlock_release(&dev->lock);
+  spinlock_release_restore(&dev->lock, flags);
 
   // Wake any threads blocked on read() or poll()
   wait_queue_wake_all(&dev->wait);
+
+  // Notify epoll
+  if (dev->vfs_node) {
+    epoll_notify_event(dev->vfs_node, POLLIN);
+  }
 }
 
 // ── VFS read callback ───────────────────────────────────────────────────────
@@ -84,10 +91,7 @@ static uint32_t evdev_vfs_read(struct vfs_node *node, uint32_t offset,
   entry->thread = t;
   entry->next = NULL;
 
-  klog_puts("[EVDEV] read from "); klog_puts(dev->name); klog_puts("\n");
-
   while (1) {
-    __asm__ volatile("cli");
     spinlock_acquire(&dev->lock);
     if (dev->head != dev->tail) {
       // Data available
@@ -100,16 +104,14 @@ static uint32_t evdev_vfs_read(struct vfs_node *node, uint32_t offset,
         copied++;
       }
       spinlock_release(&dev->lock);
-      __asm__ volatile("sti");
       kfree(entry);
       return copied * sizeof(struct input_event);
     }
 
-    // No data, must block. Add to wait queue BEFORE releasing lock to avoid race.
+    // No data, must block.
     wait_queue_add(&dev->wait, entry);
     t->state = THREAD_BLOCKED;
     spinlock_release(&dev->lock);
-    __asm__ volatile("sti");
 
     sched_yield();
 
@@ -124,13 +126,11 @@ static int evdev_vfs_poll(struct vfs_node *node, int events) {
   if (!dev)
     return 0;
 
-  __asm__ volatile("cli");
   spinlock_acquire(&dev->lock);
   int revents = 0;
   if ((events & POLLIN) && dev->head != dev->tail)
     revents |= POLLIN;
   spinlock_release(&dev->lock);
-  __asm__ volatile("sti");
   return revents;
 }
 
@@ -146,13 +146,12 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
   if (!dev)
     return -1;
 
-  klog_puts("[EVDEV] ioctl: "); klog_uint64(request); klog_puts(" on "); klog_puts(dev->name); klog_puts("\n");
-
   // Decode the ioctl command
   // EVIOCGVERSION = 0x80044501
   if (request == 0x80044501) {
     int *version = (int *)arg;
-    if (!version) return -14;
+    if (!version)
+      return -14;
     *version = 0x010001; // Linux input driver version 1.0.1
     return 0;
   }
@@ -160,7 +159,8 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
   // EVIOCGID = 0x80084502
   if (request == 0x80084502) {
     struct input_id *id = (struct input_id *)arg;
-    if (!id) return -14;
+    if (!id)
+      return -14;
     *id = dev->id;
     return 0;
   }
@@ -175,10 +175,12 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
   // Format: 0x8000_4506 | (len << 16)
   if ((request & 0xC000FFFF) == 0x80004506) {
     char *buf = (char *)arg;
-    if (!buf) return -14;
+    if (!buf)
+      return -14;
     uint32_t len = (request >> 16) & 0x3FFF;
     uint32_t name_len = strlen(dev->name);
-    if (name_len >= len) name_len = len - 1;
+    if (name_len >= len)
+      name_len = len - 1;
     memcpy(buf, dev->name, name_len);
     buf[name_len] = '\0';
     return (int)name_len;
@@ -187,10 +189,12 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
   // EVIOCGPHYS(len)
   if ((request & 0xC000FFFF) == 0x80004507) {
     char *buf = (char *)arg;
-    if (!buf) return -14;
+    if (!buf)
+      return -14;
     uint32_t len = (request >> 16) & 0x3FFF;
     uint32_t phys_len = strlen(dev->phys);
-    if (phys_len >= len) phys_len = len - 1;
+    if (phys_len >= len)
+      phys_len = len - 1;
     memcpy(buf, dev->phys, phys_len);
     buf[phys_len] = '\0';
     return (int)phys_len;
@@ -198,8 +202,7 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
 
   // EVIOCGBIT(ev, len) — 0x80004520 | (ev << 8) | (len << 16)
   // Returns which event codes are supported for a given event type.
-  if ((request & 0xC00000FF) == 0x80000020 &&
-      ((request >> 8) & 0xFF) >= 0x45) {
+  if ((request & 0xC00000FF) == 0x80000020 && ((request >> 8) & 0xFF) >= 0x45) {
     // Reparse: the low 16 bits are 0x45EE where EE = event type field
     // Actually the encoding for EVIOCGBIT is complex. Let's match directly.
   }
@@ -212,9 +215,10 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
   uint32_t cmd_base = request & 0xC000FFFF;
   if (cmd_base >= 0x80004520 && cmd_base <= 0x80004540) {
     uint8_t *buf = (uint8_t *)arg;
-    if (!buf) return -14;
+    if (!buf)
+      return -14;
     uint32_t len = (request >> 16) & 0x3FFF;
-    uint32_t ev_type = (request & 0xFF) - 0x20;  // 0x20 offsets from 0x4520
+    uint32_t ev_type = (request & 0xFF) - 0x20; // 0x20 offsets from 0x4520
 
     // Zero-fill the output
     memset(buf, 0, len);
@@ -233,13 +237,17 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
       if (dev->type == EVDEV_KEYBOARD) {
         // Report all standard keys
         for (int i = 0; i < 256; i++) {
-          if (i / 8 < (int)len) set_bit(buf, i);
+          if (i / 8 < (int)len)
+            set_bit(buf, i);
         }
       } else if (dev->type == EVDEV_MOUSE) {
         // BTN_LEFT (0x110) / BTN_MOUSE = 272
-        if (272 / 8 < (int)len) set_bit(buf, 272);
-        if (273 / 8 < (int)len) set_bit(buf, 273);
-        if (274 / 8 < (int)len) set_bit(buf, 274);
+        if (272 / 8 < (int)len)
+          set_bit(buf, 272);
+        if (273 / 8 < (int)len)
+          set_bit(buf, 273);
+        if (274 / 8 < (int)len)
+          set_bit(buf, 274);
       }
       return 0;
     }
@@ -268,7 +276,8 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
   if ((request & 0xC0FFFF00) == 0x80184500 && ((request & 0xFF) >= 0x40)) {
     uint32_t abs_axis = (request & 0xFF) - 0x40;
     struct input_absinfo *abs = (struct input_absinfo *)arg;
-    if (!abs) return -14;
+    if (!abs)
+      return -14;
 
     memset(abs, 0, sizeof(*abs));
     if (dev->type == EVDEV_MOUSE) {
@@ -298,22 +307,13 @@ static int evdev_vfs_ioctl(struct vfs_node *node, uint32_t request,
 // For the base range (scancode 0x00–0x58), the PS/2 set-1 scancode equals
 // the Linux evdev keycode. Extended scancodes (0xE0 prefix) need a lookup.
 static const uint8_t extended_scancode_to_keycode[] = {
-  // Index = PS/2 scancode (after E0 prefix), value = Linux keycode
-  // We only populate the ones we care about; rest are 0.
-  [0x1C] = KEY_KPENTER_EV,
-  [0x1D] = KEY_RIGHTCTRL,
-  [0x35] = KEY_KPSLASH_EV,
-  [0x38] = KEY_RIGHTALT,
-  [0x47] = KEY_HOME_EV,
-  [0x48] = KEY_UP_EV,
-  [0x49] = KEY_PAGEUP_EV,
-  [0x4B] = KEY_LEFT_EV,
-  [0x4D] = KEY_RIGHT_EV,
-  [0x4F] = KEY_END_EV,
-  [0x50] = KEY_DOWN_EV,
-  [0x51] = KEY_PAGEDOWN_EV,
-  [0x52] = KEY_INSERT_EV,
-  [0x53] = KEY_DELETE_EV,
+    // Index = PS/2 scancode (after E0 prefix), value = Linux keycode
+    // We only populate the ones we care about; rest are 0.
+    [0x1C] = KEY_KPENTER_EV, [0x1D] = KEY_RIGHTCTRL, [0x35] = KEY_KPSLASH_EV,
+    [0x38] = KEY_RIGHTALT,   [0x47] = KEY_HOME_EV,   [0x48] = KEY_UP_EV,
+    [0x49] = KEY_PAGEUP_EV,  [0x4B] = KEY_LEFT_EV,   [0x4D] = KEY_RIGHT_EV,
+    [0x4F] = KEY_END_EV,     [0x50] = KEY_DOWN_EV,   [0x51] = KEY_PAGEDOWN_EV,
+    [0x52] = KEY_INSERT_EV,  [0x53] = KEY_DELETE_EV,
 };
 
 // Convert a PS/2 scancode to a Linux evdev keycode.
@@ -333,16 +333,17 @@ uint16_t evdev_ps2_to_keycode(uint8_t scancode, bool is_extended) {
 // ── Create a VFS node for an evdev device ───────────────────────────────────
 static void evdev_create_node(evdev_device_t *dev, const char *node_name) {
   vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
-  if (!node) return;
+  if (!node)
+    return;
 
-  memset(node, 0, sizeof(vfs_node_t));
+  vfs_node_init(node);
   strcpy(node->name, node_name);
-  node->flags  = FS_CHARDEV;
-  node->mask   = 0666;
+  node->flags = FS_CHARDEV;
+  node->mask = 0666;
   node->device = dev;
-  node->read   = evdev_vfs_read;
-  node->poll   = evdev_vfs_poll;
-  node->ioctl  = evdev_vfs_ioctl;
+  node->read = evdev_vfs_read;
+  node->poll = evdev_vfs_poll;
+  node->ioctl = evdev_vfs_ioctl;
   node->wait_queue = &dev->wait;
 
   dev->vfs_node = node;
@@ -374,7 +375,7 @@ void evdev_init(void) {
   strcpy(kbd_evdev.name, "AT Translated Set 2 keyboard");
   strcpy(kbd_evdev.phys, "isa0060/serio0/input0");
   kbd_evdev.id.bustype = BUS_I8042;
-  kbd_evdev.id.vendor  = 0x0001;
+  kbd_evdev.id.vendor = 0x0001;
   kbd_evdev.id.product = 0x0001;
   kbd_evdev.id.version = 0xAB41;
   wait_queue_init(&kbd_evdev.wait);
@@ -388,7 +389,7 @@ void evdev_init(void) {
   strcpy(mouse_evdev.name, "ImExPS/2 Generic Explorer Mouse");
   strcpy(mouse_evdev.phys, "isa0060/serio1/input0");
   mouse_evdev.id.bustype = BUS_I8042;
-  mouse_evdev.id.vendor  = 0x0002;
+  mouse_evdev.id.vendor = 0x0002;
   mouse_evdev.id.product = 0x0005;
   mouse_evdev.id.version = 0x0000;
   wait_queue_init(&mouse_evdev.wait);
@@ -396,5 +397,6 @@ void evdev_init(void) {
 
   evdev_create_node(&mouse_evdev, "event1");
 
-  klog_puts("[OK] evdev input subsystem initialized (event0=kbd, event1=mouse)\n");
+  klog_puts(
+      "[OK] evdev input subsystem initialized (event0=kbd, event1=mouse)\n");
 }

@@ -1,13 +1,14 @@
 #include "drivers/input/mouse.h"
-#include "drivers/input/evdev.h"
 #include "../../console/klog.h"
 #include "../../cpu/isr.h"
+#include "../../cpu/irq.h"
 #include "../../fb/framebuffer.h"
 #include "../../fs/vfs.h"
 #include "../../io/io.h"
 #include "../../lib/string.h"
-#include "../../mm/heap.h"
 #include "../../lock/spinlock.h"
+#include "../../mm/heap.h"
+#include "drivers/input/evdev.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -23,14 +24,12 @@ static uint8_t mouse_cycle = 0;
 static uint8_t mouse_packet[3];
 
 static void mouse_wait(uint8_t type) {
-  uint32_t timeout = 100000;
+  uint32_t timeout = 1000; // Reduced from 100000
   if (type == 0) {
-    // Wait for data to be ready to read
     while (!(inb(MOUSE_STATUS_PORT) & 1) && timeout--) {
       io_wait();
     }
   } else {
-    // Wait for controller to be ready for writing
     while ((inb(MOUSE_STATUS_PORT) & 2) && timeout--) {
       io_wait();
     }
@@ -59,7 +58,7 @@ static void mouse_callback(struct registers *regs) {
   }
 
   uint8_t data = inb(MOUSE_DATA_PORT);
-  
+
   switch (mouse_cycle) {
   case 0:
     mouse_packet[0] = data;
@@ -115,7 +114,6 @@ static void mouse_callback(struct registers *regs) {
     // ── Push evdev events for X11 ────────────────────────────────────
     evdev_device_t *mdev = evdev_get_mouse();
     if (mdev) {
-      klog_puts("[MOUSE] Event: dx="); klog_uint64(dx); klog_puts(" dy="); klog_uint64(dy); klog_puts("\n");
       // Relative motion events
       if (dx != 0)
         evdev_push_event(mdev, EV_REL, REL_X, dx);
@@ -123,8 +121,8 @@ static void mouse_callback(struct registers *regs) {
         evdev_push_event(mdev, EV_REL, REL_Y, dy);
 
       // Button state change events
-      bool cur_left   = global_mouse_state.left_button;
-      bool cur_right  = global_mouse_state.right_button;
+      bool cur_left = global_mouse_state.left_button;
+      bool cur_right = global_mouse_state.right_button;
       bool cur_middle = global_mouse_state.middle_button;
 
       if (cur_left != prev_left)
@@ -134,8 +132,8 @@ static void mouse_callback(struct registers *regs) {
       if (cur_middle != prev_middle)
         evdev_push_event(mdev, EV_KEY, BTN_MIDDLE, cur_middle ? 1 : 0);
 
-      prev_left   = cur_left;
-      prev_right  = cur_right;
+      prev_left = cur_left;
+      prev_right = cur_right;
       prev_middle = cur_middle;
 
       // SYN_REPORT marks the end of this event batch
@@ -173,7 +171,7 @@ void mouse_init(void) {
   mouse_read(); // ACK
 
   // Register interrupt handler
-  register_interrupt_handler(44, mouse_callback);
+  irq_install_handler(12, mouse_callback, 0);
 
   klog_puts("[OK] PS/2 Mouse Initialized.\n");
 }

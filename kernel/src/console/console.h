@@ -19,5 +19,4 @@ void console_refresh_cursor(void);
 void console_scroll_view(int delta);
 uint32_t console_get_rows(void);
 
-
 #endif

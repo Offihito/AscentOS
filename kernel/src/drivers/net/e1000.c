@@ -17,6 +17,7 @@
 #include "apic/lapic.h"
 #include "console/console.h"
 #include "console/klog.h"
+#include "cpu/irq.h"
 #include "cpu/isr.h"
 #include "drivers/pci/pci.h"
 #include "io/io.h"
@@ -272,7 +273,7 @@ static bool e1000_init_rx(void) {
   dma_buffer_t *ring_buf = dma_alloc(PAGE_SIZE, DMA_FLAG_32BIT | DMA_FLAG_LOW);
   if (!ring_buf)
     return false;
-  
+
   rx_descs_phys = ring_buf->phys;
   rx_descs = (struct e1000_rx_desc *)ring_buf->virt;
   memset(rx_descs, 0, PAGE_SIZE);
@@ -282,7 +283,7 @@ static bool e1000_init_rx(void) {
     dma_buffer_t *pkt_buf = dma_alloc(PAGE_SIZE, DMA_FLAG_32BIT);
     if (!pkt_buf)
       return false;
-    
+
     rx_buf_phys[i] = pkt_buf->phys;
     rx_buffers[i] = (uint8_t *)pkt_buf->virt;
     memset(rx_buffers[i], 0, PAGE_SIZE);
@@ -318,7 +319,7 @@ static bool e1000_init_tx(void) {
   dma_buffer_t *ring_buf = dma_alloc(PAGE_SIZE, DMA_FLAG_32BIT | DMA_FLAG_LOW);
   if (!ring_buf)
     return false;
-  
+
   tx_descs_phys = ring_buf->phys;
   tx_descs = (struct e1000_tx_desc *)ring_buf->virt;
   memset(tx_descs, 0, PAGE_SIZE);
@@ -327,7 +328,7 @@ static bool e1000_init_tx(void) {
     dma_buffer_t *pkt_buf = dma_alloc(PAGE_SIZE, DMA_FLAG_32BIT);
     if (!pkt_buf)
       return false;
-    
+
     tx_buf_phys[i] = pkt_buf->phys;
     tx_buffers[i] = (uint8_t *)pkt_buf->virt;
     memset(tx_buffers[i], 0, PAGE_SIZE);
@@ -455,19 +456,21 @@ void e1000_init(void) {
     bar0_phys |= ((uint64_t)dev->bar[1]) << 32;
   }
 
-  // Map 128KB of MMIO space as UNCACHED (PCD|PWT) - MMIO must not be cached
-  // The MMIO region is near the framebuffer, so caching could cause coherency issues
-  #define E1000_MMIO_SIZE (128 * 1024)
+// Map 128KB of MMIO space as UNCACHED (PCD|PWT) - MMIO must not be cached
+// The MMIO region is near the framebuffer, so caching could cause coherency
+// issues
+#define E1000_MMIO_SIZE (128 * 1024)
   uint64_t mmio_virt = bar0_phys + pmm_get_hhdm_offset();
   uint64_t *pml4 = vmm_get_active_pml4();
-  uint64_t mmio_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_PCD | PAGE_FLAG_PWT;
-  
+  uint64_t mmio_flags =
+      PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_PCD | PAGE_FLAG_PWT;
+
   // Remap each page of MMIO as uncached
   for (uint64_t offset = 0; offset < E1000_MMIO_SIZE; offset += PAGE_SIZE) {
     vmm_map_page(pml4, mmio_virt + offset, bar0_phys + offset, mmio_flags);
   }
   vmm_flush_tlb(mmio_virt);
-  
+
   mmio_base = (volatile uint8_t *)mmio_virt;
 
   nic_irq = dev->irq_line;
@@ -562,27 +565,7 @@ void e1000_init(void) {
   print_uint32(E1000_NUM_TX_DESC);
   console_puts(" descriptors).\n");
 
-  // ── Step 11: Install IRQ handler and route through I/O APIC ─────────
-  uint8_t nic_vector = 32 + nic_irq;
-
-  uint32_t gsi = (uint32_t)nic_irq;
-  uint16_t irq_flags = 0;
-  if (!acpi_get_irq_override(nic_irq, &gsi, &irq_flags)) {
-    // PCI interrupts: level-triggered, active-low
-    irq_flags = 0x000F;
-  }
-
-  register_interrupt_handler(nic_vector, e1000_irq_handler);
-  ioapic_route_irq((uint8_t)gsi, nic_vector, (uint8_t)lapic_get_id(),
-                   irq_flags);
-
-  console_puts("     IRQ ");
-  print_uint32(nic_irq);
-  console_puts(" -> GSI ");
-  print_uint32(gsi);
-  console_puts(" -> Vector ");
-  print_uint32(nic_vector);
-  console_putchar('\n');
+  irq_install_handler(nic_irq, e1000_irq_handler, 0x000F);
 
   // ── Step 12: Enable interrupts ──────────────────────────────────────
   e1000_write(E1000_IMS,

@@ -7,15 +7,16 @@
 #include "cpu/features.h"
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
+#include "cpu/irq.h"
 #include "cpu/isr.h"
 #include "cpu/pic.h"
 #include "cpu/tsc.h"
 #include "drivers/audio/ac97.h"
 #include "drivers/audio/audio_dsp.h"
 #include "drivers/audio/sb16.h"
+#include "drivers/input/evdev.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/input/mouse.h"
-#include "drivers/input/evdev.h"
 #include "drivers/net/nic.h"
 #include "drivers/pci/pci.h"
 #include "drivers/serial.h"
@@ -31,18 +32,19 @@
 #include "fs/random.h"
 #include "fs/vfs.h"
 #include "io/io.h"
+#include "mm/dma_alloc.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
-#include "mm/dma_alloc.h"
 #include "mm/vmm.h"
 #include "net/net.h"
 #include "sched/sched.h"
 #include "shell/shell.h"
 #include "smp/cpu.h"
-#include "syscalls/syscall.h"
-#include "socket/socket.h"
 #include "socket/epoll.h"
+#include "socket/socket.h"
+#include "syscalls/syscall.h"
 #include <limine.h>
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -273,46 +275,12 @@ void kmain(void) {
     // ── 5c. Initialize the I/O APIC ─────────────────────────────────────
     ioapic_init((uint64_t)ioapic_base, acpi_get_ioapic_gsi_base());
 
-    // ── 5d. Route PIT (IRQ 0) through the I/O APIC ─────────────────────
-    uint32_t pit_gsi = 0;
-    uint16_t pit_flags = 0;
-    acpi_get_irq_override(0, &pit_gsi, &pit_flags);
-    ioapic_route_irq((uint8_t)pit_gsi, 32, (uint8_t)lapic_get_id(), pit_flags);
-    klog_puts("[OK] PIT routed: GSI ");
-    {
-      char c = '0' + (char)pit_gsi;
-      klog_putchar(c);
-    }
-    klog_puts(" -> Vector 32\n");
+    // ── 5d. Synchronize IRQ routing ─────────────────────────────────────
+    // This automates ACPI overrides and transitions all early-registered
+    // legacy IRQs to the I/O APIC path.
+    irq_manager_sync();
 
-    // ── 5e. Route Keyboard (IRQ 1) through the I/O APIC ────────────────
-    uint32_t kbd_gsi = 1;
-    uint16_t kbd_flags = 0;
-    acpi_get_irq_override(1, &kbd_gsi, &kbd_flags);
-    ioapic_route_irq((uint8_t)kbd_gsi, 33, (uint8_t)lapic_get_id(), kbd_flags);
-    klog_puts("[OK] Keyboard routed: GSI ");
-    {
-      char c = '0' + (char)kbd_gsi;
-      klog_putchar(c);
-    }
-    klog_puts(" -> Vector 33\n");
-
-    // ── 5g. Route Mouse (IRQ 12) through the I/O APIC ──────────────────
-    uint32_t mouse_gsi = 12;
-    uint16_t mouse_flags = 0;
-    acpi_get_irq_override(12, &mouse_gsi, &mouse_flags);
-    ioapic_route_irq((uint8_t)mouse_gsi, 44, (uint8_t)lapic_get_id(),
-                     mouse_flags);
-    klog_puts("[OK] Mouse routed: GSI ");
-    {
-      if (mouse_gsi >= 10) {
-        klog_putchar('1');
-        klog_putchar('0' + (char)(mouse_gsi - 10));
-      } else {
-        klog_putchar('0' + (char)mouse_gsi);
-      }
-    }
-    klog_puts(" -> Vector 44\n");
+    // ── 5f. Switch ISR EOI routing to LAPIC ─────────────────────────────
 
     // ── 5f. Switch ISR EOI routing to LAPIC ─────────────────────────────
     isr_set_apic_mode(true);
@@ -408,7 +376,7 @@ void kmain(void) {
         vfs_mkdir(fs_root, "tmp", 0777);
         tmp_dir = vfs_finddir(fs_root, "tmp");
       }
-      
+
       // Mount ramfs on /tmp for socket support and performance
       if (tmp_dir) {
         ramfs_mount_on(tmp_dir);

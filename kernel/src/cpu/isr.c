@@ -1,12 +1,12 @@
 #include "isr.h"
 #include "../console/console.h"
+#include "../console/klog.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
+#include "../sched/sched.h"
 #include "apic/lapic.h"
 #include "msr.h"
 #include "pic.h"
-#include "../sched/sched.h"
-#include "../console/klog.h"
 
 const char *exception_messages[] = {"Division By Zero",
                                     "Debug",
@@ -41,7 +41,8 @@ const char *exception_messages[] = {"Division By Zero",
                                     "Security Exception",
                                     "Reserved"};
 
-// ── Low-level output helpers ──────────────────────────────────────────────────
+// ── Low-level output helpers
+// ──────────────────────────────────────────────────
 
 static void print_hex(uint64_t value) {
   const char *hex_chars = "0123456789ABCDEF";
@@ -91,7 +92,8 @@ static bool is_canonical_addr(uint64_t vaddr) {
   return (high == 0x0000ULL) || (high == 0xFFFFULL);
 }
 
-// ── RFLAGS decoder ────────────────────────────────────────────────────────────
+// ── RFLAGS decoder
+// ────────────────────────────────────────────────────────────
 
 static void print_rflags_decoded(uint64_t rflags) {
   console_puts("RFLAGS: ");
@@ -157,7 +159,8 @@ static void print_cr_state(void) {
   console_puts("\n");
 }
 
-// ── GP fault decoder ──────────────────────────────────────────────────────────
+// ── GP fault decoder
+// ──────────────────────────────────────────────────────────
 
 static void print_gp_error_details(uint64_t err_code) {
   console_puts("GP_ERR_DETAILS: ");
@@ -180,7 +183,8 @@ static void print_gp_error_details(uint64_t err_code) {
   console_puts(")\n");
 }
 
-// ── PF fault error code decoder ───────────────────────────────────────────────
+// ── PF fault error code decoder
+// ───────────────────────────────────────────────
 
 static void print_pf_error_details(uint64_t err_code) {
   bool p = (err_code >> 0) & 1;    /* page present */
@@ -264,7 +268,8 @@ static void analyze_pte_corruption(uint64_t pte) {
       print_hex(lo32);
       console_puts(" hi=");
       print_hex(hi32);
-      console_puts(") -- looks like a 32-bit value replicated into both halves\n");
+      console_puts(
+          ") -- looks like a 32-bit value replicated into both halves\n");
     }
   }
 
@@ -278,10 +283,12 @@ static void analyze_pte_corruption(uint64_t pte) {
     console_puts("    NOTE: NX + kernel + non-present\n");
 
   if (high_bits == 0 && lo32 == 0 && hi32 == 0)
-    console_puts("    PTE is completely zero (was never mapped or was explicitly cleared)\n");
+    console_puts("    PTE is completely zero (was never mapped or was "
+                 "explicitly cleared)\n");
 }
 
-static void print_paging_entry_flags(uint64_t entry, bool is_leaf, bool is_pde) {
+static void print_paging_entry_flags(uint64_t entry, bool is_leaf,
+                                     bool is_pde) {
   print_yes_no("P", (entry & (1ULL << 0)) != 0);
   print_yes_no("RW", (entry & (1ULL << 1)) != 0);
   print_yes_no("US", (entry & (1ULL << 2)) != 0);
@@ -300,7 +307,8 @@ static void print_paging_entry_flags(uint64_t entry, bool is_leaf, bool is_pde) 
   console_puts("\n");
 }
 
-static void print_entry_summary(const char *name, size_t idx, uint64_t entry, bool is_leaf, bool is_pde) {
+static void print_entry_summary(const char *name, size_t idx, uint64_t entry,
+                                bool is_leaf, bool is_pde) {
   console_puts("  ");
   console_puts(name);
   console_puts("[");
@@ -313,7 +321,8 @@ static void print_entry_summary(const char *name, size_t idx, uint64_t entry, bo
   print_paging_entry_flags(entry, is_leaf, is_pde);
 }
 
-static void print_neighbor_entries(const char *label, uint64_t *table, size_t index) {
+static void print_neighbor_entries(const char *label, uint64_t *table,
+                                   size_t index) {
   size_t start = (index > 1) ? index - 1 : 0;
   size_t end = (index < 510) ? index + 1 : 511;
 
@@ -335,7 +344,7 @@ static void print_pf_walk(uint64_t cr2) {
   uint64_t hhdm = pmm_get_hhdm_offset();
   uint64_t *pml4_phys = vmm_get_active_pml4();
   uint64_t *pml4 = (uint64_t *)((uint64_t)pml4_phys + hhdm);
-  
+
   size_t pml4_i = (cr2 >> 39) & 0x1FF;
   size_t pdpt_i = (cr2 >> 30) & 0x1FF;
   size_t pd_i = (cr2 >> 21) & 0x1FF;
@@ -345,17 +354,20 @@ static void print_pf_walk(uint64_t cr2) {
   console_puts("PF_WALK:\n");
   uint64_t pml4e = pml4[pml4_i];
   print_entry_summary("PML4E", pml4_i, pml4e, false, false);
-  if (!(pml4e & 1)) return;
+  if (!(pml4e & 1))
+    return;
 
   uint64_t *pdpt = (uint64_t *)((pml4e & PAGE_MASK) + hhdm);
   uint64_t pdpte = pdpt[pdpt_i];
   print_entry_summary("PDPTE", pdpt_i, pdpte, false, false);
-  if (!(pdpte & 1) || (pdpte & (1ULL << 7))) return;
+  if (!(pdpte & 1) || (pdpte & (1ULL << 7)))
+    return;
 
   uint64_t *pd = (uint64_t *)((pdpte & PAGE_MASK) + hhdm);
   uint64_t pde = pd[pd_i];
   print_entry_summary("PDE", pd_i, pde, false, true);
-  if (!(pde & 1) || (pde & (1ULL << 7))) return;
+  if (!(pde & 1) || (pde & (1ULL << 7)))
+    return;
 
   uint64_t *pt = (uint64_t *)((pde & PAGE_MASK) + hhdm);
   uint64_t pte = pt[pt_i];
@@ -382,8 +394,10 @@ static void print_user_stack_words(uint64_t user_rsp, int words) {
 static void print_context_summary(struct registers *regs) {
   uint8_t cpl = regs->cs & 0x3;
   console_puts("CONTEXT: ");
-  if (cpl == 0) console_puts("kernel (ring 0)");
-  else console_puts("user   (ring 3)");
+  if (cpl == 0)
+    console_puts("kernel (ring 0)");
+  else
+    console_puts("user   (ring 3)");
   console_puts("  CS=");
   print_hex(regs->cs);
   console_puts("  SS=");
@@ -401,10 +415,14 @@ void register_interrupt_handler(uint8_t n, isr_t handler) {
 }
 
 static void send_eoi(struct registers *regs) {
-  if (regs->int_no == 255) return;
-  if (regs->int_no < 32) return;
-  if (apic_mode) lapic_send_eoi();
-  else if (regs->int_no <= 47) pic_send_eoi(regs->int_no - 32);
+  if (regs->int_no == 255)
+    return;
+  if (regs->int_no < 32)
+    return;
+  if (apic_mode)
+    lapic_send_eoi();
+  else if (regs->int_no <= 47)
+    pic_send_eoi(regs->int_no - 32);
 }
 
 // ── Exception Handling & Signals ─────────────────────────────────────────────
@@ -447,14 +465,15 @@ static void isr_panic(struct registers *regs, const char *msg) {
   }
 
   print_cr_state();
-  
+
   console_puts("\nSystem Halted.\n");
   for (;;) {
     __asm__ volatile("cli; hlt");
   }
 }
 
-static void isr_report_user_fault(struct registers *regs, int sig, uint64_t addr) {
+static void isr_report_user_fault(struct registers *regs, int sig,
+                                  uint64_t addr) {
   (void)addr;
   struct thread *current = sched_get_current();
   if (current) {
@@ -503,11 +522,11 @@ void isr_handler(struct registers *regs) {
   if (interrupt_handlers[regs->int_no] != 0) {
     isr_t handler = interrupt_handlers[regs->int_no];
     handler(regs);
-    
+
     if ((regs->cs & 0x3) == 0x3) {
       signal_deliver(regs);
     }
-    
+
     send_eoi(regs);
     return;
   }

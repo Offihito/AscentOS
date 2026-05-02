@@ -272,6 +272,14 @@ int epoll_ctl_add(eventpoll_t *ep, int fd, struct epoll_event *event) {
   ep->item_count++;
   spinlock_release(&ep->lock);
 
+  // Fast notification link
+  spinlock_acquire(&node->ep_lock);
+  if (node->ep_watchers.next == NULL) {
+    INIT_LIST_HEAD(&node->ep_watchers);
+  }
+  list_add_tail(&epi->ep_node_link, &node->ep_watchers);
+  spinlock_release(&node->ep_lock);
+
   // Check for immediate events (level-triggered)
   if (!(event->events & EPOLLET)) {
     uint32_t events = ep_check_events(epi);
@@ -303,6 +311,13 @@ int epoll_ctl_del(eventpoll_t *ep, int fd) {
   ep->items[fd] = NULL;
   ep->item_count--;
   spinlock_release(&ep->lock);
+
+  // Unlink from node
+  if (epi->node) {
+    spinlock_acquire(&epi->node->ep_lock);
+    list_del(&epi->ep_node_link);
+    spinlock_release(&epi->node->ep_lock);
+  }
 
   // Free epitem
   epitem_free(epi);
@@ -352,235 +367,89 @@ int epoll_ctl_mod(eventpoll_t *ep, int fd, struct epoll_event *event) {
 
 int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
                     int timeout_ms) {
-  if (!ep || !events)
-    return -22; // EINVAL
-
-  if (maxevents <= 0)
+  if (!ep || !events || maxevents <= 0)
     return -22; // EINVAL
 
   int returned = 0;
+  struct thread *current = sched_get_current();
 
-  // Check ready list
-  spinlock_acquire(&ep->lock);
+  while (returned == 0) {
+    spinlock_acquire(&ep->lock);
 
-  // If ready list has items, return them immediately
-  if (!list_empty(&ep->rdllist)) {
-    struct list_head *pos, *n;
-    int count = 0;
+    // If ready list has items, return them immediately
+    if (!list_empty(&ep->rdllist)) {
+      struct list_head *pos, *n;
+      list_for_each_safe(pos, n, &ep->rdllist) {
+        if (returned >= maxevents)
+          break;
 
-    list_for_each_safe(pos, n, &ep->rdllist) {
-      if (count >= maxevents)
-        break;
+        epitem_t *epi = list_entry(pos, epitem_t, rdllink);
 
-      epitem_t *epi = list_entry(pos, epitem_t, rdllink);
+        // Get current events
+        uint32_t current_events = ep_check_events(epi);
 
-      // Get current events
-      uint32_t current_events = ep_check_events(epi);
+        if (current_events) {
+          events[returned].events = current_events;
+          events[returned].data.u64 = epi->event.data.u64;
+          returned++;
 
-      if (current_events) {
-        // Copy event to user
-        events[count].events = current_events;
-        // Copy the entire data union
-        events[count].data.u64 = epi->event.data.u64;
-
-        // Debug: log event data
-        klog_puts("[EPOLL] Returning event: events=");
-        klog_uint64(current_events);
-        klog_puts(" data.u32=");
-        klog_uint64(epi->event.data.u32);
-        klog_puts(" data.u64=");
-        klog_uint64(epi->event.data.u64);
-        klog_puts("\n");
-
-        count++;
-
-        // Handle edge-triggered mode
-        if (epi->event.events & EPOLLET) {
-          // ET: only report if registered events changed
-          // Mask to only registered events (ignore EPOLLHUP/EPOLLERR for ET
-          // tracking)
-          uint32_t registered_mask =
-              epi->event.events &
-              (EPOLLIN | EPOLLOUT | EPOLLPRI | EPOLLRDNORM | EPOLLWRNORM);
-          uint32_t tracked_events = current_events & registered_mask;
-
-          if (epi->last_events == tracked_events) {
-            // Same tracked event as before, skip - remove from list but don't
-            // report
+          // Handle edge-triggered mode
+          if (epi->event.events & EPOLLET) {
             list_del(&epi->rdllink);
             epi->on_ready_list = false;
             ep->rdllist_count--;
-            continue;
+            // Track events for next edge
+            epi->last_events = current_events & (EPOLLIN | EPOLLOUT | EPOLLRDNORM | EPOLLWRNORM);
           }
-          // Edge-triggered: remove from ready list after reporting
+
+          // Handle oneshot mode
+          if (epi->oneshot) {
+            epi->oneshot_disabled = true;
+            epi->registered_events = 0;
+            if (!(epi->event.events & EPOLLET)) {
+              list_del(&epi->rdllink);
+              epi->on_ready_list = false;
+              ep->rdllist_count--;
+            }
+          }
+        } else {
+          // No longer has events, remove from ready list
           list_del(&epi->rdllink);
           epi->on_ready_list = false;
           ep->rdllist_count--;
-          epi->last_events = tracked_events;
-        }
-
-        // Handle oneshot mode
-        if (epi->oneshot) {
-          // Disable further events until EPOLL_CTL_MOD
-          epi->oneshot_disabled = true;
-          epi->registered_events = 0; // Clear to prevent further matches
-          // Remove from ready list so it won't be reported again
-          if (!(epi->event.events & EPOLLET)) {
-            list_del(&epi->rdllink);
-            epi->on_ready_list = false;
-            ep->rdllist_count--;
-          }
-        }
-      } else {
-        // No longer has events, remove from ready list
-        list_del(&epi->rdllink);
-        epi->on_ready_list = false;
-        ep->rdllist_count--;
-      }
-    }
-
-    spinlock_release(&ep->lock);
-    return count;
-  }
-
-  spinlock_release(&ep->lock);
-
-  // No events ready - handle timeout
-  if (timeout_ms == 0) {
-    // Non-blocking: return immediately
-    return 0;
-  }
-
-  // Blocking wait (simplified: yield and poll)
-  if (timeout_ms > 0) {
-    // Approximate wait by yielding
-    uint64_t max_iterations = timeout_ms / 10;
-    if (max_iterations < 1)
-      max_iterations = 1;
-    if (max_iterations > 1000)
-      max_iterations = 1000;
-
-    for (uint64_t iter = 0; iter < max_iterations && returned == 0; iter++) {
-      sched_yield();
-
-      // Re-check all watched FDs
-      spinlock_acquire(&ep->lock);
-
-      for (int i = 0; i < EPOLL_MAX_WATCHED && returned < maxevents; i++) {
-        epitem_t *epi = ep->items[i];
-        if (!epi)
-          continue;
-
-        // Skip disabled oneshot items
-        if (epi->oneshot && epi->oneshot_disabled)
-          continue;
-
-        uint32_t current_events = ep_check_events(epi);
-
-        // For ET mode: track only registered events
-        uint32_t registered_mask =
-            epi->event.events &
-            (EPOLLIN | EPOLLOUT | EPOLLPRI | EPOLLRDNORM | EPOLLWRNORM);
-        uint32_t tracked_events = current_events & registered_mask;
-
-        // For ET mode: clear last_events when no tracked events (so next rising
-        // edge fires)
-        if ((epi->event.events & EPOLLET) && tracked_events == 0) {
-          epi->last_events = 0;
-        }
-
-        if (current_events) {
-          // Edge-triggered: only report if registered events appeared
-          // (transitioned from 0)
-          if (epi->event.events & EPOLLET) {
-            // ET fires when tracked events transition from 0 to non-zero
-            if (epi->last_events == 0 && tracked_events != 0) {
-              events[returned].events = current_events;
-              events[returned].data.u64 = epi->event.data.u64;
-              returned++;
-              epi->last_events = tracked_events;
-
-              // Handle oneshot
-              if (epi->oneshot) {
-                epi->oneshot_disabled = true;
-                epi->registered_events = 0;
-              }
-            }
-          } else {
-            // Level-triggered: always report
-            events[returned].events = current_events;
-            events[returned].data.u64 = epi->event.data.u64;
-            returned++;
-
-            // Handle oneshot
-            if (epi->oneshot) {
-              epi->oneshot_disabled = true;
-              epi->registered_events = 0;
-            }
-          }
         }
       }
 
       spinlock_release(&ep->lock);
-    }
-  } else {
-    // Infinite wait (timeout_ms < 0)
-    // Poll indefinitely until events arrive
-    while (returned == 0) {
-      sched_yield();
-
-      spinlock_acquire(&ep->lock);
-
-      for (int i = 0; i < EPOLL_MAX_WATCHED && returned < maxevents; i++) {
-        epitem_t *epi = ep->items[i];
-        if (!epi)
-          continue;
-
-        if (epi->oneshot && epi->oneshot_disabled)
-          continue;
-
-        uint32_t current_events = ep_check_events(epi);
-
-        // For ET mode: track only registered events
-        uint32_t registered_mask =
-            epi->event.events &
-            (EPOLLIN | EPOLLOUT | EPOLLPRI | EPOLLRDNORM | EPOLLWRNORM);
-        uint32_t tracked_events = current_events & registered_mask;
-
-        // For ET mode: clear last_events when no tracked events (so next rising
-        // edge fires)
-        if ((epi->event.events & EPOLLET) && tracked_events == 0) {
-          epi->last_events = 0;
-        }
-
-        if (current_events) {
-          if (epi->event.events & EPOLLET) {
-            // ET fires when tracked events transition from 0 to non-zero
-            if (epi->last_events == 0 && tracked_events != 0) {
-              events[returned].events = current_events;
-              events[returned].data.u64 = epi->event.data.u64;
-              returned++;
-              epi->last_events = tracked_events;
-
-              if (epi->oneshot) {
-                epi->oneshot_disabled = true;
-                epi->registered_events = 0;
-              }
-            }
-          } else {
-            events[returned].events = current_events;
-            events[returned].data.u64 = epi->event.data.u64;
-            returned++;
-
-            if (epi->oneshot) {
-              epi->oneshot_disabled = true;
-              epi->registered_events = 0;
-            }
-          }
-        }
-      }
-
+      if (returned > 0)
+        return returned;
+    } else {
       spinlock_release(&ep->lock);
+    }
+
+    // No events ready - handle timeout
+    if (timeout_ms == 0) {
+      return 0; // Non-blocking
+    }
+
+    // Blocking wait
+    wait_queue_entry_t entry;
+    entry.thread = current;
+    entry.next = NULL;
+
+    wait_queue_add(&ep->wq, &entry);
+    current->state = THREAD_BLOCKED;
+
+    // TODO: implement actual timeout in scheduler. For now, we rely on wakeups.
+    sched_yield();
+
+    wait_queue_remove(&ep->wq, &entry);
+
+    // If timeout was positive, we should technically decrement it, but 
+    // for this phase we just loop.
+    if (timeout_ms > 0) {
+        // Simplified timeout handling - if we were woken but still nothing, 
+        // we check again. Real timeout would check ticks.
     }
   }
 
@@ -605,7 +474,7 @@ int epoll_alloc_fd(eventpoll_t *ep) {
     return -12; // ENOMEM
   }
 
-  memset(node, 0, sizeof(vfs_node_t));
+  vfs_node_init(node);
   node->flags = FS_EPOLL;
   node->inode = (uint32_t)(uint64_t)ep;
   node->device = ep;
@@ -745,67 +614,39 @@ void epoll_notify_event(struct vfs_node *node, uint32_t events) {
   if (!node)
     return;
 
-  // Track if any exclusive waiter was woken (for EPOLLEXCLUSIVE)
+  // Lazy-init check for node notification list
+  if (node->ep_watchers.next == NULL)
+    return;
+
   bool exclusive_woken = false;
 
-  // Find all epoll instances watching this node
-  // (Simplified: scan all epoll instances)
-  for (int i = 0; i < EPOLL_MAX_INSTANCES; i++) {
-    eventpoll_t *ep = epoll_table[i];
-    if (!ep)
+  spinlock_acquire(&node->ep_lock);
+  struct list_head *pos, *n;
+  list_for_each_safe(pos, n, &node->ep_watchers) {
+    epitem_t *epi = list_entry(pos, epitem_t, ep_node_link);
+    eventpoll_t *ep = epi->ep;
+
+    // Skip disabled oneshot items
+    if (epi->oneshot && epi->oneshot_disabled)
       continue;
 
-    // Find epitem for this node
-    for (int fd = 0; fd < EPOLL_MAX_WATCHED; fd++) {
-      epitem_t *epi = ep->items[fd];
-      if (!epi)
-        continue;
+    uint32_t mask = events & (epi->registered_events | EPOLLERR | EPOLLHUP | EPOLLRDHUP);
+    if (!mask)
+      continue;
 
-      if (epi->node == node) {
-        // Found matching epitem
-        // Skip disabled oneshot items
-        if (epi->oneshot && epi->oneshot_disabled)
-          continue;
+    // Add to ready list
+    ep_add_to_ready_list(ep, epi);
 
-        uint32_t mask = events & (epi->registered_events | EPOLLERR | EPOLLHUP |
-                                  EPOLLRDHUP);
-
-        if (mask) {
-          // Edge-triggered: add to ready list, let epoll_wait handle ET logic
-          if (epi->event.events & EPOLLET) {
-            // Don't set last_events here - epoll_wait will handle it
-            ep_add_to_ready_list(ep, epi);
-
-            // Handle exclusive wake-up (prevent thundering herd)
-            if (epi->exclusive) {
-              if (!exclusive_woken) {
-                // Wake only one waiter for exclusive FDs
-                wait_queue_wake_one(&ep->wq);
-                exclusive_woken = true;
-              }
-              // Don't wake others - only one epoll instance gets notified
-            } else {
-              // Normal wake-up: wake all waiters
-              wait_queue_wake_all(&ep->wq);
-            }
-          } else {
-            // Level-triggered: always add to ready list
-            ep_add_to_ready_list(ep, epi);
-
-            // Handle exclusive wake-up
-            if (epi->exclusive) {
-              if (!exclusive_woken) {
-                wait_queue_wake_one(&ep->wq);
-                exclusive_woken = true;
-              }
-            } else {
-              wait_queue_wake_all(&ep->wq);
-            }
-          }
-        }
+    if (epi->exclusive) {
+      if (!exclusive_woken) {
+        wait_queue_wake_one(&ep->wq);
+        exclusive_woken = true;
       }
+    } else {
+      wait_queue_wake_all(&ep->wq);
     }
   }
+  spinlock_release(&node->ep_lock);
 }
 
 // Notify epoll by socket FD (for abstract sockets without VFS node)

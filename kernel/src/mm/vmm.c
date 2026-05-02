@@ -4,6 +4,7 @@
 #include "vma.h"
 #include <stddef.h>
 #include <stdint.h>
+#include "../lib/string.h"
 #define PHYS_TO_VIRT(p) ((void *)((uint64_t)(p) + pmm_get_hhdm_offset()))
 
 #include "../lock/spinlock.h"
@@ -575,24 +576,21 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
         // Shared mapping: just copy the PTE (share the physical page)
         new_virt[i] = src_virt[i];
       } else {
-        // Private mapping: allocate a fresh physical page and copy content
-        void *new_page_phys = pmm_alloc();
-        if (!new_page_phys)
-          return NULL; // OOM
-
-        uint8_t *dst = (uint8_t *)PHYS_TO_VIRT((uint64_t)new_page_phys);
-        uint8_t *src = (uint8_t *)PHYS_TO_VIRT(src_virt[i] & PAGE_MASK);
-
-        // Copy page content using 64-bit words for speed
-        uint64_t *dst64 = (uint64_t *)dst;
-        uint64_t *src64 = (uint64_t *)src;
-        for (size_t w = 0; w < 512; w++) {
-          dst64[w] = src64[w];
+        // Private mapping: Use Copy-on-Write (CoW) if it's managed RAM.
+        // We MUST NOT use CoW for hardware addresses (MMIO), as they can't be copied.
+        uint64_t phys = src_virt[i] & PAGE_MASK;
+        if (pmm_is_managed(phys)) {
+          // If the page is writable, we make it read-only in both parent and child,
+          // and set the COW flag bit to track that it needs copying on write.
+          if (src_virt[i] & PAGE_FLAG_RW) {
+            src_virt[i] &= ~PAGE_FLAG_RW;
+            src_virt[i] |= PAGE_FLAG_COW;
+            vmm_flush_tlb(page_vaddr); // Update parent's TLB
+          }
+          pmm_incref((void *)phys);
         }
-
-        // Preserve flags from original PTE
-        new_virt[i] =
-            ((uint64_t)new_page_phys & PAGE_MASK) | (src_virt[i] & ~PAGE_MASK);
+        
+        new_virt[i] = src_virt[i];
       }
     } else {
       // Intermediate level: calculate base address for recursion
@@ -768,13 +766,129 @@ void vmm_free_user_pages(uint64_t cr3) {
   pmm_free_page((void *)cr3);
 }
 
+// ── VMA-aware version: skip freeing MAP_SHARED physical pages ───────────────
+// Device MMIO mappings (e.g. framebuffer) are MAP_SHARED — their physical
+// frames belong to the hardware, not the process.  Blindly freeing them
+// would hand device memory back to PMM, where it gets overwritten by the
+// next zero-fill-on-demand fault.  This function checks each page against
+// the VMA tree and only frees private/anonymous frames.
+void vmm_free_user_pages_vma(uint64_t cr3, struct vma_list *vmas) {
+  if (cr3 == 0)
+    return;
+
+  // If no VMA info, fall back to the non-VMA-aware version
+  if (!vmas) {
+    vmm_free_user_pages(cr3);
+    return;
+  }
+
+  // Safety: never free the active PML4
+  uint64_t active_cr3;
+  __asm__ volatile("mov %%cr3, %0" : "=r"(active_cr3));
+  if (cr3 == (active_cr3 & PAGE_MASK)) {
+    klog_puts("[VMM] WARNING: refusing to free active CR3!\n");
+    return;
+  }
+
+  uint64_t hhdm = pmm_get_hhdm_offset();
+  uint64_t *pml4_virt = (uint64_t *)(hhdm + cr3);
+
+  for (size_t i = 0; i < 256; i++) {
+    if (!(pml4_virt[i] & PAGE_FLAG_PRESENT))
+      continue;
+
+    uint64_t pdpt_phys = pml4_virt[i] & PAGE_MASK;
+    uint64_t *pdpt_virt = (uint64_t *)(hhdm + pdpt_phys);
+
+    for (size_t j = 0; j < 512; j++) {
+      if (!(pdpt_virt[j] & PAGE_FLAG_PRESENT))
+        continue;
+
+      // 1GB huge page — skip
+      if (pdpt_virt[j] & PAGE_FLAG_PS)
+        continue;
+
+      uint64_t pd_phys = pdpt_virt[j] & PAGE_MASK;
+      uint64_t *pd_virt = (uint64_t *)(hhdm + pd_phys);
+
+      for (size_t k = 0; k < 512; k++) {
+        if (!(pd_virt[k] & PAGE_FLAG_PRESENT))
+          continue;
+
+        // 2MB huge page — compute VA and check VMA
+        if (pd_virt[k] & PAGE_FLAG_PS) {
+          uint64_t va = (i << 39) | (j << 30) | (k << 21);
+          struct vma *v = vma_find(vmas, va);
+          if (v && (v->flags & MAP_SHARED)) {
+            pd_virt[k] = 0;
+            continue; // Don't free shared device pages
+          }
+          uint64_t huge_phys = pd_virt[k] & PAGE_MASK;
+          for (size_t p = 0; p < 512; p++) {
+            pmm_free_page((void *)(huge_phys + p * 4096));
+          }
+          pd_virt[k] = 0;
+          continue;
+        }
+
+        uint64_t pt_phys = pd_virt[k] & PAGE_MASK;
+        uint64_t *pt_virt = (uint64_t *)(hhdm + pt_phys);
+
+        for (size_t l = 0; l < 512; l++) {
+          if (pt_virt[l] & PAGE_FLAG_PRESENT) {
+            // Compute the virtual address this PTE maps
+            uint64_t va = (i << 39) | (j << 30) | (k << 21) | (l << 12);
+
+            // Check if this page belongs to a MAP_SHARED VMA
+            struct vma *v = vma_find(vmas, va);
+            if (v && (v->flags & MAP_SHARED)) {
+              // Shared/device mapping — do NOT free the physical frame.
+              // Just clear the PTE so it's no longer mapped in this process.
+              continue;
+            }
+
+            uint64_t page_phys = pt_virt[l] & PAGE_MASK;
+            pmm_free_page((void *)page_phys);
+          }
+        }
+        pmm_free_page((void *)pt_phys);
+      }
+      pmm_free_page((void *)pd_phys);
+    }
+    pmm_free_page((void *)pdpt_phys);
+  }
+
+  // Free the PML4 page itself
+  pmm_free_page((void *)cr3);
+}
+
 #include "../sched/sched.h"
+
+// Demand Paging Protection Constants (must match sys_mm.c)
+#define PROT_NONE 0x0
+#define PROT_READ 0x1
+#define PROT_WRITE 0x2
+#define PROT_EXEC 0x4
+
+// Build page table flags from VMA protection bits.
+static uint64_t dp_build_flags(uint64_t prot) {
+  if (prot == PROT_NONE)
+    return 0; // No mapping at all
+
+  uint64_t flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER;
+  if (prot & PROT_WRITE)
+    flags |= PAGE_FLAG_RW;
+  if (!(prot & PROT_EXEC))
+    flags |= PAGE_FLAG_NX;
+  return flags;
+}
 
 int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
                           struct registers *regs) {
   (void)regs;
   bool user_mode = (error_code & 0x4) != 0;
   bool write_fault = (error_code & 0x2) != 0;
+  bool present_bit = (error_code & 0x1) != 0;
 
   struct thread *current = sched_get_current();
   if (!current) {
@@ -788,50 +902,102 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     target_cr3 &= 0xFFFFFFFFFFFFF000ULL;
   }
 
-  // Special case for thread stack expansion (temporary hack until VMA strictly
-  // maps stacks)
-  if (cr2 >= current->stack_base - 0x100000 &&
-      cr2 < current->stack_base + current->stack_size) {
-    // Authentically map the missing stack page to resolve the fault and
-    // prevent infinite recursion.
-    void *phys = pmm_alloc();
-    if (phys) {
-      vmm_map_page((uint64_t *)current->cr3, cr2 & PAGE_MASK, (uint64_t)phys,
-                   PAGE_FLAG_USER | PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
-      return 0; // Success: CPU will now re-execute and find the page
-    }
-  } else {
-    // Real VMA validation
-    struct vma *vma = vma_find(&current->vmas, cr2);
-    if (!vma) {
-      vma = vma_find_growdown(&current->vmas, cr2, 8 * 1024 * 1024);
-      if (vma) {
-        // Expand the stack VMA dynamically
-        vma->start = cr2 & ~0xFFFULL;
-      } else {
-        if (user_mode) {
-          return -1; // Let ISR handle SIGSEGV reporting
-        }
-        return -1;
-      }
-    }
+  // ── Copy-on-Write (CoW) Logic ──────────────────────────────────────────
+  // If the page is PRESENT but we got a WRITE fault, check for CoW.
+  if (present_bit && write_fault) {
+    uint64_t *pml4 = (uint64_t *)PHYS_TO_VIRT(target_cr3);
+    uint64_t virt = cr2 & PAGE_MASK;
 
-    // Validate permissions
-    if (write_fault &&
-        !(vma->prot &
-          0x2)) { // PROT_WRITE mapped to 2 loosely. Assuming sys_mm.c maps this
-      if (user_mode) {
-        klog_puts("[VMM] User space write violation (SIGSEGV) at 0x");
-        klog_uint64(cr2);
-        klog_puts("\n");
-        sched_terminate_thread(current->tid);
-        return 0; // Handled
+    // Resolve the PTE
+    uint64_t *pdpt = (uint64_t *)PHYS_TO_VIRT(pml4[(virt >> 39) & 511] & PAGE_MASK);
+    if (!(pml4[(virt >> 39) & 511] & PAGE_FLAG_PRESENT)) return -1;
+
+    uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pdpt[(virt >> 30) & 511] & PAGE_MASK);
+    if (!(pdpt[(virt >> 30) & 511] & PAGE_FLAG_PRESENT)) return -1;
+    if (pdpt[(virt >> 30) & 511] & PAGE_FLAG_PS) return -1; // No 1GB CoW
+
+    uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pd[(virt >> 21) & 511] & PAGE_MASK);
+    if (!(pd[(virt >> 21) & 511] & PAGE_FLAG_PRESENT)) return -1;
+    if (pd[(virt >> 21) & 511] & PAGE_FLAG_PS) return -1; // No 2MB CoW (for now)
+
+    uint64_t *pte = &pt[(virt >> 12) & 511];
+    if (!(*pte & PAGE_FLAG_PRESENT)) return -1;
+
+    // Is this a COW page?
+    if (*pte & PAGE_FLAG_COW) {
+      uint64_t old_phys = *pte & PAGE_MASK;
+      uint16_t refs = pmm_get_ref((void *)old_phys);
+
+      if (refs > 1) {
+        // Multiple processes share this page. Copy it.
+        void *new_phys = pmm_alloc_page();
+        if (!new_phys) return -1; // OOM
+
+        // Copy content
+        memcpy(PHYS_TO_VIRT((uint64_t)new_phys), PHYS_TO_VIRT(old_phys), PAGE_SIZE);
+
+        // Update PTE: NEW physical page, RW=1, COW=0
+        *pte = ((uint64_t)new_phys & PAGE_MASK) | (*pte & ~PAGE_MASK & ~PAGE_FLAG_COW) | PAGE_FLAG_RW;
+        
+        // Decrement refcount of the old page
+        pmm_decref((void *)old_phys);
+      } else {
+        // We are the only owner (others exited or already copied it).
+        // Just promote this page to Read-Write.
+        *pte &= ~PAGE_FLAG_COW;
+        *pte |= PAGE_FLAG_RW;
       }
-      return -1;
+
+      vmm_flush_tlb(virt);
+      return 0; // Fault handled!
     }
   }
 
-  // Allocate frame (Zero-Fill Engine)
+  // If the page was already PRESENT but NOT a COW fault, it's a real violation.
+  if (present_bit) {
+    return -1;
+  }
+
+  // ── VMA-based demand paging ────────────────────────────────────────────
+  // Look up the faulting address in the process's VMA tree.
+  struct vma *vma = vma_find(&current->vmas, cr2);
+  if (!vma) {
+    // Try stack growth: find a GROWSDOWN VMA above cr2 within 8MB
+    vma = vma_find_growdown(&current->vmas, cr2, 8 * 1024 * 1024);
+    if (vma) {
+      // Expand the stack VMA downward to cover the faulting page
+      vma->start = cr2 & ~0xFFFULL;
+    }
+  }
+
+  if (!vma) {
+    // No VMA covers this address → genuine segfault
+    return -1;
+  }
+
+  // ── PROT_NONE enforcement ──────────────────────────────────────────────
+  // A VMA with prot == PROT_NONE reserves address space but forbids access.
+  if (vma->prot == PROT_NONE) {
+    if (user_mode) {
+      klog_puts("[VMM] PROT_NONE access violation at 0x");
+      klog_uint64(cr2);
+      klog_puts("\n");
+    }
+    return -1;
+  }
+
+  // ── Permission check ──────────────────────────────────────────────────
+  // Validate that the fault type matches the VMA protection.
+  if (write_fault && !(vma->prot & PROT_WRITE)) {
+    if (user_mode) {
+      klog_puts("[VMM] Write to read-only VMA at 0x");
+      klog_uint64(cr2);
+      klog_puts("\n");
+    }
+    return -1;
+  }
+
+  // ── Allocate frame (Zero-Fill-on-Demand Engine) ────────────────────────
   void *frame = pmm_alloc_page();
   if (!frame) {
     klog_puts("[VMM] OOM during demand paging!\n");
@@ -842,11 +1008,13 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     return -1;
   }
 
+  // Zero the frame through HHDM
   uint64_t *frame_virt = (uint64_t *)PHYS_TO_VIRT((uint64_t)frame);
   for (int i = 0; i < 512; i++)
-    frame_virt[i] = 0; // Zero Out
+    frame_virt[i] = 0;
 
-  uint64_t flags = PAGE_FLAG_USER | PAGE_FLAG_PRESENT | PAGE_FLAG_RW;
+  // Derive PTE flags from the VMA's protection bits
+  uint64_t flags = dp_build_flags(vma->prot);
 
   if (!vmm_map_page((uint64_t *)target_cr3, cr2 & ~0xFFFULL, (uint64_t)frame,
                     flags)) {

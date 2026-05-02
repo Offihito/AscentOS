@@ -5,6 +5,7 @@
 #include "../../console/console.h"
 #include "../../console/klog.h"
 #include "../../cpu/isr.h"
+#include "../../cpu/irq.h"
 #include "../../dma/dma.h"
 #include "../../fb/framebuffer.h"
 #include "../../fs/vfs.h"
@@ -151,15 +152,8 @@ void sb16_init(void) {
   console_putchar('0' + (minor % 10));
   console_puts(").\n");
 
-  // Route IRQ 5 via APIC
   uint8_t irq = 5;
-  uint8_t vector = 32 + irq;
-  uint32_t gsi = irq;
-  uint16_t flags = 0;
-  acpi_get_irq_override(irq, &gsi, &flags);
-
-  register_interrupt_handler(vector, sb16_isr);
-  ioapic_route_irq((uint8_t)gsi, vector, (uint8_t)lapic_get_id(), flags);
+  irq_install_handler(irq, sb16_isr, 0);
 
   // Mute auxiliary inputs to eliminate analog background sizzle
   sb16_mixer_write(0x22, 0xFF); // Master Vol L/R

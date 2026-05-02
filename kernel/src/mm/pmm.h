@@ -19,6 +19,12 @@ void *pmm_alloc_pages_range(size_t count, uint64_t min_phys_addr, uint64_t max_p
 void pmm_free_page(void *ptr);                 // Free single page
 void pmm_free_pages(void *ptr, size_t count);  // Free multiple pages
 
+// Refcounting (for CoW)
+void pmm_incref(void *ptr);                    // Increment reference count
+void pmm_decref(void *ptr);                    // Decrement reference count (frees if 0)
+uint16_t pmm_get_ref(void *ptr);               // Get current reference count
+bool pmm_is_managed(uint64_t phys);            // Check if page is managed by PMM (RAM vs MMIO)
+
 // Compatibility aliases for existing code
 #define pmm_alloc pmm_alloc_page
 #define pmm_alloc_blocks pmm_alloc_pages
