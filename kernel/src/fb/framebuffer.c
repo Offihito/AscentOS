@@ -342,9 +342,21 @@ static uint64_t fb_vfs_mmap(struct vfs_node *node, uint64_t length,
   if (!(prot & FB_MMAP_PROT_EXEC))
     page_flags |= PAGE_FLAG_NX;
 
-  // Resolve physical address of the buffer to map
+  // Resolve physical address of the buffer to map.
+  // For the hardware framebuffer, Limine always provides an HHDM-mapped
+  // address, so we can compute the physical address directly via arithmetic.
+  // This avoids fragile page-table walking that can fail when QEMU's PCI
+  // layout shifts (e.g. adding -usb).  For heap buffers (x11_backbuffer),
+  // fall back to page-table walking.
   uint64_t *pml4 = vmm_get_active_pml4();
-  uint64_t real_phys = vmm_virt_to_phys(pml4, (uint64_t)buffer_to_map);
+  uint64_t real_phys;
+  if (buffer_to_map == fb->address) {
+    // Hardware framebuffer — always HHDM-mapped by Limine
+    real_phys = (uint64_t)buffer_to_map - pmm_get_hhdm_offset();
+  } else {
+    // Heap buffer (x11_backbuffer) — walk page tables
+    real_phys = vmm_virt_to_phys(pml4, (uint64_t)buffer_to_map);
+  }
   if (real_phys == 0) {
     klog_puts("[FB_MMAP] Error: failed to resolve physical address\n");
     return (uint64_t)-1;
@@ -720,6 +732,10 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
       x11_yoffset = var->yoffset;
     }
 
+    return 0;
+  }
+  case 0x4611: { // FBIO_WAITFORVSYNC
+    // Minimal implementation: just succeed to keep X11 happy
     return 0;
   }
   default:

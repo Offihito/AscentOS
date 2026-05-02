@@ -1,10 +1,10 @@
 #include "vmm.h"
 #include "../console/klog.h"
+#include "../lib/string.h"
 #include "pmm.h"
 #include "vma.h"
 #include <stddef.h>
 #include <stdint.h>
-#include "../lib/string.h"
 #define PHYS_TO_VIRT(p) ((void *)((uint64_t)(p) + pmm_get_hhdm_offset()))
 
 #include "../lock/spinlock.h"
@@ -577,11 +577,13 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
         new_virt[i] = src_virt[i];
       } else {
         // Private mapping: Use Copy-on-Write (CoW) if it's managed RAM.
-        // We MUST NOT use CoW for hardware addresses (MMIO), as they can't be copied.
+        // We MUST NOT use CoW for hardware addresses (MMIO), as they can't be
+        // copied.
         uint64_t phys = src_virt[i] & PAGE_MASK;
         if (pmm_is_managed(phys)) {
-          // If the page is writable, we make it read-only in both parent and child,
-          // and set the COW flag bit to track that it needs copying on write.
+          // If the page is writable, we make it read-only in both parent and
+          // child, and set the COW flag bit to track that it needs copying on
+          // write.
           if (src_virt[i] & PAGE_FLAG_RW) {
             src_virt[i] &= ~PAGE_FLAG_RW;
             src_virt[i] |= PAGE_FLAG_COW;
@@ -589,7 +591,7 @@ static uint64_t *clone_table_vma(uint64_t *src_table_phys, int level,
           }
           pmm_incref((void *)phys);
         }
-        
+
         new_virt[i] = src_virt[i];
       }
     } else {
@@ -909,19 +911,27 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     uint64_t virt = cr2 & PAGE_MASK;
 
     // Resolve the PTE
-    uint64_t *pdpt = (uint64_t *)PHYS_TO_VIRT(pml4[(virt >> 39) & 511] & PAGE_MASK);
-    if (!(pml4[(virt >> 39) & 511] & PAGE_FLAG_PRESENT)) return -1;
+    uint64_t *pdpt =
+        (uint64_t *)PHYS_TO_VIRT(pml4[(virt >> 39) & 511] & PAGE_MASK);
+    if (!(pml4[(virt >> 39) & 511] & PAGE_FLAG_PRESENT))
+      return -1;
 
-    uint64_t *pd = (uint64_t *)PHYS_TO_VIRT(pdpt[(virt >> 30) & 511] & PAGE_MASK);
-    if (!(pdpt[(virt >> 30) & 511] & PAGE_FLAG_PRESENT)) return -1;
-    if (pdpt[(virt >> 30) & 511] & PAGE_FLAG_PS) return -1; // No 1GB CoW
+    uint64_t *pd =
+        (uint64_t *)PHYS_TO_VIRT(pdpt[(virt >> 30) & 511] & PAGE_MASK);
+    if (!(pdpt[(virt >> 30) & 511] & PAGE_FLAG_PRESENT))
+      return -1;
+    if (pdpt[(virt >> 30) & 511] & PAGE_FLAG_PS)
+      return -1; // No 1GB CoW
 
     uint64_t *pt = (uint64_t *)PHYS_TO_VIRT(pd[(virt >> 21) & 511] & PAGE_MASK);
-    if (!(pd[(virt >> 21) & 511] & PAGE_FLAG_PRESENT)) return -1;
-    if (pd[(virt >> 21) & 511] & PAGE_FLAG_PS) return -1; // No 2MB CoW (for now)
+    if (!(pd[(virt >> 21) & 511] & PAGE_FLAG_PRESENT))
+      return -1;
+    if (pd[(virt >> 21) & 511] & PAGE_FLAG_PS)
+      return -1; // No 2MB CoW (for now)
 
     uint64_t *pte = &pt[(virt >> 12) & 511];
-    if (!(*pte & PAGE_FLAG_PRESENT)) return -1;
+    if (!(*pte & PAGE_FLAG_PRESENT))
+      return -1;
 
     // Is this a COW page?
     if (*pte & PAGE_FLAG_COW) {
@@ -931,14 +941,17 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       if (refs > 1) {
         // Multiple processes share this page. Copy it.
         void *new_phys = pmm_alloc_page();
-        if (!new_phys) return -1; // OOM
+        if (!new_phys)
+          return -1; // OOM
 
         // Copy content
-        memcpy(PHYS_TO_VIRT((uint64_t)new_phys), PHYS_TO_VIRT(old_phys), PAGE_SIZE);
+        memcpy(PHYS_TO_VIRT((uint64_t)new_phys), PHYS_TO_VIRT(old_phys),
+               PAGE_SIZE);
 
         // Update PTE: NEW physical page, RW=1, COW=0
-        *pte = ((uint64_t)new_phys & PAGE_MASK) | (*pte & ~PAGE_MASK & ~PAGE_FLAG_COW) | PAGE_FLAG_RW;
-        
+        *pte = ((uint64_t)new_phys & PAGE_MASK) |
+               (*pte & ~PAGE_MASK & ~PAGE_FLAG_COW) | PAGE_FLAG_RW;
+
         // Decrement refcount of the old page
         pmm_decref((void *)old_phys);
       } else {

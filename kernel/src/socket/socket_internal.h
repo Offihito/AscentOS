@@ -127,6 +127,7 @@ uint32_t socket_vfs_write(struct vfs_node *node, uint32_t offset, uint32_t size,
 void socket_vfs_open(struct vfs_node *node);
 void socket_vfs_close(struct vfs_node *node);
 int socket_vfs_poll(struct vfs_node *node, int events);
+int socket_vfs_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg);
 
 // ── Socket State Helpers
 // ──────────────────────────────────────────────────────

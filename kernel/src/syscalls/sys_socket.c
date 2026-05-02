@@ -315,6 +315,66 @@ struct msghdr {
   int msg_flags;          // Flags on received message
 };
 
+// ── Syscall: sendmsg(int sockfd, struct msghdr *msg, int flags)
+// ───────────────────────────────────────────────────────────────────
+static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
+                           uint64_t _arg3, uint64_t _arg4, uint64_t _arg5) {
+  (void)_arg3;
+  (void)_arg4;
+  (void)_arg5;
+
+  int fd = (int)sockfd;
+
+  // Validate msghdr pointer
+  if (!is_user_ptr(msg_ptr)) {
+    return (uint64_t)-14; // EFAULT
+  }
+
+  // Get socket from FD
+  socket_t *sock = socket_from_fd(fd);
+  if (!sock) {
+    return (uint64_t)-9; // EBADF
+  }
+
+  struct msghdr *msg = (struct msghdr *)msg_ptr;
+
+  // Validate iovec array
+  if (!is_user_ptr((uint64_t)msg->msg_iov)) {
+    return (uint64_t)-14; // EFAULT
+  }
+
+  // Send data from iovec buffers
+  ssize_t total_sent = 0;
+  for (size_t i = 0; i < msg->msg_iovlen; i++) {
+    struct iovec *iov = &msg->msg_iov[i];
+
+    if (!is_user_ptr((uint64_t)iov->iov_base)) {
+      return (uint64_t)-14; // EFAULT
+    }
+
+    if (iov->iov_len == 0) {
+      continue;
+    }
+
+    ssize_t ret = socket_send(sock, iov->iov_base, iov->iov_len, (int)flags);
+    if (ret < 0) {
+      if (total_sent > 0) {
+        return (uint64_t)total_sent;
+      }
+      return (uint64_t)ret;
+    }
+
+    total_sent += ret;
+
+    // If we sent less than requested, we're done (buffer full)
+    if ((size_t)ret < iov->iov_len) {
+      break;
+    }
+  }
+
+  return (uint64_t)total_sent;
+}
+
 // ── Syscall: recvmsg(int sockfd, struct msghdr *msg, int flags)
 // ───────────────────────────────────────────────────────────────────
 static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
@@ -371,6 +431,11 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
       break;
     }
   }
+
+  // Update msghdr fields for user space
+  msg->msg_namelen = 0;
+  msg->msg_controllen = 0;
+  msg->msg_flags = 0;
 
   return (uint64_t)total_received;
 }
@@ -684,6 +749,8 @@ void syscall_register_socket(void) {
   syscall_register(SYS_SHUTDOWN, sys_shutdown);
   syscall_register(SYS_SETSOCKOPT, sys_setsockopt);
   syscall_register(SYS_GETSOCKOPT, sys_getsockopt);
+  syscall_register(SYS_SENDMSG, sys_sendmsg);
+  syscall_register(SYS_RECVMSG, sys_recvmsg);
   syscall_register(SYS_GETSOCKNAME, sys_getsockname);
   syscall_register(SYS_GETPEERNAME, sys_getpeername);
 

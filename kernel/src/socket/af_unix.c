@@ -522,7 +522,7 @@ static ssize_t unix_send(socket_t *sock, const void *buf, size_t len,
       if (sent > 0)
         break; // Return what we sent so far
 
-      if (sock->flags & SOCK_NONBLOCK) {
+      if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) { // MSG_DONTWAIT is 0x40
         return -11; // EAGAIN
       }
 
@@ -568,7 +568,6 @@ static ssize_t unix_send(socket_t *sock, const void *buf, size_t len,
 }
 
 static ssize_t unix_recv(socket_t *sock, void *buf, size_t len, int flags) {
-  (void)flags;
   if (!sock || !sock->sk)
     return -9; // EBADF
 
@@ -577,8 +576,12 @@ static ssize_t unix_recv(socket_t *sock, void *buf, size_t len, int flags) {
   // For STREAM sockets, we can recv if connected or if we have data left but
   // peer disconnected
   if (sock->state != SS_CONNECTED && usk->recv_buf_head == usk->recv_buf_tail) {
-    if (sock->state == SS_UNCONNECTED)
-      return -107; // ENOTCONN
+    if (sock->state == SS_UNCONNECTED) {
+      // For AF_UNIX, if the peer has closed, read should return 0 (EOF)
+      // ENOTCONN is only for sockets that were NEVER connected.
+      // Given our simple state machine, 0 is safer for X11 apps.
+      return 0;      // EOF
+    }
     return 0;      // EOF
   }
 
@@ -606,7 +609,7 @@ static ssize_t unix_recv(socket_t *sock, void *buf, size_t len, int flags) {
         return 0;
       }
 
-      if (sock->flags & SOCK_NONBLOCK) {
+      if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) { // MSG_DONTWAIT is 0x40
         return -11;    // EAGAIN
       }
 
@@ -630,22 +633,26 @@ static ssize_t unix_recv(socket_t *sock, void *buf, size_t len, int flags) {
 
     // Copy from ring buffer
     for (size_t i = 0; i < to_copy; i++) {
-      dest[received + i] = usk->recv_buf[head];
-      head = (head + 1) % size;
+      dest[received + i] = usk->recv_buf[(head + i) % size];
     }
 
-    usk->recv_buf_head = head;
-    received += to_copy;
+    if (!(flags & 0x02)) { // MSG_PEEK is 0x02
+      usk->recv_buf_head = (head + to_copy) % size;
+    }
 
     spinlock_release(&usk->recv_lock);
+    received += to_copy;
 
-    // Wake up any senders waiting for space in our buffer
-    wait_queue_wake_all(&usk->wait);
+    // For DGRAM, one recv() = one packet.
+    // For STREAM, we can continue to fill the buffer if more data is available.
+    if (sock->type == SOCK_DGRAM)
+      break;
+  }
+  wait_queue_wake_all(&usk->wait);
 
-    // Notify peer that their send buffer has space (POLLOUT)
-    if (usk->peer && usk->peer->parent && usk->peer->parent->node) {
-      epoll_notify_event(usk->peer->parent->node, EPOLLOUT | EPOLLWRNORM);
-    }
+  // Notify peer that their send buffer has space (POLLOUT)
+  if (usk->peer && usk->peer->parent && usk->peer->parent->node) {
+    epoll_notify_event(usk->peer->parent->node, EPOLLOUT | EPOLLWRNORM);
   }
 
   return (ssize_t)received;
@@ -1063,6 +1070,41 @@ static int unix_poll(socket_t *sock, int events) {
 // ── AF_UNIX Operations Vector
 // ──────────────────────────────────────────────────
 
+static int unix_ioctl(socket_t *sock, uint32_t request, uint64_t arg) {
+  if (!sock || !sock->sk)
+    return -22;
+  unix_sock_t *usk = (unix_sock_t *)sock->sk;
+
+  switch (request) {
+  case 0x541B: { // FIONREAD
+    int *val = (int *)arg;
+    if (!val)
+      return -14; // EFAULT
+    spinlock_acquire(&usk->recv_lock);
+    size_t head = usk->recv_buf_head;
+    size_t tail = usk->recv_buf_tail;
+    size_t size = usk->recv_buf_size;
+    size_t available = (tail - head + size) % size;
+    *val = (int)available;
+    spinlock_release(&usk->recv_lock);
+    return 0;
+  }
+  case 0x5421: { // FIONBIO
+    int *val = (int *)arg;
+    if (!val)
+      return -14;
+    if (*val) {
+      sock->flags |= SOCK_NONBLOCK;
+    } else {
+      sock->flags &= ~SOCK_NONBLOCK;
+    }
+    return 0;
+  }
+  default:
+    return -25; // ENOTTY
+  }
+}
+
 static sock_ops_t unix_ops = {.bind = unix_bind,
                               .connect = unix_connect,
                               .listen = unix_listen,
@@ -1075,6 +1117,7 @@ static sock_ops_t unix_ops = {.bind = unix_bind,
                               .setsockopt = unix_setsockopt,
                               .shutdown = unix_shutdown,
                               .poll = unix_poll,
+                              .ioctl = unix_ioctl,
                               .destroy = unix_destroy};
 
 // ── AF_UNIX Socket Creation

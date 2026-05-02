@@ -131,6 +131,7 @@ typedef struct sock_ops {
                     const void *optval, int optlen);
   int (*shutdown)(struct socket *sock, int how);
   int (*poll)(struct socket *sock, int events);
+  int (*ioctl)(struct socket *sock, uint32_t request, uint64_t arg);
   void (*destroy)(struct socket *sock);
 } sock_ops_t;
 

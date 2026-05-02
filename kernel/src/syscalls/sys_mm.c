@@ -109,8 +109,8 @@ static void teardown_range(uint64_t *pml4, struct thread *t, uint64_t base,
 // Linux ABI: mmap(addr, length, prot, flags, fd, offset)
 //   rdi=addr  rsi=length  rdx=prot  r10=flags  r8=fd  r9=offset
 // ════════════════════════════════════════════════════════════════════════════
-uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
-                 uint64_t flags, uint64_t fd, uint64_t offset) {
+uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
+                  uint64_t fd, uint64_t offset) {
   (void)offset;
 
   /*
@@ -267,8 +267,8 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot,
 // Linux ABI: munmap(addr, length)
 //   rdi=addr  rsi=length
 // ════════════════════════════════════════════════════════════════════════════
-uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2,
-                   uint64_t a3, uint64_t a4, uint64_t a5) {
+uint64_t sys_munmap(uint64_t addr, uint64_t length, uint64_t a2, uint64_t a3,
+                    uint64_t a4, uint64_t a5) {
   (void)a2;
   (void)a3;
   (void)a4;

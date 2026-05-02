@@ -433,6 +433,7 @@ int socket_alloc_fd(socket_t *sock) {
   node->open = socket_vfs_open;
   node->close = socket_vfs_close;
   node->poll = socket_vfs_poll;
+  node->ioctl = socket_vfs_ioctl;
 
   sock->fd = fd;
   sock->node = node;
@@ -510,7 +511,7 @@ uint32_t socket_vfs_read(struct vfs_node *node, uint32_t offset, uint32_t size,
     return 0;
 
   ssize_t ret = socket_recv(sock, buffer, size, 0);
-  return ret > 0 ? (uint32_t)ret : 0;
+  return (uint32_t)ret;
 }
 
 uint32_t socket_vfs_write(struct vfs_node *node, uint32_t offset, uint32_t size,
@@ -525,7 +526,7 @@ uint32_t socket_vfs_write(struct vfs_node *node, uint32_t offset, uint32_t size,
     return 0;
 
   ssize_t ret = socket_send(sock, buffer, size, 0);
-  return ret > 0 ? (uint32_t)ret : 0;
+  return (uint32_t)ret;
 }
 
 void socket_vfs_open(struct vfs_node *node) {
@@ -562,6 +563,20 @@ int socket_vfs_poll(struct vfs_node *node, int events) {
       revents |= POLLOUT;
   }
   return revents;
+}
+
+int socket_vfs_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
+  if (!node)
+    return -25; // ENOTTY
+
+  socket_t *sock = (socket_t *)node->device;
+  if (!sock)
+    return -25; // ENOTTY
+
+  if (sock->ops && sock->ops->ioctl)
+    return sock->ops->ioctl(sock, request, arg);
+
+  return -25; // ENOTTY
 }
 
 // ── Family Registration

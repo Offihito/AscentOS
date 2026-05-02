@@ -115,7 +115,7 @@ static inline uint32_t get_initial_apic_id(void) {
 static volatile struct cpu_info *starting_cpu = NULL;
 
 void ap_main(void) {
-  console_puts("AP IN MAIN!\n");
+  klog_puts("AP IN MAIN!\n");
 
   // We are now in 64-bit Long Mode!
 
@@ -144,11 +144,11 @@ void ap_main(void) {
   // Mark as online to unblock the BSP's boot loop
   current->status = CPU_STATUS_ONLINE;
 
-  console_puts("     AP Woke up! CPU ");
-  print_uint32(current->cpu_id);
-  console_puts(" (APIC ID 0x");
-  print_hex32(current->apic_id);
-  console_puts(") ONLINE.\n");
+  klog_puts("     AP Woke up! CPU ");
+  klog_uint64(current->cpu_id);
+  klog_puts(" (APIC ID ");
+  klog_hex32(current->apic_id);
+  klog_puts(") ONLINE.\n");
 
   // Endless loop, waiting for IPIs or scheduler interrupts
   while (1) {

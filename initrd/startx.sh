@@ -1,5 +1,5 @@
 #!/bin/sh
-# Xfbdev ile X server başlat ve xeyes'i çalıştır
+# Xfbdev ile X server başlat ve twm + xeyes çalıştır
 
 echo "X server başlatılıyor..."
 
@@ -8,20 +8,31 @@ Xfbdev :0 -retro -xkbdir /share/X11/xkb \
     -mouse evdev,,device=/dev/input/event1 \
     -keybd evdev,,device=/dev/input/event0 &
 
-# X server'ın tam olarak başlaması için kısa bir bekleme
-sleep 3
+# X server'ın tam olarak başlaması için bekle
+sleep 1
 
-echo "X server hazır, xeyes başlatılıyor..."
+echo "X server hazır, uygulamalar başlatılıyor..."
 
-# DISPLAY ortam değişkenini ayarla ve xeyes'i çalıştır
+# DISPLAY ortam değişkenini ayarla
 export DISPLAY=:0
 
-# xeyes root klasöründe ise tam yolu kullan
-if [ -x /xeyes ]; then
-    /xeyes &
+# twm (Pencere yöneticisi önce başlatılmalı)
+if [ -x /twm ]; then
+    echo "twm başlatılıyor..."
+    /twm &
+elif command -v twm >/dev/null 2>&1; then
+    echo "twm (sistem yolu ile) başlatılıyor..."
+    twm &
 else
-    echo "Hata: /xeyes bulunamadı veya çalıştırılabilir değil!"
-    exit 1
+    echo "Uyarı: twm bulunamadı!"
 fi
 
-echo "xeyes başlatıldı. Gözler fareyi takip etmeli."
+# xeyes
+if [ -x /xeyes ]; then
+    echo "xeyes başlatılıyor..."
+    /xeyes &
+else
+    echo "Uyarı: /xeyes bulunamadı!"
+fi
+
+echo "Tamamlandı. twm ve xeyes çalıştırıldı."

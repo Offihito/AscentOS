@@ -1,8 +1,8 @@
 #include "audio_dsp.h"
 #include "ac97.h"
 #include "sb16.h"
-#include "../../fb/framebuffer.h"
 #include "../../fs/vfs.h"
+#include "../../fb/framebuffer.h"
 #include "../../lib/string.h"
 #include "../../mm/heap.h"
 #include <stdbool.h>
@@ -87,6 +87,6 @@ void audio_dsp_register_vfs(void) {
   node->write = dsp_vfs_write;
   node->ioctl = dsp_vfs_ioctl;
   
-  // Register as /dev/dsp - this will be the single entry point for audio
+  // Register in internal device registry
   fb_register_device_node("dsp", node);
 }

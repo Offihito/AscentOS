@@ -639,12 +639,10 @@ static uint64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2,
 
   strcpy(buf->sysname, "AscentOS");
   strcpy(buf->nodename, "ascentos");
-  strcpy(buf->release, "0.1");
-  strcpy(buf->version, "1.0");
+  strcpy(buf->release, "0.1.0-alpha");
+  strcpy(buf->version, "#1 SMP PREEMPT Sat May 2 15:09:27 UTC 2026");
   strcpy(buf->machine, "x86_64");
-  strcpy(buf->domainname, "Ascent");
-
-  strcpy(buf->domainname, "Ascent");
+  strcpy(buf->domainname, "ascent-os.org");
 
   return 0;
 }

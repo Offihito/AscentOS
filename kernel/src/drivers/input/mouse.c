@@ -1,7 +1,7 @@
 #include "drivers/input/mouse.h"
 #include "../../console/klog.h"
-#include "../../cpu/isr.h"
 #include "../../cpu/irq.h"
+#include "../../cpu/isr.h"
 #include "../../fb/framebuffer.h"
 #include "../../fs/vfs.h"
 #include "../../io/io.h"
@@ -24,7 +24,7 @@ static uint8_t mouse_cycle = 0;
 static uint8_t mouse_packet[3];
 
 static void mouse_wait(uint8_t type) {
-  uint32_t timeout = 1000; // Reduced from 100000
+  uint32_t timeout = 100000;
   if (type == 0) {
     while (!(inb(MOUSE_STATUS_PORT) & 1) && timeout--) {
       io_wait();
@@ -33,6 +33,9 @@ static void mouse_wait(uint8_t type) {
     while ((inb(MOUSE_STATUS_PORT) & 2) && timeout--) {
       io_wait();
     }
+  }
+  if (timeout == 0) {
+    klog_puts("[MOUSE] Warning: mouse_wait timeout!\n");
   }
 }
 

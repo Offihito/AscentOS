@@ -1,4 +1,5 @@
 // ── I/O Syscalls: read, write, close, open, lseek ────────────────────────────
+#include "../apic/lapic_timer.h"
 #include "../console/console.h"
 #include "../console/klog.h"
 #include "../drivers/audio/sb16.h"
@@ -362,11 +363,14 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a3,
     return (uint64_t)-9; // EBADF
 
   vfs_node_t *node = t->fds[fd];
-  uint32_t bytes_read =
-      vfs_read(node, t->fd_offsets[fd], count, (uint8_t *)buf);
-  t->fd_offsets[fd] += bytes_read;
+  int32_t bytes_read =
+      (int32_t)vfs_read(node, t->fd_offsets[fd], count, (uint8_t *)buf);
 
-  return bytes_read;
+  if (bytes_read > 0) {
+    t->fd_offsets[fd] += (uint32_t)bytes_read;
+  }
+
+  return (uint64_t)(int64_t)bytes_read;
 }
 
 static uint64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2,
@@ -405,9 +409,13 @@ static int64_t fd_write(int fd, const void *buf, size_t count) {
     return -9; // EBADF
 
   vfs_node_t *node = t->fds[fd];
-  uint32_t bytes_written =
-      vfs_write(node, t->fd_offsets[fd], count, (uint8_t *)buf);
-  t->fd_offsets[fd] += bytes_written;
+  int32_t bytes_written =
+      (int32_t)vfs_write(node, t->fd_offsets[fd], count, (uint8_t *)buf);
+
+  if (bytes_written > 0) {
+    t->fd_offsets[fd] += (uint32_t)bytes_written;
+  }
+
   return (int64_t)bytes_written;
 }
 
@@ -474,7 +482,8 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
   if (!is_console_fd) {
     if (!t->fds[fd])
       return (uint64_t)-9;
-    if ((t->fds[fd]->flags & 0xFF) != FS_CHARDEV)
+    if ((t->fds[fd]->flags & 0xFF) != FS_CHARDEV &&
+        (t->fds[fd]->flags & 0xFF) != FS_SOCKET)
       return (uint64_t)-25; // ENOTTY
 
     vfs_node_t *node = t->fds[fd];
@@ -1364,11 +1373,21 @@ static uint64_t sys_readv(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
       return (uint64_t)-9; // EBADF
 
     vfs_node_t *node = t->fds[fd];
-    uint32_t bytes_read =
-        vfs_read(node, t->fd_offsets[fd], len, (uint8_t *)base);
-    t->fd_offsets[fd] += bytes_read;
-    total += bytes_read;
-    if (bytes_read < len)
+    int32_t bytes_read =
+        (int32_t)vfs_read(node, t->fd_offsets[fd], len, (uint8_t *)base);
+
+    if (bytes_read < 0) {
+      if (total > 0)
+        break;
+      return (uint64_t)(int64_t)bytes_read;
+    }
+
+    if (bytes_read > 0) {
+      t->fd_offsets[fd] += (uint32_t)bytes_read;
+    }
+
+    total += (size_t)bytes_read;
+    if ((uint32_t)bytes_read < len)
       break; // Short read
   }
   return total;
@@ -2250,17 +2269,17 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
     }
   }
 
-  // If nothing ready and timeout > 0, yield and try again
-  // (Simplified: real implementation would block on wait queues)
-  if (ready == 0 && timeout_ms > 0) {
-    // Yield multiple times based on timeout (approx 10ms per yield)
-    uint64_t max_iterations = timeout_ms / 10;
-    if (max_iterations < 1)
-      max_iterations = 1;
-    if (max_iterations > 100)
-      max_iterations = 100; // Cap at ~1 second
+  // If nothing ready and timeout_ms != 0, yield and try again
+  if (ready == 0 && timeout_ms != 0) {
+    uint64_t start_ms = lapic_timer_get_ms();
+    while (ready == 0) {
+      // Check if we've exceeded the timeout
+      if (timeout_ms != (uint64_t)-1) {
+        if (lapic_timer_get_ms() - start_ms >= timeout_ms) {
+          break;
+        }
+      }
 
-    for (uint64_t iter = 0; iter < max_iterations && ready == 0; iter++) {
       sched_yield();
 
       for (uint64_t i = 0; i < nfds; i++) {
@@ -2268,7 +2287,7 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
         short events = fds[i].events;
 
         if (fd < 0 || fd >= MAX_FDS || !t->fds[fd]) {
-          continue; // Already marked POLLNVAL
+          continue;
         }
 
         vfs_node_t *node = t->fds[fd];

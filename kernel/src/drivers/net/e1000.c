@@ -487,8 +487,8 @@ void e1000_init(void) {
   // Also enable memory space access in the PCI command register
   uint32_t cmd = pci_config_read32(dev->bus, dev->slot, dev->func, 0x04);
   cmd |= (1 << 1);  // Memory Space Enable
-  cmd |= (1 << 10); // Disable interrupt disable bit (INTx)
-  pci_config_write32(dev->bus, dev->slot, dev->func, 0x04, cmd & 0xFFFF);
+  cmd &= ~(1 << 10); // ENABLE interrupts (clear Interrupt Disable bit)
+  pci_config_write16(dev->bus, dev->slot, dev->func, 0x04, (uint16_t)cmd);
 
   // ── Step 4: Software reset ──────────────────────────────────────────
   uint32_t ctrl = e1000_read(E1000_CTRL);

@@ -459,7 +459,8 @@ static void execute_command(char *cmd) {
     // 2. Mock a VMA list to satisfy the clone function
     struct vma_list vmas;
     vma_list_init(&vmas);
-    // Use Linux-style PROT_READ|PROT_WRITE (1|2) and MAP_PRIVATE|MAP_ANONYMOUS (2|32)
+    // Use Linux-style PROT_READ|PROT_WRITE (1|2) and MAP_PRIVATE|MAP_ANONYMOUS
+    // (2|32)
     vma_add(&vmas, vaddr, vaddr + 4096, 0x1 | 0x2, 0x02 | 0x20, -1, 0);
 
     console_puts("Original page refcount: ");

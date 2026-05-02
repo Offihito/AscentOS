@@ -128,6 +128,12 @@ build_coreutils() {
         --enable-no-install-program=stdbuf,timeout,chroot \
         CFLAGS="-static -O2 -fno-stack-protector -I$PREFIX/include" \
         LDFLAGS="-static -L$PREFIX/lib"
+    
+    # Patch config.h to report "Ascent" instead of "GNU/Linux" in uname -o
+    if [ -f lib/config.h ]; then
+        echo "Patching lib/config.h for OS name ..."
+        sed -i 's/HOST_OPERATING_SYSTEM "GNU\/Linux"/HOST_OPERATING_SYSTEM "Ascent"/' lib/config.h
+    fi
 
     echo "Building Coreutils (this may take a while) ..."
     make -j"$JOBS"

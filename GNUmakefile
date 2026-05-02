@@ -40,6 +40,7 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-device sb16,audiodev=snd0 \
 		-device AC97,audiodev=snd0 \
 		-netdev user,id=net0 \
+		-usb \
 		$(QEMUFLAGS)
 
 .PHONY: run-bios
@@ -55,7 +56,7 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/lua.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xkbcomp.elf userland/test_shared_irq.elf initrd/startx.sh
+disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/lua.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/xeyes.elf userland/xterm.elf userland/test_x11_simple.elf userland/xkbcomp.elf userland/test_shared_irq.elf initrd/startx.sh
 	dd if=/dev/zero of=disk.img bs=1M count=256
 	mkfs.ext3 -F disk.img
 	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
@@ -196,6 +197,11 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf us
 		debugfs -w -R "mkdir share" disk.img 2>/dev/null || true; \
 		debugfs -w -R "mkdir share/X11" disk.img 2>/dev/null || true; \
 		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/share/X11/xkb share/X11/xkb; \
+		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/share/X11/locale share/X11/locale; \
+		debugfs -w -R "write toolchain/musl-sysroot/share/X11/XErrorDB share/X11/XErrorDB" disk.img; \
+		debugfs -w -R "write toolchain/musl-sysroot/share/X11/Xcms.txt share/X11/Xcms.txt" disk.img; \
+		debugfs -w -R "mkdir share/X11/app-defaults" disk.img 2>/dev/null || true; \
+		debugfs -w -R "write build/xterm/xterm-389/XTerm.ad share/X11/app-defaults/XTerm" disk.img; \
 		debugfs -w -R "mkdir home" disk.img 2>/dev/null || true; \
 		debugfs -w -R "mkdir home/offihito" disk.img 2>/dev/null || true; \
 		debugfs -w -R "mkdir home/offihito/AscentOS" disk.img 2>/dev/null || true; \
@@ -210,6 +216,15 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf us
 	@if [ -f userland/twm.elf ]; then \
 		echo "Installing twm into disk image..."; \
 		debugfs -w -R "write userland/twm.elf twm" disk.img; \
+	fi
+	@if [ -f userland/xterm.elf ]; then \
+		echo "Installing xterm into disk image..."; \
+		debugfs -w -R "write userland/xterm.elf bin/xterm" disk.img; \
+		if [ -d toolchain/musl-sysroot/share/terminfo ]; then \
+			echo "Installing terminfo data..."; \
+			debugfs -w -R "mkdir share" disk.img 2>/dev/null || true; \
+			./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/share/terminfo share/terminfo; \
+		fi \
 	fi
 	@if [ -f userland/xeyes.elf ] || [ -f userland/twm.elf ]; then \
 		debugfs -w -R "write userland/test_x11_simple.elf bin/test_x11_simple" disk.img; \

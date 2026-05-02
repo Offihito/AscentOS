@@ -24,6 +24,7 @@
 #include "drivers/storage/block.h"
 #include "drivers/timer/pit.h"
 #include "drivers/timer/rtc.h"
+#include "drivers/usb/uhci.h"
 #include "drivers/virtio/virtio.h"
 #include "drivers/virtio/virtio_gpu.h"
 #include "fb/framebuffer.h"
@@ -120,6 +121,11 @@ void restart_main_session(void) {
 }
 
 static void init_thread_entry(void) {
+  klog_puts("[INIT] Init thread started\n");
+  // Clear console only once when userland starts
+  console_clear();
+  klog_puts("[INIT] Console cleared, starting session...\n");
+
   while (1) {
     const char *bash_argv[] = {"/bin/bash", NULL};
 
@@ -129,12 +135,19 @@ static void init_thread_entry(void) {
     }
 
     if (!process_exec_argv(bash_argv)) {
-      klog_puts(
-          "\n[ERR] Failed to start Bash. Falling back to kernel shell.\n");
+      klog_puts("\n[ERR] Failed to start Bash. Falling back to shell.\n");
       shell_init();
       shell_run();
       break;
     }
+  }
+}
+
+static void net_thread_entry(void) {
+  klog_puts("[NET] Background thread started\n");
+  while (1) {
+    net_poll();
+    sched_yield();
   }
 }
 
@@ -242,10 +255,6 @@ void kmain(void) {
   acpi_init(rsdp_request.response);
 
   // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 4.5: (Moved to end of Phase 5)
-  // ═══════════════════════════════════════════════════════════════════════
-
-  // ═══════════════════════════════════════════════════════════════════════
   //  Phase 5: Transition from legacy PIC → APIC
   // ═══════════════════════════════════════════════════════════════════════
   uint32_t lapic_base = acpi_get_lapic_base();
@@ -279,8 +288,6 @@ void kmain(void) {
     // This automates ACPI overrides and transitions all early-registered
     // legacy IRQs to the I/O APIC path.
     irq_manager_sync();
-
-    // ── 5f. Switch ISR EOI routing to LAPIC ─────────────────────────────
 
     // ── 5f. Switch ISR EOI routing to LAPIC ─────────────────────────────
     isr_set_apic_mode(true);
@@ -332,6 +339,8 @@ void kmain(void) {
   random_register_vfs();
 
   pci_init();
+  uhci_init();
+  uhci_self_test();
 
   // ── VirtIO subsystem ─────────────────────────────────────────────────────
   virtio_self_test();     // Phase 1: virtqueue foundation tests
@@ -339,86 +348,59 @@ void kmain(void) {
   virtio_gpu_self_test(); // Phase 2: GPU device tests
 
   ahci_init();
-  nic_init();
-  net_init();
-  ac97_init();
-  ac97_register_vfs();
-  sb16_init();
-  sb16_register_vfs();
-  audio_dsp_register_vfs();
 
-  int devs = block_count();
-  klog_puts("[DIAG] Available Block Devices (via Block API):\n");
-  for (int i = 0; i < devs; i++) {
-    struct block_device *dev = block_get(i);
-    if (!dev)
-      continue;
-    klog_puts("   > ");
-    klog_puts(dev->name);
-    klog_puts("\n");
-  }
-
-  // Mount ext2 as root filesystem
-  struct block_device *disk = block_get(0);
-  if (disk) {
-    if (ext2_mount_root(disk) == 0) {
-      // Create /dev and /tmp on ext2 if they don't exist
-      vfs_node_t *dev_dir = vfs_finddir(fs_root, "dev");
-      if (!dev_dir) {
-        vfs_mkdir(fs_root, "dev", 0755);
-        dev_dir = vfs_finddir(fs_root, "dev");
-      } else {
-        kfree(dev_dir);
-        dev_dir = vfs_finddir(fs_root, "dev");
-      }
-      vfs_node_t *tmp_dir = vfs_finddir(fs_root, "tmp");
-      if (!tmp_dir) {
-        vfs_mkdir(fs_root, "tmp", 0777);
-        tmp_dir = vfs_finddir(fs_root, "tmp");
-      }
-
-      // Mount ramfs on /tmp for socket support and performance
-      if (tmp_dir) {
-        ramfs_mount_on(tmp_dir);
-        klog_puts("[OK] Mounted ramfs on /tmp\n");
-      }
-      // Re-register block devices to the new /dev
+  // ── Mount root filesystem ──
+  struct block_device *boot_dev = block_get(0);
+  if (boot_dev) {
+    klog_puts("[INFO] Mounting root filesystem from ");
+    klog_puts(boot_dev->name);
+    klog_puts("...\n");
+    if (ext2_mount_root(boot_dev) == 0) {
+      klog_puts("[OK] Root filesystem mounted successfully.\n");
+      // Re-populate /dev in the new root
       block_repopulate_devices();
-      // Re-register framebuffer and console devices
       fb_register_vfs();
-      ac97_register_vfs();
-      sb16_register_vfs();
+      mouse_register_vfs();
+      random_register_vfs();
+    } else {
+      klog_puts("[ERR] Failed to mount root filesystem.\n");
     }
   } else {
-    klog_puts("[WARN] No block device found for ext2 root mount.\n");
+    klog_puts("[WARN] No bootable block device found.\n");
+  }
+
+  nic_init();
+  sb16_init();
+  ac97_init();
+
+  // Driver VFS registration MUST happen after hardware init
+  sb16_register_vfs();
+  ac97_register_vfs();
+  audio_dsp_register_vfs();
+
+  // Initialize networking BEFORE spawning init thread so DHCP completes first
+  if (nic_is_present()) {
+    net_init();
+    // FORCE Net thread to CPU 3 to avoid BSP contention
+    sched_create_kernel_thread(net_thread_entry, cpu_get_info(3), true);
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 7: Interactive shell
+  //  Phase 7: Userland
   // ═══════════════════════════════════════════════════════════════════════
-  klog_puts("[OK] Reclaiming Limine Bootloader Memory...\n");
-  pmm_reclaim_bootloader();
-  klog_puts("     Optimized Usable RAM: ");
-  klog_uint64(pmm_get_usable_memory() / (1024 * 1024));
-  klog_puts(" MB\n\n");
+  klog_puts("\n[OK] Kernel initialization complete.\n");
+  klog_puts("[INFO] Spawning init thread...\n\n");
 
-  klog_puts("\nKernel initialization complete.\n");
+  // FORCE Init thread to BSP to ensure it gets first slice
+  struct thread *init_thread =
+      sched_create_kernel_thread(init_thread_entry, cpu_get_bsp(), true);
+  if (!init_thread) {
+    klog_puts("[ERR] Failed to create init thread!\n");
+    halt();
+  }
 
-  console_clear();
-
-  // Create a dedicated kernel thread for the init process (Bash)
-  sched_create_kernel_thread(init_thread_entry, cpu_get_info(0), true);
-
-  // Switch the CPU stack pointer away from the Limine boot stack,
-  // since it was just reclaimed by the physical memory manager.
-  // We become the idle thread for the BSP.
-  uint64_t bsp_stack = cpu_get_bsp()->stack_top;
-  __asm__ volatile("mov %0, %%rsp\n"
-                   "mov %0, %%rbp\n" ::"r"(bsp_stack)
-                   : "memory");
-
-  while (1) {
-    sched_yield();
+  // This loop should never really be reached as the scheduler takes over
+  for (;;) {
     __asm__ volatile("hlt");
   }
 }
