@@ -361,18 +361,42 @@ unlock:
   spinlock_release(&vmm_lock);
 }
 
-// Recursively walks the page structure starting at phys and marks every
-// physical page used as a table in the PMM bitmap.
 static void vmm_protect_table_recursive(uint64_t phys, int level) {
   if (level < 1)
     return;
-  pmm_mark_used((void *)phys, 1);
+
+  // IMPORTANT: We only protect the page if it's actually in a reclaimable
+  // region. If we blindly protect everything in the HHDM, we'd mark all
+  // of physical RAM as "used".
+  if (pmm_is_reclaimable(phys)) {
+    pmm_mark_used((void *)phys, 1);
+  }
 
   uint64_t *virt = (uint64_t *)PHYS_TO_VIRT(phys);
   for (int i = 0; i < 512; i++) {
     uint64_t entry = virt[i];
-    if ((entry & PAGE_FLAG_PRESENT) && !(entry & PAGE_FLAG_PS) && level > 1) {
-      vmm_protect_table_recursive(entry & PAGE_MASK, level - 1);
+    if (!(entry & PAGE_FLAG_PRESENT))
+      continue;
+
+    // Recurse or protect leaf
+    if (level > 1) {
+      if (entry & PAGE_FLAG_PS) {
+        // Leaf Huge Page (Level 2 = 2MB, Level 3 = 1GB)
+        uint64_t leaf_phys = entry & PAGE_MASK;
+        if (pmm_is_reclaimable(leaf_phys)) {
+          size_t page_count = (level == 3) ? 0x40000 : 0x200;
+          pmm_mark_used((void *)leaf_phys, page_count);
+        }
+      } else {
+        // Sub-table (we always protect table pages themselves if reclaimable)
+        vmm_protect_table_recursive(entry & PAGE_MASK, level - 1);
+      }
+    } else {
+      // Level 1: Leaf 4KB page
+      uint64_t leaf_phys = entry & PAGE_MASK;
+      if (pmm_is_reclaimable(leaf_phys)) {
+        pmm_mark_used((void *)leaf_phys, 1);
+      }
     }
   }
 }

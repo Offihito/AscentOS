@@ -47,6 +47,14 @@ struct usb_device_descriptor {
   uint8_t num_configurations;
 } __attribute__((packed));
 
+// ── Host Controller Interface ──────────────────────────────────────────────
+struct usb_hcd {
+  void *priv; // Pointer to controller-specific state (e.g. uhci_controller)
+  int (*control_transfer)(struct usb_hcd *hcd, uint8_t addr,
+                          struct usb_control_request *req, void *data,
+                          uint16_t len, bool low_speed);
+};
+
 // ── Device Structure ────────────────────────────────────────────────────────
 struct usb_device {
   uint8_t address;
@@ -54,7 +62,7 @@ struct usb_device {
   bool connected;
   bool low_speed;
   struct usb_device_descriptor desc;
-  void *controller; // Pointer to host controller (e.g. uhci_controller)
+  struct usb_hcd *hcd; // Reference to the host controller driver
 };
 
 // ── Core API ────────────────────────────────────────────────────────────────
@@ -63,6 +71,6 @@ void usb_init(void);
 void usb_enumerate_device(struct usb_device *dev);
 
 // Called by HC driver when a new device is detected on a root hub port
-void usb_device_discovered(void *hc, uint8_t port, bool low_speed);
+void usb_device_discovered(struct usb_hcd *hcd, uint8_t port, bool low_speed);
 
 #endif

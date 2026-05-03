@@ -41,6 +41,7 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-device AC97,audiodev=snd0 \
 		-netdev user,id=net0 \
 		-usb \
+		-device pci-ohci,id=ohci \
 		-device usb-kbd -device usb-mouse \
 		$(QEMUFLAGS)
 

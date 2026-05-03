@@ -27,6 +27,7 @@
 #include "../../mm/dma_alloc.h"
 #include "../input/evdev.h"
 #include "../input/mouse.h"
+#include "ohci.h"
 #include "uhci.h"
 #include "usb.h"
 #include <stdbool.h>
@@ -81,7 +82,7 @@ struct usb_endpoint_descriptor_m {
 
 struct usb_mouse_state {
   struct usb_device *dev;
-  struct uhci_controller *hc;
+  struct uhci_controller *hc; // Non-NULL only for UHCI-backed devices
   uint8_t ep_addr;       // Endpoint address (direction bit + endpoint number)
   uint8_t ep_number;     // Endpoint number (0-15)
   uint16_t max_packet;   // Max packet size from endpoint descriptor
@@ -95,11 +96,14 @@ struct usb_mouse_state {
   // Previous button state for detecting press/release transitions
   uint8_t prev_buttons;
 
-  // Interrupt transfer scheduling
+  // Interrupt transfer scheduling (UHCI path)
   struct uhci_td *int_td;
   uint32_t int_td_phys;
   struct uhci_qh *int_qh;
   uint32_t int_qh_phys;
+
+  // Interrupt transfer scheduling (OHCI path)
+  struct ohci_int_pipe *ohci_pipe;
 
   bool active;
 };
@@ -286,7 +290,15 @@ bool usb_mouse_probe(struct usb_device *dev) {
   if (mouse_count >= MAX_USB_MICE)
     return false;
 
-  struct uhci_controller *hc = (struct uhci_controller *)dev->controller;
+  // Only cast to uhci_controller if this device is actually on a UHCI HCD.
+  struct uhci_controller *hc = NULL;
+  for (int i = 0; i < uhci_get_controller_count(); i++) {
+    struct uhci_controller *candidate = uhci_get_controller(i);
+    if (candidate && dev->hcd->priv == candidate) {
+      hc = candidate;
+      break;
+    }
+  }
   struct usb_control_request req;
 
   // 1. Read the Configuration Descriptor (first 9 bytes to get total length)
@@ -297,7 +309,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 9;
 
-  int res = uhci_control_transfer(hc, dev->address, &req, config_buf, 9,
+  int res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf, 9,
                                   dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-MOUSE] Failed to get config descriptor header\n");
@@ -312,7 +324,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
 
   // Read the full configuration descriptor bundle
   req.length = total_len;
-  res = uhci_control_transfer(hc, dev->address, &req, config_buf, total_len,
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf, total_len,
                               dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-MOUSE] Failed to get full config descriptor\n");
@@ -393,7 +405,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = uhci_control_transfer(hc, dev->address, &req, NULL, 0, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0, dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-MOUSE] SET_CONFIGURATION failed\n");
     return false;
@@ -410,7 +422,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = uhci_control_transfer(hc, dev->address, &req, NULL, 0, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0, dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-MOUSE] SET_PROTOCOL failed (non-fatal)\n");
   }
@@ -422,7 +434,7 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = uhci_control_transfer(hc, dev->address, &req, NULL, 0, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0, dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-MOUSE] SET_IDLE failed (non-fatal)\n");
   }
@@ -457,7 +469,25 @@ bool usb_mouse_probe(struct usb_device *dev) {
   mouse_count++;
 
   // 8. Schedule the interrupt transfer
-  usb_mouse_setup_interrupt_xfer(ms);
+  if (ms->hc != NULL) {
+    // UHCI path
+    usb_mouse_setup_interrupt_xfer(ms);
+  } else {
+    // OHCI path
+    for (int ci = 0; ci < ohci_get_controller_count(); ci++) {
+      struct ohci_controller *ohc = ohci_get_controller(ci);
+      if (ohc && dev->hcd->priv == ohc) {
+        ms->ohci_pipe = ohci_setup_int_in(
+            ohc, dev->address, ms->ep_number, ms->max_packet,
+            ms->interval, dev->low_speed, ms->report_buf,
+            ms->report_buf_phys);
+        break;
+      }
+    }
+    if (!ms->ohci_pipe) {
+      klog_puts("[USB-MOUSE] Failed to set up OHCI interrupt pipe\n");
+    }
+  }
 
   klog_puts("[USB-MOUSE] Mouse driver attached (addr=");
   klog_uint64(dev->address);
@@ -478,33 +508,46 @@ void usb_mouse_poll(void) {
     if (!ms->active)
       continue;
 
-    // Check if the TD completed (Active bit cleared)
-    if (ms->int_td->status & TD_STATUS_ACTIVE)
-      continue; // Still pending
+    // ── OHCI path ──────────────────────────────────────────────────────
+    if (ms->ohci_pipe) {
+      if (!ohci_int_pipe_completed(ms->ohci_pipe))
+        continue;
 
-    // Check for errors
+      uint8_t *buf = (uint8_t *)ms->ohci_pipe->data_buf;
+      bool has_motion = (buf[1] != 0) || (buf[2] != 0);
+      bool has_wheel = (ms->max_packet >= 4 && buf[3] != 0);
+      bool btn_changed = (buf[0] != ms->prev_buttons);
+
+      if (has_motion || has_wheel || btn_changed)
+        usb_mouse_process_report(ms, buf, ms->max_packet);
+
+      ohci_int_pipe_resubmit(ms->ohci_pipe);
+      continue;
+    }
+
+    // ── UHCI path ──────────────────────────────────────────────────────
+    if (!ms->int_td)
+      continue;
+
+    if (ms->int_td->status & TD_STATUS_ACTIVE)
+      continue;
+
     if (ms->int_td->status & TD_STATUS_HALTED) {
-      // Stall or error — clear and retry
       usb_mouse_resubmit_td(ms);
       continue;
     }
 
-    // TD completed successfully — extract actual transfer length
     uint32_t actual_len = ((ms->int_td->status + 1) & 0x7FF);
     if (actual_len >= 3 && actual_len <= 8) {
       uint8_t *buf = (uint8_t *)ms->report_buf;
-
-      // Check if anything actually changed (avoid spamming events)
       bool has_motion = (buf[1] != 0) || (buf[2] != 0);
       bool has_wheel = (actual_len >= 4 && buf[3] != 0);
       bool btn_changed = (buf[0] != ms->prev_buttons);
 
-      if (has_motion || has_wheel || btn_changed) {
+      if (has_motion || has_wheel || btn_changed)
         usb_mouse_process_report(ms, buf, actual_len);
-      }
     }
 
-    // Resubmit for next poll
     usb_mouse_resubmit_td(ms);
   }
 }

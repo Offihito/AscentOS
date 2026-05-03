@@ -28,7 +28,7 @@ static inline void spinlock_init(spinlock_t *lock) {
 //   release(A): restores IF=1             → IF=1 (interrupts re-enabled)
 static inline void spinlock_acquire(spinlock_t *lock) {
   unsigned long flags;
-  __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+  __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags)::"memory");
 
   while (__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE)) {
     __asm__ volatile("pause" ::: "memory");
@@ -40,7 +40,7 @@ static inline void spinlock_acquire(spinlock_t *lock) {
 static inline void spinlock_release(spinlock_t *lock) {
   unsigned long flags = lock->saved_flags;
   __atomic_clear(&lock->locked, __ATOMIC_RELEASE);
-  __asm__ volatile("push %0; popfq" :: "r"(flags) : "memory");
+  __asm__ volatile("push %0; popfq" ::"r"(flags) : "memory");
 }
 
 static inline void spinlock_acquire_save(spinlock_t *lock, uint64_t *flags) {

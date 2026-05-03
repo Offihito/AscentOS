@@ -25,6 +25,7 @@
 #include "drivers/timer/pit.h"
 #include "drivers/timer/rtc.h"
 #include "drivers/usb/uhci.h"
+#include "drivers/usb/ohci.h"
 #include "drivers/virtio/virtio.h"
 #include "drivers/virtio/virtio_gpu.h"
 #include "fb/framebuffer.h"
@@ -88,6 +89,10 @@ __attribute__((
     section(".limine_requests"))) static volatile struct limine_rsdp_request
     rsdp_request = {.id = LIMINE_RSDP_REQUEST_ID, .revision = 0};
 
+__attribute__((used, section(".limine_requests"))) static volatile struct
+    limine_executable_address_request executable_address_request = {
+        .id = LIMINE_EXECUTABLE_ADDRESS_REQUEST_ID, .revision = 0};
+
 __attribute__((used, section(".limine_requests_end"))) static volatile uint64_t
     limine_requests_end_marker[2] = LIMINE_REQUESTS_END_MARKER;
 
@@ -98,6 +103,7 @@ static void halt(void) {
 }
 
 static void init_thread_entry(void);
+void kmain_high_half(void);
 
 void restart_main_session(void) __attribute__((noreturn));
 void restart_main_session(void) {
@@ -264,6 +270,15 @@ void kmain(void) {
   //  Phase 5: Multitasking & CPU Initialization
   // ═══════════════════════════════════════════════════════════════════════
   cpu_init();
+  klog_puts("[OK] Transitioning to kernel-allocated stack...\n");
+  cpu_jump_to_stack(cpu_get_bsp()->stack_top, kmain_high_half);
+}
+
+void kmain_high_half(void) {
+  klog_puts("[OK] Switched to kernel-allocated stack.\n");
+
+  uint32_t lapic_base = acpi_get_lapic_base();
+  uint32_t ioapic_base = acpi_get_ioapic_base();
 
   klog_puts("[INFO] Initializing Scheduler...\n");
   sched_init();
@@ -310,8 +325,14 @@ void kmain(void) {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 6: Kernel heap
   // ═══════════════════════════════════════════════════════════════════════
+  //  Phase 6: Reclaim bootloader memory & final heap check
+  // ═══════════════════════════════════════════════════════════════════════
+  uint64_t k_phys = 0;
+  if (executable_address_request.response) {
+    k_phys = executable_address_request.response->physical_base;
+  }
+  pmm_reclaim_bootloader(k_phys);
   char *heap_test = kmalloc(64);
   if (heap_test) {
     const char *test_msg = "     Heap allocation SUCCESSFUL!\n";
@@ -341,6 +362,7 @@ void kmain(void) {
   pci_init();
   uhci_init();
   uhci_self_test();
+  ohci_init();
 
   // ── VirtIO subsystem ─────────────────────────────────────────────────────
   virtio_self_test();     // Phase 1: virtqueue foundation tests

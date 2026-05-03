@@ -105,6 +105,7 @@ struct uhci_qh {
 #define PCI_CLASS_SERIAL_BUS 0x0C
 #define PCI_SUBCLASS_USB 0x03
 #define PCI_PROGIF_UHCI 0x00
+#define PCI_PROGIF_OHCI 0x10
 
 // ── UHCI controller state ───────────────────────────────────────────────────
 struct uhci_controller {
@@ -132,6 +133,8 @@ struct uhci_controller {
   // DMA buffer for control requests and small data transfers
   void *transfer_buffer;
   uint32_t transfer_buffer_phys;
+
+  struct usb_hcd hcd; // Generic host controller interface
 };
 
 struct usb_control_request;

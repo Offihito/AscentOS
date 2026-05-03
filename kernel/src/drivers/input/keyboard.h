@@ -23,6 +23,7 @@ bool keyboard_has_scancode(void);
 bool keyboard_get_scancode(scancode_event_t *event);
 void keyboard_set_scancode_mode(bool enabled);
 bool keyboard_is_scancode_mode(void);
+void keyboard_push_scancode(uint8_t scancode, bool extended, bool release);
 
 #define KEY_UP 0xE0
 #define KEY_DOWN 0xE1

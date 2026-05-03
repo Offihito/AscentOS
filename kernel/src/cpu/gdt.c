@@ -1,7 +1,8 @@
 #include "gdt.h"
 #include "../lib/string.h"
 
-// 0: Null, 1: KCode, 2: KData, 3: UCode32, 4: UData, 5: UCode64, 6: TSS (Low), 7: TSS (High)
+// 0: Null, 1: KCode, 2: KData, 3: UCode32, 4: UData, 5: UCode64, 6: TSS (Low),
+// 7: TSS (High)
 static struct gdt_entry gdt[8];
 static struct gdt_ptr gp;
 static struct tss_entry tss_bsp;
@@ -9,66 +10,63 @@ static struct tss_entry tss_bsp;
 extern void gdt_flush(uint64_t);
 
 static inline void ltr(uint16_t sel) {
-    __asm__ volatile("ltr %0" : : "r"(sel));
+  __asm__ volatile("ltr %0" : : "r"(sel));
 }
 
-static void gdt_set_gate(int num, uint64_t base, uint64_t limit, uint8_t access, uint8_t gran) {
-    gdt[num].base_low    = (base & 0xFFFF);
-    gdt[num].base_middle = (base >> 16) & 0xFF;
-    gdt[num].base_high   = (base >> 24) & 0xFF;
+static void gdt_set_gate(int num, uint64_t base, uint64_t limit, uint8_t access,
+                         uint8_t gran) {
+  gdt[num].base_low = (base & 0xFFFF);
+  gdt[num].base_middle = (base >> 16) & 0xFF;
+  gdt[num].base_high = (base >> 24) & 0xFF;
 
-    gdt[num].limit_low   = (limit & 0xFFFF);
-    gdt[num].granularity = ((limit >> 16) & 0x0F);
+  gdt[num].limit_low = (limit & 0xFFFF);
+  gdt[num].granularity = ((limit >> 16) & 0x0F);
 
-    gdt[num].granularity |= (gran & 0xF0);
-    gdt[num].access      = access;
+  gdt[num].granularity |= (gran & 0xF0);
+  gdt[num].access = access;
 }
 
 static void gdt_set_tss(int num, uint64_t base, uint32_t limit) {
-    gdt_set_gate(num, base, limit, 0x89, 0x00);
-    gdt[num + 1].limit_low = (uint16_t)(base >> 32);
-    gdt[num + 1].base_low  = (uint16_t)(base >> 48);
-    gdt[num + 1].base_middle = 0;
-    gdt[num + 1].access = 0;
-    gdt[num + 1].granularity = 0;
-    gdt[num + 1].base_high = 0;
+  gdt_set_gate(num, base, limit, 0x89, 0x00);
+  gdt[num + 1].limit_low = (uint16_t)(base >> 32);
+  gdt[num + 1].base_low = (uint16_t)(base >> 48);
+  gdt[num + 1].base_middle = 0;
+  gdt[num + 1].access = 0;
+  gdt[num + 1].granularity = 0;
+  gdt[num + 1].base_high = 0;
 }
 
-void tss_set_rsp0(uint64_t rsp0) {
-    tss_bsp.rsp0 = rsp0;
-}
+void tss_set_rsp0(uint64_t rsp0) { tss_bsp.rsp0 = rsp0; }
 
 void gdt_init(void) {
-    gp.limit = (sizeof(struct gdt_entry) * 8) - 1;
-    gp.base  = (uint64_t)&gdt;
+  gp.limit = (sizeof(struct gdt_entry) * 8) - 1;
+  gp.base = (uint64_t)&gdt;
 
-    // 0: Null descriptor
-    gdt_set_gate(0, 0, 0, 0, 0);
-    
-    // 1: Kernel Code descriptor (0x08)
-    gdt_set_gate(1, 0, 0xFFFFFFFF, 0x9A, 0xAF);
+  // 0: Null descriptor
+  gdt_set_gate(0, 0, 0, 0, 0);
 
-    // 2: Kernel Data descriptor (0x10)
-    gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF);
+  // 1: Kernel Code descriptor (0x08)
+  gdt_set_gate(1, 0, 0xFFFFFFFF, 0x9A, 0xAF);
 
-    // 3: User Code 32-bit (compatibility mode) (0x1B)
-    gdt_set_gate(3, 0, 0xFFFFFFFF, 0xFA, 0xCF);
+  // 2: Kernel Data descriptor (0x10)
+  gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF);
 
-    // 4: User Data descriptor (0x23)   - DPL 3, Data R/W
-    gdt_set_gate(4, 0, 0xFFFFFFFF, 0xF2, 0xCF);
+  // 3: User Code 32-bit (compatibility mode) (0x1B)
+  gdt_set_gate(3, 0, 0xFFFFFFFF, 0xFA, 0xCF);
 
-    // 5: User Code descriptor (0x2B)   - DPL 3, Code Exec/Read, 64-bit
-    gdt_set_gate(5, 0, 0xFFFFFFFF, 0xFA, 0xAF);
+  // 4: User Data descriptor (0x23)   - DPL 3, Data R/W
+  gdt_set_gate(4, 0, 0xFFFFFFFF, 0xF2, 0xCF);
 
-    // 6-7: TSS descriptor (0x30)
-    memset(&tss_bsp, 0, sizeof(struct tss_entry));
-    tss_bsp.iopb_offset = sizeof(struct tss_entry);
-    gdt_set_tss(6, (uint64_t)&tss_bsp, sizeof(struct tss_entry) - 1);
+  // 5: User Code descriptor (0x2B)   - DPL 3, Code Exec/Read, 64-bit
+  gdt_set_gate(5, 0, 0xFFFFFFFF, 0xFA, 0xAF);
 
-    gdt_flush((uint64_t)&gp);
-    ltr(0x30);
+  // 6-7: TSS descriptor (0x30)
+  memset(&tss_bsp, 0, sizeof(struct tss_entry));
+  tss_bsp.iopb_offset = sizeof(struct tss_entry);
+  gdt_set_tss(6, (uint64_t)&tss_bsp, sizeof(struct tss_entry) - 1);
+
+  gdt_flush((uint64_t)&gp);
+  ltr(0x30);
 }
 
-void gdt_load_ap(void) {
-    gdt_flush((uint64_t)&gp);
-}
+void gdt_load_ap(void) { gdt_flush((uint64_t)&gp); }

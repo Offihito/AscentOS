@@ -35,7 +35,8 @@ void pmm_mark_used(void *ptr, size_t count);
 
 // Reclaims the memory occupied by the Limine bootloader after boot structures
 // are no longer needed
-void pmm_reclaim_bootloader(void);
+void pmm_reclaim_bootloader(uint64_t kernel_phys_base);
+bool pmm_is_reclaimable(uint64_t phys);
 
 // Return usable memory in bytes
 uint64_t pmm_get_usable_memory(void);

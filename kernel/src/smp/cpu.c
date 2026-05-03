@@ -129,6 +129,12 @@ void ap_main(void) {
   cpu_set_gs_base((struct cpu_info *)starting_cpu);
   struct cpu_info *current = cpu_get_current();
 
+  // 1.5 Switch to the dedicated kernel stack and page tables.
+  // This is CRITICAL: APs must be off all bootloader memory (including tables)
+  // before reclamation occurs in Phase 6.
+  __asm__ volatile("mov %0, %%cr3" ::"r"(current->kernel_cr3) : "memory");
+  cpu_switch_stack(current->stack_top);
+
   // 2. Initialize the LAPIC for this core (needs the HHDM base mapping)
   lapic_init((uint64_t)acpi_get_lapic_base());
 

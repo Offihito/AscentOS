@@ -24,6 +24,7 @@
 #include "../../mm/dma_alloc.h"
 #include "../input/evdev.h"
 #include "../input/keyboard.h"
+#include "ohci.h"
 #include "uhci.h"
 #include "usb.h"
 #include <stdbool.h>
@@ -64,13 +65,13 @@ struct usb_endpoint_descriptor {
   uint8_t interval;
 } __attribute__((packed));
 
-#define USB_CLASS_HID          0x03
-#define USB_SUBCLASS_BOOT      0x01
-#define USB_PROTOCOL_KEYBOARD  0x01
+#define USB_CLASS_HID 0x03
+#define USB_SUBCLASS_BOOT 0x01
+#define USB_PROTOCOL_KEYBOARD 0x01
 
-#define USB_REQ_SET_IDLE       0x0A
-#define USB_REQ_SET_PROTOCOL   0x0B
-#define HID_PROTOCOL_BOOT     0x00
+#define USB_REQ_SET_IDLE 0x0A
+#define USB_REQ_SET_PROTOCOL 0x0B
+#define HID_PROTOCOL_BOOT 0x00
 
 // ── HID Usage ID to PS/2 Scancode mapping ───────────────────────────────────
 // USB HID uses "Usage IDs" (from the HID Usage Tables spec) for key codes.
@@ -82,7 +83,10 @@ struct usb_endpoint_descriptor {
 
 static const uint8_t hid_to_scancode[256] = {
     // 0x00-0x03: No Event, Error Roll Over, POST Fail, Error Undefined
-    [0x00] = 0x00, [0x01] = 0x00, [0x02] = 0x00, [0x03] = 0x00,
+    [0x00] = 0x00,
+    [0x01] = 0x00,
+    [0x02] = 0x00,
+    [0x03] = 0x00,
 
     // 0x04-0x1D: Letters a-z → PS/2 scancodes
     [0x04] = 0x1E, // a → 0x1E
@@ -231,12 +235,15 @@ static bool hid_is_extended(uint8_t usage) {
 
 struct usb_kbd_state {
   struct usb_device *dev;
-  struct uhci_controller *hc;
-  uint8_t ep_addr;       // Endpoint address (direction bit + endpoint number)
-  uint8_t ep_number;     // Endpoint number (0-15)
-  uint16_t max_packet;   // Max packet size from endpoint descriptor
-  uint8_t interval;      // Polling interval (in ms frames)
-  uint8_t data_toggle;   // DATA0/DATA1 toggle for interrupt IN
+  struct uhci_controller *hc; // Non-NULL only for UHCI-backed devices
+  uint8_t ep_addr;     // Endpoint address (direction bit + endpoint number)
+  uint8_t ep_number;   // Endpoint number (0-15)
+  uint16_t max_packet; // Max packet size from endpoint descriptor
+  uint8_t interval;    // Polling interval (in ms frames)
+  uint8_t data_toggle; // DATA0/DATA1 toggle for interrupt IN
+
+  uint8_t interface_number;
+  bool caps_lock;
 
   // DMA buffer for interrupt transfer data (8 bytes for boot protocol)
   void *report_buf;
@@ -245,13 +252,18 @@ struct usb_kbd_state {
   // Previous report for detecting press/release transitions
   struct usb_kbd_report prev_report;
 
-  // Interrupt transfer scheduling
+  // Interrupt transfer scheduling (UHCI path)
   struct uhci_td *int_td;
   uint32_t int_td_phys;
   struct uhci_qh *int_qh;
   uint32_t int_qh_phys;
 
+  // Interrupt transfer scheduling (OHCI path)
+  struct ohci_int_pipe *ohci_pipe;
+
   bool active;
+  uint8_t last_pressed_usage;
+  int repeat_delay_counter;
 };
 
 static struct usb_kbd_state keyboards[MAX_USB_KEYBOARDS];
@@ -276,6 +288,9 @@ static void process_modifier(uint8_t old_mods, uint8_t new_mods, uint8_t bit,
       evdev_push_event(kdev, EV_SYN, SYN_REPORT, 0);
     }
   }
+
+  // Push raw scancode event for games like Doom
+  keyboard_push_scancode(scancode, is_extended, !now);
 }
 
 static void process_modifiers(uint8_t old_mods, uint8_t new_mods) {
@@ -303,6 +318,127 @@ static bool key_in_array(uint8_t usage, const uint8_t *keys, int count) {
 extern const char scancode_to_char[];
 extern const char scancode_to_char_shift[];
 
+static void usb_kbd_update_leds(struct usb_kbd_state *kbd);
+
+static void usb_kbd_inject_key(struct usb_kbd_state *kbd, uint8_t usage,
+                               struct usb_kbd_report *report) {
+  uint8_t sc = hid_to_scancode[usage];
+  if (sc == 0)
+    return;
+
+  bool extended = hid_is_extended(usage);
+
+  // Push evdev event (for X11 / scancode mode)
+  uint16_t kc = evdev_ps2_to_keycode(sc, extended);
+  if (kc) {
+    evdev_device_t *kdev = evdev_get_keyboard();
+    if (kdev) {
+      evdev_push_event(kdev, EV_KEY, kc, 1); // press
+      evdev_push_event(kdev, EV_SYN, SYN_REPORT, 0);
+    }
+  }
+
+  // Push ASCII character into keyboard ring buffer (for console)
+  bool shift =
+      (report->modifiers & (USB_KBD_MOD_LSHIFT | USB_KBD_MOD_RSHIFT)) != 0;
+  bool ctrl = (report->modifiers & (USB_KBD_MOD_LCTRL | USB_KBD_MOD_RCTRL)) != 0;
+
+  // Handle extended keys → escape sequences
+  if (extended) {
+    switch (usage) {
+    case 0x52: { // Up
+      const char seq[] = {'\x1B', '[', 'A'};
+      keyboard_push_bytes(seq, 3);
+      break;
+    }
+    case 0x51: { // Down
+      const char seq[] = {'\x1B', '[', 'B'};
+      keyboard_push_bytes(seq, 3);
+      break;
+    }
+    case 0x4F: { // Right
+      const char seq[] = {'\x1B', '[', 'C'};
+      keyboard_push_bytes(seq, 3);
+      break;
+    }
+    case 0x50: { // Left
+      const char seq[] = {'\x1B', '[', 'D'};
+      keyboard_push_bytes(seq, 3);
+      break;
+    }
+    case 0x4A: { // Home
+      const char seq[] = {'\x1B', '[', 'H'};
+      keyboard_push_bytes(seq, 3);
+      break;
+    }
+    case 0x4D: { // End
+      const char seq[] = {'\x1B', '[', 'F'};
+      keyboard_push_bytes(seq, 3);
+      break;
+    }
+    case 0x4B: { // Page Up
+      const char seq[] = {'\x1B', '[', '5', '~'};
+      keyboard_push_bytes(seq, 4);
+      break;
+    }
+    case 0x4E: { // Page Down
+      const char seq[] = {'\x1B', '[', '6', '~'};
+      keyboard_push_bytes(seq, 4);
+      break;
+    }
+    case 0x4C: { // Delete
+      const char seq[] = {'\x1B', '[', '3', '~'};
+      keyboard_push_bytes(seq, 4);
+      break;
+    }
+    case 0x49: { // Insert
+      const char seq[] = {'\x1B', '[', '2', '~'};
+      keyboard_push_bytes(seq, 4);
+      break;
+    }
+    default:
+      break;
+    }
+  } else if (sc < 88) {
+    // Regular key — translate through scancode_to_char
+    char c;
+    if (shift) {
+      c = scancode_to_char_shift[sc];
+    } else {
+      c = scancode_to_char[sc];
+    }
+
+    if (kbd->caps_lock) {
+      if (c >= 'a' && c <= 'z')
+        c -= 32;
+      else if (c >= 'A' && c <= 'Z')
+        c += 32;
+    }
+
+    if (ctrl && c >= 'a' && c <= 'z') {
+      c = c - 'a' + 1;
+    } else if (ctrl && c >= 'A' && c <= 'Z') {
+      c = c - 'A' + 1;
+    }
+
+    if (c != 0) {
+      keyboard_push_bytes(&c, 1);
+    }
+  }
+}
+
+static void usb_kbd_handle_repeat(struct usb_kbd_state *kbd) {
+  if (kbd->last_pressed_usage == 0)
+    return;
+
+  if (kbd->repeat_delay_counter > 0) {
+    kbd->repeat_delay_counter--;
+  } else {
+    // Repeat the key
+    usb_kbd_inject_key(kbd, kbd->last_pressed_usage, &kbd->prev_report);
+  }
+}
+
 static void usb_kbd_process_report(struct usb_kbd_state *kbd,
                                    struct usb_kbd_report *report) {
   struct usb_kbd_report *prev = &kbd->prev_report;
@@ -319,7 +455,15 @@ static void usb_kbd_process_report(struct usb_kbd_state *kbd,
       continue; // still pressed
 
     // Key was released
+    if (usage == kbd->last_pressed_usage) {
+      kbd->last_pressed_usage = 0;
+    }
+
     uint8_t sc = hid_to_scancode[usage];
+    if (sc != 0) {
+      keyboard_push_scancode(sc, hid_is_extended(usage), true);
+    }
+
     if (sc == 0)
       continue;
 
@@ -343,107 +487,50 @@ static void usb_kbd_process_report(struct usb_kbd_state *kbd,
       continue; // was already pressed
 
     // Key was just pressed
-    uint8_t sc = hid_to_scancode[usage];
-    if (sc == 0)
-      continue;
-
-    bool extended = hid_is_extended(usage);
-
-    // Push evdev event (for X11 / scancode mode)
-    uint16_t kc = evdev_ps2_to_keycode(sc, extended);
-    if (kc) {
-      evdev_device_t *kdev = evdev_get_keyboard();
-      if (kdev) {
-        evdev_push_event(kdev, EV_KEY, kc, 1); // press
-        evdev_push_event(kdev, EV_SYN, SYN_REPORT, 0);
-      }
+    if (usage >= 0x04 && usage < 0xE0 && usage != 0x39) {
+      kbd->last_pressed_usage = usage;
+      kbd->repeat_delay_counter = 12; // ~500ms delay at 40ms heartbeat
     }
 
-    // Push ASCII character into keyboard ring buffer (for console)
-    bool shift = (report->modifiers &
-                  (USB_KBD_MOD_LSHIFT | USB_KBD_MOD_RSHIFT)) != 0;
-    bool ctrl = (report->modifiers &
-                 (USB_KBD_MOD_LCTRL | USB_KBD_MOD_RCTRL)) != 0;
+    uint8_t sc_press = hid_to_scancode[usage];
+    if (sc_press != 0) {
+      keyboard_push_scancode(sc_press, hid_is_extended(usage), false);
+    }
 
-    // Handle extended keys → escape sequences
-    if (extended) {
-      switch (usage) {
-      case 0x52: { // Up
-        const char seq[] = {'\x1B', '[', 'A'};
-        keyboard_push_bytes(seq, 3);
-        break;
-      }
-      case 0x51: { // Down
-        const char seq[] = {'\x1B', '[', 'B'};
-        keyboard_push_bytes(seq, 3);
-        break;
-      }
-      case 0x4F: { // Right
-        const char seq[] = {'\x1B', '[', 'C'};
-        keyboard_push_bytes(seq, 3);
-        break;
-      }
-      case 0x50: { // Left
-        const char seq[] = {'\x1B', '[', 'D'};
-        keyboard_push_bytes(seq, 3);
-        break;
-      }
-      case 0x4A: { // Home
-        const char seq[] = {'\x1B', '[', 'H'};
-        keyboard_push_bytes(seq, 3);
-        break;
-      }
-      case 0x4D: { // End
-        const char seq[] = {'\x1B', '[', 'F'};
-        keyboard_push_bytes(seq, 3);
-        break;
-      }
-      case 0x4B: { // Page Up
-        const char seq[] = {'\x1B', '[', '5', '~'};
-        keyboard_push_bytes(seq, 4);
-        break;
-      }
-      case 0x4E: { // Page Down
-        const char seq[] = {'\x1B', '[', '6', '~'};
-        keyboard_push_bytes(seq, 4);
-        break;
-      }
-      case 0x4C: { // Delete
-        const char seq[] = {'\x1B', '[', '3', '~'};
-        keyboard_push_bytes(seq, 4);
-        break;
-      }
-      case 0x49: { // Insert
-        const char seq[] = {'\x1B', '[', '2', '~'};
-        keyboard_push_bytes(seq, 4);
-        break;
-      }
-      default:
-        break;
-      }
-    } else if (sc < 88) {
-      // Regular key — translate through scancode_to_char
-      char c;
-      if (shift) {
-        c = scancode_to_char_shift[sc];
-      } else {
-        c = scancode_to_char[sc];
-      }
+    usb_kbd_inject_key(kbd, usage, report);
 
-      if (ctrl && c >= 'a' && c <= 'z') {
-        c = c - 'a' + 1;
-      } else if (ctrl && c >= 'A' && c <= 'Z') {
-        c = c - 'A' + 1;
-      }
-
-      if (c != 0) {
-        keyboard_push_bytes(&c, 1);
-      }
+    if (usage == 0x39) { // Caps Lock
+      kbd->caps_lock = !kbd->caps_lock;
+      usb_kbd_update_leds(kbd);
     }
   }
 
   // 4. Save current report as previous
   *prev = *report;
+}
+
+// ── LED Updates ─────────────────────────────────────────────────────────────
+
+static void usb_kbd_update_leds(struct usb_kbd_state *kbd) {
+  struct usb_control_request req;
+  uint8_t report = 0;
+
+  if (kbd->caps_lock)
+    report |= (1 << 1);
+
+  // bmRequestType: 0x21 (Host-to-device, Class, Interface)
+  // bRequest: 0x09 (SET_REPORT)
+  // wValue: 0x0200 (Report Type: Output (0x02), Report ID: 0)
+  // wIndex: Interface number
+  // wLength: 1
+  req.request_type = 0x21;
+  req.request = 0x09;
+  req.value = 0x0200;
+  req.index = kbd->interface_number;
+  req.length = 1;
+
+  kbd->dev->hcd->control_transfer(kbd->dev->hcd, kbd->dev->address, &req, &report, 1,
+                                  kbd->dev->low_speed);
 }
 
 // ── Interrupt Transfer Setup ────────────────────────────────────────────────
@@ -549,7 +636,16 @@ bool usb_kbd_probe(struct usb_device *dev) {
   if (kbd_count >= MAX_USB_KEYBOARDS)
     return false;
 
-  struct uhci_controller *hc = (struct uhci_controller *)dev->controller;
+  // Only cast to uhci_controller if this device is actually on a UHCI HCD.
+  struct uhci_controller *hc = NULL;
+  // Check all UHCI controllers to see if priv matches
+  for (int i = 0; i < uhci_get_controller_count(); i++) {
+    struct uhci_controller *candidate = uhci_get_controller(i);
+    if (candidate && dev->hcd->priv == candidate) {
+      hc = candidate;
+      break;
+    }
+  }
   struct usb_control_request req;
 
   // 1. Read the Configuration Descriptor (first 9 bytes to get total length)
@@ -560,21 +656,22 @@ bool usb_kbd_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 9;
 
-  int res = uhci_control_transfer(hc, dev->address, &req, config_buf, 9,
+  int res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf, 9,
                                   dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-KBD] Failed to get config descriptor header\n");
     return false;
   }
 
-  struct usb_config_descriptor *cfg = (struct usb_config_descriptor *)config_buf;
+  struct usb_config_descriptor *cfg =
+      (struct usb_config_descriptor *)config_buf;
   uint16_t total_len = cfg->total_length;
   if (total_len > sizeof(config_buf))
     total_len = sizeof(config_buf);
 
   // Read the full configuration descriptor bundle
   req.length = total_len;
-  res = uhci_control_transfer(hc, dev->address, &req, config_buf, total_len,
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf, total_len,
                               dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-KBD] Failed to get full config descriptor\n");
@@ -589,6 +686,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
   bool found_keyboard = false;
   bool in_keyboard_iface = false;
 
+  uint8_t iface_num = 0;
   uint16_t offset = cfg->length;
   while (offset + 2 <= total_len) {
     uint8_t desc_len = config_buf[offset];
@@ -614,6 +712,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
           iface->interface_protocol == USB_PROTOCOL_KEYBOARD) {
         found_keyboard = true;
         in_keyboard_iface = true;
+        iface_num = iface->interface_number;
       } else {
         in_keyboard_iface = false;
       }
@@ -659,7 +758,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = uhci_control_transfer(hc, dev->address, &req, NULL, 0, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0, dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-KBD] SET_CONFIGURATION failed\n");
     return false;
@@ -677,7 +776,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = uhci_control_transfer(hc, dev->address, &req, NULL, 0, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0, dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-KBD] SET_PROTOCOL failed (non-fatal)\n");
     // Not fatal — many keyboards work in boot protocol by default
@@ -687,11 +786,11 @@ bool usb_kbd_probe(struct usb_device *dev) {
   //    bmRequestType=0x21, bRequest=0x0A
   req.request_type = 0x21;
   req.request = USB_REQ_SET_IDLE;
-  req.value = 0; // duration=0 (infinite), report_id=0
+  req.value = (10 << 8); // duration=10 (40ms), report_id=0
   req.index = 0;
   req.length = 0;
 
-  res = uhci_control_transfer(hc, dev->address, &req, NULL, 0, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0, dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-KBD] SET_IDLE failed (non-fatal)\n");
   }
@@ -720,6 +819,8 @@ bool usb_kbd_probe(struct usb_device *dev) {
   kbd->data_toggle = 0;
   kbd->report_buf = buf;
   kbd->report_buf_phys = (uint32_t)phys;
+  kbd->interface_number = iface_num;
+  kbd->caps_lock = false;
   kbd->active = true;
 
   // Zero out previous report
@@ -729,7 +830,25 @@ bool usb_kbd_probe(struct usb_device *dev) {
   kbd_count++;
 
   // 8. Schedule the interrupt transfer
-  usb_kbd_setup_interrupt_xfer(kbd);
+  if (kbd->hc != NULL) {
+    // UHCI path
+    usb_kbd_setup_interrupt_xfer(kbd);
+  } else {
+    // OHCI path — find the OHCI controller and set up an interrupt pipe
+    for (int ci = 0; ci < ohci_get_controller_count(); ci++) {
+      struct ohci_controller *ohc = ohci_get_controller(ci);
+      if (ohc && dev->hcd->priv == ohc) {
+        kbd->ohci_pipe = ohci_setup_int_in(
+            ohc, dev->address, kbd->ep_number, kbd->max_packet,
+            kbd->interval, dev->low_speed, kbd->report_buf,
+            kbd->report_buf_phys);
+        break;
+      }
+    }
+    if (!kbd->ohci_pipe) {
+      klog_puts("[USB-KBD] Failed to set up OHCI interrupt pipe\n");
+    }
+  }
 
   klog_puts("[USB-KBD] Keyboard driver attached (addr=");
   klog_uint64(dev->address);
@@ -741,8 +860,7 @@ bool usb_kbd_probe(struct usb_device *dev) {
 }
 
 // ── Polling ─────────────────────────────────────────────────────────────────
-// Called from the UHCI IRQ handler or from a timer tick to check if
-// any keyboard has new data.
+// Called from the UHCI/OHCI IRQ handler to check if any keyboard has new data.
 
 void usb_kbd_poll(void) {
   for (int i = 0; i < kbd_count; i++) {
@@ -750,32 +868,19 @@ void usb_kbd_poll(void) {
     if (!kbd->active)
       continue;
 
-    // Check if the TD completed (Active bit cleared)
-    if (kbd->int_td->status & TD_STATUS_ACTIVE)
-      continue; // Still pending
+    // ── OHCI path ──────────────────────────────────────────────────────
+    if (kbd->ohci_pipe) {
+      if (!ohci_int_pipe_completed(kbd->ohci_pipe))
+        continue;
 
-    // Check for errors
-    if (kbd->int_td->status & TD_STATUS_HALTED) {
-      // Stall or error — clear and retry
-      klog_puts("[USB-KBD] Transfer error, retrying...\n");
-      usb_kbd_resubmit_td(kbd);
-      continue;
-    }
-
-    // TD completed successfully — extract actual transfer length
-    uint32_t actual_len = ((kbd->int_td->status + 1) & 0x7FF);
-    if (actual_len >= 3 && actual_len <= 8) {
-      // Process the HID boot keyboard report
+      // Read data from the pipe's DMA buffer
+      uint8_t *buf = (uint8_t *)kbd->ohci_pipe->data_buf;
       struct usb_kbd_report report;
-      uint8_t *buf = (uint8_t *)kbd->report_buf;
-
       report.modifiers = buf[0];
       report.reserved = buf[1];
-      for (int j = 0; j < 6; j++) {
-        report.keys[j] = (j + 2 < (int)actual_len) ? buf[j + 2] : 0;
-      }
+      for (int j = 0; j < 6; j++)
+        report.keys[j] = buf[j + 2];
 
-      // Only process if report changed
       bool changed = (report.modifiers != kbd->prev_report.modifiers);
       if (!changed) {
         for (int j = 0; j < 6; j++) {
@@ -786,12 +891,55 @@ void usb_kbd_poll(void) {
         }
       }
 
-      if (changed) {
+      if (changed)
         usb_kbd_process_report(kbd, &report);
-      }
+      else
+        usb_kbd_handle_repeat(kbd);
+
+      ohci_int_pipe_resubmit(kbd->ohci_pipe);
+      continue;
     }
 
-    // Resubmit for next poll
+    // ── UHCI path ──────────────────────────────────────────────────────
+    if (!kbd->int_td)
+      continue;
+
+    if (kbd->int_td->status & TD_STATUS_ACTIVE)
+      continue;
+
+    if (kbd->int_td->status & TD_STATUS_HALTED) {
+      klog_puts("[USB-KBD] Transfer error, retrying...\n");
+      usb_kbd_resubmit_td(kbd);
+      continue;
+    }
+
+    uint32_t actual_len = ((kbd->int_td->status + 1) & 0x7FF);
+    if (actual_len >= 3 && actual_len <= 8) {
+      struct usb_kbd_report report;
+      uint8_t *buf = (uint8_t *)kbd->report_buf;
+
+      report.modifiers = buf[0];
+      report.reserved = buf[1];
+      for (int j = 0; j < 6; j++) {
+        report.keys[j] = (j + 2 < (int)actual_len) ? buf[j + 2] : 0;
+      }
+
+      bool changed = (report.modifiers != kbd->prev_report.modifiers);
+      if (!changed) {
+        for (int j = 0; j < 6; j++) {
+          if (report.keys[j] != kbd->prev_report.keys[j]) {
+            changed = true;
+            break;
+          }
+        }
+      }
+
+      if (changed)
+        usb_kbd_process_report(kbd, &report);
+      else
+        usb_kbd_handle_repeat(kbd);
+    }
+
     usb_kbd_resubmit_td(kbd);
   }
 }

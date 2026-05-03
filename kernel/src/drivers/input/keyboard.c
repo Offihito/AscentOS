@@ -78,6 +78,10 @@ static void scancode_buffer_push(uint8_t scancode, uint8_t is_extended,
   }
 }
 
+void keyboard_push_scancode(uint8_t scancode, bool extended, bool release) {
+  scancode_buffer_push(scancode, extended ? 1 : 0, release ? 1 : 0);
+}
+
 void keyboard_push_bytes(const char *bytes, uint32_t len) {
   __asm__ volatile("cli");
   for (uint32_t i = 0; i < len; i++) {

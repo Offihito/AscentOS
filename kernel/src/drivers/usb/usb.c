@@ -21,7 +21,7 @@ void usb_init(void) {
     devices[i] = NULL;
 }
 
-void usb_device_discovered(void *hc, uint8_t port, bool low_speed) {
+void usb_device_discovered(struct usb_hcd *hcd, uint8_t port, bool low_speed) {
   klog_puts("[USB] New device detected on port ");
   klog_uint64(port + 1);
   klog_puts(low_speed ? " (Low-Speed)\n" : " (Full-Speed)\n");
@@ -37,7 +37,7 @@ void usb_device_discovered(void *hc, uint8_t port, bool low_speed) {
   dev->port = port;
   dev->connected = true;
   dev->low_speed = low_speed;
-  dev->controller = hc;
+  dev->hcd = hcd;
 
   devices[device_count++] = dev;
 
@@ -57,8 +57,8 @@ void usb_enumerate_device(struct usb_device *dev) {
   req.index = 0;
   req.length = 8;
 
-  int res = uhci_control_transfer(dev->controller, 0, &req, &dev->desc, 8,
-                                  dev->low_speed);
+  int res = dev->hcd->control_transfer(dev->hcd, 0, &req, &dev->desc, 8,
+                                       dev->low_speed);
   if (res < 0) {
     klog_puts("[USB] Failed to get device descriptor (8 bytes)\n");
     return;
@@ -76,8 +76,7 @@ void usb_enumerate_device(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res =
-      uhci_control_transfer(dev->controller, 0, &req, NULL, 0, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, 0, &req, NULL, 0, dev->low_speed);
   if (res < 0) {
     klog_puts("[USB] Failed to set address\n");
     return;
@@ -94,8 +93,8 @@ void usb_enumerate_device(struct usb_device *dev) {
   req.index = 0;
   req.length = 18;
 
-  res = uhci_control_transfer(dev->controller, dev->address, &req, &dev->desc,
-                              18, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, &dev->desc,
+                                   18, dev->low_speed);
   if (res < 0) {
     klog_puts("[USB] Failed to get full device descriptor\n");
     return;

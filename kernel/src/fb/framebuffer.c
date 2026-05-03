@@ -54,7 +54,8 @@ vfs_node_t *fb_lookup_device(const char *name) {
   return NULL;
 }
 
-static struct limine_framebuffer *fb;
+static struct limine_framebuffer fb_local;
+static struct limine_framebuffer *fb = NULL;
 static void *backbuffer = NULL;
 static size_t current_backbuffer_size = 0;
 static volatile bool backbuffer_enabled = false;
@@ -87,10 +88,11 @@ static inline void fb_mark_dirty(uint32_t x, uint32_t y, uint32_t w,
 }
 
 void fb_init(struct limine_framebuffer *framebuffer) {
-  fb = framebuffer;
-
-  if (!fb)
+  if (!framebuffer)
     return;
+
+  memcpy(&fb_local, framebuffer, sizeof(struct limine_framebuffer));
+  fb = &fb_local;
 
   klog_puts("[FB] Initializing Framebuffer:\n");
   klog_puts("     Resolution: ");

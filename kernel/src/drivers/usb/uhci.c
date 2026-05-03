@@ -368,6 +368,13 @@ int uhci_control_transfer(struct uhci_controller *hc, uint8_t addr,
   return 0;
 }
 
+static int uhci_hcd_control_transfer(struct usb_hcd *hcd, uint8_t addr,
+                                     struct usb_control_request *req, void *data,
+                                     uint16_t len, bool low_speed) {
+  struct uhci_controller *hc = (struct uhci_controller *)hcd->priv;
+  return uhci_control_transfer(hc, addr, req, data, len, low_speed);
+}
+
 // ── Detect number of root-hub ports ─────────────────────────────────────────
 // UHCI spec says ports start at offset 0x10 and each is 2 bytes.
 // We probe up to 8 ports; a non-existent port reads as 0xFFFF or has
@@ -450,7 +457,7 @@ void uhci_probe_ports(struct uhci_controller *hc) {
         portsc = uhci_read16(hc, reg);
         bool low_speed = (portsc & UHCI_PORT_LSDA) != 0;
 
-        usb_device_discovered(hc, i, low_speed);
+        usb_device_discovered(&hc->hcd, i, low_speed);
       }
     }
   }
@@ -508,6 +515,10 @@ static bool uhci_probe_pci_device(struct pci_device *pci) {
     }
   }
 
+  // Initialize generic HCD interface
+  hc->hcd.priv = hc;
+  hc->hcd.control_transfer = uhci_hcd_control_transfer;
+
   // Re-enable PCI bus mastering and IO
   pci_config_write32(hc->pci_bus, hc->pci_slot, hc->pci_func, 0x04, 0x07);
 
@@ -548,7 +559,7 @@ void uhci_init(void) {
       // For NON-UHCI controllers (like EHCI/xHCI), strictly disable them
       // by pulling the plug on Master, Memory, and I/O access.
       // We don't have drivers for them yet, so they shouldn't be active.
-      if (dev->prog_if != PCI_PROGIF_UHCI) {
+      if (dev->prog_if != PCI_PROGIF_UHCI && dev->prog_if != PCI_PROGIF_OHCI) {
         cmd &= ~(0x07); // Clear Master, Memory, I/O
         klog_puts("[USB] Electrically disabled non-UHCI controller at PCI ");
         klog_hex32(dev->bus);
