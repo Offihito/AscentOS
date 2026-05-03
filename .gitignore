@@ -8,3 +8,4 @@ disk.img
 kernel/obj-x86_64
 userland/kilo.c
 userland/build-ascentos
+userland/kria-lang
