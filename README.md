@@ -1,76 +1,70 @@
 # AscentOS
 
-**AscentOS** is a custom 64-bit (x86_64) hobby operating system kernel written in C and Assembly, focused on Testing AI's Coding Power It uses the [Limine](https://limine-bootloader.org/) boot protocol for an easy and compliant boot process.
+AscentOS is a hobby operating system kernel for the x86_64 architecture, written in C and Assembly. It has grown from a minimal bootable kernel into a system with an X11 graphical environment, a basic networking stack, and audio support.
 
-## Features
+## Current Status
 
-- **Core Architecture & Multiprocessing**
-   Symmetric Multiprocessing (SMP): Support for multiple CPU cores, initialized via ACPI MADT parsing.
-   Interrupt Handling: Advanced Programmable Interrupt Controller (APIC) and IOAPIC support with local APIC timers.
-   Inter-Processor Interrupts (IPIs): Communication between cores, including thread blocking and wake-up mechanisms.
-   Memory Management: Physical Memory Manager (PMM), Virtual Memory Manager (VMM), and a dynamic kernel heap allocator.
-   Concurrency: Thread-safe locking mechanisms (spinlocks, etc.) and per-CPU scheduling strategies.
+The system is currently capable of:
+*   **Graphics:** Running an X11 server (Xfbdev) with the `twm` window manager, `xterm`, and `xeyes`.
+*   **Networking:** Full TCP/UDP support. Tools like `wget` work with SSL (via wolfSSL).
+*   **Audio:** Sound Blaster 16 and AC97 drivers are functional; capable of playing WAV files.
+*   **Software Ported:** A variety of Unix tools including Bash, coreutils, TCC (Tiny C Compiler), Lua, and Kria-lang.
+*   **Kernel Features:** SMP (multiprocessing), advanced memory management (PMM/VMM/Heap), and CoW fork support.
 
-- **Filesystem & Storage**
-   AHCI Driver: Custom driver to communicate with SATA devices.
-   Virtual File System (VFS): Abstraction layer for filesystem operations.
-   Ext2 Filesystem: Fully functional driver with features including reading, writing, inode management, `rename`, `chmod`, `chown`, file creation (`touch`), and directory creation (`mkdir`).
-  
-- **User Interface & Interaction**
-   Kernel Shell: Built-in interactive command-line interface for executing commands right within the kernel.
-   Graphics: Framebuffer setup via Limine with a basic windowing/console drawing system and custom fonts, complete with a customized boot background (`boo.png`).
-   Debugging: COM1 serial port support for early boot and kernel-level logging.
+## Current Goals
+
+*   **Porting GCC:** Enabling a native GCC toolchain to support full self-hosting.
+*   **Full USB Support:** Expanding beyond UHCI to support OHCI, EHCI, and xHCI controllers, along with a wider range of USB devices.
 
 ## Prerequisites
 
-To build and run AscentOS, you will need the following dependencies installed on your Linux system:
+To build the project on Linux, you'll need:
 
-- `make`
-- A C compiler (e.g., `gcc` or `clang` targeting x86_64-elf or your native compiler if compatible)
-- `qemu-system-x86_64` (for emulation)
-- `xorriso` (for creating the bootable ISO)
-- `curl`, `tar`, `gunzip` (for downloading dependencies like Limine and OVMF)
-- `e2fsprogs` (specifically `mkfs.ext2` and `debugfs` for generating disk images)
-- `rustc` and `cargo` (for building the kria-lang port)
+*   `make`, `gcc`/`clang`, `nasm`
+*   `git`, `curl`
+*   `xorriso` (for ISO creation)
+*   `qemu-system-x86_64` (for emulation)
+*   `e2fsprogs` (`mkfs.ext3` and `debugfs` are required for disk image generation)
+*   `python3`
+*   `rustc` & `cargo` (only if you want to build `kria-lang`)
 
 ## Building and Running
 
-The project includes a robust `Makefile` for automated builds, disk image creation, and QEMU execution.
+1.  **Build everything:**
+    ```bash
+    make
+    ```
+    This prepares the musl-based cross-toolchain, builds the kernel, and generates the bootable ISO.
 
-1. **Build the bootable ISO:**
-   ```bash
-   make
-   ```
-   *This clones Limine, builds the kernel, and creates `ascentos-x86_64.iso`.*
+2.  **Run in QEMU:**
+    ```bash
+    make run
+    ```
 
-2. **Run in QEMU (UEFI Mode):**
-   ```bash
-   make run
-   ```
-   *This downloads the EDK2 OVMF firmware, creates a sample 64MB Ext2 disk image (`disk.img`), and launches QEMU with 4 cores in UEFI mode.*
+## Building Ported Software
 
-3. **Run in QEMU (Legacy BIOS Mode):**
-   ```bash
-   make run-bios
-   ```
+To build the full suite of ported tools (Bash, X11, etc.), run these scripts in order:
 
-## Ported Software
-
-- **Kria Programming Language** - A custom programming language with bytecode VM execution, ported from [kria-lang](https://github.com/Piotriox/kria-lang). Built as a static binary using Rust and musl libc for Linux x86_64 binary compatibility.
-  - Build: `make kria`
-  - Included on disk image: `kria.elf` (interpreter) and `test.krx` (sample program)
-  - Usage on AscentOS: `exec /mnt/kria.elf /mnt/program.krx`
+```bash
+./scripts/build-bash.sh      && \
+./scripts/build-coreutils.sh && \
+./scripts/build-lua.sh       && \
+./scripts/build-tar.sh       && \
+./scripts/build-tcc.sh       && \
+./scripts/port-x11.sh        && \
+./scripts/build-xeyes.sh     && \
+./scripts/build-twm.sh       && \
+./scripts/build-xterm.sh
+```
 
 ## Directory Structure
 
-- `kernel/` - The core operating system source code.
-  - `src/` - C source files and subsystems (acpi, apic, fs, mm, sched, shell, smp, etc.).
-  - `linker-scripts/` - Custom linker script for the x86_64 kernel.
-- `userland/` - User-space programs compiled with musl libc.
-  - `kria-lang/` - Kria programming language source (Rust).
-- `limine.conf` - Configuration file for the Limine bootloader.
-- `GNUmakefile` - The main build script orchestrating the Limine download, kernel build, disk image generation, and QEMU execution.
+*   `kernel/`: Core kernel source code.
+*   `userland/`: User-space applications and ports.
+*   `scripts/`: Build system and toolchain automation.
+*   `initrd/`: Initial files and configurations for the system boot.
+*   `toolchain/`: (Generated) Musl toolchain and sysroot.
+*   `limine/`: Bootloader source and binaries.
 
-## License
-
-This project is open-source and intended for educational purposes and operating system development exploration.
+---
+Developed as an open-source project for educational purposes and OS development exploration.

@@ -1,0 +1,10 @@
+/build
+*.elf
+*.iso
+*.bin
+/kernel/bin-x86_64
+disk.img
+/toolchain
+kernel/obj-x86_64
+userland/kilo.c
+userland/build-ascentos
