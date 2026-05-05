@@ -54,5 +54,9 @@ $(OBJDIR)/i_ascentos_sound.o:	$(ASCENTOS_SOUND)
 	@echo [Compiling $<]
 	$(VB)$(CC) $(CFLAGS) -I$(DOOM_SRC) -c $< -o $@
 
+$(MIDIPLAY_LIB):
+	@echo [Building midiplay]
+	$(VB)../scripts/build-midiplay.sh
+
 print:
 	@echo OBJS: $(OBJS)

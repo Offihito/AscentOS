@@ -27,6 +27,7 @@
 #include "../../mm/dma_alloc.h"
 #include "../input/evdev.h"
 #include "../input/mouse.h"
+#include "ehci.h"
 #include "ohci.h"
 #include "uhci.h"
 #include "usb.h"
@@ -68,13 +69,13 @@ struct usb_endpoint_descriptor_m {
   uint8_t interval;
 } __attribute__((packed));
 
-#define USB_CLASS_HID         0x03
-#define USB_SUBCLASS_BOOT     0x01
-#define USB_PROTOCOL_MOUSE    0x02
+#define USB_CLASS_HID 0x03
+#define USB_SUBCLASS_BOOT 0x01
+#define USB_PROTOCOL_MOUSE 0x02
 
-#define USB_REQ_SET_IDLE_M    0x0A
+#define USB_REQ_SET_IDLE_M 0x0A
 #define USB_REQ_SET_PROTOCOL_M 0x0B
-#define HID_PROTOCOL_BOOT_M  0x00
+#define HID_PROTOCOL_BOOT_M 0x00
 
 // ── Mouse state ─────────────────────────────────────────────────────────────
 
@@ -83,11 +84,11 @@ struct usb_endpoint_descriptor_m {
 struct usb_mouse_state {
   struct usb_device *dev;
   struct uhci_controller *hc; // Non-NULL only for UHCI-backed devices
-  uint8_t ep_addr;       // Endpoint address (direction bit + endpoint number)
-  uint8_t ep_number;     // Endpoint number (0-15)
-  uint16_t max_packet;   // Max packet size from endpoint descriptor
-  uint8_t interval;      // Polling interval (in ms frames)
-  uint8_t data_toggle;   // DATA0/DATA1 toggle for interrupt IN
+  uint8_t ep_addr;     // Endpoint address (direction bit + endpoint number)
+  uint8_t ep_number;   // Endpoint number (0-15)
+  uint16_t max_packet; // Max packet size from endpoint descriptor
+  uint8_t interval;    // Polling interval (in ms frames)
+  uint8_t data_toggle; // DATA0/DATA1 toggle for interrupt IN
 
   // DMA buffer for interrupt transfer data
   void *report_buf;
@@ -104,6 +105,9 @@ struct usb_mouse_state {
 
   // Interrupt transfer scheduling (OHCI path)
   struct ohci_int_pipe *ohci_pipe;
+
+  // Interrupt transfer scheduling (EHCI path)
+  struct ehci_int_pipe *ehci_pipe;
 
   bool active;
 };
@@ -195,7 +199,8 @@ static void usb_mouse_process_report(struct usb_mouse_state *mouse,
 // ── Interrupt Transfer Setup ────────────────────────────────────────────────
 //
 // Uses QH pool indices 8+ to avoid conflicts with keyboard (1-4) and
-// control transfers (0). TD pool indices start at 48+ to avoid keyboard (32-35).
+// control transfers (0). TD pool indices start at 48+ to avoid keyboard
+// (32-35).
 
 static void usb_mouse_setup_interrupt_xfer(struct usb_mouse_state *mouse) {
   struct uhci_controller *hc = mouse->hc;
@@ -309,8 +314,8 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 9;
 
-  int res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf, 9,
-                                  dev->low_speed);
+  int res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf,
+                                       9, dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-MOUSE] Failed to get config descriptor header\n");
     return false;
@@ -324,8 +329,8 @@ bool usb_mouse_probe(struct usb_device *dev) {
 
   // Read the full configuration descriptor bundle
   req.length = total_len;
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf, total_len,
-                              dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf,
+                                   total_len, dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-MOUSE] Failed to get full config descriptor\n");
     return false;
@@ -405,7 +410,8 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0,
+                                   dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-MOUSE] SET_CONFIGURATION failed\n");
     return false;
@@ -422,7 +428,8 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0,
+                                   dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-MOUSE] SET_PROTOCOL failed (non-fatal)\n");
   }
@@ -434,7 +441,8 @@ bool usb_mouse_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0,
+                                   dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-MOUSE] SET_IDLE failed (non-fatal)\n");
   }
@@ -473,19 +481,38 @@ bool usb_mouse_probe(struct usb_device *dev) {
     // UHCI path
     usb_mouse_setup_interrupt_xfer(ms);
   } else {
-    // OHCI path
-    for (int ci = 0; ci < ohci_get_controller_count(); ci++) {
-      struct ohci_controller *ohc = ohci_get_controller(ci);
-      if (ohc && dev->hcd->priv == ohc) {
-        ms->ohci_pipe = ohci_setup_int_in(
-            ohc, dev->address, ms->ep_number, ms->max_packet,
-            ms->interval, dev->low_speed, ms->report_buf,
-            ms->report_buf_phys);
+    bool pipe_found = false;
+
+    // EHCI path — check if this device is on an EHCI controller
+    for (int ci = 0; ci < ehci_get_controller_count(); ci++) {
+      struct ehci_controller *ehc = ehci_get_controller(ci);
+      if (ehc && dev->hcd->priv == ehc) {
+        ms->ehci_pipe = ehci_setup_int_in(
+            ehc, dev->address, ms->ep_number, ms->max_packet, ms->interval,
+            dev->low_speed, ms->report_buf, ms->report_buf_phys);
+        if (ms->ehci_pipe)
+          pipe_found = true;
+        else
+          klog_puts("[USB-MOUSE] Failed to set up EHCI interrupt pipe\n");
         break;
       }
     }
-    if (!ms->ohci_pipe) {
-      klog_puts("[USB-MOUSE] Failed to set up OHCI interrupt pipe\n");
+
+    // OHCI path — check if this device is on an OHCI controller
+    if (!pipe_found) {
+      for (int ci = 0; ci < ohci_get_controller_count(); ci++) {
+        struct ohci_controller *ohc = ohci_get_controller(ci);
+        if (ohc && dev->hcd->priv == ohc) {
+          ms->ohci_pipe = ohci_setup_int_in(
+              ohc, dev->address, ms->ep_number, ms->max_packet, ms->interval,
+              dev->low_speed, ms->report_buf, ms->report_buf_phys);
+          if (ms->ohci_pipe)
+            pipe_found = true;
+          else
+            klog_puts("[USB-MOUSE] Failed to set up OHCI interrupt pipe\n");
+          break;
+        }
+      }
     }
   }
 
@@ -507,6 +534,23 @@ void usb_mouse_poll(void) {
     struct usb_mouse_state *ms = &mice[i];
     if (!ms->active)
       continue;
+
+    // ── EHCI path ──────────────────────────────────────────────────────
+    if (ms->ehci_pipe) {
+      if (!ehci_int_pipe_completed(ms->ehci_pipe))
+        continue;
+
+      uint8_t *buf = (uint8_t *)ms->ehci_pipe->data_buf;
+      bool has_motion = (buf[1] != 0) || (buf[2] != 0);
+      bool has_wheel = (ms->max_packet >= 4 && buf[3] != 0);
+      bool btn_changed = (buf[0] != ms->prev_buttons);
+
+      if (has_motion || has_wheel || btn_changed)
+        usb_mouse_process_report(ms, buf, ms->max_packet);
+
+      ehci_int_pipe_resubmit(ms->ehci_pipe);
+      continue;
+    }
 
     // ── OHCI path ──────────────────────────────────────────────────────
     if (ms->ohci_pipe) {

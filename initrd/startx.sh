@@ -1,5 +1,5 @@
 #!/bin/sh
-# Xfbdev ile X server başlat ve twm + xeyes çalıştır
+# Xfbdev ile X server başlat ve twm + xeyes + st çalıştır
 
 echo "X server başlatılıyor..."
 
@@ -31,8 +31,22 @@ fi
 if [ -x /xeyes ]; then
     echo "xeyes başlatılıyor..."
     /xeyes &
+elif command -v xeyes >/dev/null 2>&1; then
+    echo "xeyes (sistem yolu ile) başlatılıyor..."
+    xeyes &
 else
-    echo "Uyarı: /xeyes bulunamadı!"
+    echo "Uyarı: xeyes bulunamadı!"
 fi
 
-echo "Tamamlandı. twm ve xeyes çalıştırıldı."
+# st (suckless terminal)
+if [ -x /bin/st ]; then
+    echo "st başlatılıyor..."
+    /bin/st &
+elif command -v st >/dev/null 2>&1; then
+    echo "st (sistem yolu ile) başlatılıyor..."
+    st &
+else
+    echo "Uyarı: st bulunamadı!"
+fi
+
+echo "Tamamlandı. twm, xeyes ve st çalıştırıldı."

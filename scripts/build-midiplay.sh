@@ -76,9 +76,22 @@ build_midiplay() {
 
     export CC AR RANLIB
 
+    # Fetch midiplay source if missing
+    if [ ! -f "${MIDIPLAY_SRC}/opl.c" ]; then
+        echo "midiplay source missing, downloading..."
+        mkdir -p "${MIDIPLAY_SRC}"
+        BASE_URL="https://raw.githubusercontent.com/fawtytoo/Midiplay/master"
+        for f in midiplay.c midiplay.h opl.c opl.h nuked_opl3.h; do
+            if [ ! -f "${MIDIPLAY_SRC}/$f" ]; then
+                echo "  Downloading $f..."
+                curl -L -s -o "${MIDIPLAY_SRC}/$f" "${BASE_URL}/$f"
+            fi
+        done
+    fi
+
     echo "Using CC=$CC AR=$AR RANLIB=$RANLIB"
 
-    CFLAGS="-static -O2 -Wall -fno-stack-protector -I$PREFIX/include"
+    CFLAGS="-static -O2 -Wall -fno-stack-protector -I$PREFIX/include -I${MIDIPLAY_SRC}"
     LDFLAGS="-static -L$PREFIX/lib"
 
     echo "Compiling OPL3 emulator..."

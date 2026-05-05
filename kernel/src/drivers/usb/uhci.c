@@ -369,8 +369,8 @@ int uhci_control_transfer(struct uhci_controller *hc, uint8_t addr,
 }
 
 static int uhci_hcd_control_transfer(struct usb_hcd *hcd, uint8_t addr,
-                                     struct usb_control_request *req, void *data,
-                                     uint16_t len, bool low_speed) {
+                                     struct usb_control_request *req,
+                                     void *data, uint16_t len, bool low_speed) {
   struct uhci_controller *hc = (struct uhci_controller *)hcd->priv;
   return uhci_control_transfer(hc, addr, req, data, len, low_speed);
 }
@@ -560,6 +560,10 @@ void uhci_init(void) {
       // by pulling the plug on Master, Memory, and I/O access.
       // We don't have drivers for them yet, so they shouldn't be active.
       if (dev->prog_if != PCI_PROGIF_UHCI && dev->prog_if != PCI_PROGIF_OHCI) {
+        // Skip EHCI controllers — they are managed by our ehci.c driver
+        if (dev->prog_if == 0x20)
+          continue;
+
         cmd &= ~(0x07); // Clear Master, Memory, I/O
         klog_puts("[USB] Electrically disabled non-UHCI controller at PCI ");
         klog_hex32(dev->bus);

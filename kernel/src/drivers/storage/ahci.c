@@ -4,12 +4,12 @@
 #include "drivers/pci/pci.h"
 #include "drivers/storage/block.h"
 #include "lib/string.h"
+#include "lock/spinlock.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
-#include "lock/spinlock.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 #define ATA_CMD_READ_DMA_EX 0x25
 #define ATA_CMD_WRITE_DMA_EX 0x35
@@ -134,14 +134,16 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
     }
   }
 
-  if (drive) spinlock_acquire(&drive->lock);
+  if (drive)
+    spinlock_acquire(&drive->lock);
 
   // Clear pending interrupts
   port->is = port->is;
 
   int slot = find_cmdslot(port);
   if (slot == -1) {
-    if (drive) spinlock_release(&drive->lock);
+    if (drive)
+      spinlock_release(&drive->lock);
     return -1;
   }
 
@@ -229,7 +231,8 @@ static int ahci_io(ahci_port_t *port, uint64_t lba, uint32_t count, void *buf,
   }
   pmm_free_blocks(bounce_phys, pages);
 
-  if (drive) spinlock_release(&drive->lock);
+  if (drive)
+    spinlock_release(&drive->lock);
   return 0;
 }
 

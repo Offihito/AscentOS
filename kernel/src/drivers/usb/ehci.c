@@ -1,0 +1,650 @@
+#include "ehci.h"
+#include "../../console/klog.h"
+#include "../../cpu/irq.h"
+#include "../../io/io.h"
+#include "../../lib/string.h"
+#include "../../mm/dma_alloc.h"
+#include "../../mm/pmm.h"
+#include "../../mm/vmm.h"
+#include "../pci/pci.h"
+#include "usb.h"
+#include "usb_kbd.h"
+#include "usb_mouse.h"
+#include <stddef.h>
+
+static struct ehci_controller controllers[EHCI_MAX_CONTROLLERS];
+static int ehci_count = 0;
+
+// Global interrupt pipe array (shared across all EHCI controllers)
+static struct ehci_int_pipe int_pipes[EHCI_MAX_INT_PIPES];
+static int int_pipe_count = 0;
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+static inline uint32_t ehci_read_cap32(struct ehci_controller *hc,
+                                       uint32_t reg) {
+  return *(volatile uint32_t *)(hc->cap_base + reg);
+}
+
+static inline uint8_t ehci_read_cap8(struct ehci_controller *hc, uint32_t reg) {
+  return *(volatile uint8_t *)(hc->cap_base + reg);
+}
+
+static inline uint32_t ehci_read_op(struct ehci_controller *hc, uint32_t reg) {
+  return *(volatile uint32_t *)(hc->op_base + reg);
+}
+
+static inline void ehci_write_op(struct ehci_controller *hc, uint32_t reg,
+                                 uint32_t val) {
+  *(volatile uint32_t *)(hc->op_base + reg) = val;
+}
+
+// ── BIOS Handover (EECP) ────────────────────────────────────────────────────
+
+static void ehci_bios_handover(struct ehci_controller *hc) {
+  uint32_t hccparams = ehci_read_cap32(hc, EHCI_CAP_HCCPARAMS);
+  uint8_t eecp_offset = (hccparams >> 8) & 0xFF;
+
+  if (eecp_offset < 0x40) {
+    klog_puts("[EHCI] No EECP found (BIOS handover not needed).\n");
+    return;
+  }
+
+  uint32_t legsup =
+      pci_config_read32(hc->pci_bus, hc->pci_slot, hc->pci_func, eecp_offset);
+
+  // Officially claim ownership
+  pci_config_write32(hc->pci_bus, hc->pci_slot, hc->pci_func, eecp_offset,
+                     legsup | EHCI_LEGACY_OS_OWNED);
+
+  if (legsup & EHCI_LEGACY_BIOS_OWNED) {
+    klog_puts("[EHCI] BIOS owns the controller. Waiting for handover...\n");
+    int timeout = 1000;
+    while (timeout > 0) {
+      legsup = pci_config_read32(hc->pci_bus, hc->pci_slot, hc->pci_func,
+                                 eecp_offset);
+      if (!(legsup & EHCI_LEGACY_BIOS_OWNED))
+        break;
+      for (int i = 0; i < 1000; i++)
+        io_wait();
+      timeout--;
+    }
+  }
+
+  // Disable SMI on USB events
+  pci_config_write32(hc->pci_bus, hc->pci_slot, hc->pci_func, eecp_offset + 4,
+                     0);
+}
+
+// ── Reset and Initialization ────────────────────────────────────────────────
+
+static void ehci_controller_reset(struct ehci_controller *hc) {
+  // 1. Stop the controller if it's running
+  uint32_t cmd = ehci_read_op(hc, EHCI_REG_USBCMD);
+  cmd &= ~EHCI_CMD_RS;
+  ehci_write_op(hc, EHCI_REG_USBCMD, cmd);
+
+  // Wait for it to stop
+  while (!(ehci_read_op(hc, EHCI_REG_USBSTS) & EHCI_STS_HALTED))
+    ;
+
+  // 2. Issue Reset
+  ehci_write_op(hc, EHCI_REG_USBCMD, EHCI_CMD_HCRESET);
+
+  // 3. Wait for reset to complete
+  int timeout = 1000;
+  while (ehci_read_op(hc, EHCI_REG_USBCMD) & EHCI_CMD_HCRESET) {
+    for (int i = 0; i < 1000; i++)
+      io_wait();
+    if (--timeout == 0) {
+      klog_puts("[EHCI] Reset timed out!\n");
+      return;
+    }
+  }
+}
+
+static void ehci_init_schedule(struct ehci_controller *hc) {
+  // ── Asynchronous Schedule ─────────────────────────────────────────────
+  // Allocate Dummy QH for Asynchronous Schedule
+  uint64_t phys;
+  hc->async_qh = (struct ehci_qh *)dma_alloc_page(&phys);
+  memset(hc->async_qh, 0, 4096);
+  hc->async_qh_phys = (uint32_t)phys;
+
+  // Initialize Dummy QH
+  hc->async_qh->link = hc->async_qh_phys | EHCI_PTR_QH;
+  hc->async_qh->ep_char = (1 << 15); // H (Head of Reclamation) bit
+  hc->async_qh->overlay.next = EHCI_PTR_TERMINATE;
+  hc->async_qh->overlay.alt_next = EHCI_PTR_TERMINATE;
+  hc->async_qh->overlay.token = 0; // Not active
+
+  // Set the Asynchronous List Address
+  ehci_write_op(hc, EHCI_REG_ASYNCLISTADDR, hc->async_qh_phys);
+
+  // ── Periodic Schedule ─────────────────────────────────────────────────
+  // Allocate the 4KB Periodic Frame List (1024 × 32-bit pointers)
+  hc->periodic_list = (uint32_t *)dma_alloc_page(&phys);
+  hc->periodic_list_phys = (uint32_t)phys;
+
+  // Initialize all entries to TERMINATE (no interrupt QHs linked yet)
+  for (int i = 0; i < EHCI_PERIODIC_FRAME_COUNT; i++) {
+    hc->periodic_list[i] = EHCI_PTR_TERMINATE;
+  }
+
+  // Tell the hardware where the periodic list is
+  ehci_write_op(hc, EHCI_REG_PERIODICLISTBASE, hc->periodic_list_phys);
+
+  // ── Interrupt Pipe Pools (QHs + qTDs for HID devices) ─────────────────
+  hc->int_qh_pool = (struct ehci_qh *)dma_alloc_page(&phys);
+  memset(hc->int_qh_pool, 0, 4096);
+  hc->int_qh_pool_phys = (uint32_t)phys;
+
+  hc->int_qtd_pool = (struct ehci_qtd *)dma_alloc_page(&phys);
+  memset(hc->int_qtd_pool, 0, 4096);
+  hc->int_qtd_pool_phys = (uint32_t)phys;
+
+  // ── Control Transfer Pools ────────────────────────────────────────────
+  hc->qh_pool = (struct ehci_qh *)dma_alloc_page(&phys);
+  memset(hc->qh_pool, 0, 4096);
+  hc->qh_pool_phys = (uint32_t)phys;
+
+  hc->qtd_pool = (struct ehci_qtd *)dma_alloc_page(&phys);
+  memset(hc->qtd_pool, 0, 4096);
+  hc->qtd_pool_phys = (uint32_t)phys;
+
+  hc->transfer_buffer = dma_alloc_page(&phys);
+  hc->transfer_buffer_phys = (uint32_t)phys;
+}
+
+// ── Port Management ─────────────────────────────────────────────────────────
+
+static void ehci_reset_port(struct ehci_controller *hc, uint8_t port) {
+  uint32_t reg = EHCI_REG_PORTSC + (port * 4);
+  uint32_t status = ehci_read_op(hc, reg);
+
+  // 1. Kick off reset
+  // The spec says write 0 to bit 2 (Port Enable) and 1 to bit 8 (Port Reset).
+  status &= ~(EHCI_PORT_ENABLE | EHCI_PORT_EN_CHANGE);
+  status |= EHCI_PORT_RESET;
+  ehci_write_op(hc, reg, status);
+
+  // 2. Hold reset for 50ms
+  for (int i = 0; i < 50000; i++)
+    io_wait();
+
+  // 3. Clear reset
+  status = ehci_read_op(hc, reg);
+  status &= ~EHCI_PORT_RESET;
+  ehci_write_op(hc, reg, status);
+
+  // 4. Wait for reset to settle
+  for (int i = 0; i < 10000; i++) {
+    status = ehci_read_op(hc, reg);
+    if (!(status & EHCI_PORT_RESET))
+      break;
+    io_wait();
+  }
+
+  // 5. If port is ENABLED, it's High-Speed.
+  // If port is NOT enabled, it's FS/LS.
+  if (!(status & EHCI_PORT_ENABLE)) {
+    klog_puts("[EHCI] Port ");
+    klog_uint64(port);
+    klog_puts(": Device is FS/LS. Handing over to companion...\n");
+    status |= EHCI_PORT_OWNER;
+    ehci_write_op(hc, reg, status);
+  } else {
+    klog_puts("[EHCI] Port ");
+    klog_uint64(port);
+    klog_puts(": High-Speed device discovered and enabled.\n");
+  }
+}
+
+// ── Control Transfers ───────────────────────────────────────────────────────
+
+int ehci_control_transfer(struct ehci_controller *hc, uint8_t addr,
+                          struct usb_control_request *req, void *data,
+                          uint16_t len, bool low_speed) {
+  (void)low_speed;
+
+  // Setup Stage qTD
+  struct ehci_qtd *setup_qtd = &hc->qtd_pool[0];
+  struct ehci_qtd *data_qtd = (len > 0) ? &hc->qtd_pool[1] : NULL;
+  struct ehci_qtd *status_qtd = (len > 0) ? &hc->qtd_pool[2] : &hc->qtd_pool[1];
+
+  uint32_t setup_phys = hc->qtd_pool_phys + (0 * sizeof(struct ehci_qtd));
+  uint32_t data_phys = hc->qtd_pool_phys + (1 * sizeof(struct ehci_qtd));
+  uint32_t status_phys =
+      hc->qtd_pool_phys + ((len > 0 ? 2 : 1) * sizeof(struct ehci_qtd));
+
+  memset(hc->qtd_pool, 0, 3 * sizeof(struct ehci_qtd));
+  memcpy(hc->transfer_buffer, req, sizeof(struct usb_control_request));
+
+  setup_qtd->next = (len > 0) ? data_phys : status_phys;
+  setup_qtd->alt_next = EHCI_PTR_TERMINATE;
+  setup_qtd->token = (QTD_PID_SETUP << 8) | (3 << 10) |
+                     (sizeof(struct usb_control_request) << 16) |
+                     QTD_TOKEN_ACTIVE;
+  setup_qtd->buffer[0] = hc->transfer_buffer_phys;
+
+  if (data_qtd) {
+    bool is_in = (req->request_type & 0x80) != 0;
+    if (!is_in && data)
+      memcpy((uint8_t *)hc->transfer_buffer + 64, data, len);
+    data_qtd->next = status_phys;
+    data_qtd->alt_next = EHCI_PTR_TERMINATE;
+    data_qtd->token = ((is_in ? QTD_PID_IN : QTD_PID_OUT) << 8) | (3 << 10) |
+                      (len << 16) | (1 << 31) | QTD_TOKEN_ACTIVE;
+    data_qtd->buffer[0] = hc->transfer_buffer_phys + 64;
+  }
+
+  bool status_in = (len == 0 || !(req->request_type & 0x80));
+  status_qtd->next = EHCI_PTR_TERMINATE;
+  status_qtd->alt_next = EHCI_PTR_TERMINATE;
+  status_qtd->token = ((status_in ? QTD_PID_IN : QTD_PID_OUT) << 8) |
+                      (3 << 10) | (0 << 16) | (1 << 31) | QTD_TOKEN_ACTIVE;
+
+  struct ehci_qh *qh = &hc->qh_pool[0];
+  uint32_t qh_phys = hc->qh_pool_phys;
+  memset(qh, 0, sizeof(struct ehci_qh));
+  qh->link = EHCI_PTR_TERMINATE;
+  qh->ep_char = addr | (0 << 8) | (64 << 16) | (2 << 12) | (1 << 14);
+  qh->ep_caps = (1 << 30);
+  qh->overlay.next = setup_phys;
+
+  asm volatile("mfence" ::: "memory");
+  qh->link = hc->async_qh->link;
+  hc->async_qh->link = qh_phys | EHCI_PTR_QH;
+  asm volatile("mfence" ::: "memory");
+
+  bool success = false;
+  int timeout = 1000000;
+  while (timeout--) {
+    asm volatile("" ::: "memory");
+    if (!(status_qtd->token & QTD_TOKEN_ACTIVE)) {
+      if (!(status_qtd->token & 0x7C))
+        success = true;
+      break;
+    }
+    for (int j = 0; j < 10; j++)
+      io_wait();
+  }
+
+  hc->async_qh->link = qh->link;
+  asm volatile("mfence" ::: "memory");
+
+  if (success && data && len > 0 && (req->request_type & 0x80)) {
+    memcpy(data, (uint8_t *)hc->transfer_buffer + 64, len);
+  }
+
+  return success ? 0 : -1;
+}
+
+static int ehci_hcd_control_transfer(struct usb_hcd *hcd, uint8_t addr,
+                                     struct usb_control_request *req,
+                                     void *data, uint16_t len, bool low_speed) {
+  struct ehci_controller *hc = (struct ehci_controller *)hcd->priv;
+  return ehci_control_transfer(hc, addr, req, data, len, low_speed);
+}
+
+// ── Interrupt Pipe Management (Phase 5 — HID support) ───────────────────────
+//
+// EHCI Periodic Schedule uses QHs linked into the Periodic Frame List.
+// Each QH points to a qTD that performs an IN transfer from the device's
+// interrupt endpoint. We use a ping-pong scheme (2 qTDs) for clean resubmit.
+
+struct ehci_int_pipe *ehci_setup_int_in(struct ehci_controller *hc,
+                                        uint8_t dev_addr, uint8_t ep_num,
+                                        uint16_t max_packet, uint8_t interval,
+                                        bool low_speed, void *buffer,
+                                        uint32_t buffer_phys) {
+  (void)low_speed; // EHCI only handles high-speed devices
+
+  if (int_pipe_count >= EHCI_MAX_INT_PIPES)
+    return NULL;
+
+  struct ehci_int_pipe *pipe = &int_pipes[int_pipe_count];
+  pipe->hc = hc;
+  pipe->data_buf = buffer;
+  pipe->data_buf_phys = buffer_phys;
+  pipe->max_packet = max_packet;
+  pipe->interval = interval;
+  pipe->active = true;
+  pipe->cur_idx = 0;
+
+  // ── Allocate QH and 2 qTDs from the dedicated interrupt pools ─────────
+  int pipe_idx = int_pipe_count;
+
+  pipe->qh = &hc->int_qh_pool[pipe_idx];
+  pipe->qh_phys = hc->int_qh_pool_phys + (pipe_idx * sizeof(struct ehci_qh));
+
+  pipe->qtd[0] = &hc->int_qtd_pool[pipe_idx * 2];
+  pipe->qtd_phys[0] =
+      hc->int_qtd_pool_phys + (pipe_idx * 2 * sizeof(struct ehci_qtd));
+
+  pipe->qtd[1] = &hc->int_qtd_pool[pipe_idx * 2 + 1];
+  pipe->qtd_phys[1] =
+      hc->int_qtd_pool_phys + ((pipe_idx * 2 + 1) * sizeof(struct ehci_qtd));
+
+  // ── Build the QH ──────────────────────────────────────────────────────
+  memset(pipe->qh, 0, sizeof(struct ehci_qh));
+
+  // ep_char: device address, endpoint number, high speed, max packet size
+  // Bit 14 = DTC (Data Toggle Control from qTD)
+  pipe->qh->ep_char = ((uint32_t)dev_addr) | ((uint32_t)ep_num << 8) |
+                      QH_EP_SPEED_HIGH | ((uint32_t)max_packet << 16) |
+                      (1 << 14); // DTC = 1 (toggle from qTD)
+
+  // ep_caps: Mult = 1 (one transaction per microframe minimum)
+  // High-speed interrupt endpoints: S-mask determines which microframes to
+  // schedule. We use microframe 0 (bit 0 of S-mask) for simplicity.
+  pipe->qh->ep_caps = (1 << 30) | // Mult = 1
+                      (0x01);     // S-mask = microframe 0
+
+  // ── Build qTD[0] as the active transfer ───────────────────────────────
+  memset(pipe->qtd[0], 0, sizeof(struct ehci_qtd));
+  pipe->qtd[0]->next = EHCI_PTR_TERMINATE;
+  pipe->qtd[0]->alt_next = EHCI_PTR_TERMINATE;
+  pipe->qtd[0]->token = (QTD_PID_IN << 8) | (3 << 10) | // C_ERR = 3
+                        (1 << 15) | // IOC = generate interrupt
+                        ((uint32_t)max_packet << 16) | // Total bytes
+                        QTD_TOKEN_ACTIVE; // Data toggle = 0 (first xfer)
+  pipe->qtd[0]->buffer[0] = buffer_phys;
+
+  // ── qTD[1] is the inactive spare (for ping-pong resubmit) ────────────
+  memset(pipe->qtd[1], 0, sizeof(struct ehci_qtd));
+
+  // ── Link QH overlay to our active qTD ─────────────────────────────────
+  pipe->qh->overlay.next = pipe->qtd_phys[0];
+  pipe->qh->overlay.alt_next = EHCI_PTR_TERMINATE;
+  pipe->qh->overlay.token = 0; // HC will override this from qtd[0]
+
+  // ── Insert QH into the Periodic Frame List ────────────────────────────
+  // The interval determines how many milliseconds between polls.
+  // EHCI operates at 1 frame/ms; we insert the QH every N frames.
+  uint16_t sched_interval = 1;
+  if (interval > 1) {
+    sched_interval = interval;
+    // Round down to power of 2
+    uint16_t p2 = 1;
+    while (p2 * 2 <= sched_interval && p2 < 512)
+      p2 *= 2;
+    sched_interval = p2;
+  }
+  if (sched_interval > 1024)
+    sched_interval = 1024;
+
+  asm volatile("mfence" ::: "memory");
+  for (int i = 0; i < EHCI_PERIODIC_FRAME_COUNT; i += sched_interval) {
+    // Chain: framelist[i] → our QH → previous entry
+    pipe->qh->link = hc->periodic_list[i]; // Chain to existing
+    hc->periodic_list[i] = pipe->qh_phys | EHCI_PTR_QH;
+  }
+  asm volatile("mfence" ::: "memory");
+
+  // Enable Periodic Schedule if not already enabled
+  uint32_t cmd = ehci_read_op(hc, EHCI_REG_USBCMD);
+  if (!(cmd & EHCI_CMD_PSE)) {
+    cmd |= EHCI_CMD_PSE;
+    ehci_write_op(hc, EHCI_REG_USBCMD, cmd);
+
+    // Wait for PSS (Periodic Schedule Status) to confirm activation
+    for (int i = 0; i < 100000; i++) {
+      if (ehci_read_op(hc, EHCI_REG_USBSTS) & EHCI_STS_PSS)
+        break;
+      io_wait();
+    }
+  }
+
+  int_pipe_count++;
+
+  klog_puts("[EHCI] Interrupt IN pipe: addr=");
+  klog_uint64(dev_addr);
+  klog_puts(", ep=");
+  klog_uint64(ep_num);
+  klog_puts(", mps=");
+  klog_uint64(max_packet);
+  klog_puts(", interval=");
+  klog_uint64(sched_interval);
+  klog_puts("ms\n");
+
+  return pipe;
+}
+
+bool ehci_int_pipe_completed(struct ehci_int_pipe *pipe) {
+  if (!pipe || !pipe->active)
+    return false;
+  asm volatile("" ::: "memory");
+  // Check the overlay area of the QH — the HC copies qTD status here
+  // When the Active bit clears, the transfer is done
+  uint32_t token = pipe->qh->overlay.token;
+  return !(token & QTD_TOKEN_ACTIVE);
+}
+
+void ehci_int_pipe_resubmit(struct ehci_int_pipe *pipe) {
+  if (!pipe || !pipe->active)
+    return;
+
+  int old_active = pipe->cur_idx;
+  int new_active = 1 - old_active;
+
+  // Get the toggle bit from the completed transfer (preserved in overlay)
+  uint32_t old_token = pipe->qh->overlay.token;
+  uint32_t toggle = old_token & (1 << 31); // Data toggle bit
+  toggle ^= (1 << 31);                     // Flip for next transfer
+
+  // Build the new active qTD
+  struct ehci_qtd *qtd = pipe->qtd[new_active];
+  memset(qtd, 0, sizeof(struct ehci_qtd));
+  qtd->next = EHCI_PTR_TERMINATE;
+  qtd->alt_next = EHCI_PTR_TERMINATE;
+  qtd->token = (QTD_PID_IN << 8) | (3 << 10) |      // C_ERR = 3
+               (1 << 15) |                          // IOC = generate interrupt
+               ((uint32_t)pipe->max_packet << 16) | // Total bytes
+               toggle |                             // Data toggle
+               QTD_TOKEN_ACTIVE;
+  qtd->buffer[0] = pipe->data_buf_phys;
+
+  pipe->cur_idx = new_active;
+
+  asm volatile("mfence" ::: "memory");
+
+  // Repoint the QH overlay to the new qTD
+  // The HC will pick this up on the next periodic schedule traversal
+  pipe->qh->overlay.next = pipe->qtd_phys[new_active];
+  pipe->qh->overlay.alt_next = EHCI_PTR_TERMINATE;
+  pipe->qh->overlay.token = 0; // Clear — HC reloads from qTD
+  pipe->qh->current = 0;       // Force re-fetch
+
+  asm volatile("mfence" ::: "memory");
+}
+
+// ── IRQ Handler ─────────────────────────────────────────────────────────────
+
+static void ehci_irq_handler(struct registers *regs) {
+  (void)regs;
+  for (int i = 0; i < ehci_count; i++) {
+    struct ehci_controller *hc = &controllers[i];
+    if (!hc->present)
+      continue;
+
+    uint32_t status = ehci_read_op(hc, EHCI_REG_USBSTS);
+    uint32_t enabled = ehci_read_op(hc, EHCI_REG_USBINTR);
+    uint32_t active = status & enabled;
+
+    if (active == 0)
+      continue;
+
+    // Acknowledge by writing back the active bits
+    ehci_write_op(hc, EHCI_REG_USBSTS, active);
+
+    if (active & EHCI_STS_USBINT) {
+      // USB Interrupt — a transfer completed (IOC)
+      // Poll HID devices to check their pipe status
+      usb_kbd_poll();
+      usb_mouse_poll();
+    }
+
+    if (active & EHCI_STS_ERROR) {
+      klog_puts("[EHCI] USB Error Interrupt\n");
+    }
+
+    if (active & EHCI_STS_HSE) {
+      klog_puts("[EHCI] Host System Error!\n");
+    }
+
+    if (active & EHCI_STS_PCD) {
+      // Port Change Detect — could handle hot-plug here
+    }
+  }
+}
+
+// ── Initialization Entry ────────────────────────────────────────────────────
+
+void ehci_init(void) {
+  ehci_count = 0;
+  int_pipe_count = 0;
+  klog_puts("[EHCI] Searching for EHCI controllers...\n");
+
+  for (uint32_t i = 0; i < pci_get_device_count(); i++) {
+    struct pci_device *pdev = pci_get_device(i);
+    if (pdev->class_code == 0x0C && pdev->subclass == 0x03 &&
+        pdev->prog_if == 0x20) {
+      if (ehci_count >= EHCI_MAX_CONTROLLERS)
+        break;
+
+      struct ehci_controller *hc = &controllers[ehci_count++];
+      hc->pci_bus = pdev->bus;
+      hc->pci_slot = pdev->slot;
+      hc->pci_func = pdev->func;
+      hc->vendor_id = pdev->vendor_id;
+      hc->device_id = pdev->device_id;
+      hc->irq_line = pdev->irq_line;
+
+      uint32_t pci_cmd =
+          pci_config_read32(hc->pci_bus, hc->pci_slot, hc->pci_func, 0x04);
+      pci_config_write32(hc->pci_bus, hc->pci_slot, hc->pci_func, 0x04,
+                         pci_cmd | 0x06);
+
+      uintptr_t phys_base = pdev->bar[0] & 0xFFFFFFF0;
+      uintptr_t virt_base = phys_base + pmm_get_hhdm_offset();
+
+      vmm_map_page(vmm_get_active_pml4(), virt_base, phys_base,
+                   PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+      vmm_map_page(vmm_get_active_pml4(), virt_base + 0x1000,
+                   phys_base + 0x1000, PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+
+      hc->cap_base = virt_base;
+      uint8_t cap_len = ehci_read_cap8(hc, EHCI_CAP_CAPLENGTH);
+      hc->op_base = hc->cap_base + cap_len;
+
+      uint32_t hcsparams = ehci_read_cap32(hc, EHCI_CAP_HCSPARAMS);
+      hc->num_ports = hcsparams & 0x0F;
+
+      ehci_bios_handover(hc);
+
+      klog_puts("[EHCI] Resetting controller...\n");
+      ehci_controller_reset(hc);
+
+      klog_puts("[EHCI] Initializing schedules...\n");
+      ehci_init_schedule(hc);
+
+      // Register IRQ handler for EHCI interrupts
+      if (irq_install_handler(hc->irq_line, ehci_irq_handler, 0x000F)) {
+        // Enable USB Interrupt, Error, Port Change, and Host System Error
+        ehci_write_op(hc, EHCI_REG_USBINTR,
+                      EHCI_INTR_USBINT | EHCI_INTR_ERROR | EHCI_INTR_PCD |
+                          EHCI_INTR_HSE);
+      }
+
+      uint32_t cmd = ehci_read_op(hc, EHCI_REG_USBCMD);
+      cmd |= EHCI_CMD_RS | EHCI_CMD_ASE;
+      ehci_write_op(hc, EHCI_REG_USBCMD, cmd);
+
+      // Route all ports to EHCI first, then hand low-speed to companion UHCI
+      // This MUST happen before UHCI probes ports
+      ehci_write_op(hc, EHCI_REG_CONFIGFLAG, 1);
+
+      // Clear segment register (we use 32-bit addresses)
+      ehci_write_op(hc, EHCI_REG_CTRLDSSEGMENT, 0);
+
+      hc->hcd.priv = hc;
+      hc->hcd.control_transfer = ehci_hcd_control_transfer;
+
+      hc->present = true;
+    }
+  }
+}
+
+void ehci_hand_to_companion(void) {
+  // Hand low-speed/full-speed ports to companion UHCI/OHCI controllers.
+  // Ports with ENABLED high-speed devices must stay under EHCI ownership.
+  for (int i = 0; i < ehci_count; i++) {
+    struct ehci_controller *hc = &controllers[i];
+    for (uint8_t p = 0; p < hc->num_ports; p++) {
+      uint32_t portsc = ehci_read_op(hc, EHCI_REG_PORTSC + (p * 4));
+
+      // Skip ports that are enabled (high-speed device active)
+      if (portsc & EHCI_PORT_ENABLE)
+        continue;
+
+      // Hand over empty or FS/LS ports to companion controller
+      if (!(portsc & EHCI_PORT_OWNER)) {
+        portsc |= EHCI_PORT_OWNER;
+        ehci_write_op(hc, EHCI_REG_PORTSC + (p * 4), portsc);
+      }
+    }
+  }
+}
+
+// ── Port Enumeration (Phase 5) ──────────────────────────────────────────────
+// After resetting ports, enumerate high-speed devices through the USB core
+// which will trigger HID driver probe (keyboard/mouse).
+
+static void ehci_enumerate_ports(struct ehci_controller *hc) {
+  for (uint8_t p = 0; p < hc->num_ports; p++) {
+    uint32_t portsc = ehci_read_op(hc, EHCI_REG_PORTSC + (p * 4));
+    if (!(portsc & EHCI_PORT_CONNECT))
+      continue;
+
+    klog_puts("       - Device detected on port ");
+    klog_uint64(p);
+    klog_puts(". Resetting...\n");
+
+    ehci_reset_port(hc, p);
+
+    // After reset, if it's still EHCI-enabled (high-speed), enumerate it
+    portsc = ehci_read_op(hc, EHCI_REG_PORTSC + (p * 4));
+    if (portsc & EHCI_PORT_ENABLE) {
+      // High-speed device — enumerate through USB core
+      // This will call usb_device_discovered → usb_enumerate_device →
+      // usb_kbd_probe / usb_mouse_probe
+      usb_device_discovered(&hc->hcd, p, false /* not low speed */);
+    }
+  }
+}
+
+// ── Public API ──────────────────────────────────────────────────────────────
+
+int ehci_get_controller_count(void) { return ehci_count; }
+
+struct ehci_controller *ehci_get_controller(int index) {
+  if (index < 0 || index >= ehci_count)
+    return NULL;
+  return &controllers[index];
+}
+
+void ehci_self_test(void) {
+  klog_puts("[TEST] EHCI Phase 5: Port Enumeration & HID Support\n");
+  if (ehci_count == 0) {
+    klog_puts("       No EHCI controllers detected. FAIL.\n");
+    return;
+  }
+
+  for (int i = 0; i < ehci_count; i++) {
+    struct ehci_controller *hc = &controllers[i];
+    ehci_enumerate_ports(hc);
+  }
+
+  klog_puts("[TEST] EHCI Phase 5 complete.\n\n");
+}

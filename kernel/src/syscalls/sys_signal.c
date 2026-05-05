@@ -309,6 +309,25 @@ static uint64_t sys_kill(uint64_t pid, uint64_t sig, uint64_t a2, uint64_t a3,
   return 0;
 }
 
+// Send signal to all processes in a process group
+void signal_send_pgid(uint32_t pgid, int sig) {
+  if (sig <= 0 || sig > 64)
+    return;
+  
+  extern struct thread *global_thread_list;
+  extern spinlock_t tid_lock;
+  spinlock_acquire(&tid_lock);
+  
+  struct thread *t = global_thread_list;
+  while (t) {
+    if (t->pgid == pgid) {
+      t->pending_signals |= (1ULL << (sig - 1));
+    }
+    t = t->global_next;
+  }
+  spinlock_release(&tid_lock);
+}
+
 void syscall_register_signal(void) {
   syscall_register(SYS_RT_SIGACTION, sys_rt_sigaction);
   syscall_register(SYS_RT_SIGPROCMASK, sys_rt_sigprocmask);

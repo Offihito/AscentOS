@@ -15,7 +15,12 @@ static int device_count = 0;
 
 void usb_enumerate_device(struct usb_device *dev);
 
+static bool usb_initialized = false;
+
 void usb_init(void) {
+  if (usb_initialized)
+    return;
+  usb_initialized = true;
   klog_puts("[USB] Subsystem initialized.\n");
   for (int i = 0; i < MAX_USB_DEVICES; i++)
     devices[i] = NULL;
@@ -93,8 +98,8 @@ void usb_enumerate_device(struct usb_device *dev) {
   req.index = 0;
   req.length = 18;
 
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, &dev->desc,
-                                   18, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, &dev->desc, 18,
+                                   dev->low_speed);
   if (res < 0) {
     klog_puts("[USB] Failed to get full device descriptor\n");
     return;

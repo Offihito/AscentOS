@@ -24,6 +24,7 @@
 #include "../../mm/dma_alloc.h"
 #include "../input/evdev.h"
 #include "../input/keyboard.h"
+#include "ehci.h"
 #include "ohci.h"
 #include "uhci.h"
 #include "usb.h"
@@ -261,6 +262,9 @@ struct usb_kbd_state {
   // Interrupt transfer scheduling (OHCI path)
   struct ohci_int_pipe *ohci_pipe;
 
+  // Interrupt transfer scheduling (EHCI path)
+  struct ehci_int_pipe *ehci_pipe;
+
   bool active;
   uint8_t last_pressed_usage;
   int repeat_delay_counter;
@@ -341,7 +345,8 @@ static void usb_kbd_inject_key(struct usb_kbd_state *kbd, uint8_t usage,
   // Push ASCII character into keyboard ring buffer (for console)
   bool shift =
       (report->modifiers & (USB_KBD_MOD_LSHIFT | USB_KBD_MOD_RSHIFT)) != 0;
-  bool ctrl = (report->modifiers & (USB_KBD_MOD_LCTRL | USB_KBD_MOD_RCTRL)) != 0;
+  bool ctrl =
+      (report->modifiers & (USB_KBD_MOD_LCTRL | USB_KBD_MOD_RCTRL)) != 0;
 
   // Handle extended keys → escape sequences
   if (extended) {
@@ -529,8 +534,8 @@ static void usb_kbd_update_leds(struct usb_kbd_state *kbd) {
   req.index = kbd->interface_number;
   req.length = 1;
 
-  kbd->dev->hcd->control_transfer(kbd->dev->hcd, kbd->dev->address, &req, &report, 1,
-                                  kbd->dev->low_speed);
+  kbd->dev->hcd->control_transfer(kbd->dev->hcd, kbd->dev->address, &req,
+                                  &report, 1, kbd->dev->low_speed);
 }
 
 // ── Interrupt Transfer Setup ────────────────────────────────────────────────
@@ -656,8 +661,8 @@ bool usb_kbd_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 9;
 
-  int res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf, 9,
-                                  dev->low_speed);
+  int res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf,
+                                       9, dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-KBD] Failed to get config descriptor header\n");
     return false;
@@ -671,8 +676,8 @@ bool usb_kbd_probe(struct usb_device *dev) {
 
   // Read the full configuration descriptor bundle
   req.length = total_len;
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf, total_len,
-                              dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, config_buf,
+                                   total_len, dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-KBD] Failed to get full config descriptor\n");
     return false;
@@ -758,7 +763,8 @@ bool usb_kbd_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0,
+                                   dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-KBD] SET_CONFIGURATION failed\n");
     return false;
@@ -776,7 +782,8 @@ bool usb_kbd_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0,
+                                   dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-KBD] SET_PROTOCOL failed (non-fatal)\n");
     // Not fatal — many keyboards work in boot protocol by default
@@ -790,7 +797,8 @@ bool usb_kbd_probe(struct usb_device *dev) {
   req.index = 0;
   req.length = 0;
 
-  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0, dev->low_speed);
+  res = dev->hcd->control_transfer(dev->hcd, dev->address, &req, NULL, 0,
+                                   dev->low_speed);
   if (res < 0) {
     klog_puts("[USB-KBD] SET_IDLE failed (non-fatal)\n");
   }
@@ -834,19 +842,38 @@ bool usb_kbd_probe(struct usb_device *dev) {
     // UHCI path
     usb_kbd_setup_interrupt_xfer(kbd);
   } else {
-    // OHCI path — find the OHCI controller and set up an interrupt pipe
-    for (int ci = 0; ci < ohci_get_controller_count(); ci++) {
-      struct ohci_controller *ohc = ohci_get_controller(ci);
-      if (ohc && dev->hcd->priv == ohc) {
-        kbd->ohci_pipe = ohci_setup_int_in(
-            ohc, dev->address, kbd->ep_number, kbd->max_packet,
-            kbd->interval, dev->low_speed, kbd->report_buf,
-            kbd->report_buf_phys);
+    bool pipe_found = false;
+
+    // EHCI path — check if this device is on an EHCI controller
+    for (int ci = 0; ci < ehci_get_controller_count(); ci++) {
+      struct ehci_controller *ehc = ehci_get_controller(ci);
+      if (ehc && dev->hcd->priv == ehc) {
+        kbd->ehci_pipe = ehci_setup_int_in(
+            ehc, dev->address, kbd->ep_number, kbd->max_packet, kbd->interval,
+            dev->low_speed, kbd->report_buf, kbd->report_buf_phys);
+        if (kbd->ehci_pipe)
+          pipe_found = true;
+        else
+          klog_puts("[USB-KBD] Failed to set up EHCI interrupt pipe\n");
         break;
       }
     }
-    if (!kbd->ohci_pipe) {
-      klog_puts("[USB-KBD] Failed to set up OHCI interrupt pipe\n");
+
+    // OHCI path — check if this device is on an OHCI controller
+    if (!pipe_found) {
+      for (int ci = 0; ci < ohci_get_controller_count(); ci++) {
+        struct ohci_controller *ohc = ohci_get_controller(ci);
+        if (ohc && dev->hcd->priv == ohc) {
+          kbd->ohci_pipe = ohci_setup_int_in(
+              ohc, dev->address, kbd->ep_number, kbd->max_packet, kbd->interval,
+              dev->low_speed, kbd->report_buf, kbd->report_buf_phys);
+          if (kbd->ohci_pipe)
+            pipe_found = true;
+          else
+            klog_puts("[USB-KBD] Failed to set up OHCI interrupt pipe\n");
+          break;
+        }
+      }
     }
   }
 
@@ -868,12 +895,42 @@ void usb_kbd_poll(void) {
     if (!kbd->active)
       continue;
 
+    // ── EHCI path ──────────────────────────────────────────────────────
+    if (kbd->ehci_pipe) {
+      if (!ehci_int_pipe_completed(kbd->ehci_pipe))
+        continue;
+
+      uint8_t *buf = (uint8_t *)kbd->ehci_pipe->data_buf;
+      struct usb_kbd_report report;
+      report.modifiers = buf[0];
+      report.reserved = buf[1];
+      for (int j = 0; j < 6; j++)
+        report.keys[j] = buf[j + 2];
+
+      bool changed = (report.modifiers != kbd->prev_report.modifiers);
+      if (!changed) {
+        for (int j = 0; j < 6; j++) {
+          if (report.keys[j] != kbd->prev_report.keys[j]) {
+            changed = true;
+            break;
+          }
+        }
+      }
+
+      if (changed)
+        usb_kbd_process_report(kbd, &report);
+      else
+        usb_kbd_handle_repeat(kbd);
+
+      ehci_int_pipe_resubmit(kbd->ehci_pipe);
+      continue;
+    }
+
     // ── OHCI path ──────────────────────────────────────────────────────
     if (kbd->ohci_pipe) {
       if (!ohci_int_pipe_completed(kbd->ohci_pipe))
         continue;
 
-      // Read data from the pipe's DMA buffer
       uint8_t *buf = (uint8_t *)kbd->ohci_pipe->data_buf;
       struct usb_kbd_report report;
       report.modifiers = buf[0];

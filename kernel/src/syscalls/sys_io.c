@@ -176,6 +176,7 @@ struct statx {
 #define AT_EMPTY_PATH 0x1000
 
 #include "../fb/terminal.h"
+#include "../drivers/pty.h"
 
 struct termios console_termios;
 
@@ -224,6 +225,80 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
     dev_path = path + 4;
 
   if (dev_path) {
+    // Special handling for /dev/ptmx - each open creates a new PTY pair
+    if (strcmp(dev_path, "ptmx") == 0) {
+      int pty_index = pty_alloc_pair();
+      if (pty_index < 0) {
+        return (uint64_t)-16; // EBUSY
+      }
+      
+      pty_pair_t *pty = pty_get_pair(pty_index);
+      if (!pty) {
+        return (uint64_t)-16;
+      }
+      
+      // Create a unique VFS node for this PTY master
+      node = kmalloc(sizeof(vfs_node_t));
+      if (!node) {
+        return (uint64_t)-12; // ENOMEM
+      }
+      memset(node, 0, sizeof(vfs_node_t));
+      strcpy(node->name, "ptmx");
+      node->flags = FS_CHARDEV;
+      node->mask = 0666;
+      node->read = ptmx_read;
+      node->write = ptmx_write;
+      node->ioctl = ptmx_ioctl;
+      node->poll = ptmx_poll;
+      node->device = pty;
+      
+      klog_puts("[PTY] Opened PTY master ");
+      klog_uint64(pty_index);
+      klog_puts("\n");
+      
+      goto open_done;
+    }
+    
+    // Special handling for /dev/pts/N - PTY slave devices
+    if (strncmp(dev_path, "pts/", 4) == 0) {
+      const char *num_str = dev_path + 4;
+      int pty_index = 0;
+      while (*num_str >= '0' && *num_str <= '9') {
+        pty_index = pty_index * 10 + (*num_str - '0');
+        num_str++;
+      }
+      
+      if (*num_str != '\0') {
+        return (uint64_t)-2; // ENOENT - invalid path
+      }
+      
+      pty_pair_t *pty = pty_get_pair(pty_index);
+      if (!pty || pty->locked) {
+        return (uint64_t)-2; // ENOENT or EACCES
+      }
+      
+      // Create a unique VFS node for this PTY slave
+      node = kmalloc(sizeof(vfs_node_t));
+      if (!node) {
+        return (uint64_t)-12; // ENOMEM
+      }
+      memset(node, 0, sizeof(vfs_node_t));
+      strcpy(node->name, dev_path);
+      node->flags = FS_CHARDEV;
+      node->mask = 0620; // crw--w---- typical for PTY slaves
+      node->read = pty_slave_read;
+      node->write = pty_slave_write;
+      node->ioctl = pty_slave_ioctl;
+      node->poll = pty_slave_poll;
+      node->device = pty;
+      
+      klog_puts("[PTY] Opened PTY slave ");
+      klog_uint64(pty_index);
+      klog_puts("\n");
+      
+      goto open_done;
+    }
+    
     // Try to get from device registry first
     node = fb_lookup_device((char *)dev_path);
     if (node) {
@@ -336,6 +411,7 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
   if ((flags & O_TRUNC) && node->flags == FS_FILE)
     node->length = 0;
 
+open_done:
   vfs_open(node);
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;

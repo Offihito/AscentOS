@@ -40,9 +40,9 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
 		-device sb16,audiodev=snd0 \
 		-device AC97,audiodev=snd0 \
 		-netdev user,id=net0 \
-		-usb \
-		-device pci-ohci,id=ohci \
-		-device usb-kbd -device usb-mouse \
+		-device usb-ehci,id=ehci \
+		-device usb-tablet,bus=ehci.0 \
+		-device usb-kbd,bus=ehci.0 \
 		$(QEMUFLAGS)
 
 .PHONY: run-bios
@@ -55,102 +55,176 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		-boot d \
 		-audiodev pa,id=snd0 \
 		-device AC97,audiodev=snd0 \
-		-usb -device usb-kbd -device usb-mouse \
+		-device usb-ehci,id=ehci \
+		-device usb-tablet,bus=ehci.0 \
+		-device usb-kbd,bus=ehci.0 \
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/lua.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/xeyes.elf userland/xterm.elf userland/test_x11_simple.elf userland/xkbcomp.elf userland/test_shared_irq.elf initrd/startx.sh
-	dd if=/dev/zero of=disk.img bs=1M count=256
-	mkfs.ext3 -F disk.img
-	echo "Hello from AscentOS ext2!" > /tmp/ascentos_hello.txt
-	echo "This is a test document." > /tmp/ascentos_readme.txt
-	debugfs -w -R "cd /" -R "mkdir tmp" disk.img
-	debugfs -w -R "write /tmp/ascentos_hello.txt hello.txt" disk.img
-	debugfs -w -R "mkdir docs" disk.img
-	debugfs -w -R "mkdir bin" disk.img
-	debugfs -w -R "write initrd/startx.sh bin/startx.sh" disk.img
-	debugfs -w -R "mkdir lib" disk.img
-	debugfs -w -R "write toolchain/musl-sysroot/lib/libc.so lib/libc.so" disk.img
-	debugfs -w -R "write toolchain/musl-sysroot/lib/libc.so lib/ld-musl-x86_64.so.1" disk.img
-	debugfs -w -R "write /tmp/ascentos_readme.txt docs/readme.txt" disk.img
-	debugfs -w -R "write userland/test_syscalls.elf bin/test_syscalls" disk.img
-	debugfs -w -R "write userland/test_kilo_syscalls.elf bin/test_kilo_syscalls" disk.img
-	debugfs -w -R "write userland/test_wait4_complex.elf bin/test_wait4_complex" disk.img
-	debugfs -w -R "write userland/kilo.elf bin/kilo" disk.img
-	debugfs -w -R "write userland/test_args.elf bin/test_args" disk.img
-	debugfs -w -R "write userland/hello.elf bin/hello" disk.img
-	debugfs -w -R "write userland/test_cow.elf bin/test_cow" disk.img
-	debugfs -w -R "write userland/test_stat.elf bin/test_stat" disk.img
-	debugfs -w -R "write userland/ls.elf bin/ls" disk.img
-	debugfs -w -R "write userland/readelf.elf bin/readelf" disk.img
-	debugfs -w -R "write userland/pong.elf bin/pong" disk.img
-	debugfs -w -R "write userland/raycast.elf bin/raycast" disk.img
-	debugfs -w -R "write userland/test_mmap_shared_private.elf bin/test_mmap_shared_private" disk.img
-	debugfs -w -R "write userland/kria.elf bin/kria" disk.img
-	debugfs -w -R "write userland/playwav.elf bin/playwav" disk.img
-	debugfs -w -R "write userland/showbmp.elf bin/showbmp" disk.img
-	debugfs -w -R "write userland/test_uname_pipe.elf bin/test_uname_pipe" disk.img
-	debugfs -w -R "write userland/test_pipe_fork.elf bin/test_pipe_fork" disk.img
-	debugfs -w -R "write userland/test_sys_access.elf bin/test_sys_access" disk.img
-	debugfs -w -R "write userland/test_sys_cwd.elf bin/test_sys_cwd" disk.img
-	debugfs -w -R "write userland/test_newfstatat.elf bin/test_newfstatat" disk.img
-	debugfs -w -R "write userland/test_unlink_rename.elf bin/test_unlink_rename" disk.img
-	debugfs -w -R "write userland/test_ext3.elf bin/test_ext3" disk.img
-	debugfs -w -R "write userland/test_dynamic.elf bin/test_dynamic" disk.img
-	debugfs -w -R "write userland/test_tcc_libc.c test_tcc_libc.c" disk.img
-	debugfs -w -R "write userland/test_mm.c test_mm.c" disk.img
-	debugfs -w -R "write userland/test_dup.elf bin/test_dup" disk.img
-	debugfs -w -R "write userland/test_attrib.elf bin/test_attrib" disk.img
-	debugfs -w -R "write userland/test_symlink.elf bin/test_symlink" disk.img
-	debugfs -w -R "write userland/test_cred.elf bin/test_cred" disk.img
-	debugfs -w -R "write userland/test.s test.s" disk.img
-	debugfs -w -R "write userland/standalone.s standalone.s" disk.img
-	debugfs -w -R "write test.wav test.wav" disk.img
-	debugfs -w -R "write test.bmp test.bmp" disk.img
-	debugfs -w -R "write terry.bmp terry.bmp" disk.img
-	debugfs -w -R "write terry.wav terry.wav" disk.img
-	debugfs -w -R "write charliekirk.wav charliekirk.wav" disk.img
-	debugfs -w -R "write charliekir.wav mc952.wav" disk.img
-	debugfs -w -R "write userland/kria-lang/test.krx test.krx" disk.img
-	debugfs -w -R "write userland/hello.krx hello.krx" disk.img
-	debugfs -w -R "write userland/doom.elf bin/doom" disk.img
-	debugfs -w -R "write userland/poll_test.elf bin/poll_test" disk.img
-	debugfs -w -R "write userland/test_time.elf bin/test_time" disk.img
-	debugfs -w -R "write userland/test_tsc_manual.elf bin/test_tsc_manual" disk.img
-	debugfs -w -R "write doomu.wad doom1.wad" disk.img
-	debugfs -w -R "write userland/wget.elf bin/wget" disk.img
-	debugfs -w -R "write userland/lua.elf bin/lua" disk.img
-	debugfs -w -R "write userland/test_unix_sock.elf bin/test_unix_sock" disk.img
-	debugfs -w -R "write userland/test_unix_fdpass.elf bin/test_unix_fdpass" disk.img
-	debugfs -w -R "write userland/test_fb.elf bin/test_fb" disk.img
-	debugfs -w -R "write userland/test_events.elf bin/test_events" disk.img
-	debugfs -w -R "write userland/test_shared_irq.elf bin/test_shared_irq" disk.img
-
-	debugfs -w -R "write userland/test_socket_phase3.elf bin/test_socket_phase3" disk.img
-	debugfs -w -R "write userland/test_socket_phase3_advanced.elf bin/test_socket_phase3_advanced" disk.img
-	debugfs -w -R "write userland/test_socket_phase3_megastress.elf bin/test_socket_phase3_megastress" disk.img
-	debugfs -w -R "write userland/test_socket_phase4.elf bin/test_socket_phase4" disk.img
-	debugfs -w -R "write userland/test_socket_phase4_detailed.elf bin/test_socket_phase4_detailed" disk.img
-	debugfs -w -R "write userland/test_socket_phase5.elf bin/test_socket_phase5" disk.img
-	debugfs -w -R "write userland/test_socket_phase6.elf bin/test_socket_phase6" disk.img
-	debugfs -w -R "write userland/test_socket_phase7.elf bin/test_socket_phase7" disk.img
-	debugfs -w -R "write userland/test_socket_phase7_advanced.elf bin/test_socket_phase7_advanced" disk.img
-	debugfs -w -R "write userland/test_socket_phase8.elf bin/test_socket_phase8" disk.img
-	debugfs -w -R "write userland/test_socket_phase9.elf bin/test_socket_phase9" disk.img
-	debugfs -w -R "write userland/test_socket_phase10.elf bin/test_socket_phase10" disk.img
-	debugfs -w -R "write userland/test_socket_phase11.elf bin/test_socket_phase11" disk.img
-
-	debugfs -w -R "write test.tar test.tar" disk.img
+disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/lua.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/xeyes.elf userland/st.elf userland/test_x11_simple.elf userland/xkbcomp.elf userland/test_shared_irq.elf initrd/startx.sh
+	@if [ ! -f disk.img ] || [ $$(stat -c %s disk.img 2>/dev/null || echo 0) -ne $$((512*1024*1024)) ]; then \
+		echo "Creating disk.img (512MB, 1KB blocks)..."; \
+		rm -f disk.img; \
+		dd if=/dev/zero of=disk.img bs=1M count=512; \
+		mkfs.ext3 -F -b 1024 -I 128 disk.img; \
+	fi
+	@echo "Populating disk.img..."
+	@echo "Hello from AscentOS!" > /tmp/ascentos_hello.txt
+	@echo "This is a test document." > /tmp/ascentos_readme.txt
+	@{ \
+		echo "cd /"; \
+		echo "mkdir tmp"; \
+		echo "mkdir docs"; \
+		echo "mkdir bin"; \
+		echo "mkdir lib"; \
+		echo "rm hello.txt"; \
+		echo "write /tmp/ascentos_hello.txt hello.txt"; \
+		echo "rm bin/startx.sh"; \
+		echo "write initrd/startx.sh bin/startx.sh"; \
+		echo "rm lib/libc.so"; \
+		echo "write toolchain/musl-sysroot/lib/libc.so lib/libc.so"; \
+		echo "rm lib/ld-musl-x86_64.so.1"; \
+		echo "write toolchain/musl-sysroot/lib/libc.so lib/ld-musl-x86_64.so.1"; \
+		echo "rm docs/readme.txt"; \
+		echo "write /tmp/ascentos_readme.txt docs/readme.txt"; \
+		echo "rm bin/test_syscalls"; \
+		echo "write userland/test_syscalls.elf bin/test_syscalls"; \
+		echo "rm bin/test_kilo_syscalls"; \
+		echo "write userland/test_kilo_syscalls.elf bin/test_kilo_syscalls"; \
+		echo "rm bin/test_wait4_complex"; \
+		echo "write userland/test_wait4_complex.elf bin/test_wait4_complex"; \
+		echo "rm bin/kilo"; \
+		echo "write userland/kilo.elf bin/kilo"; \
+		echo "rm bin/test_args"; \
+		echo "write userland/test_args.elf bin/test_args"; \
+		echo "rm bin/hello"; \
+		echo "write userland/hello.elf bin/hello"; \
+		echo "rm bin/test_cow"; \
+		echo "write userland/test_cow.elf bin/test_cow"; \
+		echo "rm bin/test_stat"; \
+		echo "write userland/test_stat.elf bin/test_stat"; \
+		echo "rm bin/ls"; \
+		echo "write userland/ls.elf bin/ls"; \
+		echo "rm bin/readelf"; \
+		echo "write userland/readelf.elf bin/readelf"; \
+		echo "rm bin/pong"; \
+		echo "write userland/pong.elf bin/pong"; \
+		echo "rm bin/raycast"; \
+		echo "write userland/raycast.elf bin/raycast"; \
+		echo "rm bin/test_mmap_shared_private"; \
+		echo "write userland/test_mmap_shared_private.elf bin/test_mmap_shared_private"; \
+		echo "rm bin/kria"; \
+		echo "write userland/kria.elf bin/kria"; \
+		echo "rm bin/playwav"; \
+		echo "write userland/playwav.elf bin/playwav"; \
+		echo "rm bin/showbmp"; \
+		echo "write userland/showbmp.elf bin/showbmp"; \
+		echo "rm bin/test_uname_pipe"; \
+		echo "write userland/test_uname_pipe.elf bin/test_uname_pipe"; \
+		echo "rm bin/test_pipe_fork"; \
+		echo "write userland/test_pipe_fork.elf bin/test_pipe_fork"; \
+		echo "rm bin/test_sys_access"; \
+		echo "write userland/test_sys_access.elf bin/test_sys_access"; \
+		echo "rm bin/test_sys_cwd"; \
+		echo "write userland/test_sys_cwd.elf bin/test_sys_cwd"; \
+		echo "rm bin/test_newfstatat"; \
+		echo "write userland/test_newfstatat.elf bin/test_newfstatat"; \
+		echo "rm bin/test_unlink_rename"; \
+		echo "write userland/test_unlink_rename.elf bin/test_unlink_rename"; \
+		echo "rm bin/test_ext3"; \
+		echo "write userland/test_ext3.elf bin/test_ext3"; \
+		echo "rm bin/test_dynamic"; \
+		echo "write userland/test_dynamic.elf bin/test_dynamic"; \
+		echo "rm test_tcc_libc.c"; \
+		echo "write userland/test_tcc_libc.c test_tcc_libc.c"; \
+		echo "rm test_mm.c"; \
+		echo "write userland/test_mm.c test_mm.c"; \
+		echo "rm bin/test_dup"; \
+		echo "write userland/test_dup.elf bin/test_dup"; \
+		echo "rm bin/test_attrib"; \
+		echo "write userland/test_attrib.elf bin/test_attrib"; \
+		echo "rm bin/test_symlink"; \
+		echo "write userland/test_symlink.elf bin/test_symlink"; \
+		echo "rm bin/test_cred"; \
+		echo "write userland/test_cred.elf bin/test_cred"; \
+		echo "rm test.s"; \
+		echo "write userland/test.s test.s"; \
+		echo "rm standalone.s"; \
+		echo "write userland/standalone.s standalone.s"; \
+		echo "rm test.wav"; \
+		echo "write test.wav test.wav"; \
+		echo "rm test.bmp"; \
+		echo "write test.bmp test.bmp"; \
+		echo "rm test.krx"; \
+		echo "write userland/kria-lang/test.krx test.krx"; \
+		echo "rm hello.krx"; \
+		echo "write userland/hello.krx hello.krx"; \
+		echo "rm bin/doom"; \
+		echo "write userland/doom.elf bin/doom"; \
+		echo "rm bin/poll_test"; \
+		echo "write userland/poll_test.elf bin/poll_test"; \
+		echo "rm bin/pty_test"; \
+		echo "write userland/pty_test.elf bin/pty_test"; \
+		echo "rm bin/test_time"; \
+		echo "write userland/test_time.elf bin/test_time"; \
+		echo "rm bin/test_tsc_manual"; \
+		echo "write userland/test_tsc_manual.elf bin/test_tsc_manual"; \
+		echo "rm doom1.wad"; \
+		echo "write doomu.wad doom1.wad"; \
+		echo "rm bin/wget"; \
+		echo "write userland/wget.elf bin/wget"; \
+		echo "rm bin/lua"; \
+		echo "write userland/lua.elf bin/lua"; \
+		echo "rm bin/test_unix_sock"; \
+		echo "write userland/test_unix_sock.elf bin/test_unix_sock"; \
+		echo "rm bin/test_unix_fdpass"; \
+		echo "write userland/test_unix_fdpass.elf bin/test_unix_fdpass"; \
+		echo "rm bin/test_fb"; \
+		echo "write userland/test_fb.elf bin/test_fb"; \
+		echo "rm bin/test_events"; \
+		echo "write userland/test_events.elf bin/test_events"; \
+		echo "rm bin/test_shared_irq"; \
+		echo "write userland/test_shared_irq.elf bin/test_shared_irq"; \
+		echo "rm bin/test_socket_phase3"; \
+		echo "write userland/test_socket_phase3.elf bin/test_socket_phase3"; \
+		echo "rm bin/test_socket_phase3_advanced"; \
+		echo "write userland/test_socket_phase3_advanced.elf bin/test_socket_phase3_advanced"; \
+		echo "rm bin/test_socket_phase3_megastress"; \
+		echo "write userland/test_socket_phase3_megastress.elf bin/test_socket_phase3_megastress"; \
+		echo "rm bin/test_socket_phase4"; \
+		echo "write userland/test_socket_phase4.elf bin/test_socket_phase4"; \
+		echo "rm bin/test_socket_phase4_detailed"; \
+		echo "write userland/test_socket_phase4_detailed.elf bin/test_socket_phase4_detailed"; \
+		echo "rm bin/test_socket_phase5"; \
+		echo "write userland/test_socket_phase5.elf bin/test_socket_phase5"; \
+		echo "rm bin/test_socket_phase6"; \
+		echo "write userland/test_socket_phase6.elf bin/test_socket_phase6"; \
+		echo "rm bin/test_socket_phase7"; \
+		echo "write userland/test_socket_phase7.elf bin/test_socket_phase7"; \
+		echo "rm bin/test_socket_phase7_advanced"; \
+		echo "write userland/test_socket_phase7_advanced.elf bin/test_socket_phase7_advanced"; \
+		echo "rm bin/test_socket_phase8"; \
+		echo "write userland/test_socket_phase8.elf bin/test_socket_phase8"; \
+		echo "rm bin/test_socket_phase9"; \
+		echo "write userland/test_socket_phase9.elf bin/test_socket_phase9"; \
+		echo "rm bin/test_socket_phase10"; \
+		echo "write userland/test_socket_phase10.elf bin/test_socket_phase10"; \
+		echo "rm bin/test_socket_phase11"; \
+		echo "write userland/test_socket_phase11.elf bin/test_socket_phase11"; \
+		echo "rm test.tar"; \
+		echo "write test.tar test.tar"; \
+	} | debugfs -w disk.img >/dev/null 2>&1 || true
 	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
+	@touch disk.img
 	@if [ -d toolchain/musl-sysroot/opt/tcc ]; then \
 		echo "Installing TCC into disk image..."; \
 		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/opt/tcc opt/tcc; \
-		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/bin/tcc bin/tcc" disk.img; \
-		debugfs -w -R "write toolchain/musl-sysroot/lib/libc.a libc.a" disk.img; \
-		debugfs -w -R "write toolchain/musl-sysroot/lib/crt1.o crt1.o" disk.img; \
-		debugfs -w -R "write toolchain/musl-sysroot/lib/crti.o crti.o" disk.img; \
-		debugfs -w -R "write toolchain/musl-sysroot/lib/crtn.o crtn.o" disk.img; \
-		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/lib/tcc/libtcc1.a libtcc1.a" disk.img; \
+		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/bin/tcc bin/tcc" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/lib/libc.a libc.a" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/lib/crt1.o crt1.o" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/lib/crti.o crti.o" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/lib/crtn.o crtn.o" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/lib/tcc/libtcc1.a libtcc1.a" disk.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -d toolchain/musl-sysroot/opt/coreutils ]; then \
 		echo "Installing coreutils into disk image..."; \
@@ -158,42 +232,52 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf us
 	fi
 	@if [ -d toolchain/musl-sysroot/opt/bash ]; then \
 		echo "Installing bash into disk image..."; \
-		debugfs -w -R "mkdir opt" disk.img 2>/dev/null || true; \
+		debugfs -w -R "mkdir opt" disk.img >/dev/null 2>&1 || true; \
 		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/opt/bash opt/bash; \
-		debugfs -w -R "write toolchain/musl-sysroot/opt/bash/bin/bash bin/bash" disk.img; \
-		debugfs -w -R "write toolchain/musl-sysroot/opt/bash/bin/bash bin/sh" disk.img; \
+		debugfs -w -R "rm bin/bash" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/opt/bash/bin/bash bin/bash" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm bin/sh" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/opt/bash/bin/bash bin/sh" disk.img >/dev/null 2>&1 || true; \
 		echo "root:x:0:0:root:/root:/bin/bash" > /tmp/passwd; \
 		echo "PS1='\033[0;32mRoot@AscentOS\033[0m:\w\\$$ '" > /tmp/bashrc; \
 		echo "PATH=/opt/coreutils/bin:/bin:/opt/bash/bin:/opt/tcc/bin" >> /tmp/bashrc; \
 		echo "HOME=/root" >> /tmp/bashrc; \
 		echo "TERM=vt100" >> /tmp/bashrc; \
 		echo "export TERM" >> /tmp/bashrc; \
-		debugfs -w -R "mkdir etc" disk.img 2>/dev/null || true; \
+		debugfs -w -R "mkdir etc" disk.img >/dev/null 2>&1 || true; \
 		echo "nameserver 10.0.2.3" > /tmp/resolv.conf; \
 		echo "127.0.0.1 localhost" > /tmp/hosts; \
-		debugfs -w -R "write /tmp/resolv.conf etc/resolv.conf" disk.img; \
-		debugfs -w -R "write /tmp/hosts etc/hosts" disk.img; \
-		debugfs -w -R "mkdir etc/ssl" disk.img 2>/dev/null || true; \
-		debugfs -w -R "mkdir etc/ssl/certs" disk.img 2>/dev/null || true; \
-		debugfs -w -R "write /tmp/passwd etc/passwd" disk.img; \
-		debugfs -w -R "mkdir root" disk.img 2>/dev/null || true; \
-		debugfs -w -R "write /tmp/bashrc root/.bashrc" disk.img; \
+		debugfs -w -R "rm etc/resolv.conf" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write /tmp/resolv.conf etc/resolv.conf" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm etc/hosts" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write /tmp/hosts etc/hosts" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "mkdir etc/ssl" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "mkdir etc/ssl/certs" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm etc/passwd" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write /tmp/passwd etc/passwd" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "mkdir root" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm root/.bashrc" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write /tmp/bashrc root/.bashrc" disk.img >/dev/null 2>&1 || true; \
 		rm -f /tmp/passwd /tmp/bashrc /tmp/resolv.conf /tmp/hosts; \
 	fi
 	@if [ -f toolchain/musl-sysroot/bin/tar ]; then \
 		echo "Installing tar into disk image..."; \
-		debugfs -w -R "write toolchain/musl-sysroot/bin/tar bin/tar" disk.img; \
+		debugfs -w -R "rm bin/tar" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/bin/tar bin/tar" disk.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -f userland/Xfbdev.elf ]; then \
 		echo "Installing updated Xfbdev server into disk image..."; \
-		debugfs -w -R "write userland/Xfbdev.elf bin/Xfbdev" disk.img; \
+		debugfs -w -R "rm bin/Xfbdev" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/Xfbdev.elf bin/Xfbdev" disk.img >/dev/null 2>&1 || true; \
 	elif [ -f toolchain/musl-sysroot/bin/Xfbdev ]; then \
 		echo "Installing X11 server into disk image..."; \
-		debugfs -w -R "write toolchain/musl-sysroot/bin/Xfbdev bin/Xfbdev" disk.img; \
+		debugfs -w -R "rm bin/Xfbdev" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/bin/Xfbdev bin/Xfbdev" disk.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -f userland/xkbcomp.elf ]; then \
 		echo "Installing xkbcomp into disk image..."; \
-		debugfs -w -R "write userland/xkbcomp.elf bin/xkbcomp" disk.img; \
+		debugfs -w -R "rm bin/xkbcomp" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/xkbcomp.elf bin/xkbcomp" disk.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -f toolchain/musl-sysroot/bin/Xfbdev ] || [ -f userland/Xfbdev.elf ]; then \
 		echo "Installing XKB keyboard data..."; \
@@ -204,7 +288,6 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf us
 		debugfs -w -R "write toolchain/musl-sysroot/share/X11/XErrorDB share/X11/XErrorDB" disk.img; \
 		debugfs -w -R "write toolchain/musl-sysroot/share/X11/Xcms.txt share/X11/Xcms.txt" disk.img; \
 		debugfs -w -R "mkdir share/X11/app-defaults" disk.img 2>/dev/null || true; \
-		debugfs -w -R "write build/xterm/xterm-389/XTerm.ad share/X11/app-defaults/XTerm" disk.img; \
 		debugfs -w -R "mkdir home" disk.img 2>/dev/null || true; \
 		debugfs -w -R "mkdir home/offihito" disk.img 2>/dev/null || true; \
 		debugfs -w -R "mkdir home/offihito/AscentOS" disk.img 2>/dev/null || true; \
@@ -214,25 +297,25 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf us
 	fi
 	@if [ -f userland/xeyes.elf ]; then \
 		echo "Installing xeyes into disk image..."; \
-		debugfs -w -R "write userland/xeyes.elf xeyes" disk.img; \
+		debugfs -w -R "rm xeyes" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/xeyes.elf xeyes" disk.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -f userland/twm.elf ]; then \
 		echo "Installing twm into disk image..."; \
-		debugfs -w -R "write userland/twm.elf twm" disk.img; \
+		debugfs -w -R "rm twm" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/twm.elf twm" disk.img >/dev/null 2>&1 || true; \
 	fi
-	@if [ -f userland/xterm.elf ]; then \
-		echo "Installing xterm into disk image..."; \
-		debugfs -w -R "write userland/xterm.elf bin/xterm" disk.img; \
-		if [ -d toolchain/musl-sysroot/share/terminfo ]; then \
-			echo "Installing terminfo data..."; \
-			debugfs -w -R "mkdir share" disk.img 2>/dev/null || true; \
-			./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/share/terminfo share/terminfo; \
-		fi \
+	@if [ -f userland/st.elf ]; then \
+		echo "Installing st (simple terminal) into disk image..."; \
+		debugfs -w -R "rm bin/st" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/st.elf bin/st" disk.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -f userland/xeyes.elf ] || [ -f userland/twm.elf ]; then \
-		debugfs -w -R "write userland/test_x11_simple.elf bin/test_x11_simple" disk.img; \
-		debugfs -w -R "mkdir root" disk.img 2>/dev/null || true; \
-		debugfs -w -R "write initrd/.Xauthority root/.Xauthority" disk.img; \
+		debugfs -w -R "rm bin/test_x11_simple" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/test_x11_simple.elf bin/test_x11_simple" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "mkdir root" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm root/.Xauthority" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write initrd/.Xauthority root/.Xauthority" disk.img >/dev/null 2>&1 || true; \
 	fi
 
 edk2-ovmf:
@@ -571,5 +654,9 @@ userland/xkbcomp.elf: scripts/port-x11.sh
 userland/test_shared_irq.elf: userland/test_shared_irq.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/test_shared_irq.c -o userland/test_shared_irq.elf
+
+userland/pty_test.elf: userland/pty_test.c $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
+		userland/pty_test.c -o userland/pty_test.elf
 
 .PHONY: all qemu clean

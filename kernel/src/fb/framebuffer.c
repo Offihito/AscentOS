@@ -2,6 +2,7 @@
 #include "../console/console.h"
 #include "../console/klog.h"
 #include "../drivers/input/keyboard.h"
+#include "../drivers/pty.h"
 #include "../fs/ramfs.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
@@ -951,6 +952,9 @@ void fb_register_vfs(void) {
     setup_chardev(misc_dir, "apm_bios", zero_vfs_read, zero_vfs_write, NULL,
                   NULL, NULL, NULL, NULL, NULL, 0);
   }
+
+  // Register PTY devices (/dev/ptmx and /dev/pts/N)
+  pty_register_devices();
 
   // Note: don't free dev_dir - it still points to a valid VFS node
 }

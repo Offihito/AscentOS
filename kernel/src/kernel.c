@@ -24,8 +24,10 @@
 #include "drivers/storage/block.h"
 #include "drivers/timer/pit.h"
 #include "drivers/timer/rtc.h"
-#include "drivers/usb/uhci.h"
+#include "drivers/usb/ehci.h"
 #include "drivers/usb/ohci.h"
+#include "drivers/usb/uhci.h"
+#include "drivers/usb/usb.h"
 #include "drivers/virtio/virtio.h"
 #include "drivers/virtio/virtio_gpu.h"
 #include "fb/framebuffer.h"
@@ -360,6 +362,10 @@ void kmain_high_half(void) {
   random_register_vfs();
 
   pci_init();
+  usb_init();
+  ehci_init();
+  ehci_self_test();
+  ehci_hand_to_companion(); // Hand ports to UHCI before it probes
   uhci_init();
   uhci_self_test();
   ohci_init();
