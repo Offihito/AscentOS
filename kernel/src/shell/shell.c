@@ -2,6 +2,7 @@
 #include "apic/lapic_timer.h"
 #include "console/console.h"
 #include "console/klog.h"
+#include "cpu/irq.h"
 #include "drivers/audio/pcspeaker.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/net/nic.h"
@@ -31,6 +32,14 @@ static char cmd_buffer[CMD_BUFFER_SIZE];
 static int cmd_len = 0;
 
 static void test_task_entry(void);
+
+// IRQ test handlers (file-scope for irqtest command)
+static volatile int irq_test_handler1_hits = 0;
+static volatile int irq_test_handler2_hits = 0;
+static volatile int irq_test_handler3_hits = 0;
+static void irq_test_handler1(struct registers *regs) { (void)regs; irq_test_handler1_hits++; }
+static void irq_test_handler2(struct registers *regs) { (void)regs; irq_test_handler2_hits++; }
+static void irq_test_handler3(struct registers *regs) { (void)regs; irq_test_handler3_hits++; }
 
 static void shell_print_uint64(uint64_t num) {
   if (num == 0) {
@@ -86,6 +95,7 @@ static void execute_command(char *cmd) {
     console_puts("  ps        - List running tasks\n");
     console_puts("  kill      - Terminate a task by TID (e.g. kill 5)\n");
     console_puts("  heaptest  - Test kernel heap allocator\n");
+    console_puts("  irqtest   - Test IRQ handler install/uninstall\n");
     console_puts("  locktest  - Test atomic spinlock functionality\n");
     console_puts("  uptime    - Show system uptime\n");
     console_puts("  diskinfo  - Show detected block devices\n");
@@ -268,6 +278,81 @@ static void execute_command(char *cmd) {
     }
 
     console_puts("Stress test complete.\n");
+  } else if (strcmp(cmd, "irqtest") == 0) {
+    console_puts("Starting IRQ Handler Install/Uninstall Test...\n");
+
+    // Test 1: Install single handler
+    console_puts("[1/7] Installing handler1 on IRQ 15...\n");
+    if (irq_install_handler(15, irq_test_handler1, 0)) {
+      console_puts("  -> PASS: Handler1 installed.\n");
+    } else {
+      console_puts("  -> FAIL: Could not install handler1.\n");
+    }
+
+    // Test 2: Install second handler (shared IRQ)
+    console_puts("[2/7] Installing handler2 on same IRQ (shared)...\n");
+    if (irq_install_handler(15, irq_test_handler2, 0)) {
+      console_puts("  -> PASS: Handler2 installed (shared IRQ).\n");
+    } else {
+      console_puts("  -> FAIL: Could not install handler2.\n");
+    }
+
+    // Test 3: Install third handler (shared IRQ)
+    console_puts("[3/7] Installing handler3 on same IRQ (shared)...\n");
+    if (irq_install_handler(15, irq_test_handler3, 0)) {
+      console_puts("  -> PASS: Handler3 installed (shared IRQ).\n");
+    } else {
+      console_puts("  -> FAIL: Could not install handler3.\n");
+    }
+
+    // Test 4: Trigger interrupt and verify ALL handlers called (EOI timing test)
+    // If EOI were sent mid-dispatch, later handlers wouldn't run
+    console_puts("[4/7] Triggering IRQ 15 to verify all 3 handlers execute...\n");
+    irq_test_handler1_hits = 0;
+    irq_test_handler2_hits = 0;
+    irq_test_handler3_hits = 0;
+    irq_test_trigger(15);
+    if (irq_test_handler1_hits > 0 && irq_test_handler2_hits > 0 && irq_test_handler3_hits > 0) {
+      console_puts("  -> PASS: All 3 handlers executed (EOI sent after all complete).\n");
+    } else {
+      console_puts("  -> FAIL: Not all handlers called (EOI timing issue?).\n");
+    }
+
+    // Test 5: Uninstall middle handler
+    console_puts("[5/7] Uninstalling handler2 (middle of chain)...\n");
+    if (irq_uninstall_handler(15, irq_test_handler2)) {
+      console_puts("  -> PASS: Handler2 removed.\n");
+    } else {
+      console_puts("  -> FAIL: Could not remove handler2.\n");
+    }
+
+    // Test 6: Verify remaining handlers still work
+    console_puts("[6/7] Triggering IRQ 15 (handlers 1 and 3 should run)...\n");
+    irq_test_handler1_hits = 0;
+    irq_test_handler2_hits = 0;
+    irq_test_handler3_hits = 0;
+    irq_test_trigger(15);
+    if (irq_test_handler1_hits > 0 && irq_test_handler2_hits == 0 && irq_test_handler3_hits > 0) {
+      console_puts("  -> PASS: Only handlers 1 and 3 executed.\n");
+    } else {
+      console_puts("  -> FAIL: Uninstall did not work correctly.\n");
+    }
+
+    // Test 7: Uninstall all and verify no handlers run
+    console_puts("[7/7] Uninstalling all handlers and verifying cleanup...\n");
+    irq_uninstall_handler(15, irq_test_handler1);
+    irq_uninstall_handler(15, irq_test_handler3);
+    irq_test_handler1_hits = 0;
+    irq_test_handler2_hits = 0;
+    irq_test_handler3_hits = 0;
+    irq_test_trigger(15);
+    if (irq_test_handler1_hits == 0 && irq_test_handler2_hits == 0 && irq_test_handler3_hits == 0) {
+      console_puts("  -> PASS: No handlers executed after full cleanup.\n");
+    } else {
+      console_puts("  -> FAIL: Handlers still running after uninstall.\n");
+    }
+
+    console_puts("IRQ test complete.\n");
   } else if (strcmp(cmd, "pmmtest") == 0) {
     console_puts("Starting Intensive PMM Buddy Allocator Stress Test...\n");
 

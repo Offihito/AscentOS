@@ -60,6 +60,29 @@ run-bios: $(IMAGE_NAME).iso disk.img
 		-device usb-kbd,bus=ehci.0 \
 		$(QEMUFLAGS)
 
+# FAT32 test image for testing the FAT32 driver
+fat32_test.img:
+	./scripts/create-fat32-test.sh
+
+.PHONY: run-fat32
+run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
+	qemu-system-$(ARCH) \
+		-M q35,pcspk-audiodev=snd0 \
+		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
+		-cdrom $(IMAGE_NAME).iso \
+		-hda fat32_test.img \
+		-smp 4 \
+		-serial stdio \
+		-audiodev pa,id=snd0 \
+		-device e1000,netdev=net0 \
+		-device sb16,audiodev=snd0 \
+		-device AC97,audiodev=snd0 \
+		-netdev user,id=net0 \
+		-device usb-ehci,id=ehci \
+		-device usb-tablet,bus=ehci.0 \
+		-device usb-kbd,bus=ehci.0 \
+		$(QEMUFLAGS)
+
 # Create a 64MB ext2 disk image with sample files for testing
 disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/lua.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/xeyes.elf userland/st.elf userland/test_x11_simple.elf userland/xkbcomp.elf userland/test_shared_irq.elf initrd/startx.sh
 	@if [ ! -f disk.img ] || [ $$(stat -c %s disk.img 2>/dev/null || echo 0) -ne $$((512*1024*1024)) ]; then \

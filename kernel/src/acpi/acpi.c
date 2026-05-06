@@ -2,6 +2,7 @@
 #include "console/console.h"
 #include "mm/pmm.h"
 #include "lib/string.h"
+#include "drivers/manager/device.h"
 #include <limine.h>
 
 // ── Internal state ───────────────────────────────────────────────────────────
@@ -108,6 +109,10 @@ bool acpi_get_irq_override(uint8_t irq, uint32_t *gsi, uint16_t *flags) {
 uint32_t acpi_get_cpu_count(void)         { return cpu_count; }
 const uint8_t *acpi_get_cpu_apic_ids(void) { return cpu_apic_ids; }
 
+struct acpi_mcfg *acpi_get_mcfg(void) {
+    return (struct acpi_mcfg *)acpi_find_table("MCFG");
+}
+
 // ── Initialization ──────────────────────────────────────────────────────────
 
 void acpi_init(struct limine_rsdp_response *response) {
@@ -162,6 +167,11 @@ void acpi_init(struct limine_rsdp_response *response) {
     print_hex32(lapic_base_address);
     console_puts("\n");
 
+    // Add LAPIC to device tree
+    struct device *sys_node = device_find_by_path("/sys");
+    struct device *lapic_dev = device_create(sys_node, "lapic");
+    device_add_resource(lapic_dev, RES_MEM, "regs", lapic_base_address, lapic_base_address + 0x400);
+
     uint32_t core_count = 0;
     uint8_t *entries = madt->entries;
     uint8_t *end = (uint8_t *)madt + madt->header.length;
@@ -185,12 +195,14 @@ void acpi_init(struct limine_rsdp_response *response) {
             // Store the first I/O APIC we find
             if (ioapic_address == 0) {
                 ioapic_address = io->ioapic_address;
-                ioapic_gsi     = io->gsi_base;
-                console_puts("     I/O APIC Addr:  0x");
-                print_hex32(ioapic_address);
-                console_puts(", GSI Base: ");
-                print_uint32(ioapic_gsi);
                 console_puts("\n");
+
+                // Add IOAPIC to device tree
+                char ioapic_name[16];
+                strcpy(ioapic_name, "ioapic0"); // Simplification for first one
+                struct device *ioapic_dev = device_create(device_find_by_path("/sys"), ioapic_name);
+                device_add_resource(ioapic_dev, RES_MEM, "regs", ioapic_address, ioapic_address + 0x20);
+                device_add_resource(ioapic_dev, RES_IRQ, "gsi_base", ioapic_gsi, ioapic_gsi);
             }
             break;
         }

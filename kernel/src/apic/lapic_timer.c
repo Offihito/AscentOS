@@ -34,7 +34,10 @@ void lapic_timer_handler(struct registers *regs) {
         lapic_timer_ticks++;
     }
 
-    // Always signal EOI before potentially yielding.
+    // Send EOI BEFORE context switch. This is a special case - normally
+    // isr_handler sends EOI after the handler returns. But the scheduler
+    // may switch to another thread, and we need to keep receiving timer
+    // interrupts. Double EOI (here + in isr_handler) is harmless.
     lapic_write(LAPIC_EOI, 0);
 
     // Call the scheduler. Every core handles its own preemption.

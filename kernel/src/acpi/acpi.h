@@ -80,13 +80,28 @@ struct acpi_madt_ioapic {
     uint32_t gsi_base;
 } __attribute__((packed));
 
-// ── MADT Entry Type 2: Interrupt Source Override ─────────────────────────────
+// ── ACPI MADT Entry Type 2: Interrupt Source Override ─────────────────────────────
 struct acpi_madt_iso {
     struct acpi_madt_entry_header header;
     uint8_t bus_source;     // 0 = ISA
     uint8_t irq_source;     // ISA IRQ number
     uint32_t gsi;            // Global System Interrupt it maps to
     uint16_t flags;          // Polarity (bits 1:0) and Trigger (bits 3:2)
+} __attribute__((packed));
+
+// ── MCFG (Memory Mapped Configuration Space Base Address Description Table) ─────
+struct acpi_mcfg_entry {
+    uint64_t base_address;
+    uint16_t pci_segment_group_number;
+    uint8_t start_bus_number;
+    uint8_t end_bus_number;
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct acpi_mcfg {
+    struct acpi_sdt_header header;
+    uint64_t reserved;
+    struct acpi_mcfg_entry entries[];
 } __attribute__((packed));
 
 // ── ACPI Initialization & Table Lookup ───────────────────────────────────────
@@ -113,5 +128,8 @@ uint32_t acpi_get_cpu_count(void);
 
 // Returns a pointer to the array of APIC IDs for all enabled CPUs.
 const uint8_t *acpi_get_cpu_apic_ids(void);
+
+// Returns the MCFG table if present, otherwise NULL.
+struct acpi_mcfg *acpi_get_mcfg(void);
 
 #endif

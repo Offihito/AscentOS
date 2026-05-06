@@ -414,6 +414,12 @@ void register_interrupt_handler(uint8_t n, isr_t handler) {
   interrupt_handlers[n] = handler;
 }
 
+// Send End-of-Interrupt signal after handler completes.
+// CRITICAL: This must be called AFTER the handler returns, not during.
+// For shared IRQs (multiple handlers on one IRQ), this ensures all handlers
+// run before we tell the APIC we're done. If EOI were sent mid-dispatch,
+// the APIC would accept a new interrupt before all shared handlers complete,
+// potentially causing handlers to miss their turn or see corrupted state.
 static void send_eoi(struct registers *regs) {
   if (regs->int_no == 255)
     return;

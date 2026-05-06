@@ -1,5 +1,8 @@
 #include "drivers/pci/pci.h"
+#include "drivers/pci/pcie.h"
+#include "drivers/manager/device.h"
 #include "console/console.h"
+#include "lib/string.h"
 #include "io/io.h"
 #include <stddef.h>
 
@@ -9,7 +12,11 @@ static uint32_t device_count = 0;
 // ── PCI Config Space Access ─────────────────────────────────────────────────
 
 uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t func,
-                           uint8_t offset) {
+                           uint16_t offset) {
+  if (pcie_available(bus)) {
+    return pcie_config_read32(bus, slot, func, offset);
+  }
+  if (offset > 255) return 0xFFFFFFFF;
   uint32_t address = (1u << 31) | ((uint32_t)bus << 16) |
                      ((uint32_t)slot << 11) | ((uint32_t)func << 8) |
                      (offset & 0xFC);
@@ -17,8 +24,13 @@ uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t func,
   return inl(PCI_CONFIG_DATA);
 }
 
-void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset,
+void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t func, uint16_t offset,
                         uint32_t value) {
+  if (pcie_available(bus)) {
+    pcie_config_write32(bus, slot, func, offset, value);
+    return;
+  }
+  if (offset > 255) return;
   uint32_t address = (1u << 31) | ((uint32_t)bus << 16) |
                      ((uint32_t)slot << 11) | ((uint32_t)func << 8) |
                      (offset & 0xFC);
@@ -27,18 +39,18 @@ void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset,
 }
 
 uint16_t pci_config_read16(uint8_t bus, uint8_t slot, uint8_t func,
-                           uint8_t offset) {
-  uint32_t val = pci_config_read32(bus, slot, func, offset & 0xFC);
+                           uint16_t offset) {
+  uint32_t val = pci_config_read32(bus, slot, func, offset & 0xFFFC);
   return (uint16_t)(val >> ((offset & 2) * 8));
 }
 
-void pci_config_write16(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset,
+void pci_config_write16(uint8_t bus, uint8_t slot, uint8_t func, uint16_t offset,
                         uint16_t value) {
-  uint32_t val = pci_config_read32(bus, slot, func, offset & 0xFC);
+  uint32_t val = pci_config_read32(bus, slot, func, offset & 0xFFFC);
   uint32_t mask = 0xFFFFu << ((offset & 2) * 8);
   val &= ~mask;
   val |= (uint32_t)value << ((offset & 2) * 8);
-  pci_config_write32(bus, slot, func, offset & 0xFC, val);
+  pci_config_write32(bus, slot, func, offset & 0xFFFC, val);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -99,11 +111,51 @@ static void pci_check_function(uint8_t bus, uint8_t slot, uint8_t func) {
   dev->irq_line = reg_irq & 0xFF;
 
   // Read BARs (only for standard header type 0x00)
+  char dev_path[32];
+  // Format: 00:02.0
+  // Note: we are hardcoding seg0 for now
+  strcpy(dev_path, "00:00.0"); // TODO: use actual bus/slot/func
+  // We'll just use a simple name for now
+  char dev_name[16];
+  // Format: 00:02.0
+  // Int to string is not available easily without snprintf
+  // Let's just name them by index or something simple
+  static int dev_idx = 0;
+  char buf[4];
+  buf[0] = '0' + (dev_idx / 10);
+  buf[1] = '0' + (dev_idx % 10);
+  buf[2] = '\0';
+  strcpy(dev_name, "pci_dev");
+  strcat(dev_name, buf);
+  dev_idx++;
+
+  struct device *seg_dev = device_find_by_path("/sys/pci/seg0");
+  if (!seg_dev) seg_dev = device_find_by_path("/sys/pci"); // Fallback
+
+  struct device *pci_node = device_create(seg_dev, dev_name);
+  if (pci_node) {
+      pci_node->vendor_id = vendor_id;
+      pci_node->device_id = device_id;
+      pci_node->pci_class = dev->class_code;
+      pci_node->pci_subclass = dev->subclass;
+      pci_node->pci_prog_if = dev->prog_if;
+      dm_probe_device(pci_node);
+  }
+
   if ((dev->header_type & 0x7F) == 0x00) {
     for (int i = 0; i < 6; i++) {
-      dev->bar[i] = pci_config_read32(bus, slot, func, 0x10 + i * 4);
+        uint32_t bar = pci_config_read32(bus, slot, func, 0x10 + i * 4);
+        dev->bar[i] = bar;
+        if (bar != 0 && bar != 0xFFFFFFFF) {
+            if (bar & 1) { // IO
+                device_add_resource(pci_node, RES_IO, "bar", bar & ~0x3, 0);
+            } else { // MEM
+                device_add_resource(pci_node, RES_MEM, "bar", bar & ~0xF, 0);
+            }
+        }
     }
   }
+  device_add_resource(pci_node, RES_IRQ, "irq", dev->irq_line, dev->irq_line);
 
   device_count++;
 }
@@ -129,6 +181,7 @@ static void pci_check_device(uint8_t bus, uint8_t slot) {
 // ── Public API ──────────────────────────────────────────────────────────────
 
 void pci_init(void) {
+  pcie_init();
   device_count = 0;
   console_puts("[INFO] Scanning PCI bus...\n");
 
@@ -140,26 +193,9 @@ void pci_init(void) {
 
   console_puts("[OK] PCI: Found ");
   print_uint32(device_count);
-  console_puts(" device(s):\n");
+  console_puts(" device(s). Dumping Device Tree...\n");
 
-  for (uint32_t i = 0; i < device_count; i++) {
-    struct pci_device *dev = &devices[i];
-    console_puts("     ");
-    print_uint32(dev->bus);
-    console_putchar(':');
-    print_uint32(dev->slot);
-    console_putchar('.');
-    print_uint32(dev->func);
-    console_puts(" [");
-    print_hex8(dev->class_code);
-    console_putchar(':');
-    print_hex8(dev->subclass);
-    console_puts("] vendor=0x");
-    print_hex16(dev->vendor_id);
-    console_puts(" device=0x");
-    print_hex16(dev->device_id);
-    console_putchar('\n');
-  }
+  dm_dump_tree();
 }
 
 struct pci_device *pci_find_device(uint8_t class_code, uint8_t subclass) {

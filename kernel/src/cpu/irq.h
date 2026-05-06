@@ -19,6 +19,20 @@
  * @return true if successful, false otherwise.
  */
 bool irq_install_handler(uint8_t irq_no, isr_t handler, uint16_t flags);
+
+/**
+ * @brief Remove a handler from an IRQ's handler chain.
+ * 
+ * This function safely removes a handler from the linked list,
+ * freeing the node memory. If no handlers remain for the IRQ,
+ * the IRQ is marked as unregistered.
+ * 
+ * @param irq_no The IRQ number (0-223).
+ * @param handler The handler function to remove.
+ * @return true if handler was found and removed, false otherwise.
+ */
+bool irq_uninstall_handler(uint8_t irq_no, isr_t handler);
+
 void irq_manager_sync(void);
 void irq_register_stats_dev(void);
 

@@ -156,3 +156,21 @@ uint32_t atoui(const char *s) {
   }
   return res;
 }
+
+static char tolower_char(char c) {
+  if (c >= 'A' && c <= 'Z')
+    return c + ('a' - 'A');
+  return c;
+}
+
+int strcasecmp(const char *s1, const char *s2) {
+  while (*s1 && *s2) {
+    char c1 = tolower_char(*s1);
+    char c2 = tolower_char(*s2);
+    if (c1 != c2)
+      return (unsigned char)c1 - (unsigned char)c2;
+    s1++;
+    s2++;
+  }
+  return (unsigned char)*s1 - (unsigned char)*s2;
+}

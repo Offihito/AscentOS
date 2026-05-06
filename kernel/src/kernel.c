@@ -17,6 +17,8 @@
 #include "drivers/input/evdev.h"
 #include "drivers/input/keyboard.h"
 #include "drivers/input/mouse.h"
+#include "drivers/manager/device.h"
+#include "drivers/manager/dtb.h"
 #include "drivers/net/nic.h"
 #include "drivers/pci/pci.h"
 #include "drivers/serial.h"
@@ -32,6 +34,7 @@
 #include "drivers/virtio/virtio_gpu.h"
 #include "fb/framebuffer.h"
 #include "fs/ext2.h"
+#include "fs/fat32.h"
 #include "fs/ramfs.h"
 #include "fs/random.h"
 #include "fs/vfs.h"
@@ -94,6 +97,11 @@ __attribute__((
 __attribute__((used, section(".limine_requests"))) static volatile struct
     limine_executable_address_request executable_address_request = {
         .id = LIMINE_EXECUTABLE_ADDRESS_REQUEST_ID, .revision = 0};
+
+__attribute__((
+    used,
+    section(".limine_requests"))) static volatile struct limine_dtb_request
+    dtb_request = {.id = LIMINE_DTB_REQUEST_ID, .revision = 0};
 
 __attribute__((used, section(".limine_requests_end"))) static volatile uint64_t
     limine_requests_end_marker[2] = LIMINE_REQUESTS_END_MARKER;
@@ -237,6 +245,14 @@ void kmain(void) {
   heap_init();
   dma_alloc_init();
   console_init(fb);
+  dm_init();
+
+  console_puts("[UDM] Checking for platform DTB...\n");
+  if (dtb_request.response && dtb_request.response->dtb_ptr) {
+    dm_parse_dtb(dtb_request.response->dtb_ptr);
+  } else {
+    console_puts("      No platform DTB provided (standard for x86/ACPI).\n");
+  }
 
   klog_puts("[OK] Testing VMM mapping... (0xCAFEBABE000)\n");
   void *test_phys = pmm_alloc();

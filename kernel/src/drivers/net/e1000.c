@@ -12,6 +12,7 @@
  */
 
 #include "drivers/net/e1000.h"
+#include "drivers/manager/device.h"
 #include "acpi/acpi.h"
 #include "apic/ioapic.h"
 #include "apic/lapic.h"
@@ -424,71 +425,57 @@ static void e1000_irq_handler(struct registers *regs) {
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-void e1000_init(void) {
-  // ── Step 1: Find the NIC on the PCI bus ─────────────────────────────
-  struct pci_device *dev =
-      pci_find_device_by_id(E1000_VENDOR_ID, E1000_DEVICE_ID);
-  if (!dev) {
-    console_puts("[WARN] Intel e1000 NIC not found on PCI bus.\n");
-    return;
+static int e1000_probe(struct device *dev) {
+  // Use resources from 'dev' instead of global scanning
+  // For now, we'll keep using the existing logic but wrapped in match
+  
+  console_puts("[E1000] Probing device ");
+  console_puts(dev->name);
+  console_puts("\n");
+
+  // Step 2: Map the MMIO region from BAR0
+  // Note: resources[0] should be BAR0 MMIO
+  if (dev->resource_count == 0 || dev->resources[0].type != RES_MEM) {
+      return -1;
   }
 
-  console_puts("[INFO] Intel e1000 NIC found at PCI ");
-  print_uint32(dev->bus);
-  console_putchar(':');
-  print_uint32(dev->slot);
-  console_putchar('.');
-  print_uint32(dev->func);
-  console_putchar('\n');
-
-  // ── Step 2: Map the MMIO region from BAR0 ───────────────────────────
-  uint32_t bar0 = dev->bar[0];
-  if (bar0 & 1) {
-    console_puts("[ERR] e1000 BAR0 is I/O-mapped, expected memory-mapped.\n");
-    return;
-  }
-
-  // BAR0 physical address (strip lower 4 bits which are type/prefetch flags)
-  uint64_t bar0_phys = bar0 & 0xFFFFFFF0;
-
-  // For 64-bit BAR, combine BAR0 and BAR1
-  if (((bar0 >> 1) & 0x3) == 0x2) {
-    bar0_phys |= ((uint64_t)dev->bar[1]) << 32;
-  }
-
-// Map 128KB of MMIO space as UNCACHED (PCD|PWT) - MMIO must not be cached
-// The MMIO region is near the framebuffer, so caching could cause coherency
-// issues
+  uint64_t bar0_phys = dev->resources[0].start;
+  
+  // Map 128KB of MMIO space as UNCACHED (PCD|PWT)
 #define E1000_MMIO_SIZE (128 * 1024)
   uint64_t mmio_virt = bar0_phys + pmm_get_hhdm_offset();
   uint64_t *pml4 = vmm_get_active_pml4();
   uint64_t mmio_flags =
       PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_PCD | PAGE_FLAG_PWT;
 
-  // Remap each page of MMIO as uncached
   for (uint64_t offset = 0; offset < E1000_MMIO_SIZE; offset += PAGE_SIZE) {
     vmm_map_page(pml4, mmio_virt + offset, bar0_phys + offset, mmio_flags);
   }
   vmm_flush_tlb(mmio_virt);
 
   mmio_base = (volatile uint8_t *)mmio_virt;
-
-  nic_irq = dev->irq_line;
-
-  console_puts("     MMIO Base: 0x");
-  print_hex32((uint32_t)bar0_phys);
-  console_puts("  IRQ: ");
-  print_uint32(nic_irq);
-  console_putchar('\n');
+  
+  // Find IRQ resource
+  for (size_t i = 0; i < dev->resource_count; i++) {
+      if (dev->resources[i].type == RES_IRQ) {
+          nic_irq = (uint8_t)dev->resources[i].start;
+          break;
+      }
+  }
 
   // ── Step 3: Enable PCI bus mastering (required for DMA) ─────────────
-  pci_enable_bus_mastering(dev);
+  // We need the bus/slot/func. We can store them in dev->driver_data 
+  // or use a helper. For now, we'll just scan the legacy PCI data using vendor/device.
+  struct pci_device *pci_dev = pci_find_device_by_id(dev->vendor_id, dev->device_id);
+  if (!pci_dev) return -1;
+  
+  pci_enable_bus_mastering(pci_dev);
 
   // Also enable memory space access in the PCI command register
-  uint32_t cmd = pci_config_read32(dev->bus, dev->slot, dev->func, 0x04);
+  uint32_t cmd = pci_config_read32(pci_dev->bus, pci_dev->slot, pci_dev->func, 0x04);
   cmd |= (1 << 1);  // Memory Space Enable
   cmd &= ~(1 << 10); // ENABLE interrupts (clear Interrupt Disable bit)
-  pci_config_write16(dev->bus, dev->slot, dev->func, 0x04, (uint16_t)cmd);
+  pci_config_write16(pci_dev->bus, pci_dev->slot, pci_dev->func, 0x04, (uint16_t)cmd);
 
   // ── Step 4: Software reset ──────────────────────────────────────────
   uint32_t ctrl = e1000_read(E1000_CTRL);
@@ -501,7 +488,7 @@ void e1000_init(void) {
   }
   if (timeout == 0) {
     console_puts("[ERR] e1000 reset timed out!\n");
-    return;
+    return -1;
   }
 
   // Small delay after reset
@@ -528,7 +515,7 @@ void e1000_init(void) {
   // ── Step 8: Read MAC address ────────────────────────────────────────
   if (!e1000_read_mac()) {
     console_puts("[ERR] e1000: failed to read MAC address.\n");
-    return;
+    return -1;
   }
 
   // Program MAC into RAL0/RAH0 (Address Valid bit in RAH)
@@ -550,7 +537,7 @@ void e1000_init(void) {
   // ── Step 9: Initialize RX ring ──────────────────────────────────────
   if (!e1000_init_rx()) {
     console_puts("[ERR] e1000: failed to initialize RX ring.\n");
-    return;
+    return -1;
   }
   console_puts("     RX ring initialized (");
   print_uint32(E1000_NUM_RX_DESC);
@@ -559,7 +546,7 @@ void e1000_init(void) {
   // ── Step 10: Initialize TX ring ─────────────────────────────────────
   if (!e1000_init_tx()) {
     console_puts("[ERR] e1000: failed to initialize TX ring.\n");
-    return;
+    return -1;
   }
   console_puts("     TX ring initialized (");
   print_uint32(E1000_NUM_TX_DESC);
@@ -587,6 +574,22 @@ void e1000_init(void) {
   console_puts((status & STATUS_LU) ? "UP\n" : "DOWN\n");
 
   console_puts("[OK] Intel e1000 driver initialized.\n\n");
+  return 0; // Success
+}
+
+static struct device_id e1000_ids[] = {
+    { .type = ID_PCI, .pci = { .vendor = E1000_VENDOR_ID, .device = E1000_DEVICE_ID } }
+};
+
+static struct driver e1000_driver = {
+    .name = "e1000",
+    .ids = e1000_ids,
+    .id_count = 1,
+    .probe = e1000_probe
+};
+
+void e1000_init(void) {
+  dm_register_driver(&e1000_driver);
 }
 
 const uint8_t *e1000_get_mac(void) {

@@ -7,6 +7,7 @@
 #include "lock/spinlock.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "drivers/manager/device.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -389,46 +390,25 @@ static void probe_port(ahci_port_t *port, int portno) {
 
 // ── Initialization ──────────────────────────────────────────────────────────
 
-void ahci_init(void) {
-  ahci_drive_count = 0;
-  console_puts("[INFO] Searching for AHCI controller...\n");
+static int ahci_probe(struct device *dev) {
+  uint32_t abar = 0;
+  // Get ABAR from BAR5
+  // We should ideally have BARs in dev->resources, but for now we'll do legacy PCI read
+  struct pci_device *pci_dev = pci_find_device_by_id(dev->vendor_id, dev->device_id);
+  if (!pci_dev) return -1;
+  
+  abar = pci_dev->bar[5];
+  if (abar == 0) return -1;
 
-  struct pci_device *dev = pci_find_device(0x01, 0x06);
-  if (!dev) {
-    console_puts("[WARN] AHCI controller not found.\n");
-    return;
-  }
-
-  uint32_t abar = dev->bar[5];
-  if (abar == 0) {
-    console_puts("[ERR] AHCI BAR5 is zero.\n");
-    return;
-  }
-
-  // Mask bottom 13 bits to get physical address (bit 0 indicates Memory Space)
   uint64_t phys_abar = abar & 0xFFFFFFF0;
-
-  // Map ABAR (usually 4K or 8K)
   uint64_t virt_abar = phys_abar + pmm_get_hhdm_offset();
-  if (!vmm_map_page(vmm_get_active_pml4(), virt_abar, phys_abar,
-                    PAGE_FLAG_RW | PAGE_FLAG_PRESENT)) {
-    klog_puts("[AHCI] Warning: Failed to map ABAR page\n");
-  }
-  // Map an extra page just in case
-  if (!vmm_map_page(vmm_get_active_pml4(), virt_abar + 0x1000,
-                    phys_abar + 0x1000, PAGE_FLAG_RW | PAGE_FLAG_PRESENT)) {
-    klog_puts("[AHCI] Warning: Failed to map ABAR extra page\n");
-  }
+  
+  // Map ABAR
+  vmm_map_page(vmm_get_active_pml4(), virt_abar, phys_abar, PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+  vmm_map_page(vmm_get_active_pml4(), virt_abar + 0x1000, phys_abar + 0x1000, PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
 
   hba = (ahci_hba_mem_t *)virt_abar;
-
-  // Set GHC.AE (AHCI Enable)
-  hba->ghc |= (1 << 31);
-
-  // Reset HBA?
-  // hba->ghc |= 1; // HR (HBA Reset) bit
-  // while (hba->ghc & 1); // Wait for reset to clear
-  // hba->ghc |= (1 << 31); // Ensure AE is set after reset
+  hba->ghc |= (1 << 31); // AHCI Enable
 
   uint32_t pi = hba->pi;
   for (int i = 0; i < 32; i++) {
@@ -436,6 +416,23 @@ void ahci_init(void) {
       probe_port(&hba->ports[i], i);
     }
   }
+  return 0;
+}
+
+static struct device_id ahci_ids[] = {
+    { .type = ID_PCI, .pci = { .match_class = true, .class = 0x01, .subclass = 0x06 } }
+};
+
+static struct driver ahci_driver = {
+    .name = "ahci",
+    .ids = ahci_ids,
+    .id_count = 1,
+    .probe = ahci_probe
+};
+
+void ahci_init(void) {
+  ahci_drive_count = 0;
+  dm_register_driver(&ahci_driver);
 
   if (ahci_drive_count == 0) {
     console_puts("[WARN] No SATA drives successfully initialized.\n");
