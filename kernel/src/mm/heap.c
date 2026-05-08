@@ -15,6 +15,7 @@
 
 static spinlock_t heap_lock = SPINLOCK_INIT;
 static uint64_t current_heap_vaddr = KERNEL_HEAP_BASE;
+bool heap_initialized = false;
 
 struct slab_cache;
 
@@ -63,6 +64,7 @@ static uint64_t allocate_virtual_space(size_t pages) {
 }
 
 void heap_init(void) {
+    heap_initialized = true;
     // Rely on static zeroes and VMM/PMM already being up
 }
 

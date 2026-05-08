@@ -1,20 +1,70 @@
 #include "klog.h"
 #include "../drivers/serial.h"
+#include "../fb/framebuffer.h"
+#include "../font/font.h"
 #include "../lock/spinlock.h"
 #include "console.h"
 
 static spinlock_t klog_lock = SPINLOCK_INIT;
+static bool screen_logging_enabled = false;
+static uint32_t screen_x = 0;
+static uint32_t screen_y = 0;
+
+#define KLOG_FG 0x00FFFFFF
+#define KLOG_BG 0x00000000
+
+void klog_set_screen_logging(bool enabled) {
+  spinlock_acquire(&klog_lock);
+  screen_logging_enabled = enabled;
+  spinlock_release(&klog_lock);
+}
+
+static void klog_putchar_screen(char c) {
+  if (!screen_logging_enabled)
+    return;
+
+  uint32_t w = fb_get_width();
+  uint32_t h = fb_get_height();
+
+  if (c == '\n') {
+    screen_x = 0;
+    screen_y += FONT_HEIGHT;
+  } else if (c == '\r') {
+    screen_x = 0;
+  } else {
+    if (screen_x + FONT_WIDTH > w) {
+      screen_x = 0;
+      screen_y += FONT_HEIGHT;
+    }
+
+    if (screen_y + FONT_HEIGHT > h) {
+      // For early boot logging, we don't handle scrolling properly yet,
+      // just wrap around or stop? Let's just wrap around for now.
+      screen_y = 0;
+    }
+
+    const uint8_t *glyph = font_get_glyph(c);
+    for (uint32_t gy = 0; gy < FONT_HEIGHT; gy++) {
+      fb_draw_glyph_scanline(screen_x, screen_y + gy, glyph[gy], KLOG_FG,
+                              KLOG_BG);
+    }
+    screen_x += FONT_WIDTH;
+  }
+}
 
 void klog_putchar(char c) {
   spinlock_acquire(&klog_lock);
   serial_putchar(c);
+  klog_putchar_screen(c);
   spinlock_release(&klog_lock);
 }
 
 void klog_puts(const char *s) {
   spinlock_acquire(&klog_lock);
   while (*s) {
-    serial_putchar(*s++);
+    char c = *s++;
+    serial_putchar(c);
+    klog_putchar_screen(c);
   }
   spinlock_release(&klog_lock);
 }
@@ -23,6 +73,7 @@ void klog_uint64(uint64_t num) {
   spinlock_acquire(&klog_lock);
   if (num == 0) {
     serial_putchar('0');
+    klog_putchar_screen('0');
     spinlock_release(&klog_lock);
     return;
   }
@@ -35,6 +86,7 @@ void klog_uint64(uint64_t num) {
   while (i > 0) {
     i--;
     serial_putchar(buf[i]);
+    klog_putchar_screen(buf[i]);
   }
   spinlock_release(&klog_lock);
 }
@@ -43,9 +95,13 @@ void klog_hex64(uint64_t num) {
   spinlock_acquire(&klog_lock);
   const char *hex = "0123456789ABCDEF";
   serial_putchar('0');
+  klog_putchar_screen('0');
   serial_putchar('x');
+  klog_putchar_screen('x');
   for (int i = 60; i >= 0; i -= 4) {
-    serial_putchar(hex[(num >> i) & 0xF]);
+    char c = hex[(num >> i) & 0xF];
+    serial_putchar(c);
+    klog_putchar_screen(c);
   }
   spinlock_release(&klog_lock);
 }
@@ -54,9 +110,13 @@ void klog_hex32(uint32_t num) {
   spinlock_acquire(&klog_lock);
   const char *hex = "0123456789ABCDEF";
   serial_putchar('0');
+  klog_putchar_screen('0');
   serial_putchar('x');
+  klog_putchar_screen('x');
   for (int i = 28; i >= 0; i -= 4) {
-    serial_putchar(hex[(num >> i) & 0xF]);
+    char c = hex[(num >> i) & 0xF];
+    serial_putchar(c);
+    klog_putchar_screen(c);
   }
   spinlock_release(&klog_lock);
 }

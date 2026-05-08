@@ -14,6 +14,8 @@
 #include "lock/spinlock.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
+#include "mm/shm.h"
+#include "mm/slab_cache.h"
 #include "mm/vmm.h"
 #include "net/arp.h"
 #include "net/dns.h"
@@ -37,9 +39,18 @@ static void test_task_entry(void);
 static volatile int irq_test_handler1_hits = 0;
 static volatile int irq_test_handler2_hits = 0;
 static volatile int irq_test_handler3_hits = 0;
-static void irq_test_handler1(struct registers *regs) { (void)regs; irq_test_handler1_hits++; }
-static void irq_test_handler2(struct registers *regs) { (void)regs; irq_test_handler2_hits++; }
-static void irq_test_handler3(struct registers *regs) { (void)regs; irq_test_handler3_hits++; }
+static void irq_test_handler1(struct registers *regs) {
+  (void)regs;
+  irq_test_handler1_hits++;
+}
+static void irq_test_handler2(struct registers *regs) {
+  (void)regs;
+  irq_test_handler2_hits++;
+}
+static void irq_test_handler3(struct registers *regs) {
+  (void)regs;
+  irq_test_handler3_hits++;
+}
 
 static void shell_print_uint64(uint64_t num) {
   if (num == 0) {
@@ -133,6 +144,10 @@ static void execute_command(char *cmd) {
         "  vmmtest   - Test the VMM demand paging and mapping bounds\n");
     console_puts(
         "  slabtest  - Test generic native Slab Allocator constraints\n");
+    console_puts(
+        "  slabstress - Stress test Named Object Slab Cache (kmem_cache)\n");
+    console_puts(
+        "  shmtest   - Stress test System V Shared Memory (shmget/shmat)\n");
     console_puts("  kilo      - Launch the kilo text editor\n");
     console_puts("  netinfo   - Show NIC status and MAC address\n");
     console_puts("  ifconfig  - Show network interface configuration\n");
@@ -305,15 +320,18 @@ static void execute_command(char *cmd) {
       console_puts("  -> FAIL: Could not install handler3.\n");
     }
 
-    // Test 4: Trigger interrupt and verify ALL handlers called (EOI timing test)
-    // If EOI were sent mid-dispatch, later handlers wouldn't run
-    console_puts("[4/7] Triggering IRQ 15 to verify all 3 handlers execute...\n");
+    // Test 4: Trigger interrupt and verify ALL handlers called (EOI timing
+    // test) If EOI were sent mid-dispatch, later handlers wouldn't run
+    console_puts(
+        "[4/7] Triggering IRQ 15 to verify all 3 handlers execute...\n");
     irq_test_handler1_hits = 0;
     irq_test_handler2_hits = 0;
     irq_test_handler3_hits = 0;
     irq_test_trigger(15);
-    if (irq_test_handler1_hits > 0 && irq_test_handler2_hits > 0 && irq_test_handler3_hits > 0) {
-      console_puts("  -> PASS: All 3 handlers executed (EOI sent after all complete).\n");
+    if (irq_test_handler1_hits > 0 && irq_test_handler2_hits > 0 &&
+        irq_test_handler3_hits > 0) {
+      console_puts("  -> PASS: All 3 handlers executed (EOI sent after all "
+                   "complete).\n");
     } else {
       console_puts("  -> FAIL: Not all handlers called (EOI timing issue?).\n");
     }
@@ -332,7 +350,8 @@ static void execute_command(char *cmd) {
     irq_test_handler2_hits = 0;
     irq_test_handler3_hits = 0;
     irq_test_trigger(15);
-    if (irq_test_handler1_hits > 0 && irq_test_handler2_hits == 0 && irq_test_handler3_hits > 0) {
+    if (irq_test_handler1_hits > 0 && irq_test_handler2_hits == 0 &&
+        irq_test_handler3_hits > 0) {
       console_puts("  -> PASS: Only handlers 1 and 3 executed.\n");
     } else {
       console_puts("  -> FAIL: Uninstall did not work correctly.\n");
@@ -346,7 +365,8 @@ static void execute_command(char *cmd) {
     irq_test_handler2_hits = 0;
     irq_test_handler3_hits = 0;
     irq_test_trigger(15);
-    if (irq_test_handler1_hits == 0 && irq_test_handler2_hits == 0 && irq_test_handler3_hits == 0) {
+    if (irq_test_handler1_hits == 0 && irq_test_handler2_hits == 0 &&
+        irq_test_handler3_hits == 0) {
       console_puts("  -> PASS: No handlers executed after full cleanup.\n");
     } else {
       console_puts("  -> FAIL: Handlers still running after uninstall.\n");
@@ -974,6 +994,275 @@ static void execute_command(char *cmd) {
     } else {
       console_puts("\n=== SLAB TEST FAILED ===\n");
     }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Named Slab Cache Stress Test (kmem_cache API)
+  // ════════════════════════════════════════════════════════════════════════
+  } else if (strcmp(cmd, "slabstress") == 0) {
+    console_puts("Starting Named Slab Cache Stress Test...\n");
+    int pass = 1;
+
+    // ── Phase 1: Custom cache create/alloc/free cycle ───────────────────
+    console_puts("[1/6] Creating custom test cache (obj_size=96)...\n");
+    kmem_cache_t *test_cache = kmem_cache_create("stress_test", 96, 8, NULL, NULL);
+    if (!test_cache) {
+      console_puts("  -> FAIL: kmem_cache_create returned NULL!\n");
+      pass = 0;
+    } else {
+      console_puts("  -> PASS: Cache created successfully.\n");
+
+      // Allocate 500 objects
+      console_puts("[2/6] Allocating 500 objects from test cache...\n");
+      void *objs[500];
+      int alloc_count = 0;
+      for (int i = 0; i < 500; i++) {
+        objs[i] = kmem_cache_alloc(test_cache);
+        if (!objs[i]) {
+          console_puts("  -> FAIL: Allocation failed at index ");
+          shell_print_uint64(i);
+          console_puts("\n");
+          pass = 0;
+          break;
+        }
+        alloc_count++;
+        // Write a unique pattern (verifies no overlapping objects)
+        memset(objs[i], (uint8_t)(i & 0xFF), 96);
+      }
+
+      if (alloc_count == 500) {
+        console_puts("  -> PASS: 500 objects allocated.\n");
+
+        // Verify data integrity
+        console_puts("[3/6] Verifying data integrity across 500 objects...\n");
+        int integrity = 1;
+        for (int i = 0; i < 500; i++) {
+          uint8_t *p = (uint8_t *)objs[i];
+          uint8_t expected = (uint8_t)(i & 0xFF);
+          if (p[0] != expected || p[95] != expected) {
+            console_puts("  -> FAIL: Corruption at index ");
+            shell_print_uint64(i);
+            console_puts("\n");
+            integrity = 0;
+            pass = 0;
+            break;
+          }
+        }
+        if (integrity) {
+          console_puts("  -> PASS: All 500 objects verified.\n");
+        }
+
+        // Free all objects
+        console_puts("[4/6] Freeing all 500 objects...\n");
+        for (int i = 0; i < 500; i++) {
+          kmem_cache_free(test_cache, objs[i]);
+        }
+
+        if (test_cache->active_objects == 0) {
+          console_puts("  -> PASS: Active count returned to 0.\n");
+        } else {
+          console_puts("  -> FAIL: Active count is ");
+          shell_print_uint64(test_cache->active_objects);
+          console_puts(" (expected 0)\n");
+          pass = 0;
+        }
+
+        // Verify re-allocation works (slab reuse)
+        console_puts("[5/6] Testing slab reuse (alloc/free/alloc cycle)...\n");
+        void *reuse1 = kmem_cache_alloc(test_cache);
+        void *reuse2 = kmem_cache_alloc(test_cache);
+        if (reuse1 && reuse2) {
+          kmem_cache_free(test_cache, reuse1);
+          kmem_cache_free(test_cache, reuse2);
+          console_puts("  -> PASS: Slab reuse cycle works.\n");
+        } else {
+          console_puts("  -> FAIL: Reuse allocation failed.\n");
+          pass = 0;
+        }
+      } else {
+        // Free what we allocated
+        for (int i = 0; i < alloc_count; i++) {
+          kmem_cache_free(test_cache, objs[i]);
+        }
+      }
+
+      // Test shrink
+      console_puts("[6/6] Testing kmem_cache_shrink...\n");
+      size_t free_before = pmm_get_free_pages();
+      kmem_cache_shrink(test_cache);
+      size_t free_after = pmm_get_free_pages();
+      if (free_after >= free_before) {
+        console_puts("  -> PASS: Shrink returned ");
+        shell_print_uint64(free_after - free_before);
+        console_puts(" pages to PMM.\n");
+      } else {
+        console_puts("  -> WARN: Shrink did not reclaim (may be normal).\n");
+      }
+
+      kmem_cache_destroy(test_cache);
+    }
+
+    // ── Phase 2: Test kernel object caches (vma, vfs_node, thread) ──────
+    console_puts("\n[BONUS] Testing kernel object caches...\n");
+
+    if (vma_cache) {
+      void *v1 = kmem_cache_alloc(vma_cache);
+      void *v2 = kmem_cache_alloc(vma_cache);
+      if (v1 && v2) {
+        kmem_cache_free(vma_cache, v1);
+        kmem_cache_free(vma_cache, v2);
+        console_puts("  -> PASS: vma_cache alloc/free cycle OK.\n");
+      } else {
+        console_puts("  -> FAIL: vma_cache alloc returned NULL.\n");
+        pass = 0;
+      }
+    } else {
+      console_puts("  -> SKIP: vma_cache not initialized.\n");
+    }
+
+    if (vfs_node_cache) {
+      void *n1 = kmem_cache_alloc(vfs_node_cache);
+      void *n2 = kmem_cache_alloc(vfs_node_cache);
+      if (n1 && n2) {
+        kmem_cache_free(vfs_node_cache, n1);
+        kmem_cache_free(vfs_node_cache, n2);
+        console_puts("  -> PASS: vfs_node_cache alloc/free cycle OK.\n");
+      } else {
+        console_puts("  -> FAIL: vfs_node_cache alloc returned NULL.\n");
+        pass = 0;
+      }
+    } else {
+      console_puts("  -> SKIP: vfs_node_cache not initialized.\n");
+    }
+
+    if (thread_cache) {
+      void *t1 = kmem_cache_alloc(thread_cache);
+      if (t1) {
+        kmem_cache_free(thread_cache, t1);
+        console_puts("  -> PASS: thread_cache alloc/free cycle OK.\n");
+      } else {
+        console_puts("  -> FAIL: thread_cache alloc returned NULL.\n");
+        pass = 0;
+      }
+    } else {
+      console_puts("  -> SKIP: thread_cache not initialized.\n");
+    }
+
+    // Print cache stats
+    kmem_cache_print_all();
+
+    if (pass) {
+      console_puts("\n=== NAMED SLAB CACHE STRESS TEST PASSED ===\n");
+    } else {
+      console_puts("\n=== NAMED SLAB CACHE STRESS TEST FAILED ===\n");
+    }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Shared Memory (SHM) Stress Test
+  // ════════════════════════════════════════════════════════════════════════
+  } else if (strcmp(cmd, "shmtest") == 0) {
+    console_puts("Starting Shared Memory (SHM) Stress Test...\n");
+    int pass = 1;
+
+    // ── Phase 1: Create a segment ───────────────────────────────────────
+    console_puts("[1/5] Creating SHM segment (8192 bytes, key=42)...\n");
+    int64_t shmid = sys_shmget(42, 8192, IPC_CREAT | 0x1FF, 0, 0, 0);
+    if (shmid < 0) {
+      console_puts("  -> FAIL: shmget returned error ");
+      shell_print_uint64((uint64_t)(-shmid));
+      console_puts("\n");
+      pass = 0;
+    } else {
+      console_puts("  -> PASS: Created segment id=");
+      shell_print_uint64((uint64_t)shmid);
+      console_puts("\n");
+    }
+
+    // ── Phase 2: Attach the segment ─────────────────────────────────────
+    int64_t addr1 = 0;
+    if (pass) {
+      console_puts("[2/5] Attaching segment (auto-address)...\n");
+      addr1 = sys_shmat((uint64_t)shmid, 0, 0, 0, 0, 0);
+      if (addr1 < 0 || addr1 == 0) {
+        console_puts("  -> FAIL: shmat returned error\n");
+        pass = 0;
+      } else {
+        console_puts("  -> PASS: Attached at ");
+        shell_print_uint64((uint64_t)addr1);
+        console_puts("\n");
+      }
+    }
+
+    // ── Phase 3: Write and verify data ──────────────────────────────────
+    if (pass) {
+      console_puts("[3/5] Writing pattern and verifying...\n");
+      volatile uint8_t *ptr = (volatile uint8_t *)addr1;
+      for (int i = 0; i < 8192; i++) {
+        ptr[i] = (uint8_t)(i & 0xFF);
+      }
+
+      int integrity = 1;
+      for (int i = 0; i < 8192; i++) {
+        if (ptr[i] != (uint8_t)(i & 0xFF)) {
+          integrity = 0;
+          break;
+        }
+      }
+
+      if (integrity) {
+        console_puts("  -> PASS: 8192 bytes written and verified.\n");
+      } else {
+        console_puts("  -> FAIL: Data integrity mismatch.\n");
+        pass = 0;
+      }
+    }
+
+    // ── Phase 4: shmctl IPC_STAT ────────────────────────────────────────
+    if (pass) {
+      console_puts("[4/5] Querying segment info (shmctl IPC_STAT)...\n");
+      struct shmid_ds info;
+      memset(&info, 0, sizeof(info));
+      int64_t rc = sys_shmctl((uint64_t)shmid, IPC_STAT, (uint64_t)&info, 0, 0, 0);
+      if (rc == 0 && info.shm_segsz == 8192 && info.shm_nattch == 1) {
+        console_puts("  -> PASS: size=");
+        shell_print_uint64(info.shm_segsz);
+        console_puts(" nattch=");
+        shell_print_uint64(info.shm_nattch);
+        console_puts("\n");
+      } else {
+        console_puts("  -> FAIL: shmctl returned unexpected values.\n");
+        pass = 0;
+      }
+    }
+
+    // ── Phase 5: Detach and destroy ─────────────────────────────────────
+    if (pass) {
+      console_puts("[5/5] Detaching and destroying segment...\n");
+      int64_t rc = sys_shmdt((uint64_t)addr1, 0, 0, 0, 0, 0);
+      if (rc != 0) {
+        console_puts("  -> FAIL: shmdt returned error.\n");
+        pass = 0;
+      }
+
+      rc = sys_shmctl((uint64_t)shmid, IPC_RMID, 0, 0, 0, 0);
+      if (rc != 0) {
+        console_puts("  -> FAIL: shmctl IPC_RMID returned error.\n");
+        pass = 0;
+      }
+
+      if (pass) {
+        console_puts("  -> PASS: Segment detached and destroyed.\n");
+      }
+    }
+
+    // Print SHM status table
+    shm_print_status();
+
+    if (pass) {
+      console_puts("\n=== SHM STRESS TEST PASSED ===\n");
+    } else {
+      console_puts("\n=== SHM STRESS TEST FAILED ===\n");
+    }
+
   } else if (strcmp(cmd, "vmatest") == 0) {
     console_puts("Starting Intensive VMA AVL Interval Tree Stress Test...\n");
     struct vma_list tester_list;

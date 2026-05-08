@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define BLOCK_MAX_DEVICES 4
+#define BLOCK_MAX_DEVICES 16
 #define BLOCK_SECTOR_SIZE 512
 
 struct block_device {
@@ -23,6 +23,9 @@ struct block_device *block_get(int index);
 
 // Get the number of registered block devices.
 int block_count(void);
+
+// Scan for partitions on a block device (MBR).
+void block_scan_partitions(struct block_device *dev);
 
 // Re-register all devices to the current /dev directory.
 // Call this after mounting a new root filesystem.

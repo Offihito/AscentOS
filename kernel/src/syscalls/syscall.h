@@ -128,6 +128,12 @@
 #define SYS_EPOLL_WAIT 232
 #define SYS_EPOLL_PWAIT 281
 
+// Shared Memory (SHM) syscalls
+#define SYS_SHMGET 29
+#define SYS_SHMAT  30
+#define SYS_SHMCTL 31
+#define SYS_SHMDT  67
+
 #define MAX_SYSCALL 512
 
 // ── Register state pushed by syscall_entry.asm ──────────────────────────────
@@ -161,6 +167,7 @@ void signal_deliver_syscall(struct syscall_regs *regs);
 void syscall_register_media(void);
 void syscall_register_socket(void);
 void syscall_register_epoll(void);
+void syscall_register_shm(void);
 
 // ── Core init (MSRs + calls subsystem registrations) ────────────────────────
 void syscall_init(void);

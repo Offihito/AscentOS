@@ -1,9 +1,9 @@
 #include "drivers/pci/pci.h"
-#include "drivers/pci/pcie.h"
-#include "drivers/manager/device.h"
 #include "console/console.h"
-#include "lib/string.h"
+#include "drivers/manager/device.h"
+#include "drivers/pci/pcie.h"
 #include "io/io.h"
+#include "lib/string.h"
 #include <stddef.h>
 
 static struct pci_device devices[PCI_MAX_DEVICES];
@@ -16,7 +16,8 @@ uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t func,
   if (pcie_available(bus)) {
     return pcie_config_read32(bus, slot, func, offset);
   }
-  if (offset > 255) return 0xFFFFFFFF;
+  if (offset > 255)
+    return 0xFFFFFFFF;
   uint32_t address = (1u << 31) | ((uint32_t)bus << 16) |
                      ((uint32_t)slot << 11) | ((uint32_t)func << 8) |
                      (offset & 0xFC);
@@ -24,13 +25,14 @@ uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t func,
   return inl(PCI_CONFIG_DATA);
 }
 
-void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t func, uint16_t offset,
-                        uint32_t value) {
+void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t func,
+                        uint16_t offset, uint32_t value) {
   if (pcie_available(bus)) {
     pcie_config_write32(bus, slot, func, offset, value);
     return;
   }
-  if (offset > 255) return;
+  if (offset > 255)
+    return;
   uint32_t address = (1u << 31) | ((uint32_t)bus << 16) |
                      ((uint32_t)slot << 11) | ((uint32_t)func << 8) |
                      (offset & 0xFC);
@@ -44,8 +46,8 @@ uint16_t pci_config_read16(uint8_t bus, uint8_t slot, uint8_t func,
   return (uint16_t)(val >> ((offset & 2) * 8));
 }
 
-void pci_config_write16(uint8_t bus, uint8_t slot, uint8_t func, uint16_t offset,
-                        uint16_t value) {
+void pci_config_write16(uint8_t bus, uint8_t slot, uint8_t func,
+                        uint16_t offset, uint16_t value) {
   uint32_t val = pci_config_read32(bus, slot, func, offset & 0xFFFC);
   uint32_t mask = 0xFFFFu << ((offset & 2) * 8);
   val &= ~mask;
@@ -130,29 +132,30 @@ static void pci_check_function(uint8_t bus, uint8_t slot, uint8_t func) {
   dev_idx++;
 
   struct device *seg_dev = device_find_by_path("/sys/pci/seg0");
-  if (!seg_dev) seg_dev = device_find_by_path("/sys/pci"); // Fallback
+  if (!seg_dev)
+    seg_dev = device_find_by_path("/sys/pci"); // Fallback
 
   struct device *pci_node = device_create(seg_dev, dev_name);
   if (pci_node) {
-      pci_node->vendor_id = vendor_id;
-      pci_node->device_id = device_id;
-      pci_node->pci_class = dev->class_code;
-      pci_node->pci_subclass = dev->subclass;
-      pci_node->pci_prog_if = dev->prog_if;
-      dm_probe_device(pci_node);
+    pci_node->vendor_id = vendor_id;
+    pci_node->device_id = device_id;
+    pci_node->pci_class = dev->class_code;
+    pci_node->pci_subclass = dev->subclass;
+    pci_node->pci_prog_if = dev->prog_if;
+    dm_probe_device(pci_node);
   }
 
   if ((dev->header_type & 0x7F) == 0x00) {
     for (int i = 0; i < 6; i++) {
-        uint32_t bar = pci_config_read32(bus, slot, func, 0x10 + i * 4);
-        dev->bar[i] = bar;
-        if (bar != 0 && bar != 0xFFFFFFFF) {
-            if (bar & 1) { // IO
-                device_add_resource(pci_node, RES_IO, "bar", bar & ~0x3, 0);
-            } else { // MEM
-                device_add_resource(pci_node, RES_MEM, "bar", bar & ~0xF, 0);
-            }
+      uint32_t bar = pci_config_read32(bus, slot, func, 0x10 + i * 4);
+      dev->bar[i] = bar;
+      if (bar != 0 && bar != 0xFFFFFFFF) {
+        if (bar & 1) { // IO
+          device_add_resource(pci_node, RES_IO, "bar", bar & ~0x3, 0);
+        } else { // MEM
+          device_add_resource(pci_node, RES_MEM, "bar", bar & ~0xF, 0);
         }
+      }
     }
   }
   device_add_resource(pci_node, RES_IRQ, "irq", dev->irq_line, dev->irq_line);
@@ -223,6 +226,19 @@ void pci_enable_bus_mastering(struct pci_device *dev) {
   uint32_t cmd = pci_config_read32(dev->bus, dev->slot, dev->func, 0x04);
   cmd |= (1 << 2); // Set Bus Master bit
   pci_config_write32(dev->bus, dev->slot, dev->func, 0x04, cmd);
+}
+
+uint8_t pci_find_capability(struct pci_device *dev, uint8_t cap_id) {
+    uint16_t status = pci_config_read16(dev->bus, dev->slot, dev->func, 0x06);
+    if (!(status & (1 << 4))) return 0; // Capabilities bit not set
+
+    uint8_t cap_ptr = pci_config_read32(dev->bus, dev->slot, dev->func, 0x34) & 0xFF;
+    while (cap_ptr != 0) {
+        uint32_t cap_reg = pci_config_read32(dev->bus, dev->slot, dev->func, cap_ptr);
+        if ((cap_reg & 0xFF) == cap_id) return cap_ptr;
+        cap_ptr = (cap_reg >> 8) & 0xFF;
+    }
+    return 0;
 }
 
 uint32_t pci_get_device_count(void) { return device_count; }

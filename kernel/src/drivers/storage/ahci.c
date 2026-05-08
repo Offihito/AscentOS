@@ -430,7 +430,7 @@ static struct driver ahci_driver = {
     .probe = ahci_probe
 };
 
-void ahci_init(void) {
+int ahci_init(void) {
   ahci_drive_count = 0;
   dm_register_driver(&ahci_driver);
 
@@ -441,4 +441,5 @@ void ahci_init(void) {
     print_uint64(ahci_drive_count);
     console_puts(" drive(s) registered.\n");
   }
+  return ahci_drive_count;
 }

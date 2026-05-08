@@ -13,6 +13,7 @@
 #include "cpu/tsc.h"
 #include "drivers/audio/ac97.h"
 #include "drivers/audio/audio_dsp.h"
+#include "drivers/audio/hda.h"
 #include "drivers/audio/sb16.h"
 #include "drivers/input/evdev.h"
 #include "drivers/input/keyboard.h"
@@ -23,7 +24,9 @@
 #include "drivers/pci/pci.h"
 #include "drivers/serial.h"
 #include "drivers/storage/ahci.h"
+#include "drivers/storage/ata.h"
 #include "drivers/storage/block.h"
+#include "drivers/storage/nvme.h"
 #include "drivers/timer/pit.h"
 #include "drivers/timer/rtc.h"
 #include "drivers/usb/ehci.h"
@@ -42,6 +45,8 @@
 #include "mm/dma_alloc.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
+#include "mm/shm.h"
+#include "mm/slab_cache.h"
 #include "mm/vmm.h"
 #include "net/net.h"
 #include "sched/sched.h"
@@ -180,6 +185,13 @@ void kmain(void) {
   struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
   serial_init();
 
+  // Initialize basic PMM state (hhdm offset) so fb_init can work
+  pmm_init_early(hhdm_request.response->offset);
+  fb_init(fb);
+  klog_set_screen_logging(true);
+
+  klog_puts("AscentOS Kernel Booting...\n");
+
   if (paging_mode_request.response != NULL) {
     if (paging_mode_request.response->mode == LIMINE_PAGING_MODE_X86_64_4LVL) {
       klog_puts("[OK] Limine Paging Mode: 4-level (x86_64)\n");
@@ -194,34 +206,7 @@ void kmain(void) {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 1: CPU descriptor tables
-  // ═══════════════════════════════════════════════════════════════════════
-  gdt_init();
-  cpu_features_init();
-  tsc_init();
-  idt_init();
-  syscall_init();
-  socket_init();
-  epoll_init();
-  isr_init_exceptions();
-
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 2: Legacy PIC — used temporarily until APIC takes over
-  // ═══════════════════════════════════════════════════════════════════════
-  pic_remap(32, 40);
-  outb(0x21, 0xF8); // unmask IRQ0 (PIT), IRQ1 (Keyboard), and IRQ2 (Slave PIC)
-  outb(0xA1, 0xEF); // unmask IRQ12 (Mouse)
-
-  pit_init(100);
-  rtc_init();
-  klog_puts("[OK] Legacy PIC Remapped, PIT 100Hz and RTC started.\n");
-
-  keyboard_init();
-  mouse_init();
-  __asm__ volatile("sti"); // Enable hardware interrupts!
-
-  // ═══════════════════════════════════════════════════════════════════════
-  //  Phase 3: Memory management
+  //  Phase 1: Memory management (The foundation!)
   // ═══════════════════════════════════════════════════════════════════════
   if (memmap_request.response == NULL || hhdm_request.response == NULL) {
     klog_puts("[ERR] Missing Limine memory map or HHDM responses. Halting.\n");
@@ -239,12 +224,50 @@ void kmain(void) {
   klog_uint64(pmm_get_usable_memory() / (1024 * 1024));
   klog_puts(" MB\n\n");
 
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Phase 2: CPU descriptor tables
+  // ═══════════════════════════════════════════════════════════════════════
+  gdt_init();
+  cpu_features_init();
+  tsc_init();
+  idt_init();
+  syscall_init();
+  socket_init();
+  epoll_init();
+  isr_init_exceptions();
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  Phase 3: Legacy PIC — used temporarily until APIC takes over
+  // ═══════════════════════════════════════════════════════════════════════
+  pic_remap(32, 40);
+  outb(0x21, 0xF8); // unmask IRQ0 (PIT), IRQ1 (Keyboard), and IRQ2 (Slave PIC)
+  outb(0xA1, 0xEF); // unmask IRQ12 (Mouse)
+
+  pit_init(100);
+  rtc_init();
+  klog_puts("[OK] Legacy PIC Remapped, PIT 100Hz and RTC started.\n");
+
+  keyboard_init();
+  mouse_init();
+  __asm__ volatile("sti"); // Enable hardware interrupts!
+
   klog_puts("[OK] Initializing Virtual Memory Manager (VMM)...\n");
   vmm_init();
   klog_puts("     Active CR3 Page Map hooked.\n");
   heap_init();
+  slab_cache_init();
+
+  // Create named object caches for frequent kernel structures
+  extern kmem_cache_t *vma_cache;
+  vma_cache = kmem_cache_create("vma", sizeof(struct vma), 8, NULL, NULL);
+
   dma_alloc_init();
   console_init(fb);
+  // After console_init, klog should stop drawing manually to the screen
+  // and let the full console driver handle it via serial output redirected to
+  // console? Actually, console_init takes over. Let's disable klog screen
+  // logging now.
+  klog_set_screen_logging(false);
   dm_init();
 
   console_puts("[UDM] Checking for platform DTB...\n");
@@ -372,6 +395,17 @@ void kmain_high_half(void) {
   // Initialize Virtual Filesystem and Ramfs
   klog_puts("[OK] Initializing RamFS & Virtual Filesystem (VFS)...\n");
   ramfs_init();
+
+  // Create VFS node slab cache now that the full kernel is up.
+  // NOTE: struct thread (~7KB) is too large for single-page slabs and stays
+  // on the general-purpose big-alloc path, which is already efficient for it.
+  extern kmem_cache_t *vfs_node_cache;
+  vfs_node_cache =
+      kmem_cache_create("vfs_node", sizeof(vfs_node_t), 8, NULL, NULL);
+
+  // Initialize shared memory subsystem
+  shm_init();
+
   fb_register_vfs();
   mouse_register_vfs();
   evdev_init();
@@ -391,35 +425,63 @@ void kmain_high_half(void) {
   virtio_gpu_init();      // Phase 2: GPU device discovery & init
   virtio_gpu_self_test(); // Phase 2: GPU device tests
 
-  ahci_init();
+  if (ahci_init() == 0) {
+    ata_init();
+  }
+
+  nvme_init();
+  nvme_self_test();
 
   // ── Mount root filesystem ──
-  struct block_device *boot_dev = block_get(0);
+  struct block_device *boot_dev = NULL;
+
+  // Try to find a partition first (indices 1, 2, ... usually partitions)
+  // then fallback to raw device (index 0)
+  for (int i = 1; i < block_count(); i++) {
+    boot_dev = block_get(i);
+    if (boot_dev) {
+      klog_puts("[INFO] Attempting to mount root from partition: ");
+      klog_puts(boot_dev->name);
+      klog_puts("...\n");
+      if (ext2_mount_root(boot_dev) == 0) {
+        goto mount_success;
+      }
+    }
+  }
+
+  // Fallback to raw disk
+  boot_dev = block_get(0);
   if (boot_dev) {
-    klog_puts("[INFO] Mounting root filesystem from ");
+    klog_puts("[INFO] Attempting to mount root from raw device: ");
     klog_puts(boot_dev->name);
     klog_puts("...\n");
     if (ext2_mount_root(boot_dev) == 0) {
-      klog_puts("[OK] Root filesystem mounted successfully.\n");
-      // Re-populate /dev in the new root
-      block_repopulate_devices();
-      fb_register_vfs();
-      mouse_register_vfs();
-      random_register_vfs();
-    } else {
-      klog_puts("[ERR] Failed to mount root filesystem.\n");
+      goto mount_success;
     }
-  } else {
-    klog_puts("[WARN] No bootable block device found.\n");
   }
+
+  klog_puts("[ERR] Failed to mount root filesystem on any device.\n");
+  goto mount_fail;
+
+mount_success:
+  klog_puts("[OK] Root filesystem mounted successfully.\n");
+  // Re-populate /dev in the new root
+  block_repopulate_devices();
+  fb_register_vfs();
+  mouse_register_vfs();
+  random_register_vfs();
+
+mount_fail:
 
   nic_init();
   sb16_init();
   ac97_init();
+  hda_init();
 
   // Driver VFS registration MUST happen after hardware init
   sb16_register_vfs();
   ac97_register_vfs();
+  hda_register_vfs();
   audio_dsp_register_vfs();
 
   // Initialize networking BEFORE spawning init thread so DHCP completes first

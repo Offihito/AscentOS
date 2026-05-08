@@ -46,6 +46,9 @@ struct pci_device *pci_find_device_by_id(uint16_t vendor_id,
 // Enable PCI bus-mastering for a device (required for DMA).
 void pci_enable_bus_mastering(struct pci_device *dev);
 
+// Find a capability in the PCI configuration space. Returns offset or 0 if not found.
+uint8_t pci_find_capability(struct pci_device *dev, uint8_t cap_id);
+
 // Get the number of discovered devices
 uint32_t pci_get_device_count(void);
 

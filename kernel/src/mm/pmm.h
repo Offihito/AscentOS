@@ -8,7 +8,10 @@
 
 #define PAGE_SIZE 4096
 
-// Initialize the physical memory manager using the memory map and HHDM offset.
+// Initialize basic PMM state (hhdm offset) so early components can function.
+void pmm_init_early(uint64_t hhdm_offset);
+
+// Initialize the full physical memory manager using the memory map and HHDM offset.
 void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset);
 
 // New Buddy Allocator API

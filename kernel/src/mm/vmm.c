@@ -11,6 +11,7 @@
 static spinlock_t vmm_lock = SPINLOCK_INIT;
 
 static uint64_t *kernel_pml4 = NULL;
+bool vmm_initialized = false;
 
 uint64_t *vmm_get_active_pml4(void) {
   uint64_t cr3;
@@ -98,6 +99,7 @@ void vmm_init(void) {
 
   // Switch to the newly allocated kernel-owned PML4
   __asm__ volatile("mov %0, %%cr3" ::"r"(kernel_pml4) : "memory");
+  vmm_initialized = true;
   klog_puts("[VMM] Switched to new, independent kernel-owned PML4.\n");
 }
 

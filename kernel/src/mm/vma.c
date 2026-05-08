@@ -1,6 +1,22 @@
 #include "vma.h"
 #include "../lib/string.h"
 #include "heap.h"
+#include "slab_cache.h"
+
+// ── Slab-accelerated allocation for VMA nodes ──────────────────────────────
+// Falls back to kmalloc if the vma_cache hasn't been created yet (early boot).
+static inline struct vma *vma_node_alloc(void) {
+    if (vma_cache)
+        return (struct vma *)kmem_cache_alloc(vma_cache);
+    return (struct vma *)kmalloc(sizeof(struct vma));
+}
+
+static inline void vma_node_free(struct vma *v) {
+    if (vma_cache)
+        kmem_cache_free(vma_cache, v);
+    else
+        kfree(v);
+}
 
 // Helper macros
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -112,12 +128,12 @@ static struct vma *delete_node(struct vma *node, uint64_t start,
     if (!node->left || !node->right) {
       struct vma *temp = node->left ? node->left : node->right;
       if (!temp) {
-        kfree(node);
+        vma_node_free(node);
         node = NULL;
       } else {
         struct vma *unlinked = node;
         node = temp;
-        kfree(unlinked);
+        vma_node_free(unlinked);
       }
     } else {
       // Node with two children: Get the inorder successor (smallest in the
@@ -176,7 +192,7 @@ static void vma_destroy_recursive(struct vma *node) {
     return;
   vma_destroy_recursive(node->left);
   vma_destroy_recursive(node->right);
-  kfree(node);
+  vma_node_free(node);
 }
 
 void vma_list_destroy(struct vma_list *list) {
@@ -191,7 +207,7 @@ int vma_add(struct vma_list *list, uint64_t start, uint64_t end, uint64_t prot,
     return -1; // Overlapping regions rejected securely
   }
 
-  struct vma *new_node = kmalloc(sizeof(struct vma));
+  struct vma *new_node = vma_node_alloc();
   if (!new_node)
     return -1; // OOM
 

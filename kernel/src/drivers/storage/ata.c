@@ -1,4 +1,4 @@
-#include "drivers/ata/ata.h"
+#include "drivers/storage/ata.h"
 #include "io/io.h"
 #include "drivers/storage/block.h"
 #include "console/console.h"
@@ -232,7 +232,7 @@ static void ata_probe_channel(uint16_t io_base, uint16_t ctrl_base, int drive_in
     }
 }
 
-void ata_init(void) {
+int ata_init(void) {
     ata_drive_count = 0;
     console_puts("[INFO] Probing ATA drives...\n");
 
@@ -249,4 +249,5 @@ void ata_init(void) {
         print_uint64(ata_drive_count);
         console_puts(" drive(s) registered.\n");
     }
+    return ata_drive_count;
 }

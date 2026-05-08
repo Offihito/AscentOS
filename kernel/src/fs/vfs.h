@@ -1,11 +1,11 @@
 #ifndef FS_VFS_H
 #define FS_VFS_H
 
+#include "../lib/list.h"
+#include "../lock/spinlock.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "../lib/list.h"
-#include "../lock/spinlock.h"
 
 #define FS_FILE 0x01
 #define FS_DIRECTORY 0x02
@@ -96,7 +96,7 @@ typedef struct vfs_node {
 
   struct list_head ep_watchers; // List of epitem_t watching this node
   spinlock_t ep_lock;           // Lock for ep_watchers
-  
+
   struct vfs_node *ptr; // Used by mountpoints and symlinks
 } vfs_node_t;
 

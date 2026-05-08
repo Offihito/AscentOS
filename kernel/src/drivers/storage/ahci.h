@@ -129,6 +129,6 @@ typedef struct {
     ahci_port_t ports[32];       // 0x100 ~ 0x10FF, Port control registers
 } ahci_hba_mem_t;
 
-void ahci_init(void);
+int ahci_init(void);
 
 #endif

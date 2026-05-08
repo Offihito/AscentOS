@@ -258,7 +258,8 @@ vfs_node_t *vfs_resolve_path(const char *path) {
 }
 
 void vfs_node_init(vfs_node_t *node) {
-  if (!node) return;
+  if (!node)
+    return;
   memset(node, 0, sizeof(vfs_node_t));
   INIT_LIST_HEAD(&node->ep_watchers);
   spinlock_init(&node->ep_lock);

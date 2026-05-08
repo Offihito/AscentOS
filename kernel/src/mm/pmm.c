@@ -175,10 +175,15 @@ static void buddy_free_internal(uint64_t phys, size_t order) {
   list_add_tail(&block->node, &b_zone.free_list[order]);
 }
 
+void pmm_init_early(uint64_t hhdm_offset) {
+  physical_memory_offset = hhdm_offset;
+}
+
 void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
   physical_memory_offset = hhdm_offset;
   internal_memmap = memmap;
   highest_page = 0;
+  lowest_page = 0xFFFFFFFFFFFFFFFF;
 
   for (uint64_t i = 0; i < memmap->entry_count; i++) {
     struct limine_memmap_entry *entry = memmap->entries[i];
@@ -199,8 +204,8 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
       if (entry->base / PAGE_SIZE < lowest_page) {
         lowest_page = entry->base / PAGE_SIZE;
       }
-      if (top / PAGE_SIZE > highest_page) {
-        highest_page = top / PAGE_SIZE;
+      if ((top + PAGE_SIZE - 1) / PAGE_SIZE > highest_page) {
+        highest_page = (top + PAGE_SIZE - 1) / PAGE_SIZE;
       }
     }
   }
@@ -218,6 +223,10 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
   size_t refcount_table_size = page_count * sizeof(uint16_t);
   size_t total_metadata_size = bitmap_size * 2 + refcount_table_size;
 
+  klog_puts("[PMM] Required Metadata Size: ");
+  klog_uint64(total_metadata_size / 1024);
+  klog_puts(" KB\n");
+
   for (uint64_t i = 0; i < memmap->entry_count; i++) {
     struct limine_memmap_entry *entry = memmap->entries[i];
     if (entry->type == LIMINE_MEMMAP_USABLE &&
@@ -232,6 +241,18 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
       // sparse maps
       break;
     }
+  }
+
+  if (bitmap == NULL) {
+    klog_puts("[PMM] FATAL: Could not find a large enough usable memory region "
+              "for PMM metadata!\n");
+    klog_puts("      Metadata Size: ");
+    klog_uint64(total_metadata_size / 1024);
+    klog_puts(" KB\n");
+    klog_puts("      Max usable region seen: ");
+    // Optional: add a log for the largest region seen to help debugging
+    while (1)
+      __asm__ volatile("hlt");
   }
 
   for (int i = 0; i < MAX_ORDER; i++) {
@@ -589,56 +610,44 @@ void pmm_reclaim_bootloader(uint64_t kernel_phys_base) {
   if (!internal_memmap)
     return;
 
-  klog_puts("[PMM] Analyzing memory map for reclamation:\n");
-  for (uint64_t i = 0; i < internal_memmap->entry_count; i++) {
-    struct limine_memmap_entry *entry = internal_memmap->entries[i];
-    klog_puts("     Region ");
-    klog_uint64(i);
-    klog_puts(": type=");
-    klog_uint64(entry->type);
-    klog_puts(" base=0x");
-    klog_hex64(entry->base);
-    klog_puts(" size=");
-    klog_uint64(entry->length / 1024 / 1024);
-    klog_puts(" MB\n");
+  // STEP 0: Buffer the memory map locally.
+  // The original memmap structure is in Bootloader Reclaimable memory!
+  // If we start freeing it while looping over it, we will crash.
+  static struct limine_memmap_entry static_entries[128];
+  uint64_t entry_count = internal_memmap->entry_count;
+  if (entry_count > 128)
+    entry_count = 128;
+
+  for (uint64_t i = 0; i < entry_count; i++) {
+    static_entries[i] = *internal_memmap->entries[i];
   }
+
+  klog_puts("[PMM] Analyzing buffered memory map for reclamation...\n");
 
   extern void vmm_protect_active_tables(void);
 
   // Allocate a temporary bitmap to track which pages are reclaimable.
-  // pmm_alloc_pages returns a physical address.
   size_t temp_count = (bitmap_size + PAGE_SIZE - 1) / PAGE_SIZE;
-  size_t order = get_order(temp_count);
   uint8_t *temp_bitmap_phys = pmm_alloc_pages(temp_count);
   if (!temp_bitmap_phys) {
-    klog_puts(
-        "[PMM] FATAL: Failed to allocate temp bitmap for reclaim. count=");
-    klog_uint64(temp_count);
-    klog_puts(" order=");
-    klog_uint64(order);
-    klog_puts(" bitmap_size=");
-    klog_uint64(bitmap_size);
-    klog_puts("\n");
+    klog_puts("[PMM] ERROR: Failed to allocate temp bitmap for reclaim.\n");
     return;
   }
   uint8_t *temp_bitmap =
       (uint8_t *)((uint64_t)temp_bitmap_phys + physical_memory_offset);
+  memset(temp_bitmap, 0, bitmap_size);
 
-  for (size_t i = 0; i < bitmap_size; i++) {
-    temp_bitmap[i] = 0;
-  }
-
-  // Step 1: Mark all reclaimable regions (Bootloader, ACPI, and Modules)
-  for (uint64_t i = 0; i < internal_memmap->entry_count; i++) {
-    struct limine_memmap_entry *entry = internal_memmap->entries[i];
+  // Step 1: Mark all reclaimable regions (excluding ACPI until fully parsed)
+  for (uint64_t i = 0; i < entry_count; i++) {
+    struct limine_memmap_entry *entry = &static_entries[i];
 
     bool reclaim = false;
-    if (entry->type == LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE ||
-        entry->type == LIMINE_MEMMAP_ACPI_RECLAIMABLE) {
+    // We EXCLUDE ACPI_RECLAIMABLE for now as we might need SDTs later (e.g.
+    // MCFG discovery)
+    if (entry->type == LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE) {
       reclaim = true;
     } else if (entry->type == LIMINE_MEMMAP_EXECUTABLE_AND_MODULES) {
-      // Reclaim modules but keep the kernel.
-      // We check if the entry's physical range contains the kernel_phys_base.
+      // Keep only the kernel image, reclaim other modules/initrd
       if (kernel_phys_base < entry->base ||
           kernel_phys_base >= (entry->base + entry->length)) {
         reclaim = true;
@@ -658,86 +667,75 @@ void pmm_reclaim_bootloader(uint64_t kernel_phys_base) {
       size_t pfn_start = start / PAGE_SIZE;
       size_t pfn_count = len / PAGE_SIZE;
       bitmap_set_range(temp_bitmap, pfn_start, pfn_count);
-      bitmap_clear_range(bitmap, pfn_start, pfn_count);
+      // DON'T clear main bitmap yet; wait until we ensure VMM doesn't need them
     }
   }
 
-  // Step 2: VMM sets main bitmap to 1 for active tables via pmm_mark_used
+  // Step 2: VMM marks active page tables as used in main bitmap
   vmm_protect_active_tables();
 
-  spinlock_acquire(&b_zone.lock);
-
-  // Step 3: Iterate through temp_bitmap.
-  // If a page is meant to be reclaimed (in temp) but wasn't protected by VMM
-  // (main == 0), we MUST temporarily set it back to 1 in the main bitmap to
-  // prevent false coalescing when processing other pages. If it WAS protected
-  // (main == 1), we remove it from temp_bitmap so we don't free it.
+  // Step 3: Safety check: If a page is marked for reclaim but VMM says it's
+  // used, don't reclaim.
   for (size_t b = 0; b < bitmap_size; b++) {
     if (temp_bitmap[b]) {
       for (int i = 0; i < 8; i++) {
         if (temp_bitmap[b] & (1 << i)) {
           uint64_t pfn = b * 8 + i + lowest_page;
-          if (!bitmap_test(bitmap, pfn - lowest_page)) {
-            bitmap_set(bitmap,
-                       pfn - lowest_page); // Prevent uninitialized coalescing
-          } else {
-            temp_bitmap[b] &= ~(1 << i); // Protected, don't free later
+          if (bitmap_test(bitmap, pfn - lowest_page)) {
+            // Locked by VMM, remove from reclaim set
+            temp_bitmap[b] &= ~(1 << i);
           }
         }
       }
     }
   }
 
-  // Step 4: Now safely pass exactly the unprotected pages to the buddy
-  // allocator in large blocks
+  // Step 4: Safely perform the reclamation
+  klog_puts("[PMM] Reclaiming unprotected bootloader pages...\n");
+
+  // Disable interrupts during final stage to avoid scheduler/allocation races
+  uint64_t flags;
+  __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags));
+  spinlock_acquire(&b_zone.lock);
+
   for (size_t b = 0; b < bitmap_size; b++) {
     if (temp_bitmap[b]) {
       for (int i = 0; i < 8; i++) {
         if (temp_bitmap[b] & (1 << i)) {
           uint64_t start_pfn = (uint64_t)b * 8 + i + lowest_page;
-
-          // Find length of contiguous run of set bits in temp_bitmap
           size_t count = 0;
           uint64_t curr_pfn = start_pfn;
+
           while (curr_pfn < highest_page) {
             size_t curr_idx = curr_pfn - lowest_page;
-            size_t curr_b = curr_idx / 8;
-            int curr_bit_idx = curr_idx % 8;
-            if (temp_bitmap[curr_b] & (1 << curr_bit_idx)) {
+            if (temp_bitmap[curr_idx / 8] & (1 << (curr_idx % 8))) {
               count++;
-              // Clear bit so we don't process it again in the outer loop
-              temp_bitmap[curr_b] &= ~(1 << curr_bit_idx);
+              temp_bitmap[curr_idx / 8] &= ~(1 << (curr_idx % 8));
               curr_pfn++;
-            } else {
+            } else
               break;
-            }
           }
 
-          // Add this run in the largest possible blocks
           uint64_t p = 0;
           while (p < count) {
             uint64_t phys = (start_pfn + p) * PAGE_SIZE;
             size_t remaining = count - p;
-
             size_t order = 0;
             while (order < MAX_ORDER - 1) {
-              uint64_t next_order_pages = 1ULL << (order + 1);
-              if (next_order_pages > remaining)
-                break;
-              if ((phys % (next_order_pages * PAGE_SIZE)) != 0)
+              uint64_t n_pages = 1ULL << (order + 1);
+              if (n_pages > remaining || (phys % (n_pages * PAGE_SIZE)) != 0)
                 break;
               order++;
             }
 
-            uint64_t pages_in_block = 1ULL << order;
-            uint64_t pfn = phys / PAGE_SIZE;
-            
-            bitmap_set_range(managed_bitmap, pfn, pages_in_block);
-            memset(&refcounts[pfn - lowest_page], 0, pages_in_block * sizeof(uint16_t));
-
+            uint64_t p_count = 1ULL << order;
+            uint64_t base_pfn = phys / PAGE_SIZE;
+            bitmap_set_range(managed_bitmap, base_pfn, p_count);
+            memset(&refcounts[base_pfn - lowest_page], 0,
+                   p_count * sizeof(uint16_t));
             buddy_free_internal(phys, order);
-            usable_memory += pages_in_block * PAGE_SIZE;
-            p += pages_in_block;
+            usable_memory += p_count * PAGE_SIZE;
+            p += p_count;
           }
         }
       }
@@ -746,11 +744,12 @@ void pmm_reclaim_bootloader(uint64_t kernel_phys_base) {
 
   internal_memmap = NULL;
   spinlock_release(&b_zone.lock);
+  __asm__ volatile("push %0; popfq" ::"r"(flags));
+
   klog_puts("[PMM] Bootloader memory reclaimed. Usable RAM now: ");
   klog_uint64(usable_memory / 1024 / 1024);
   klog_puts(" MB\n");
 
-  // Free the temp bitmap
   pmm_free_pages(temp_bitmap_phys, temp_count);
 }
 

@@ -107,8 +107,8 @@ void fb_init(struct limine_framebuffer *framebuffer) {
   klog_puts("     BPP:        ");
   klog_uint64(fb->bpp);
   klog_puts("\n");
-  klog_puts("     Address:    0x");
-  klog_uint64((uint64_t)fb->address);
+  klog_puts("     Address:    ");
+  klog_hex64((uint64_t)fb->address);
   klog_puts("\n");
   klog_puts("     Red:        size=");
   klog_uint64(fb->red_mask_size);
@@ -129,15 +129,14 @@ void fb_init(struct limine_framebuffer *framebuffer) {
   uint64_t fb_size = (uint64_t)fb->height * fb->pitch;
 
   // Re-map the virtual address provided by Limine with strict PCD/PWT
-  // (Uncacheable) to avoid aliasing conflicts with the HHDM or bootloader
-  // mappings.
-  {
+  // only if VMM is initialized.
+  extern bool vmm_initialized;
+  if (vmm_initialized) {
     uint64_t virt = (uint64_t)fb->address;
     uint64_t phys = virt - pmm_get_hhdm_offset();
     uint64_t *pml4 = vmm_get_active_pml4();
     uint64_t num_pages = (fb_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
-    // PCD (bit 4) + PWT (bit 3) = Uncacheable
     uint64_t flags =
         PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_PCD | PAGE_FLAG_PWT;
 
@@ -145,54 +144,43 @@ void fb_init(struct limine_framebuffer *framebuffer) {
       vmm_map_page(pml4, virt + i * PAGE_SIZE, phys + i * PAGE_SIZE, flags);
     }
 
-    // Nuclear flush: ensures no stale WB lines exist in the cache for this
-    // range.
     __asm__ volatile("wbinvd" ::: "memory");
     klog_puts("[FB] PAT synchronized (PCD|PWT) and cache flushed.\n");
-  }
 
-  // Allocate backbuffer if not already allocated or if size changed
-  if (!backbuffer || current_backbuffer_size < fb_size) {
-    if (backbuffer)
-      kfree(backbuffer);
-    backbuffer = kmalloc(fb_size);
-    if (backbuffer) {
-      current_backbuffer_size = fb_size;
-      memset(backbuffer, 0, fb_size);
-    }
-  }
-
-  // Allocate X11 backbuffer for double buffering (graphics mode)
-  if (!x11_backbuffer) {
-    x11_backbuffer = kmalloc(fb_size);
-    if (x11_backbuffer) {
-      memset(x11_backbuffer, 0, fb_size);
-      klog_puts("[FB] X11 double buffer allocated\n");
-    }
-  }
-
-  // 4. Full TLB flush via CR3 reload — after the huge-page split above, stale
-  // 2MB TLB entries may reference the old WB mapping for pages we haven't
-  // individually flushed yet.  A CR3 reload invalidates the entire TLB.
-  {
+    // Flush TLB
     uint64_t cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
     __asm__ volatile("mov %0, %%cr3" ::"r"(cr3) : "memory");
-  }
 
-  // Clear the hardware framebuffer to solid black (now strictly uncached)
-  if (fb->address) {
-    volatile uint32_t *dest = (volatile uint32_t *)fb->address;
-    for (uint32_t i = 0; i < fb_size / 4; i++) {
-      dest[i] = 0x00000000;
+    // Clear hardware framebuffer
+    if (fb->address) {
+      volatile uint32_t *dest = (volatile uint32_t *)fb->address;
+      for (uint32_t i = 0; i < fb_size / 4; i++) {
+        dest[i] = 0x00000000;
+      }
     }
   }
 
-  // Ensure all writes hit RAM
-  __asm__ volatile("wbinvd" ::: "memory");
+  // Allocate backbuffer and X11 buffer only if heap is ready.
+  extern bool heap_initialized;
+  if (heap_initialized) {
+    if (!backbuffer || current_backbuffer_size < fb_size) {
+      if (backbuffer)
+        kfree(backbuffer);
+      backbuffer = kmalloc(fb_size);
+      if (backbuffer) {
+        current_backbuffer_size = fb_size;
+        memset(backbuffer, 0x00, fb_size);
+      }
+    }
 
-  if (backbuffer && fb->address) {
-    memset(backbuffer, 0, fb_size);
+    if (!x11_backbuffer) {
+      x11_backbuffer = kmalloc(fb_size);
+      if (x11_backbuffer) {
+        memset(x11_backbuffer, 0x00, fb_size);
+        klog_puts("[FB] X11 double buffer allocated\n");
+      }
+    }
   }
 }
 

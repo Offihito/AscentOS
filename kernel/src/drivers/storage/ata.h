@@ -1,5 +1,5 @@
-#ifndef DRIVERS_ATA_H
-#define DRIVERS_ATA_H
+#ifndef DRIVERS_STORAGE_ATA_H
+#define DRIVERS_STORAGE_ATA_H
 
 #include <stdint.h>
 
@@ -42,6 +42,6 @@
 #define ATA_CMD_FLUSH          0xE7
 
 // Initialize ATA subsystem: detect drives and register them as block devices
-void ata_init(void);
+int ata_init(void);
 
 #endif

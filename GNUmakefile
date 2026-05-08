@@ -27,34 +27,58 @@ all: $(IMAGE_NAME).iso
 run: run-$(ARCH)
 
 .PHONY: run-x86_64
-run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img
+run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img nvme.img
 	qemu-system-$(ARCH) \
 		-M q35,pcspk-audiodev=snd0 \
 		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
 		-cdrom $(IMAGE_NAME).iso \
-		-hda disk.img \
+		-drive file=disk.img,format=raw,if=ide \
 		-smp 4 \
 		-serial stdio \
 		-audiodev pa,id=snd0 \
 		-device e1000,netdev=net0 \
 		-device sb16,audiodev=snd0 \
 		-device AC97,audiodev=snd0 \
+		-device intel-hda -device hda-duplex,audiodev=snd0 \
 		-netdev user,id=net0 \
 		-device usb-ehci,id=ehci \
 		-device usb-tablet,bus=ehci.0 \
 		-device usb-kbd,bus=ehci.0 \
+		-drive file=nvme.img,if=none,id=nvm0 \
+		-device nvme,drive=nvm0,serial=ascentos-nvme-0 \
 		$(QEMUFLAGS)
 
 .PHONY: run-bios
 run-bios: $(IMAGE_NAME).iso disk.img
 	qemu-system-$(ARCH) \
 		-M q35,pcspk-audiodev=snd0 \
-		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
 		-cdrom $(IMAGE_NAME).iso \
 		-hda disk.img \
 		-boot d \
 		-audiodev pa,id=snd0 \
+		-serial stdio \
 		-device AC97,audiodev=snd0 \
+		-device intel-hda -device hda-duplex,audiodev=snd0 \
+		-device usb-ehci,id=ehci \
+		-device usb-tablet,bus=ehci.0 \
+		-device usb-kbd,bus=ehci.0 \
+		$(QEMUFLAGS)
+
+.PHONY: run-ata
+run-ata: edk2-ovmf $(IMAGE_NAME).iso disk.img
+	qemu-system-$(ARCH) \
+		-M pc,pcspk-audiodev=snd0 \
+		-drive if=pflash,unit=0,format=raw,file=edk2-ovmf/ovmf-code-$(ARCH).fd,readonly=on \
+		-cdrom $(IMAGE_NAME).iso \
+		-drive file=disk.img,format=raw,if=ide \
+		-smp 4 \
+		-serial stdio \
+		-audiodev pa,id=snd0 \
+		-device e1000,netdev=net0 \
+		-device sb16,audiodev=snd0 \
+		-device AC97,audiodev=snd0 \
+		-device intel-hda -device hda-duplex,audiodev=snd0 \
+		-netdev user,id=net0 \
 		-device usb-ehci,id=ehci \
 		-device usb-tablet,bus=ehci.0 \
 		-device usb-kbd,bus=ehci.0 \
@@ -77,6 +101,7 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		-device e1000,netdev=net0 \
 		-device sb16,audiodev=snd0 \
 		-device AC97,audiodev=snd0 \
+		-device intel-hda -device hda-duplex,audiodev=snd0 \
 		-netdev user,id=net0 \
 		-device usb-ehci,id=ehci \
 		-device usb-tablet,bus=ehci.0 \
@@ -85,13 +110,11 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 
 # Create a 64MB ext2 disk image with sample files for testing
 disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/lua.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/xeyes.elf userland/st.elf userland/test_x11_simple.elf userland/xkbcomp.elf userland/test_shared_irq.elf initrd/startx.sh
-	@if [ ! -f disk.img ] || [ $$(stat -c %s disk.img 2>/dev/null || echo 0) -ne $$((512*1024*1024)) ]; then \
-		echo "Creating disk.img (512MB, 1KB blocks)..."; \
-		rm -f disk.img; \
-		dd if=/dev/zero of=disk.img bs=1M count=512; \
-		mkfs.ext3 -F -b 1024 -I 128 disk.img; \
-	fi
-	@echo "Populating disk.img..."
+	@echo "Creating root filesystem (ext3)..."
+	rm -f /tmp/part.img
+	dd if=/dev/zero of=/tmp/part.img bs=1M count=511
+	mkfs.ext3 -F -b 1024 -I 128 /tmp/part.img
+	@echo "Populating root filesystem..."
 	@echo "Hello from AscentOS!" > /tmp/ascentos_hello.txt
 	@echo "This is a test document." > /tmp/ascentos_readme.txt
 	@{ \
@@ -236,110 +259,122 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf us
 		echo "write userland/test_socket_phase11.elf bin/test_socket_phase11"; \
 		echo "rm test.tar"; \
 		echo "write test.tar test.tar"; \
-	} | debugfs -w disk.img >/dev/null 2>&1 || true
+	} | debugfs -w /tmp/part.img >/dev/null 2>&1 || true
 	rm -f /tmp/ascentos_hello.txt /tmp/ascentos_readme.txt
-	@touch disk.img
+	@echo "Populating root filesystem with additional tools..."
+
 	@if [ -d toolchain/musl-sysroot/opt/tcc ]; then \
 		echo "Installing TCC into disk image..."; \
-		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/opt/tcc opt/tcc; \
-		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/bin/tcc bin/tcc" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write toolchain/musl-sysroot/lib/libc.a libc.a" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write toolchain/musl-sysroot/lib/crt1.o crt1.o" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write toolchain/musl-sysroot/lib/crti.o crti.o" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write toolchain/musl-sysroot/lib/crtn.o crtn.o" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/lib/tcc/libtcc1.a libtcc1.a" disk.img >/dev/null 2>&1 || true; \
+		./scripts/populate-ext2-dir.sh /tmp/part.img toolchain/musl-sysroot/opt/tcc opt/tcc; \
+		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/bin/tcc bin/tcc" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/lib/libc.a libc.a" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/lib/crt1.o crt1.o" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/lib/crti.o crti.o" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/lib/crtn.o crtn.o" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/opt/tcc/lib/tcc/libtcc1.a libtcc1.a" /tmp/part.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -d toolchain/musl-sysroot/opt/coreutils ]; then \
 		echo "Installing coreutils into disk image..."; \
-		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/opt/coreutils opt/coreutils; \
+		./scripts/populate-ext2-dir.sh /tmp/part.img toolchain/musl-sysroot/opt/coreutils opt/coreutils; \
 	fi
 	@if [ -d toolchain/musl-sysroot/opt/bash ]; then \
 		echo "Installing bash into disk image..."; \
-		debugfs -w -R "mkdir opt" disk.img >/dev/null 2>&1 || true; \
-		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/opt/bash opt/bash; \
-		debugfs -w -R "rm bin/bash" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write toolchain/musl-sysroot/opt/bash/bin/bash bin/bash" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "rm bin/sh" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write toolchain/musl-sysroot/opt/bash/bin/bash bin/sh" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "mkdir opt" /tmp/part.img >/dev/null 2>&1 || true; \
+		./scripts/populate-ext2-dir.sh /tmp/part.img toolchain/musl-sysroot/opt/bash opt/bash; \
+		debugfs -w -R "rm bin/bash" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/opt/bash/bin/bash bin/bash" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm bin/sh" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/opt/bash/bin/bash bin/sh" /tmp/part.img >/dev/null 2>&1 || true; \
 		echo "root:x:0:0:root:/root:/bin/bash" > /tmp/passwd; \
 		echo "PS1='\033[0;32mRoot@AscentOS\033[0m:\w\\$$ '" > /tmp/bashrc; \
 		echo "PATH=/opt/coreutils/bin:/bin:/opt/bash/bin:/opt/tcc/bin" >> /tmp/bashrc; \
 		echo "HOME=/root" >> /tmp/bashrc; \
 		echo "TERM=vt100" >> /tmp/bashrc; \
 		echo "export TERM" >> /tmp/bashrc; \
-		debugfs -w -R "mkdir etc" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "mkdir etc" /tmp/part.img >/dev/null 2>&1 || true; \
 		echo "nameserver 10.0.2.3" > /tmp/resolv.conf; \
 		echo "127.0.0.1 localhost" > /tmp/hosts; \
-		debugfs -w -R "rm etc/resolv.conf" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write /tmp/resolv.conf etc/resolv.conf" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "rm etc/hosts" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write /tmp/hosts etc/hosts" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "mkdir etc/ssl" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "mkdir etc/ssl/certs" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "rm etc/passwd" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write /tmp/passwd etc/passwd" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "mkdir root" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "rm root/.bashrc" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write /tmp/bashrc root/.bashrc" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm etc/resolv.conf" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write /tmp/resolv.conf etc/resolv.conf" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm etc/hosts" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write /tmp/hosts etc/hosts" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "mkdir etc/ssl" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "mkdir etc/ssl/certs" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm etc/passwd" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write /tmp/passwd etc/passwd" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "mkdir root" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm root/.bashrc" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write /tmp/bashrc root/.bashrc" /tmp/part.img >/dev/null 2>&1 || true; \
 		rm -f /tmp/passwd /tmp/bashrc /tmp/resolv.conf /tmp/hosts; \
 	fi
 	@if [ -f toolchain/musl-sysroot/bin/tar ]; then \
 		echo "Installing tar into disk image..."; \
-		debugfs -w -R "rm bin/tar" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write toolchain/musl-sysroot/bin/tar bin/tar" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm bin/tar" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/bin/tar bin/tar" /tmp/part.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -f userland/Xfbdev.elf ]; then \
 		echo "Installing updated Xfbdev server into disk image..."; \
-		debugfs -w -R "rm bin/Xfbdev" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write userland/Xfbdev.elf bin/Xfbdev" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm bin/Xfbdev" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/Xfbdev.elf bin/Xfbdev" /tmp/part.img >/dev/null 2>&1 || true; \
 	elif [ -f toolchain/musl-sysroot/bin/Xfbdev ]; then \
 		echo "Installing X11 server into disk image..."; \
-		debugfs -w -R "rm bin/Xfbdev" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write toolchain/musl-sysroot/bin/Xfbdev bin/Xfbdev" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm bin/Xfbdev" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write toolchain/musl-sysroot/bin/Xfbdev bin/Xfbdev" /tmp/part.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -f userland/xkbcomp.elf ]; then \
 		echo "Installing xkbcomp into disk image..."; \
-		debugfs -w -R "rm bin/xkbcomp" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write userland/xkbcomp.elf bin/xkbcomp" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm bin/xkbcomp" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/xkbcomp.elf bin/xkbcomp" /tmp/part.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -f toolchain/musl-sysroot/bin/Xfbdev ] || [ -f userland/Xfbdev.elf ]; then \
 		echo "Installing XKB keyboard data..."; \
-		debugfs -w -R "mkdir share" disk.img 2>/dev/null || true; \
-		debugfs -w -R "mkdir share/X11" disk.img 2>/dev/null || true; \
-		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/share/X11/xkb share/X11/xkb; \
-		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/share/X11/locale share/X11/locale; \
-		debugfs -w -R "write toolchain/musl-sysroot/share/X11/XErrorDB share/X11/XErrorDB" disk.img; \
-		debugfs -w -R "write toolchain/musl-sysroot/share/X11/Xcms.txt share/X11/Xcms.txt" disk.img; \
-		debugfs -w -R "mkdir share/X11/app-defaults" disk.img 2>/dev/null || true; \
-		debugfs -w -R "mkdir home" disk.img 2>/dev/null || true; \
-		debugfs -w -R "mkdir home/offihito" disk.img 2>/dev/null || true; \
-		debugfs -w -R "mkdir home/offihito/AscentOS" disk.img 2>/dev/null || true; \
-		debugfs -w -R "mkdir home/offihito/AscentOS/toolchain" disk.img 2>/dev/null || true; \
-		debugfs -w -R "symlink home/offihito/AscentOS/toolchain/musl-sysroot /" disk.img; \
-		./scripts/populate-ext2-dir.sh disk.img toolchain/musl-sysroot/share/fonts share/fonts; \
+		debugfs -w -R "mkdir share" /tmp/part.img 2>/dev/null || true; \
+		debugfs -w -R "mkdir share/X11" /tmp/part.img 2>/dev/null || true; \
+		./scripts/populate-ext2-dir.sh /tmp/part.img toolchain/musl-sysroot/share/X11/xkb share/X11/xkb; \
+		./scripts/populate-ext2-dir.sh /tmp/part.img toolchain/musl-sysroot/share/X11/locale share/X11/locale; \
+		debugfs -w -R "write toolchain/musl-sysroot/share/X11/XErrorDB share/X11/XErrorDB" /tmp/part.img; \
+		debugfs -w -R "write toolchain/musl-sysroot/share/X11/Xcms.txt share/X11/Xcms.txt" /tmp/part.img; \
+		debugfs -w -R "mkdir share/X11/app-defaults" /tmp/part.img 2>/dev/null || true; \
+		debugfs -w -R "mkdir home" /tmp/part.img 2>/dev/null || true; \
+		debugfs -w -R "mkdir home/offihito" /tmp/part.img 2>/dev/null || true; \
+		debugfs -w -R "mkdir home/offihito/AscentOS" /tmp/part.img 2>/dev/null || true; \
+		debugfs -w -R "mkdir home/offihito/AscentOS/toolchain" /tmp/part.img 2>/dev/null || true; \
+		debugfs -w -R "symlink home/offihito/AscentOS/toolchain/musl-sysroot /" /tmp/part.img; \
+		./scripts/populate-ext2-dir.sh /tmp/part.img toolchain/musl-sysroot/share/fonts share/fonts; \
 	fi
 	@if [ -f userland/xeyes.elf ]; then \
 		echo "Installing xeyes into disk image..."; \
-		debugfs -w -R "rm xeyes" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write userland/xeyes.elf xeyes" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm xeyes" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/xeyes.elf xeyes" /tmp/part.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -f userland/twm.elf ]; then \
 		echo "Installing twm into disk image..."; \
-		debugfs -w -R "rm twm" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write userland/twm.elf twm" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm twm" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/twm.elf twm" /tmp/part.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -f userland/st.elf ]; then \
 		echo "Installing st (simple terminal) into disk image..."; \
-		debugfs -w -R "rm bin/st" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write userland/st.elf bin/st" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm bin/st" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/st.elf bin/st" /tmp/part.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -f userland/xeyes.elf ] || [ -f userland/twm.elf ]; then \
-		debugfs -w -R "rm bin/test_x11_simple" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write userland/test_x11_simple.elf bin/test_x11_simple" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "mkdir root" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "rm root/.Xauthority" disk.img >/dev/null 2>&1 || true; \
-		debugfs -w -R "write initrd/.Xauthority root/.Xauthority" disk.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm bin/test_x11_simple" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/test_x11_simple.elf bin/test_x11_simple" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "mkdir root" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm root/.Xauthority" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write initrd/.Xauthority root/.Xauthority" /tmp/part.img >/dev/null 2>&1 || true; \
 	fi
+	@echo "Creating partitioned disk image (MBR)..."
+	dd if=/dev/zero of=disk.img bs=1M count=512
+	parted -s disk.img mklabel msdos
+	parted -s disk.img mkpart primary ext3 1MiB 100%
+	parted -s disk.img set 1 boot on
+	dd if=/tmp/part.img of=disk.img bs=1M seek=1 conv=notrunc
+	rm /tmp/part.img
+	@touch disk.img
+
+nvme.img:
+	dd if=/dev/zero of=nvme.img bs=1M count=128
 
 edk2-ovmf:
 	curl -L https://github.com/osdev0/edk2-ovmf-nightly/releases/latest/download/edk2-ovmf.tar.gz | gunzip | tar -xf -
@@ -385,7 +420,7 @@ $(IMAGE_NAME).iso: limine/limine kernel
 .PHONY: clean
 clean: clean-musl clean-doom clean-coreutils clean-wolfssl clean-tar
 	$(MAKE) -C kernel clean
-	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
+	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd nvme.img
 
 .PHONY: clean-coreutils
 clean-coreutils:
