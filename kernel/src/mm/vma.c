@@ -6,16 +6,16 @@
 // ── Slab-accelerated allocation for VMA nodes ──────────────────────────────
 // Falls back to kmalloc if the vma_cache hasn't been created yet (early boot).
 static inline struct vma *vma_node_alloc(void) {
-    if (vma_cache)
-        return (struct vma *)kmem_cache_alloc(vma_cache);
-    return (struct vma *)kmalloc(sizeof(struct vma));
+  if (vma_cache)
+    return (struct vma *)kmem_cache_alloc(vma_cache);
+  return (struct vma *)kmalloc(sizeof(struct vma));
 }
 
 static inline void vma_node_free(struct vma *v) {
-    if (vma_cache)
-        kmem_cache_free(vma_cache, v);
-    else
-        kfree(v);
+  if (vma_cache)
+    kmem_cache_free(vma_cache, v);
+  else
+    kfree(v);
 }
 
 // Helper macros

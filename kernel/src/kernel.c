@@ -27,6 +27,7 @@
 #include "drivers/storage/ata.h"
 #include "drivers/storage/block.h"
 #include "drivers/storage/nvme.h"
+#include "drivers/timer/hpet.h"
 #include "drivers/timer/pit.h"
 #include "drivers/timer/rtc.h"
 #include "drivers/usb/ehci.h"
@@ -301,6 +302,12 @@ void kmain(void) {
   // ═══════════════════════════════════════════════════════════════════════
   acpi_init(rsdp_request.response);
 
+  // Initialize HPET (High Precision Event Timer)
+  hpet_init();
+
+  // Parse and log FADT (Fixed ACPI Description Table)
+  acpi_parse_fadt();
+
   // ═══════════════════════════════════════════════════════════════════════
   //  Phase 5: Transition from legacy PIC → APIC
   // ═══════════════════════════════════════════════════════════════════════
@@ -355,6 +362,11 @@ void kmain_high_half(void) {
 
     // ── 5h. Start the LAPIC timer (calibrates against PIT) ──────────────
     lapic_timer_init();
+
+    // ── 5h.1: HPET is available as backup timer if LAPIC fails ────────────
+    if (hpet_is_backup_available()) {
+      klog_puts("[INFO] HPET available as backup timer.\n");
+    }
 
     // ── 5i. Wake up Application Processors ──────────────────────────────
     // This is done AFTER lapic_timer_init because APs need the calibrated

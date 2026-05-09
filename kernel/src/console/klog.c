@@ -46,7 +46,7 @@ static void klog_putchar_screen(char c) {
     const uint8_t *glyph = font_get_glyph(c);
     for (uint32_t gy = 0; gy < FONT_HEIGHT; gy++) {
       fb_draw_glyph_scanline(screen_x, screen_y + gy, glyph[gy], KLOG_FG,
-                              KLOG_BG);
+                             KLOG_BG);
     }
     screen_x += FONT_WIDTH;
   }

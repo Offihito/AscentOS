@@ -9,6 +9,7 @@
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
+#include "../sched/sched.h"
 #include "../syscalls/syscall.h"
 #include "terminal.h"
 #include <stdbool.h>
@@ -399,8 +400,15 @@ static uint32_t fb_vfs_read(struct vfs_node *node, uint32_t offset,
 static uint8_t canon_buffer[1024];
 static uint32_t canon_len = 0;
 static uint32_t canon_pos = 0;
+static uint32_t console_pgid = 0;
 
-static void console_vfs_open(vfs_node_t *node) { (void)node; }
+static void console_vfs_open(vfs_node_t *node) {
+  (void)node;
+  struct thread *t = sched_get_current();
+  if (t && console_pgid == 0) {
+    console_pgid = t->pgid;
+  }
+}
 static void console_vfs_close(vfs_node_t *node) { (void)node; }
 
 static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
@@ -863,6 +871,20 @@ static int tty0_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
     current_kb_mode = (int)arg;
     return 0;
   }
+  case TIOCGPGRP: {
+    int *pgid = (int *)arg;
+    if (!pgid)
+      return -14;
+    *pgid = (int)console_pgid;
+    return 0;
+  }
+  case TIOCSPGRP: {
+    int *pgid = (int *)arg;
+    if (!pgid)
+      return -14;
+    console_pgid = (uint32_t)*pgid;
+    return 0;
+  }
   default:
     return -25; // ENOTTY
   }
@@ -886,13 +908,13 @@ void fb_register_vfs(void) {
 
   // /dev/console
   setup_chardev(dev_dir, "console", console_vfs_read, console_vfs_write,
-                console_vfs_open, console_vfs_close, console_vfs_poll, 0, NULL,
-                NULL, 0);
+                console_vfs_open, console_vfs_close, console_vfs_poll,
+                tty0_ioctl, NULL, NULL, 0);
 
   // /dev/tty (alias to console for now)
   setup_chardev(dev_dir, "tty", console_vfs_read, console_vfs_write,
-                console_vfs_open, console_vfs_close, console_vfs_poll, 0, NULL,
-                NULL, 0);
+                console_vfs_open, console_vfs_close, console_vfs_poll,
+                tty0_ioctl, NULL, NULL, 0);
 
   // /dev/stdin
   setup_chardev(dev_dir, "stdin", console_vfs_read, 0, console_vfs_open,

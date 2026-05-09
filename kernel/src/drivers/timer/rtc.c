@@ -1,6 +1,7 @@
 #include "rtc.h"
 #include "../../io/io.h"
 #include "../../console/klog.h"
+#include "../../lib/string.h"
 
 #define CMOS_ADDR 0x70
 #define CMOS_DATA 0x71
@@ -84,4 +85,90 @@ void rtc_init(void) {
 
 uint64_t rtc_get_boot_timestamp(void) {
     return boot_timestamp;
+}
+
+static const char *month_names[] = {
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+};
+
+void rtc_format_datetime(uint64_t timestamp, char *buf, size_t bufsize) {
+  // Convert Unix timestamp to date/time string: "May 9 2026 10:35:16"
+  uint64_t seconds = timestamp;
+  uint64_t days = seconds / 86400;
+  uint64_t secs_remaining = seconds % 86400;
+  
+  uint64_t hour = secs_remaining / 3600;
+  uint64_t minute = (secs_remaining % 3600) / 60;
+  uint64_t sec = secs_remaining % 60;
+  
+  // Calculate year, month, day from days since epoch
+  uint64_t year = 1970;
+  while (1) {
+    uint64_t days_in_year = ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0) ? 366 : 365;
+    if (days < days_in_year) break;
+    days -= days_in_year;
+    year++;
+  }
+  
+  uint64_t month = 0;
+  uint64_t days_in_months[] = {31, ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0) ? 29 : 28, 
+                                31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  while (month < 12 && days >= days_in_months[month]) {
+    days -= days_in_months[month];
+    month++;
+  }
+  
+  uint64_t day = days + 1;
+  month++; // 1-indexed
+  
+  // Format: "May 9 2026 10:35:16"
+  char tmp[32];
+  char *p = tmp;
+  
+  // Month name
+  const char *mname = month_names[(month - 1) % 12];
+  while (*mname) *p++ = *mname++;
+  *p++ = ' ';
+  
+  // Day
+  if (day >= 10) {
+    *p++ = '0' + (day / 10);
+  }
+  *p++ = '0' + (day % 10);
+  *p++ = ' ';
+  
+  // Year
+  uint64_t y = year;
+  char ybuf[5] = {0};
+  for (int i = 3; i >= 0; i--) {
+    ybuf[i] = '0' + (y % 10);
+    y /= 10;
+  }
+  for (int i = 0; i < 4; i++) *p++ = ybuf[i];
+  
+  *p++ = ' ';
+  
+  // Hour
+  if (hour < 10) *p++ = '0';
+  else *p++ = '0' + (hour / 10);
+  *p++ = '0' + (hour % 10);
+  *p++ = ':';
+  
+  // Minute
+  if (minute < 10) *p++ = '0';
+  else *p++ = '0' + (minute / 10);
+  *p++ = '0' + (minute % 10);
+  *p++ = ':';
+  
+  // Second
+  if (sec < 10) *p++ = '0';
+  else *p++ = '0' + (sec / 10);
+  *p++ = '0' + (sec % 10);
+  
+  *p = '\0';
+  
+  size_t len = p - tmp;
+  if (len >= bufsize) len = bufsize - 1;
+  memcpy(buf, tmp, len + 1);
 }

@@ -38,15 +38,12 @@ else
     echo "Uyarı: xeyes bulunamadı!"
 fi
 
-# st (suckless terminal)
-if [ -x /bin/st ]; then
-    echo "st başlatılıyor..."
-    /bin/st &
-elif command -v st >/dev/null 2>&1; then
-    echo "st (sistem yolu ile) başlatılıyor..."
+# st (suckless terminal from Alpine)
+if command -v st >/dev/null 2>&1; then
+    echo "st (Alpine) başlatılıyor..."
     st &
 else
-    echo "Uyarı: st bulunamadı!"
+    echo "Uyarı: st (Alpine) bulunamadı!"
 fi
 
 echo "Tamamlandı. twm, xeyes ve st çalıştırıldı."

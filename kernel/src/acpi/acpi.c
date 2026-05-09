@@ -113,6 +113,147 @@ struct acpi_mcfg *acpi_get_mcfg(void) {
     return (struct acpi_mcfg *)acpi_find_table("MCFG");
 }
 
+// ── FADT Data ────────────────────────────────────────────────────────────────
+static struct acpi_fadt *fadt_table = NULL;
+
+struct acpi_fadt *acpi_get_fadt(void) {
+    if (fadt_table) return fadt_table;
+    fadt_table = (struct acpi_fadt *)acpi_find_table("FACP");
+    return fadt_table;
+}
+
+bool acpi_parse_fadt(void) {
+    struct acpi_fadt *fadt = acpi_get_fadt();
+    if (!fadt) {
+        console_puts("[WARN] No FADT (FACP) table found.\n");
+        return false;
+    }
+    
+    console_puts("[OK] FADT table found.\n");
+    
+    // Print basic info
+    console_puts("     Revision: ");
+    print_uint32(fadt->header.revision);
+    console_puts(".");
+    print_uint32(fadt->minor_revision);
+    console_puts("\n");
+    
+    console_puts("     PM Profile: ");
+    console_puts(fadt_pm_profile_name(fadt->preferred_pm_profile));
+    console_puts("\n");
+    
+    console_puts("     SCI Interrupt: 0x");
+    print_hex32(fadt->sci_int);
+    console_puts("\n");
+    
+    console_puts("     SMI Command Port: 0x");
+    print_hex32(fadt->smi_cmd);
+    console_puts("\n");
+    
+    console_puts("     ACPI Enable Value: 0x");
+    const char *hex = "0123456789ABCDEF";
+    console_putchar(hex[(fadt->acpi_enable >> 4) & 0xF]);
+    console_putchar(hex[fadt->acpi_enable & 0xF]);
+    console_puts("\n");
+    
+    console_puts("     ACPI Disable Value: 0x");
+    console_putchar(hex[(fadt->acpi_disable >> 4) & 0xF]);
+    console_putchar(hex[fadt->acpi_disable & 0xF]);
+    console_puts("\n");
+    
+    // Power management register blocks
+    console_puts("     PM1a Event Block: 0x");
+    print_hex32(fadt->pm1a_evt_blk);
+    console_puts("\n");
+    
+    console_puts("     PM1a Control Block: 0x");
+    print_hex32(fadt->pm1a_cnt_blk);
+    console_puts("\n");
+    
+    console_puts("     PM Timer Block: 0x");
+    print_hex32(fadt->pm_tmr_blk);
+    console_puts(" (length: ");
+    print_uint32(fadt->pm_tmr_len);
+    console_puts(")\n");
+    
+    console_puts("     GPE0 Block: 0x");
+    print_hex32(fadt->gpe0_blk);
+    console_puts(" (length: ");
+    print_uint32(fadt->gpe0_blk_len);
+    console_puts(")\n");
+    
+    // C-state latencies
+    console_puts("     C2 Latency: ");
+    if (fadt->p_lvl2_lat == 0x3E7) {
+        console_puts("Unsupported\n");
+    } else {
+        print_uint32(fadt->p_lvl2_lat);
+        console_puts(" us\n");
+    }
+    
+    console_puts("     C3 Latency: ");
+    if (fadt->p_lvl3_lat == 0x3E7) {
+        console_puts("Unsupported\n");
+    } else {
+        print_uint32(fadt->p_lvl3_lat);
+        console_puts(" us\n");
+    }
+    
+    // Feature flags
+    console_puts("     Feature Flags: 0x");
+    print_hex32(fadt->flags);
+    console_puts("\n");
+    
+    if (fadt->flags & FADT_FLAG_PROC_C1) {
+        console_puts("       - C1 power state supported\n");
+    }
+    if (fadt->flags & FADT_FLAG_P_LVL2_UP) {
+        console_puts("       - C2 on all CPUs\n");
+    }
+    if (fadt->flags & FADT_FLAG_RESET_REG_SUP) {
+        console_puts("       - Reset register supported\n");
+    }
+    if (fadt->flags & FADT_FLAG_HW_REDUCED_ACPI) {
+        console_puts("       - Hardware-reduced ACPI\n");
+    }
+    if (fadt->flags & FADT_FLAG_LOW_PWR_IDLE_S0) {
+        console_puts("       - Low power idle in S0 (Modern Standby)\n");
+    }
+    
+    // Reset register (ACPI 2.0+)
+    if (fadt->header.revision >= 2 && fadt->reset_reg.address) {
+        console_puts("     Reset Register: 0x");
+        print_hex32((uint32_t)fadt->reset_reg.address);
+        console_puts(" (value: 0x");
+        console_putchar(hex[(fadt->reset_value >> 4) & 0xF]);
+        console_putchar(hex[fadt->reset_value & 0xF]);
+        console_puts(")\n");
+    }
+    
+    // Boot architecture flags
+    console_puts("     Boot Arch Flags: 0x");
+    print_hex32(fadt->iapc_boot_arch);
+    console_puts("\n");
+    
+    if (fadt->iapc_boot_arch & (1 << 0)) {
+        console_puts("       - Legacy VGA supported\n");
+    }
+    if (fadt->iapc_boot_arch & (1 << 1)) {
+        console_puts("       - MSI devices supported\n");
+    }
+    if (fadt->iapc_boot_arch & (1 << 2)) {
+        console_puts("       - PC-AT keyboard supported\n");
+    }
+    if (fadt->iapc_boot_arch & (1 << 3)) {
+        console_puts("       - 8042 controller present\n");
+    }
+    if (fadt->iapc_boot_arch & (1 << 4)) {
+        console_puts("       - VGA not required\n");
+    }
+    
+    return true;
+}
+
 // ── Initialization ──────────────────────────────────────────────────────────
 
 void acpi_init(struct limine_rsdp_response *response) {

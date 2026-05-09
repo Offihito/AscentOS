@@ -175,8 +175,8 @@ struct statx {
 #define AT_STATX_SYNC_TYPE 0x6000
 #define AT_EMPTY_PATH 0x1000
 
-#include "../fb/terminal.h"
 #include "../drivers/pty.h"
+#include "../fb/terminal.h"
 
 struct termios console_termios;
 
@@ -190,6 +190,7 @@ int alloc_fd(struct thread *t) {
 
 static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
                             uint64_t mode) {
+  (void)dirfd;
   if (!path)
     return (uint64_t)-14; // EFAULT
 
@@ -231,12 +232,12 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       if (pty_index < 0) {
         return (uint64_t)-16; // EBUSY
       }
-      
+
       pty_pair_t *pty = pty_get_pair(pty_index);
       if (!pty) {
         return (uint64_t)-16;
       }
-      
+
       // Create a unique VFS node for this PTY master
       node = kmalloc(sizeof(vfs_node_t));
       if (!node) {
@@ -251,14 +252,10 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       node->ioctl = ptmx_ioctl;
       node->poll = ptmx_poll;
       node->device = pty;
-      
-      klog_puts("[PTY] Opened PTY master ");
-      klog_uint64(pty_index);
-      klog_puts("\n");
-      
+
       goto open_done;
     }
-    
+
     // Special handling for /dev/pts/N - PTY slave devices
     if (strncmp(dev_path, "pts/", 4) == 0) {
       const char *num_str = dev_path + 4;
@@ -267,16 +264,16 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
         pty_index = pty_index * 10 + (*num_str - '0');
         num_str++;
       }
-      
+
       if (*num_str != '\0') {
         return (uint64_t)-2; // ENOENT - invalid path
       }
-      
+
       pty_pair_t *pty = pty_get_pair(pty_index);
       if (!pty || pty->locked) {
         return (uint64_t)-2; // ENOENT or EACCES
       }
-      
+
       // Create a unique VFS node for this PTY slave
       node = kmalloc(sizeof(vfs_node_t));
       if (!node) {
@@ -291,21 +288,12 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       node->ioctl = pty_slave_ioctl;
       node->poll = pty_slave_poll;
       node->device = pty;
-      
-      klog_puts("[PTY] Opened PTY slave ");
-      klog_uint64(pty_index);
-      klog_puts("\n");
-      
+
       goto open_done;
     }
-    
+
     // Try to get from device registry first
     node = fb_lookup_device((char *)dev_path);
-    if (node) {
-      klog_puts("[SYSCALL] sys_open: found registry node for: ");
-      klog_puts(path);
-      klog_puts("\n");
-    }
   }
 
   // Fall back to normal VFS path resolution
@@ -401,9 +389,6 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       if (!node)
         return (uint64_t)-2; // ENOENT
     } else {
-      klog_puts("[SYSCALL] sys_open failed to find: ");
-      klog_puts(path);
-      klog_puts("\n");
       return (uint64_t)-2; // ENOENT
     }
   }
@@ -432,6 +417,7 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+
   if (!is_user_ptr(buf))
     return (uint64_t)-14; // EFAULT
   struct thread *t = sched_get_current();
@@ -500,7 +486,8 @@ static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count,
   (void)a3;
   (void)a4;
   (void)a5;
-  if (fd > 2 && !is_user_ptr(buf))
+
+  if (!is_user_ptr(buf))
     return (uint64_t)-14; // EFAULT
   int64_t r = fd_write((int)fd, (const void *)buf, (size_t)count);
   return (uint64_t)r;
@@ -545,6 +532,12 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
   (void)a4;
   (void)a5;
 
+  klog_puts("[SYSCALL] sys_ioctl fd=");
+  klog_uint64(fd);
+  klog_puts(" request=");
+  klog_hex64(request);
+  klog_puts("\n");
+
   // Most ioctls take pointers. A few take ints. However, no valid integer
   // argument or user pointer should ever be in the kernel/HHDM address range.
   if (arg > USER_ADDR_MAX)
@@ -554,17 +547,13 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
   if (!t || fd >= MAX_FDS)
     return (uint64_t)-9; // EBADF
 
-  bool is_console_fd = (fd <= 2);
-  if (!is_console_fd) {
-    if (!t->fds[fd])
-      return (uint64_t)-9;
-    if ((t->fds[fd]->flags & 0xFF) != FS_CHARDEV &&
-        (t->fds[fd]->flags & 0xFF) != FS_SOCKET)
-      return (uint64_t)-25; // ENOTTY
-
+  if (fd < MAX_FDS && t->fds[fd]) {
     vfs_node_t *node = t->fds[fd];
     if (node->ioctl) {
-      return (uint64_t)node->ioctl(node, (uint32_t)request, arg);
+      uint64_t res = (uint64_t)node->ioctl(node, (uint32_t)request, arg);
+      if (res != (uint64_t)-25) {
+        return res;
+      }
     }
   }
 
@@ -577,13 +566,24 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
     ws->ws_col = (unsigned short)(fb_get_width() / FONT_WIDTH);
     ws->ws_xpixel = (unsigned short)fb_get_width();
     ws->ws_ypixel = (unsigned short)fb_get_height();
+    
+    klog_puts("[IOCTL] TIOCGWINSZ: ");
+    klog_uint64(ws->ws_row);
+    klog_puts("x");
+    klog_uint64(ws->ws_col);
+    klog_puts(" (pixels: ");
+    klog_uint64(ws->ws_xpixel);
+    klog_puts("x");
+    klog_uint64(ws->ws_ypixel);
+    klog_puts(")\n");
     return 0;
   }
   case TCGETS: {
-    struct termios *term = (struct termios *)arg;
-    if (!term)
-      return (uint64_t)-14;
-    *term = console_termios;
+    struct termios *t = (struct termios *)arg;
+    if (!t)
+      return -14;
+    extern struct termios console_termios;
+    *t = console_termios;
     return 0;
   }
   case TCSETS:
@@ -706,7 +706,6 @@ static uint64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence,
   t->fd_offsets[fd] = (uint32_t)new_offset;
   return (uint64_t)new_offset;
 }
-
 static uint64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
                           uint64_t a4, uint64_t a5) {
   (void)a1;
@@ -714,6 +713,7 @@ static uint64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
   (void)a3;
   (void)a4;
   (void)a5;
+
   struct thread *t = sched_get_current();
   if (!t || fd >= MAX_FDS || !t->fds[fd])
     return (uint64_t)-9; // EBADF

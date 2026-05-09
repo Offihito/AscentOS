@@ -600,3 +600,17 @@ void sched_reap_thread(struct thread *t) {
 
   klog_puts("[REAP] Done\n");
 }
+
+struct thread *sched_get_thread_by_tid(uint32_t tid) {
+  spinlock_acquire(&tid_lock);
+  struct thread *curr = global_thread_list;
+  while (curr) {
+    if (curr->tid == tid) {
+      spinlock_release(&tid_lock);
+      return curr;
+    }
+    curr = curr->global_next;
+  }
+  spinlock_release(&tid_lock);
+  return NULL;
+}

@@ -522,8 +522,9 @@ static ssize_t unix_send(socket_t *sock, const void *buf, size_t len,
       if (sent > 0)
         break; // Return what we sent so far
 
-      if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) { // MSG_DONTWAIT is 0x40
-        return -11; // EAGAIN
+      if ((sock->flags & SOCK_NONBLOCK) ||
+          (flags & 0x40)) { // MSG_DONTWAIT is 0x40
+        return -11;         // EAGAIN
       }
 
       // Block until space available
@@ -580,9 +581,9 @@ static ssize_t unix_recv(socket_t *sock, void *buf, size_t len, int flags) {
       // For AF_UNIX, if the peer has closed, read should return 0 (EOF)
       // ENOTCONN is only for sockets that were NEVER connected.
       // Given our simple state machine, 0 is safer for X11 apps.
-      return 0;      // EOF
+      return 0; // EOF
     }
-    return 0;      // EOF
+    return 0; // EOF
   }
 
   uint8_t *dest = (uint8_t *)buf;
@@ -609,8 +610,9 @@ static ssize_t unix_recv(socket_t *sock, void *buf, size_t len, int flags) {
         return 0;
       }
 
-      if ((sock->flags & SOCK_NONBLOCK) || (flags & 0x40)) { // MSG_DONTWAIT is 0x40
-        return -11;    // EAGAIN
+      if ((sock->flags & SOCK_NONBLOCK) ||
+          (flags & 0x40)) { // MSG_DONTWAIT is 0x40
+        return -11;         // EAGAIN
       }
 
       // Block until data available
@@ -1041,7 +1043,7 @@ static int unix_poll(socket_t *sock, int events) {
     revents |= 0x010;  // POLLHUP
     revents |= 0x2000; // EPOLLRDHUP - peer closed
     // POSIX: POLLIN should be set on hangup so read() returns EOF (0)
-    revents |= 0x001;  // POLLIN
+    revents |= 0x001; // POLLIN
   }
 
   // If peer did shutdown(SHUT_WR), treat as hangup
@@ -1281,9 +1283,9 @@ void unix_destroy(socket_t *sock) {
       peer->parent->error = 104; // ECONNRESET
     }
     spinlock_release(&peer->parent->lock);
-    
+
     wait_queue_wake_all(&peer->wait);
-    
+
     // Notify peer's epoll watchers that connection is closed
     if (peer->parent && peer->parent->node) {
       epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLHUP | EPOLLRDHUP);

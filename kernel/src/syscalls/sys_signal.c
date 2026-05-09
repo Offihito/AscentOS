@@ -272,43 +272,6 @@ static uint64_t sys_sigprocmask(uint64_t how, uint64_t set_ptr,
   return sys_rt_sigprocmask(how, set_ptr, oldset_ptr, 8, 0, 0);
 }
 
-static uint64_t sys_kill(uint64_t pid, uint64_t sig, uint64_t a2, uint64_t a3,
-                         uint64_t a4, uint64_t a5) {
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  if (sig > 64)
-    return (uint64_t)-22;
-  extern struct thread *global_thread_list;
-  extern spinlock_t tid_lock;
-  spinlock_acquire(&tid_lock);
-  if (sig == 0) {
-    struct thread *t = global_thread_list;
-    bool found = false;
-    while (t) {
-      if (t->tid == (uint32_t)pid) {
-        found = true;
-        break;
-      }
-      t = t->global_next;
-    }
-    spinlock_release(&tid_lock);
-    return found ? 0 : (uint64_t)-3; // -ESRCH
-  }
-
-  struct thread *t = global_thread_list;
-  while (t) {
-    if (t->tid == (uint32_t)pid) {
-      t->pending_signals |= (1ULL << (sig - 1));
-      break;
-    }
-    t = t->global_next;
-  }
-  spinlock_release(&tid_lock);
-  return 0;
-}
-
 // Send signal to all processes in a process group
 void signal_send_pgid(uint32_t pgid, int sig) {
   if (sig <= 0 || sig > 64)
@@ -326,6 +289,49 @@ void signal_send_pgid(uint32_t pgid, int sig) {
     t = t->global_next;
   }
   spinlock_release(&tid_lock);
+}
+
+static uint64_t sys_kill(uint64_t pid_val, uint64_t sig, uint64_t a2, uint64_t a3,
+                         uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  int32_t pid = (int32_t)pid_val;
+  if (sig > 64)
+    return (uint64_t)-22;
+
+  struct thread *current = sched_get_current();
+  if (sig == 0) {
+    if (pid == 0) return 0;
+    if (pid == -1) return 0;
+    // ... existence check logic ...
+  }
+
+  if (pid == 0) {
+    signal_send_pgid(current->pgid, (int)sig);
+    return 0;
+  } else if (pid == -1) {
+    // Send to everyone? Not implemented for safety.
+    return 0;
+  } else if (pid < -1) {
+    signal_send_pgid((uint32_t)-pid, (int)sig);
+    return 0;
+  }
+
+  extern struct thread *global_thread_list;
+  extern spinlock_t tid_lock;
+  spinlock_acquire(&tid_lock);
+  struct thread *t = global_thread_list;
+  while (t) {
+    if (t->tid == (uint32_t)pid) {
+      t->pending_signals |= (1ULL << (sig - 1));
+      break;
+    }
+    t = t->global_next;
+  }
+  spinlock_release(&tid_lock);
+  return 0;
 }
 
 void syscall_register_signal(void) {

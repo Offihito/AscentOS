@@ -79,6 +79,7 @@
 #define SYS_SETPGID 109
 #define SYS_GETPPID 110
 #define SYS_GETPGRP 111
+#define SYS_GETPGID 121
 #define SYS_SETSID 112
 #define SYS_ARCH_PRCTL 158
 #define SYS_PRCTL 157
@@ -103,6 +104,7 @@
 #define SYS_SETRESGID 119
 #define SYS_FCHMOD 91
 #define SYS_LINK 86
+#define SYS_UPTIME 399
 
 // Socket syscalls
 #define SYS_SOCKET 41
@@ -130,9 +132,9 @@
 
 // Shared Memory (SHM) syscalls
 #define SYS_SHMGET 29
-#define SYS_SHMAT  30
+#define SYS_SHMAT 30
 #define SYS_SHMCTL 31
-#define SYS_SHMDT  67
+#define SYS_SHMDT 67
 
 #define MAX_SYSCALL 512
 

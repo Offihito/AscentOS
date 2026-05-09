@@ -750,7 +750,6 @@ void syscall_register_socket(void) {
   syscall_register(SYS_SETSOCKOPT, sys_setsockopt);
   syscall_register(SYS_GETSOCKOPT, sys_getsockopt);
   syscall_register(SYS_SENDMSG, sys_sendmsg);
-  syscall_register(SYS_RECVMSG, sys_recvmsg);
   syscall_register(SYS_GETSOCKNAME, sys_getsockname);
   syscall_register(SYS_GETPEERNAME, sys_getpeername);
 

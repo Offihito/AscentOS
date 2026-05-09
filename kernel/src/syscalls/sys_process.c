@@ -10,6 +10,8 @@
 #include "../sched/sched.h"
 #include "../smp/cpu.h"
 #include "syscall.h"
+#include "../apic/lapic_timer.h"
+#include "../drivers/timer/rtc.h"
 #include <stdint.h>
 
 extern void mm_reset_mmap_state(struct thread *t);
@@ -173,7 +175,7 @@ static uint64_t __attribute__((noreturn)) sys_exit(uint64_t status, uint64_t a1,
   (void)a3;
   (void)a4;
   (void)a5;
-  process_do_exit(status);
+  process_do_exit((int)status);
 }
 
 static uint64_t __attribute__((noreturn))
@@ -206,7 +208,6 @@ static uint64_t sys_set_tid_address(uint64_t tidptr, uint64_t a1, uint64_t a2,
   return current->tid;
 }
 
-// ── sys_getpid ──────────────────────────────────────────────────────────────
 static uint64_t sys_getpid(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
                            uint64_t a4, uint64_t a5) {
   (void)a0;
@@ -640,11 +641,32 @@ static uint64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2,
   strcpy(buf->sysname, "AscentOS");
   strcpy(buf->nodename, "ascentos");
   strcpy(buf->release, "0.1.0-alpha");
-  strcpy(buf->version, "#1 SMP PREEMPT Sat May 2 15:09:27 UTC 2026");
+  
+  // Dynamic date/time from RTC
+  char datetime[32];
+  rtc_format_datetime(rtc_get_timestamp(), datetime, sizeof(datetime));
+  
+  char version[80];
+  strcpy(version, "#1 SMP PREEMPT ");
+  strcat(version, datetime);
+  strcpy(buf->version, version);
+  
   strcpy(buf->machine, "x86_64");
   strcpy(buf->domainname, "ascent-os.org");
 
   return 0;
+}
+
+// ── sys_uptime ─────────────────────────────────────────────────────────────
+static uint64_t sys_uptime(uint64_t a0, uint64_t a1, uint64_t a2,
+                           uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a0;
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  return lapic_timer_get_ms();
 }
 
 static uint64_t sys_prctl(uint64_t option, uint64_t arg2, uint64_t arg3,
@@ -799,7 +821,6 @@ static uint64_t sys_getppid(struct syscall_regs *regs) {
 static uint64_t sys_setpgid(struct syscall_regs *regs) {
   uint32_t pid = (uint32_t)regs->rdi;
   uint32_t pgid = (uint32_t)regs->rsi;
-
   struct thread *current = sched_get_current();
   struct thread *target = NULL;
 
@@ -830,6 +851,22 @@ static uint64_t sys_setpgid(struct syscall_regs *regs) {
     pgid = target->tid;
   target->pgid = pgid;
   return 0;
+}
+
+static uint64_t sys_getpgid(uint64_t pid, uint64_t a1, uint64_t a2, uint64_t a3,
+                            uint64_t a4, uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct thread *current = sched_get_current();
+  if (pid == 0)
+    return current->pgid;
+  struct thread *target = sched_get_thread_by_tid((uint32_t)pid);
+  if (!target)
+    return (uint64_t)-3; // ESRCH
+  return target->pgid;
 }
 
 // ── sys_getpgrp ─────────────────────────────────────────────────────────────
@@ -873,6 +910,7 @@ void syscall_register_process(void) {
   syscall_register(SYS_GETPID, sys_getpid);
   syscall_register(SYS_WAIT4, sys_wait4);
   syscall_register(SYS_UNAME, sys_uname);
+  syscall_register(SYS_UPTIME, sys_uptime);
   syscall_register(SYS_GETCWD, sys_getcwd);
   syscall_register(SYS_CHDIR, sys_chdir);
   syscall_register(SYS_PRCTL, sys_prctl);
@@ -892,6 +930,7 @@ void syscall_register_process(void) {
   syscall_register_raw(SYS_GETPPID, sys_getppid);
   syscall_register_raw(SYS_SETPGID, sys_setpgid);
   syscall_register_raw(SYS_GETPGRP, sys_getpgrp);
+  syscall_register(SYS_GETPGID, sys_getpgid);
   syscall_register_raw(SYS_SETSID, sys_setsid);
   syscall_register_raw(SYS_SETUID, sys_setuid);
   syscall_register_raw(SYS_SETGID, sys_setgid);
