@@ -3,6 +3,7 @@
 #include "../console/klog.h"
 #include "../cpu/msr.h"
 #include "../drivers/timer/rtc.h"
+#include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "syscall.h"
 #include <stdint.h>
@@ -57,6 +58,8 @@ static uint64_t sys_arch_prctl(uint64_t code, uint64_t addr, uint64_t a2,
   case ARCH_GET_FS:
     // addr is a pointer to a uint64_t in userspace where we store the value.
     if (addr) {
+      if (!vmm_is_user_addr_range_valid(addr, sizeof(uint64_t)))
+        return (uint64_t)-14;
       *(uint64_t *)addr = rdmsr(IA32_FS_BASE);
     }
     return 0;
@@ -78,6 +81,8 @@ static uint64_t sys_arch_prctl(uint64_t code, uint64_t addr, uint64_t a2,
 
   case ARCH_GET_GS:
     if (addr) {
+      if (!vmm_is_user_addr_range_valid(addr, sizeof(uint64_t)))
+        return (uint64_t)-14;
       *(uint64_t *)addr = rdmsr(IA32_KERNEL_GS_BASE);
     }
     return 0;

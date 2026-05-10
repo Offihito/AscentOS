@@ -156,27 +156,27 @@ static uint64_t sys_epoll_wait(uint64_t epfd, uint64_t events_ptr,
                                 uint64_t a4, uint64_t a5) {
   (void)a4;
   (void)a5;
-  
+
   // Get epoll instance
   eventpoll_t *ep = epoll_from_fd((int)epfd);
   if (!ep) {
     return (uint64_t)-9; // EBADF
   }
-  
+
   // Validate parameters
   if (!is_user_ptr(events_ptr)) {
     return (uint64_t)-14; // EFAULT
   }
-  
+
   if ((int)maxevents <= 0) {
     return (uint64_t)-22; // EINVAL
   }
-  
+
   struct epoll_event *events = (struct epoll_event *)events_ptr;
-  
+
   // Call implementation
   int ret = epoll_wait_impl(ep, events, (int)maxevents, (int)timeout_ms);
-  
+
   return (uint64_t)ret;
 }
 

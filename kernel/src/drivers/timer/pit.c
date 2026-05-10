@@ -14,9 +14,6 @@ static uint64_t pit_ticks = 0;
 static void pit_callback(struct registers *regs) {
   (void)regs;
   pit_ticks++;
-  if (pit_ticks % 100 == 0) {
-    klog_putchar('.');
-  }
 }
 
 void pit_init(uint32_t frequency) {
@@ -39,7 +36,9 @@ void pit_init(uint32_t frequency) {
   outb(PIT_DATA_PORT0, h);
 }
 
-uint64_t pit_get_ticks(void) { return pit_ticks; }
+#include "../../apic/lapic_timer.h"
+
+uint64_t pit_get_ticks(void) { return lapic_timer_get_ms() / 10; }
 
 void pit_sleep(uint32_t ms) {
   // 100Hz = 10ms per tick

@@ -3,7 +3,7 @@
 #include "../console/klog.h"
 #include "../cpu/idt.h"
 #include "../cpu/msr.h"
-#include "../drivers/timer/pit.h"
+#include "../apic/lapic_timer.h"
 #include "../lib/string.h"
 #include "../lock/spinlock.h"
 #include "../mm/heap.h"
@@ -218,23 +218,28 @@ void sched_yield(void) {
   struct thread *next_t = cpu->current_thread->next;
   struct thread *start_t = next_t; // Keep track of the starting thread
 
-  // Find next ready/running thread
+  // Wake ALL expired sleeping threads first, then find the first READY one.
+  // This prevents cascading delays where N polling threads each wait N ticks.
+  {
+    uint64_t now = lapic_timer_get_ticks();
+    struct thread *scan = next_t;
+    do {
+      if ((scan->state == THREAD_SLEEPING || scan->state == THREAD_BLOCKED) &&
+          scan->wakeup_ticks != 0 && now >= scan->wakeup_ticks) {
+        scan->state = THREAD_READY;
+        scan->wakeup_ticks = 0;
+      }
+      scan = scan->next;
+    } while (scan != next_t && scan != cpu->current_thread);
+  }
+
+  // Now find the first ready thread to switch to
   while (next_t != cpu->current_thread) {
     if (next_t->state == THREAD_READY || next_t->state == THREAD_RUNNING) {
       break;
     }
-
-    // Check for timeout on sleeping/blocked threads
-    if ((next_t->state == THREAD_SLEEPING || next_t->state == THREAD_BLOCKED) &&
-        next_t->wakeup_ticks != 0 && pit_get_ticks() >= next_t->wakeup_ticks) {
-      next_t->state = THREAD_READY;
-      next_t->wakeup_ticks = 0;
-      break;
-    }
-
     next_t = next_t->next;
     if (next_t == start_t) {
-      // Broken loop gracefully, likely due to runqueue modifications
       break;
     }
   }

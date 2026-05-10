@@ -4,6 +4,9 @@
 #include "console/klog.h"
 #include "lib/string.h"
 #include "mm/heap.h"
+#include "mm/pmm.h"
+#include "mm/vmm.h"
+#include "syscalls/syscall.h"
 
 // ── Forward declarations ────────────────────────────────────────────────────
 
@@ -24,6 +27,7 @@ static int ext2_rename_impl(vfs_node_t *node, char *old_name, char *new_name);
 static int ext2_chmod_impl(vfs_node_t *node, uint16_t permission);
 static int ext2_chown_impl(vfs_node_t *node, uint32_t uid, uint32_t gid);
 static int ext2_mknod_impl(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags, void *device);
+static uint64_t ext2_mmap_impl(vfs_node_t *node, uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags, uint64_t offset);
 
 // ── Timestamp helper ────────────────────────────────────────────────────────
 
@@ -602,6 +606,7 @@ static vfs_node_t *ext2_make_vfs_node(ext2_mount_t *mnt, uint32_t inode_num,
     node->read = ext2_read_impl;
     node->write = ext2_write_impl;
     node->truncate = ext2_truncate_impl;
+    node->mmap = ext2_mmap_impl;
     node->chmod = ext2_chmod_impl;
     node->chown = ext2_chown_impl;
   } else if ((inode->i_mode & 0xF000) == EXT2_S_IFLNK) {
@@ -1871,4 +1876,69 @@ static int ext2_mknod_impl(vfs_node_t *node, char *name, uint16_t permission, ui
     new_node->device = device;
     kfree(new_node); 
     return 0;
+}
+#define EXT2_MMAP_PROT_READ  0x1
+#define EXT2_MMAP_PROT_WRITE 0x2
+#define EXT2_MMAP_PROT_EXEC  0x4
+
+#define EXT2_MAP_FIXED 0x10
+
+static uint64_t ext2_mmap_impl(vfs_node_t *node, uint64_t addr, uint64_t length, uint64_t prot,
+                               uint64_t flags, uint64_t offset) {
+  if (length == 0) return (uint64_t)-1;
+  if ((node->flags & 0xFF) != FS_FILE) {
+      klog_puts("[EXT2_MMAP] Error: not a regular file\n");
+      return (uint64_t)-1;
+  }
+
+  uint64_t aligned_len = (length + 4095) & ~4095ULL;
+  uint64_t vaddr = addr;
+  if (!(flags & EXT2_MAP_FIXED) || vaddr == 0) {
+      vaddr = mm_alloc_mmap_region(aligned_len);
+  }
+
+  if (vaddr == 0) {
+      klog_puts("[EXT2_MMAP] Error: mmap region exhausted\n");
+      return (uint64_t)-1;
+  }
+
+  uint64_t num_pages = aligned_len / 4096;
+  uint64_t *pml4 = vmm_get_active_pml4();
+  uint64_t hhdm = pmm_get_hhdm_offset();
+
+  uint64_t page_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER;
+  if (prot & EXT2_MMAP_PROT_WRITE) page_flags |= PAGE_FLAG_RW;
+  if (!(prot & EXT2_MMAP_PROT_EXEC)) page_flags |= PAGE_FLAG_NX;
+
+  for (uint64_t i = 0; i < num_pages; i++) {
+      void *phys = pmm_alloc();
+      if (!phys) {
+          klog_puts("[EXT2_MMAP] Error: physical allocation failed\n");
+          return (uint64_t)-1;
+      }
+
+      uint64_t virt_page = vaddr + i * 4096;
+      uint64_t phys_page = (uint64_t)phys;
+
+      // Zero the page first
+      memset((void *)(phys_page + hhdm), 0, 4096);
+
+      // Read from file into the physical page
+      uint64_t file_off = offset + i * 4096;
+      if (file_off < node->length) {
+          uint32_t to_read = 4096;
+          if (file_off + to_read > node->length) {
+              to_read = node->length - file_off;
+          }
+          ext2_read_impl(node, (uint32_t)file_off, to_read, (uint8_t *)(phys_page + hhdm));
+      }
+
+      if (!vmm_map_page(pml4, virt_page, phys_page, page_flags)) {
+          klog_puts("[EXT2_MMAP] Error: vmm_map_page failed\n");
+          return (uint64_t)-1;
+      }
+      vmm_flush_tlb(virt_page);
+  }
+
+  return vaddr;
 }

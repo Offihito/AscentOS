@@ -32,8 +32,8 @@ install_apk() {
     local REPO=$2
     echo "[*] Installing package: ${PKG_NAME} from ${REPO}..."
     
-    # Stricter grep to find the exact package filename
-    local APK_FILENAME=$(curl -sL "https://dl-cdn.alpinelinux.org/alpine/v3.21/${REPO}/x86_64/" | grep -oP ">${PKG_NAME}-\d+[^<]*\.apk<" | sed 's/>//;s/<//' | sort -V | tail -n 1)
+    # Relaxed grep: match >${PKG_NAME}-<version>.apk (version starts with digit)
+    local APK_FILENAME=$(curl -sL "https://dl-cdn.alpinelinux.org/alpine/v3.21/${REPO}/x86_64/" | grep -oP ">${PKG_NAME}-[0-9][^<]*\.apk<" | sed 's/>//;s/<//' | sort -V | tail -n 1)
     
     # Fallback to a known version if the search fails
     if [ -z "${APK_FILENAME}" ] && [ "${PKG_NAME}" == "st" ]; then
@@ -49,12 +49,35 @@ install_apk() {
     echo "[*] Downloading ${APK_URL}..."
     curl -L "${APK_URL}" -o "${BUILD_DIR}/${APK_FILENAME}"
     
-    # APK files are multi-part tarballs. cat | tar ensures all streams are processed.
-    cat "${BUILD_DIR}/${APK_FILENAME}" | tar -xz -C "${ROOTFS_DIR}" --warning=no-unknown-keyword || true
+    # APK files are 3 concatenated gzip streams (signature + control + data).
+    # tar --ignore-zeros -xz processes all streams in the concatenation.
+    tar --ignore-zeros -xzf "${BUILD_DIR}/${APK_FILENAME}" -C "${ROOTFS_DIR}" --warning=no-unknown-keyword 2>/dev/null || true
 }
 
-# Install st terminal (usually in community)
+# Install st terminal and its dependencies
 install_apk "st" "community"
+install_apk "libxft" "main"
+install_apk "fontconfig" "main"
+install_apk "libxrender" "main"
+install_apk "libexpat" "main"
+install_apk "libuuid" "main"
+install_apk "libpng" "main"
+install_apk "freetype" "main"
+install_apk "libx11" "main"
+install_apk "libxcb" "main"
+install_apk "libxau" "main"
+install_apk "libxdmcp" "main"
+install_apk "libbsd" "main"
+install_apk "libmd" "main"
+install_apk "ncurses-terminfo-base" "main"
+install_apk "font-liberation" "main"
+install_apk "libbz2" "main"
+install_apk "brotli-libs" "main"
+install_apk "zlib" "main"
+install_apk "libxcursor" "main"
+install_apk "libxfixes" "main"
+install_apk "libxrender" "main"
+install_apk "libxft" "main"
 
 # 4. Inject into disk.img
 if [ ! -f "${DISK_IMG}" ]; then

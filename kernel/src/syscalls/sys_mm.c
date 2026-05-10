@@ -143,49 +143,13 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     return MAP_FAILED;
   }
 
-  // ── File-backed mapping ──────────────────────────────────────────────────
-  if (!(flags & MAP_ANONYMOUS) && (int64_t)fd != -1) {
-    struct thread *t = sched_get_current();
-    if (!t || fd >= MAX_FDS || !t->fds[fd]) {
-      klog_puts("[MMAP] Error: invalid fd\n");
-      return MAP_FAILED;
-    }
-    vfs_node_t *node = t->fds[fd];
-    if (!node->mmap) {
-      klog_puts("[MMAP] Error: device does not support mmap\n");
-      return MAP_FAILED;
-    }
-
-    uint64_t result = node->mmap(node, length, prot, flags);
-    if (result == MAP_FAILED || result == (uint64_t)-1)
-      return MAP_FAILED;
-
-    uint64_t aligned_len = PAGE_ALIGN_UP(length);
-    int vma_idx = vma_add(&t->vmas, result, result + aligned_len, prot, flags,
-                          (int)fd, 0);
-    if (vma_idx < 0)
-      klog_puts("[MMAP] Warning: failed to register VMA for file mapping\n");
-
-    return result;
-  }
-
-  // ── Reject non-anonymous mappings with no fd ─────────────────────────────
-  if (!(flags & MAP_ANONYMOUS)) {
-    klog_puts("[MMAP] Error: non-anonymous mapping requires a valid fd\n");
-    return MAP_FAILED;
-  }
-
-  // ── Anonymous mapping ────────────────────────────────────────────────────
-  uint64_t aligned_len = PAGE_ALIGN_UP(length);
-
-  struct thread *current = sched_get_current();
-  uint64_t *pml4 = vmm_get_active_pml4();
-
   // ── Determine virtual address ────────────────────────────────────────────
-  uint64_t vaddr;
+  uint64_t aligned_len = PAGE_ALIGN_UP(length);
+  struct thread *current_thread = sched_get_current();
+  uint64_t *pml4 = vmm_get_active_pml4();
+  uint64_t vaddr = 0;
 
   if (flags & MAP_FIXED) {
-    // MAP_FIXED: addr must be non-null and page-aligned.
     if (addr == 0 || (addr & (PAGE_SIZE - 1))) {
       klog_puts(
           "[MMAP] Error: MAP_FIXED requires non-null page-aligned addr\n");
@@ -197,35 +161,72 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     }
     vaddr = addr;
 
-    // Tear down any existing mappings in the target range BEFORE allocating
-    // new frames.  This ensures no stale PTEs exist when we begin mapping,
-    // and that the old frames are back in PMM before new ones are requested.
+    // Tear down any existing mappings in the target range
     klog_puts("[MMAP] MAP_FIXED teardown [");
     klog_uint64(vaddr);
     klog_puts(", ");
     klog_uint64(vaddr + aligned_len);
     klog_puts(")\n");
 
-    teardown_range(pml4, current, vaddr, aligned_len, "MAP_FIXED teardown");
-
-    if (current)
-      vma_remove(&current->vmas, vaddr, vaddr + aligned_len);
-
+    teardown_range(pml4, current_thread, vaddr, aligned_len,
+                   "MAP_FIXED teardown");
+    if (current_thread)
+      vma_remove(&current_thread->vmas, vaddr, vaddr + aligned_len);
   } else {
-    // Non-fixed: allocate dynamically utilizing AVL Interval Gap Finding.
-    // Automatically drops disjoint chunks inside explicitly unmapped holes
-    // rather than blindly advancing the ceiling ceiling!
-    vaddr = vma_find_gap(&current->vmas, aligned_len, MMAP_REGION_BASE,
-                         MMAP_REGION_LIMIT);
+    // Non-fixed: allocate dynamically utilizing AVL Interval Gap Finding
+    if (current_thread) {
+      vaddr = vma_find_gap(&current_thread->vmas, aligned_len, MMAP_REGION_BASE,
+                           MMAP_REGION_LIMIT);
+    }
+    if (vaddr == 0) {
+      // Fallback to legacy allocator if AVL gap finding fails or thread context
+      // missing
+      vaddr = mm_alloc_mmap_region(aligned_len);
+    }
+
     if (vaddr == 0 || vaddr + aligned_len > MMAP_REGION_LIMIT) {
-      klog_puts(
-          "[MMAP] Error: mmap region exhausted (no mapping gaps found)\n");
+      klog_puts("[MMAP] Error: mmap region exhausted\n");
+      return MAP_FAILED;
+    }
+  }
+
+  // ── File-backed mapping ──────────────────────────────────────────────────
+  if (!(flags & MAP_ANONYMOUS) && (int64_t)fd != -1) {
+    if (!current_thread || fd >= MAX_FDS || !current_thread->fds[fd]) {
+      klog_puts("[MMAP] Error: invalid fd\n");
+      return MAP_FAILED;
+    }
+    vfs_node_t *node = current_thread->fds[fd];
+    if (!node->mmap) {
+      klog_puts("[MMAP] Error: device does not support mmap\n");
       return MAP_FAILED;
     }
 
-    // We update the bump tracker loosely for legacy device-mmaps
-    current->mmap_next_addr = MAX(current->mmap_next_addr, vaddr + aligned_len);
+    // Pass MAP_FIXED to internal handler to ensure it respects our vaddr
+    uint64_t result =
+        node->mmap(node, vaddr, length, prot, flags | MAP_FIXED, offset);
+    if (result == MAP_FAILED || result == (uint64_t)-1)
+      return MAP_FAILED;
+
+    int vma_idx = vma_add(&current_thread->vmas, result, result + aligned_len,
+                          prot, flags, (int)fd, offset);
+    if (vma_idx < 0) {
+      klog_puts("[MMAP] Warning: failed to register VMA for file mapping at ");
+      klog_uint64(result);
+      klog_puts("\n");
+    }
+
+    return result;
   }
+
+  // ── Reject non-anonymous mappings with no fd ─────────────────────────────
+  if (!(flags & MAP_ANONYMOUS)) {
+    klog_puts("[MMAP] Error: non-anonymous mapping requires a valid fd\n");
+    return MAP_FAILED;
+  }
+
+  // ── Anonymous mapping ────────────────────────────────────────────────────
+  // (Address determination already handled above)
 
   // ── PROT_NONE shortcut ────────────────────────────────────────────────────
   // On x86-64 there is no "read-disable" bit; any PRESENT page is readable.
@@ -244,19 +245,28 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
   // only partially touched (e.g. musl's mmap-backed malloc arenas).
 
   // ── Register VMA ─────────────────────────────────────────────────────────
-  if (current) {
-    int vma_idx =
-        vma_add(&current->vmas, vaddr, vaddr + aligned_len, prot, flags, -1, 0);
-    if (vma_idx < 0)
+  // ── Register VMA ─────────────────────────────────────────────────────────
+  if (current_thread) {
+    int vma_idx = vma_add(&current_thread->vmas, vaddr, vaddr + aligned_len,
+                          prot, flags, -1, 0);
+    if (vma_idx < 0) {
       klog_puts(
-          "[MMAP] Warning: VMA registration failed (mapping still valid)\n");
+          "[MMAP] Warning: failed to register VMA for anonymous mapping at ");
+      klog_uint64(vaddr);
+      klog_puts("\n");
+    }
+
+    // Update the mmap bump pointer to stay ahead of the latest mapping,
+    // ensuring legacy drivers using mm_alloc_mmap_region() don't overlap.
+    current_thread->mmap_next_addr =
+        MAX(current_thread->mmap_next_addr, vaddr + aligned_len);
   }
 
   klog_puts("[MMAP] ");
   klog_uint64(aligned_len);
   klog_puts(" bytes at ");
   klog_uint64(vaddr);
-  klog_puts(is_shared ? " SHARED" : " PRIVATE");
+  klog_puts((flags & MAP_SHARED) ? " SHARED" : " PRIVATE");
   klog_puts(" (demand-paged)\n");
 
   return vaddr;

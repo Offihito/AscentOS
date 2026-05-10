@@ -1,6 +1,7 @@
 #include "syscall.h"
 #include "../console/klog.h"
 #include "../cpu/msr.h"
+#include "../sched/sched.h"
 #include <stdint.h>
 
 extern void syscall_entry(void);
@@ -23,6 +24,13 @@ void syscall_register_raw(int num, syscall_raw_handler_t handler) {
 
 // ── Dispatcher (called from syscall_entry.asm) ──────────────────────────────
 void syscall_dispatcher(struct syscall_regs *regs) {
+  struct thread *t = sched_get_current();
+  if (t && t->tid == 13) {
+    klog_puts("[SYSCALL] tid=13 syscall=");
+    klog_uint64(regs->rax);
+    klog_puts("\n");
+  }
+
   if (regs->rax >= MAX_SYSCALL) {
     klog_puts("\n[SYSCALL] Unimplemented syscall: ");
     klog_uint64(regs->rax);

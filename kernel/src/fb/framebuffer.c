@@ -139,7 +139,7 @@ void fb_init(struct limine_framebuffer *framebuffer) {
     uint64_t num_pages = (fb_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
     uint64_t flags =
-        PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_PCD | PAGE_FLAG_PWT;
+        PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_PWT;
 
     for (uint64_t i = 0; i < num_pages; i++) {
       vmm_map_page(pml4, virt + i * PAGE_SIZE, phys + i * PAGE_SIZE, flags);
@@ -275,9 +275,11 @@ static uint32_t fb_vfs_write(struct vfs_node *node, uint32_t offset,
 #define FBIOGET_FSCREENINFO 0x4602
 #define FBIOPAN_DISPLAY 0x4606
 
-static uint64_t fb_vfs_mmap(struct vfs_node *node, uint64_t length,
-                            uint64_t prot, uint64_t flags) {
+static uint64_t fb_vfs_mmap(struct vfs_node *node, uint64_t addr, uint64_t length,
+                            uint64_t prot, uint64_t flags, uint64_t offset) {
+  (void)offset;
   (void)node;
+  (void)addr;
   klog_puts("\n[FB_MMAP] length=");
   klog_uint64(length);
   klog_puts("\n");
@@ -316,7 +318,10 @@ static uint64_t fb_vfs_mmap(struct vfs_node *node, uint64_t length,
 #define PAGE_ALIGN_UP(x) (((x) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1))
 
   uint64_t aligned_len = PAGE_ALIGN_UP(length);
-  uint64_t vaddr = mm_alloc_mmap_region(aligned_len);
+  uint64_t vaddr = addr;
+  if (vaddr == 0) {
+    vaddr = mm_alloc_mmap_region(aligned_len);
+  }
   if (vaddr == 0) {
     klog_puts("[FB_MMAP] Error: mmap region exhausted\n");
     return (uint64_t)-1;
@@ -326,8 +331,8 @@ static uint64_t fb_vfs_mmap(struct vfs_node *node, uint64_t length,
   // For X11 backbuffer (heap memory), use WB (write-back) caching for speed
   uint64_t page_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER;
   if (buffer_to_map == fb->address) {
-    // Hardware framebuffer - use uncached
-    page_flags |= PAGE_FLAG_PCD | PAGE_FLAG_PWT;
+    // Hardware framebuffer - use write-through
+    page_flags |= PAGE_FLAG_PWT;
   }
   if (prot & FB_MMAP_PROT_WRITE)
     page_flags |= PAGE_FLAG_RW;
@@ -482,9 +487,17 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
     return to_copy;
   } else {
     // Non-canonical mode (raw-ish)
+    klog_puts("[CONSOLE] vfs_read: non-canonical mode, size=");
+    klog_uint64(size);
+    klog_puts(" keyboard_has_char=");
+    klog_uint64(keyboard_has_char() ? 1 : 0);
+    klog_puts("\n");
     uint32_t count = 0;
     while (count < size) {
       char c = keyboard_get_char();
+      klog_puts("[CONSOLE] vfs_read: got char 0x");
+      klog_hex64((unsigned char)c);
+      klog_puts("\n");
 
       // ICRNL: Map CR to NL on input
       if (c == '\r' && (console_termios.c_iflag & ICRNL))
@@ -500,6 +513,9 @@ static uint32_t console_vfs_read(struct vfs_node *node, uint32_t offset,
       if (!keyboard_has_char())
         break;
     }
+    klog_puts("[CONSOLE] vfs_read: returning count=");
+    klog_uint64(count);
+    klog_puts("\n");
     return count;
   }
 }
@@ -584,7 +600,7 @@ static void setup_chardev(
     void (*open_fn)(struct vfs_node *), void (*close_fn)(struct vfs_node *),
     int (*poll_fn)(struct vfs_node *, int),
     int (*ioctl_fn)(struct vfs_node *, uint32_t, uint64_t),
-    uint64_t (*mmap_fn)(struct vfs_node *, uint64_t, uint64_t, uint64_t),
+    uint64_t (*mmap_fn)(struct vfs_node *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t),
     void *device, uint32_t length) {
   (void)dev_dir; // Not needed - we use the device registry
 
@@ -620,9 +636,11 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   if (!fb)
     return -1;
 
+/*
   klog_puts("[FB_IOCTL] request=0x");
   klog_hex32(request);
   klog_puts("\n");
+*/
 
   switch (request) {
   case FBIOGET_VSCREENINFO: {

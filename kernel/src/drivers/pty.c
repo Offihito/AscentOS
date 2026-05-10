@@ -8,8 +8,11 @@
 #include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
+#include "../mm/pmm.h"
+#include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "../sched/wait.h"
+#include "../syscalls/syscall.h"
 
 // PTY pair pool
 static pty_pair_t pty_pool[PTY_MAX_PAIRS];
@@ -30,6 +33,10 @@ static inline bool ring_empty(uint32_t head, uint32_t tail) {
 }
 
 // Write to ring buffer, returns bytes written
+static inline bool ring_full(uint32_t head, uint32_t tail) {
+  return ((head + 1) % PTY_BUFFER_SIZE) == tail;
+}
+
 static uint32_t ring_write(uint8_t *buffer, uint32_t *head, uint32_t tail,
                            const uint8_t *data, uint32_t len) {
   uint32_t free_space = ring_free(*head, tail);
@@ -37,12 +44,17 @@ static uint32_t ring_write(uint8_t *buffer, uint32_t *head, uint32_t tail,
     return 0;
 
   uint32_t to_write = (len < free_space) ? len : free_space;
+  uint32_t first_part = PTY_BUFFER_SIZE - *head;
 
-  for (uint32_t i = 0; i < to_write; i++) {
-    buffer[*head] = data[i];
-    *head = (*head + 1) % PTY_BUFFER_SIZE;
+  if (first_part > to_write)
+    first_part = to_write;
+
+  memcpy(buffer + *head, data, first_part);
+  if (to_write > first_part) {
+    memcpy(buffer, data + first_part, to_write - first_part);
   }
 
+  *head = (*head + to_write) % PTY_BUFFER_SIZE;
   return to_write;
 }
 
@@ -54,12 +66,19 @@ static uint32_t ring_read(uint8_t *buffer, uint32_t head, uint32_t *tail,
     return 0;
 
   uint32_t to_read = (len < used) ? len : used;
+  uint32_t first_part = PTY_BUFFER_SIZE - *tail;
 
-  for (uint32_t i = 0; i < to_read; i++) {
-    data[i] = buffer[*tail];
-    *tail = (*tail + 1) % PTY_BUFFER_SIZE;
+  if (first_part > to_read)
+    first_part = to_read;
+
+  if (data) {
+    memcpy(data, buffer + *tail, first_part);
+    if (to_read > first_part) {
+      memcpy(data + first_part, buffer, to_read - first_part);
+    }
   }
 
+  *tail = (*tail + to_read) % PTY_BUFFER_SIZE;
   return to_read;
 }
 
@@ -70,33 +89,46 @@ void pty_init(void) {
     pty_pool[i].index = i;
     pty_pool[i].allocated = false;
     pty_pool[i].locked = false;
+    pty_pool[i].master_open = false;
+    pty_pool[i].slave_open_count = 0;
     pty_pool[i].m2s_head = 0;
     pty_pool[i].m2s_tail = 0;
+    pty_pool[i].m2s_newline_count = 0;
     pty_pool[i].s2m_head = 0;
     pty_pool[i].s2m_tail = 0;
     pty_pool[i].pgid = 0;
-    pty_pool[i].master_waitq = NULL;
-    pty_pool[i].slave_waitq = NULL;
+    pty_pool[i].master_waitq = kmalloc(sizeof(wait_queue_t));
+    pty_pool[i].slave_waitq = kmalloc(sizeof(wait_queue_t));
+    pty_pool[i].slave_write_waitq = kmalloc(sizeof(wait_queue_t));
+    wait_queue_init((wait_queue_t *)pty_pool[i].master_waitq);
+    wait_queue_init((wait_queue_t *)pty_pool[i].slave_waitq);
+    wait_queue_init((wait_queue_t *)pty_pool[i].slave_write_waitq);
+    spinlock_init(&pty_pool[i].lock);
 
-    // Default terminal settings (same as console)
+    // Default terminal settings
     pty_pool[i].termios.c_iflag = 0x00000100; // ICRNL
     pty_pool[i].termios.c_oflag = 0x00000005; // OPOST | ONLCR
     pty_pool[i].termios.c_cflag = 0;
     pty_pool[i].termios.c_lflag = 0x0000000b; // ISIG | ICANON | ECHO
     pty_pool[i].termios.c_line = 0;
+
+    // POSIX standard control character defaults
     for (int j = 0; j < NCCS; j++)
       pty_pool[i].termios.c_cc[j] = 0;
+    pty_pool[i].termios.c_cc[0] = 0x03; // VINTR (Ctrl-C)
+    pty_pool[i].termios.c_cc[1] = 0x1C; // VQUIT (Ctrl-\)
+    pty_pool[i].termios.c_cc[2] = 0x7F; // VERASE (Backspace)
+    pty_pool[i].termios.c_cc[3] = 0x15; // VKILL (Ctrl-U)
+    pty_pool[i].termios.c_cc[4] = 0x04; // VEOF (Ctrl-D)
 
-    // Default window size (80x24)
+    // Window size (standard desktop-ish defaults)
     pty_pool[i].winsize.ws_row = 24;
     pty_pool[i].winsize.ws_col = 80;
     pty_pool[i].winsize.ws_xpixel = 80 * 8;
     pty_pool[i].winsize.ws_ypixel = 24 * 16;
   }
 
-  klog_puts("[PTY] Initialized with ");
-  klog_uint64(PTY_MAX_PAIRS);
-  klog_puts(" PTY pairs\n");
+  klog_puts("[PTY] Initialized with 16 pairs\n");
 }
 
 // ── PTY allocation ───────────────────────────────────────────────────────────
@@ -107,17 +139,25 @@ int pty_alloc_pair(void) {
     if (!pty_pool[idx].allocated) {
       pty_pool[idx].allocated = true;
       pty_pool[idx].locked = false;
+      pty_pool[idx].master_open = true;
+      pty_pool[idx].slave_open_count = 0;
       pty_pool[idx].m2s_head = 0;
       pty_pool[idx].m2s_tail = 0;
+      pty_pool[idx].m2s_newline_count = 0;
       pty_pool[idx].s2m_head = 0;
       pty_pool[idx].s2m_tail = 0;
       pty_pool[idx].pgid = 0;
+      pty_pool[idx].shared_mmap_frame = NULL;
 
       // Reset terminal settings
       pty_pool[idx].termios.c_iflag = 0x00000100;
       pty_pool[idx].termios.c_oflag = 0x00000005;
       pty_pool[idx].termios.c_cflag = 0;
       pty_pool[idx].termios.c_lflag = 0x0000000b;
+
+      wait_queue_init((wait_queue_t *)pty_pool[idx].master_waitq);
+      wait_queue_init((wait_queue_t *)pty_pool[idx].slave_waitq);
+      spinlock_init(&pty_pool[idx].lock);
 
       pty_next_index = (idx + 1) % PTY_MAX_PAIRS;
 
@@ -148,7 +188,16 @@ bool pty_master_can_read(pty_pair_t *pty) {
 }
 
 bool pty_slave_can_read(pty_pair_t *pty) {
-  return !ring_empty(pty->m2s_head, pty->m2s_tail);
+  if (ring_empty(pty->m2s_head, pty->m2s_tail)) {
+    return false;
+  }
+
+  if (pty->termios.c_lflag & ICANON) {
+    // In canonical mode, data is only available if there's a newline
+    return pty->m2s_newline_count > 0;
+  }
+
+  return true;
 }
 
 // ── /dev/ptmx (master) VFS operations ────────────────────────────────────────
@@ -161,9 +210,38 @@ uint32_t ptmx_read(struct vfs_node *node, uint32_t offset, uint32_t size,
   if (!pty)
     return 0;
 
+  spinlock_acquire(&pty->lock);
   // Master reads from slave→master buffer
-  return ring_read(pty->slave_to_master, pty->s2m_head, &pty->s2m_tail, buffer,
-                   size);
+  while (ring_empty(pty->s2m_head, pty->s2m_tail)) {
+    if (pty->slave_open_count == 0) {
+      spinlock_release(&pty->lock);
+      return 0; // EOF: No slaves left
+    }
+
+    // Wait for data from slave
+    wait_queue_entry_t entry = {0};
+    entry.thread = sched_get_current();
+    wait_queue_add((wait_queue_t *)pty->master_waitq, &entry);
+    entry.thread->state = THREAD_BLOCKED;
+
+    spinlock_release(&pty->lock);
+    sched_yield();
+    spinlock_acquire(&pty->lock);
+
+    wait_queue_remove((wait_queue_t *)pty->master_waitq, &entry);
+  }
+
+  uint32_t read = ring_read(pty->slave_to_master, pty->s2m_head, &pty->s2m_tail,
+                            buffer, size);
+
+  // Wake up any writers waiting for buffer space
+  if (read > 0 && pty->slave_write_waitq &&
+      ((wait_queue_t *)pty->slave_write_waitq)->head != NULL) {
+    wait_queue_wake_all(pty->slave_write_waitq);
+  }
+
+  spinlock_release(&pty->lock);
+  return read;
 }
 
 uint32_t ptmx_write(struct vfs_node *node, uint32_t offset, uint32_t size,
@@ -174,14 +252,113 @@ uint32_t ptmx_write(struct vfs_node *node, uint32_t offset, uint32_t size,
   if (!pty)
     return 0;
 
-  // Master writes to master→slave buffer
-  uint32_t written = ring_write(pty->master_to_slave, &pty->m2s_head,
-                                pty->m2s_tail, buffer, size);
+  klog_puts("[PTY] ptmx_write: size=");
+  klog_uint64(size);
+  klog_puts(" first_byte=0x");
+  klog_hex64(buffer[0]);
+  klog_puts("\n");
 
-  // Wake up any readers waiting on slave
-  if (written > 0 && pty->slave_waitq) {
-    wait_queue_wake_all(pty->slave_waitq);
+  bool wake_slave = false;
+  bool wake_master = false;
+  uint32_t written = 0;
+
+  spinlock_acquire(&pty->lock);
+  klog_puts("[PTY] ptmx_write: slave_open_count=");
+  klog_uint64(pty->slave_open_count);
+  klog_puts(" ICANON=");
+  klog_uint64(pty->termios.c_lflag & ICANON ? 1 : 0);
+  klog_puts(" ECHO=");
+  klog_uint64(pty->termios.c_lflag & ECHO ? 1 : 0);
+  klog_puts("\n");
+
+  if (pty->slave_open_count == 0) {
+    spinlock_release(&pty->lock);
+    klog_puts("[PTY] ptmx_write: no slave open, returning 0\n");
+    return 0; // Or return -EPIPE/-32
   }
+
+  // Fast path for raw mode (no input/output processing, no echo)
+  if (!(pty->termios.c_lflag & (ICANON | ECHO)) &&
+      !(pty->termios.c_iflag & ICRNL)) {
+    written = ring_write(pty->master_to_slave, &pty->m2s_head, pty->m2s_tail,
+                         buffer, size);
+    if (written > 0)
+      wake_slave = true;
+    spinlock_release(&pty->lock);
+  } else {
+    for (uint32_t i = 0; i < size; i++) {
+      uint8_t c = buffer[i];
+
+      // Input processing: ICRNL (map \r to \n)
+      if (c == '\r' && (pty->termios.c_iflag & ICRNL)) {
+        c = '\n';
+      }
+
+      // Support for canonical mode backspace (VERASE)
+      if ((pty->termios.c_lflag & ICANON) && c == pty->termios.c_cc[2]) {
+        if (!ring_empty(pty->m2s_head, pty->m2s_tail)) {
+          uint32_t prev =
+              (pty->m2s_head + PTY_BUFFER_SIZE - 1) % PTY_BUFFER_SIZE;
+          if (pty->master_to_slave[prev] != '\n') {
+            pty->m2s_head = prev;
+            written++;
+            if (pty->termios.c_lflag & ECHO) {
+              uint8_t bs[] = "\b \b";
+              ring_write(pty->slave_to_master, &pty->s2m_head, pty->s2m_tail,
+                         bs, 3);
+              wake_master = true;
+            }
+          }
+        }
+        continue;
+      }
+
+      uint32_t n = ring_write(pty->master_to_slave, &pty->m2s_head,
+                              pty->m2s_tail, &c, 1);
+      if (n > 0) {
+        written++;
+        wake_slave = true;
+
+        if (c == '\n') {
+          pty->m2s_newline_count++;
+        }
+
+        if (pty->termios.c_lflag & ECHO) {
+          if (c == '\n' && (pty->termios.c_oflag & ONLCR)) {
+            uint8_t cr = '\r';
+            ring_write(pty->slave_to_master, &pty->s2m_head, pty->s2m_tail, &cr,
+                       1);
+          }
+          klog_puts("[PTY] ptmx_write: echoing char 0x");
+          klog_hex64(c);
+          klog_puts(" to s2m buffer\n");
+          ring_write(pty->slave_to_master, &pty->s2m_head, pty->s2m_tail, &c,
+                     1);
+          wake_master = true;
+        }
+      } else {
+        break;
+      }
+    }
+    spinlock_release(&pty->lock);
+  }
+
+  if (wake_slave && pty->slave_waitq &&
+      ((wait_queue_t *)pty->slave_waitq)->head != NULL) {
+    klog_puts("[PTY] ptmx_write: waking slave waitq\n");
+    wait_queue_wake_all((wait_queue_t *)pty->slave_waitq);
+  }
+  if (wake_master && pty->master_waitq &&
+      ((wait_queue_t *)pty->master_waitq)->head != NULL) {
+    klog_puts("[PTY] ptmx_write: waking master waitq\n");
+    wait_queue_wake_all((wait_queue_t *)pty->master_waitq);
+  }
+
+  klog_puts("[PTY] ptmx_write: written=");
+  klog_uint64(written);
+  klog_puts(" m2s_newline_count=");
+  klog_uint64(pty->m2s_newline_count);
+  klog_puts("\n");
 
   return written;
 }
@@ -191,73 +368,104 @@ int ptmx_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   if (!pty)
     return -9; // EBADF
 
+  uint32_t pgid_to_signal = 0;
+  int signal_to_send = 0;
+  int ret = -25; // Default: ENOTTY
+
+  spinlock_acquire(&pty->lock);
+
   switch (request) {
   case TIOCGPTN: {
     // Get PTY number
     int *ptn = (int *)arg;
-    if (!ptn)
-      return -14; // EFAULT
-    *ptn = pty->index;
-    return 0;
+    if (!ptn || !vmm_is_user_addr_range_valid(arg, sizeof(int))) {
+      ret = -14; // EFAULT
+    } else {
+      *ptn = pty->index;
+      ret = 0;
+    }
+    break;
   }
 
   case TIOCSPTLCK: {
     // Lock/unlock PTY
     int *lock = (int *)arg;
-    if (!lock)
-      return -14;
-    pty->locked = (*lock != 0);
-    return 0;
+    if (!lock || !vmm_is_user_addr_range_valid(arg, sizeof(int))) {
+      ret = -14;
+    } else {
+      pty->locked = (*lock != 0);
+      ret = 0;
+    }
+    break;
   }
 
   case TIOCGPTLCK: {
     // Get lock state
     int *lock = (int *)arg;
-    if (!lock)
-      return -14;
-    *lock = pty->locked ? 1 : 0;
-    return 0;
+    if (!lock || !vmm_is_user_addr_range_valid(arg, sizeof(int))) {
+      ret = -14;
+    } else {
+      *lock = pty->locked ? 1 : 0;
+      ret = 0;
+    }
+    break;
   }
 
   case TIOCSIG: {
     // Send signal to slave's foreground process group
     int sig = (int)arg;
-    if (sig <= 0 || sig > 64)
-      return -22; // EINVAL
-
-    if (pty->pgid != 0) {
-      // Send signal to process group
-      extern void signal_send_pgid(uint32_t pgid, int sig);
-      signal_send_pgid(pty->pgid, sig);
+    if (sig <= 0 || sig > 64) {
+      ret = -22; // EINVAL
+    } else {
+      if (pty->pgid != 0) {
+        pgid_to_signal = pty->pgid;
+        signal_to_send = sig;
+      }
+      ret = 0;
     }
-    return 0;
+    break;
   }
 
   case TIOCGWINSZ: {
     struct winsize *ws = (struct winsize *)arg;
-    if (!ws)
-      return -14;
-    *ws = pty->winsize;
-    return 0;
+    if (!ws || !vmm_is_user_addr_range_valid(arg, sizeof(struct winsize))) {
+      ret = -14;
+    } else {
+      *ws = pty->winsize;
+      ret = 0;
+    }
+    break;
   }
 
   case TIOCSWINSZ: {
     const struct winsize *ws = (const struct winsize *)arg;
-    if (!ws)
-      return -14;
-    pty->winsize = *ws;
-
-    // Send SIGWINCH to slave's foreground process group
-    if (pty->pgid != 0) {
-      extern void signal_send_pgid(uint32_t pgid, int sig);
-      signal_send_pgid(pty->pgid, 28); // SIGWINCH
+    if (!ws || !vmm_is_user_addr_range_valid(arg, sizeof(struct winsize))) {
+      ret = -14;
+    } else {
+      pty->winsize = *ws;
+      if (pty->pgid != 0) {
+        pgid_to_signal = pty->pgid;
+        signal_to_send = 28; // SIGWINCH
+      }
+      ret = 0;
     }
-    return 0;
+    break;
   }
 
   default:
-    return -25; // ENOTTY
+    ret = -25; // ENOTTY
+    break;
   }
+
+  spinlock_release(&pty->lock);
+
+  // Deliver signals outside the device lock
+  if (pgid_to_signal != 0) {
+    extern void signal_send_pgid(uint32_t pgid, int sig);
+    signal_send_pgid(pgid_to_signal, signal_to_send);
+  }
+
+  return ret;
 }
 
 int ptmx_poll(struct vfs_node *node, int events) {
@@ -265,20 +473,57 @@ int ptmx_poll(struct vfs_node *node, int events) {
   if (!pty)
     return 0;
 
+  spinlock_acquire(&pty->lock);
   int revents = 0;
 
   if (events & POLLIN) {
-    if (pty_master_can_read(pty)) {
+    // Master can read if slave has written anything
+    if (!ring_empty(pty->s2m_head, pty->s2m_tail)) {
       revents |= POLLIN;
+    } else if (pty->slave_open_count == 0) {
+      revents |= POLLHUP;
     }
   }
 
   if (events & POLLOUT) {
-    // Always ready to write (buffer permitting)
-    revents |= POLLOUT;
+    // Master is ready to write if master->slave buffer is not full
+    if (!ring_full(pty->m2s_head, pty->m2s_tail)) {
+      revents |= POLLOUT;
+    }
   }
 
+  spinlock_release(&pty->lock);
   return revents;
+}
+
+void ptmx_close(struct vfs_node *node) {
+  pty_pair_t *pty = (pty_pair_t *)node->device;
+  if (!pty)
+    return;
+
+  spinlock_acquire(&pty->lock);
+  
+  // Only mark master as closed if no slaves are open
+  // This prevents breaking the slave when the terminal emulator
+  // accidentally closes the master fd (e.g., by reusing fd for other files)
+  if (pty->slave_open_count == 0) {
+    pty->master_open = false;
+    pty->allocated = false;
+    klog_puts("[PTY] Deallocated PTY pair ");
+    klog_uint64((uint64_t)pty->index);
+    klog_puts(" (master closed, no slaves)\n");
+  } else {
+    // Keep master_open = true so slave can still write
+    // The buffer will accumulate data until master is reopened
+    klog_puts("[PTY] Master fd closed but slaves still open, keeping PTY alive\n");
+  }
+
+  // Wake up anything waiting on the slave side to notify them of hangup
+  if (pty->slave_waitq) {
+    wait_queue_wake_all((wait_queue_t *)pty->slave_waitq);
+  }
+
+  spinlock_release(&pty->lock);
 }
 
 // ── /dev/pts/N (slave) VFS operations ────────────────────────────────────────
@@ -291,11 +536,86 @@ uint32_t pty_slave_read(struct vfs_node *node, uint32_t offset, uint32_t size,
   if (!pty)
     return 0;
 
+  klog_puts("[PTY] slave_read: size=");
+  klog_uint64(size);
+  klog_puts("\n");
+
+  spinlock_acquire(&pty->lock);
   // Slave reads from master→slave buffer
-  // TODO: Implement canonical mode processing (line editing)
-  // For now, raw mode only
-  return ring_read(pty->master_to_slave, pty->m2s_head, &pty->m2s_tail, buffer,
-                   size);
+  while (1) {
+    bool can_read = false;
+    bool empty = ring_empty(pty->m2s_head, pty->m2s_tail);
+    klog_puts("[PTY] slave_read: ring_empty=");
+    klog_uint64(empty ? 1 : 0);
+    klog_puts(" m2s_newline_count=");
+    klog_uint64(pty->m2s_newline_count);
+    klog_puts(" ICANON=");
+    klog_uint64(pty->termios.c_lflag & ICANON ? 1 : 0);
+    klog_puts("\n");
+
+    if (!empty) {
+      if (pty->termios.c_lflag & ICANON) {
+        // In canonical mode, only allow reading if there's a newline
+        if (pty->m2s_newline_count > 0) {
+          can_read = true;
+        }
+      } else {
+        can_read = true;
+      }
+    }
+
+    if (can_read)
+      break;
+
+    if (!pty->master_open) {
+      spinlock_release(&pty->lock);
+      klog_puts("[PTY] slave_read: master closed, EOF\n");
+      return 0; // EOF: Master closed
+    }
+
+    // Wait for data
+    klog_puts("[PTY] slave_read: blocking on waitq\n");
+    wait_queue_entry_t entry = {0};
+    entry.thread = sched_get_current();
+    wait_queue_add((wait_queue_t *)pty->slave_waitq, &entry);
+    entry.thread->state = THREAD_BLOCKED;
+
+    spinlock_release(&pty->lock);
+    sched_yield();
+    spinlock_acquire(&pty->lock);
+
+    wait_queue_remove((wait_queue_t *)pty->slave_waitq, &entry);
+    klog_puts("[PTY] slave_read: woke up\n");
+  }
+
+  uint32_t read = 0;
+  if (pty->termios.c_lflag & ICANON) {
+    // Read up to newline or size
+    while (read < size && !ring_empty(pty->m2s_head, pty->m2s_tail)) {
+      uint8_t c = pty->master_to_slave[pty->m2s_tail];
+      buffer[read++] = c;
+      pty->m2s_tail = (pty->m2s_tail + 1) % PTY_BUFFER_SIZE;
+      if (c == '\n') {
+        pty->m2s_newline_count--;
+        break;
+      }
+    }
+  } else {
+    read = ring_read(pty->master_to_slave, pty->m2s_head, &pty->m2s_tail,
+                     buffer, size);
+  }
+
+  spinlock_release(&pty->lock);
+
+  if (read > 0) {
+    /*
+        klog_puts("[PTY] Slave read count=");
+        klog_uint64((uint64_t)read);
+        klog_puts("\n");
+    */
+  }
+
+  return read;
 }
 
 uint32_t pty_slave_write(struct vfs_node *node, uint32_t offset, uint32_t size,
@@ -303,40 +623,122 @@ uint32_t pty_slave_write(struct vfs_node *node, uint32_t offset, uint32_t size,
   (void)offset;
 
   pty_pair_t *pty = (pty_pair_t *)node->device;
-  if (!pty)
+  if (!pty) {
+    klog_puts("[PTY] slave_write: no pty\n");
     return 0;
+  }
 
-  // Slave writes to slave→master buffer
-  // Apply output processing (ONLCR: convert \n to \r\n)
-  uint32_t written = 0;
+  klog_puts("[PTY] slave_write: size=");
+  klog_uint64(size);
+  klog_puts("\n");
 
-  if (pty->termios.c_oflag & ONLCR) {
-    // Process each character
-    for (uint32_t i = 0; i < size; i++) {
-      if (buffer[i] == '\n') {
-        // Write \r first
-        if (ring_write(pty->slave_to_master, &pty->s2m_head, pty->s2m_tail,
-                       (const uint8_t *)"\r", 1) == 0) {
-          break;
-        }
+  uint32_t total_written = 0;
+
+  // Check if output processing is needed
+  bool do_opost = (pty->termios.c_oflag & OPOST) != 0;
+  bool do_onlcr = (pty->termios.c_oflag & ONLCR) != 0;
+
+  while (total_written < size) {
+    spinlock_acquire(&pty->lock);
+    
+    if (!pty->master_open) {
+      klog_puts("[PTY] slave_write: master not open\n");
+      spinlock_release(&pty->lock);
+      break; // Master gone - return what we've written so far
+    }
+
+    // Check if there's space in the buffer
+    uint32_t free_space = ring_free(pty->s2m_head, pty->s2m_tail);
+    
+    if (free_space == 0) {
+      // Buffer full - block until master reads
+      // Wake up master in case it's waiting
+      if (pty->master_waitq && ((wait_queue_t *)pty->master_waitq)->head != NULL) {
+        wait_queue_wake_all(pty->master_waitq);
       }
-      if (ring_write(pty->slave_to_master, &pty->s2m_head, pty->s2m_tail,
-                     &buffer[i], 1) == 0) {
+      
+      // Wait for space
+      wait_queue_entry_t entry = {0};
+      entry.thread = sched_get_current();
+      wait_queue_add((wait_queue_t *)pty->slave_write_waitq, &entry);
+      entry.thread->state = THREAD_BLOCKED;
+      
+      spinlock_release(&pty->lock);
+      sched_yield();
+      spinlock_acquire(&pty->lock);
+      
+      wait_queue_remove((wait_queue_t *)pty->slave_write_waitq, &entry);
+      
+      // Re-check master status after waking
+      if (!pty->master_open) {
+        spinlock_release(&pty->lock);
         break;
       }
-      written++;
+      
+      free_space = ring_free(pty->s2m_head, pty->s2m_tail);
+      if (free_space == 0) {
+        // Still no space - try again
+        spinlock_release(&pty->lock);
+        continue;
+      }
     }
-  } else {
-    written = ring_write(pty->slave_to_master, &pty->s2m_head, pty->s2m_tail,
-                         buffer, size);
+    
+    if (do_opost && do_onlcr) {
+      // Output processing: convert \n to \r\n
+      while (total_written < size) {
+        free_space = ring_free(pty->s2m_head, pty->s2m_tail);
+        if (free_space == 0)
+          break;
+
+        uint8_t c = buffer[total_written];
+        if (c == '\n') {
+          // Need at least 2 bytes of space for \r\n
+          if (free_space < 2)
+            break;
+          uint8_t crlf[2] = {'\r', '\n'};
+          ring_write(pty->slave_to_master, &pty->s2m_head,
+                     pty->s2m_tail, crlf, 2);
+        } else {
+          ring_write(pty->slave_to_master, &pty->s2m_head,
+                     pty->s2m_tail, &c, 1);
+        }
+        total_written++;
+      }
+    } else {
+      // No output processing - fast path
+      uint32_t to_write = size - total_written;
+      if (to_write > free_space)
+        to_write = free_space;
+      uint32_t written_now = ring_write(pty->slave_to_master, &pty->s2m_head, 
+                                          pty->s2m_tail, buffer + total_written, to_write);
+      total_written += written_now;
+    }
+    
+    spinlock_release(&pty->lock);
+    
+    // Wake up master if we wrote something
+    if (pty->master_waitq && 
+        ((wait_queue_t *)pty->master_waitq)->head != NULL) {
+      wait_queue_wake_all(pty->master_waitq);
+    }
   }
 
-  // Wake up any readers waiting on master
-  if (written > 0 && pty->master_waitq) {
-    wait_queue_wake_all(pty->master_waitq);
-  }
+  klog_puts("[PTY] slave_write: total_written=");
+  klog_uint64(total_written);
+  klog_puts("\n");
+  return total_written;
+}
 
-  return written;
+// Rescan buffer for newlines (used when switching to canonical mode)
+static void pty_rescan_newlines(pty_pair_t *pty) {
+  pty->m2s_newline_count = 0;
+  uint32_t curr = pty->m2s_tail;
+  while (curr != pty->m2s_head) {
+    if (pty->master_to_slave[curr] == '\n') {
+      pty->m2s_newline_count++;
+    }
+    curr = (curr + 1) % PTY_BUFFER_SIZE;
+  }
 }
 
 int pty_slave_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
@@ -344,63 +746,114 @@ int pty_slave_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   if (!pty)
     return -9; // EBADF
 
+  uint32_t pgid_to_signal = 0;
+  int signal_to_send = 0;
+  int ret = -25; // Default: ENOTTY
+
+  spinlock_acquire(&pty->lock);
+
   switch (request) {
   case TCGETS: {
     struct termios *term = (struct termios *)arg;
-    if (!term)
-      return -14;
-    *term = pty->termios;
-    return 0;
+    if (!term || !vmm_is_user_addr_range_valid(arg, sizeof(struct termios))) {
+      ret = -14;
+    } else {
+      *term = pty->termios;
+      ret = 0;
+    }
+    break;
   }
 
   case TCSETS:
   case TCSETSW:
   case TCSETSF: {
     const struct termios *term = (const struct termios *)arg;
-    if (!term)
-      return -14;
-    pty->termios = *term;
-    return 0;
+    if (!term || !vmm_is_user_addr_range_valid(arg, sizeof(struct termios))) {
+      ret = -14;
+    } else {
+      bool old_icanon = (pty->termios.c_lflag & ICANON);
+      klog_puts("[PTY] slave_ioctl TCSETS: old ICANON=");
+      klog_uint64(old_icanon ? 1 : 0);
+      klog_puts(" new ICANON=");
+      klog_uint64(term->c_lflag & ICANON ? 1 : 0);
+      klog_puts(" new ECHO=");
+      klog_uint64(term->c_lflag & ECHO ? 1 : 0);
+      klog_puts("\n");
+      pty->termios = *term;
+      if (!old_icanon && (pty->termios.c_lflag & ICANON)) {
+        pty_rescan_newlines(pty);
+      }
+      ret = 0;
+    }
+    break;
   }
 
   case TIOCGWINSZ: {
     struct winsize *ws = (struct winsize *)arg;
-    if (!ws)
-      return -14;
-    *ws = pty->winsize;
-    return 0;
+    if (!ws || !vmm_is_user_addr_range_valid(arg, sizeof(struct winsize))) {
+      ret = -14;
+    } else {
+      *ws = pty->winsize;
+      ret = 0;
+    }
+    break;
   }
 
   case TIOCSWINSZ: {
     const struct winsize *ws = (const struct winsize *)arg;
-    if (!ws)
-      return -14;
-    pty->winsize = *ws;
-    // Note: SIGWINCH is sent to the foreground process group
-    return 0;
+    if (!ws || !vmm_is_user_addr_range_valid(arg, sizeof(struct winsize))) {
+      ret = -14;
+    } else {
+      pty->winsize = *ws;
+      if (pty->pgid != 0) {
+        pgid_to_signal = pty->pgid;
+        signal_to_send = 28; // SIGWINCH
+      }
+      ret = 0;
+    }
+    break;
   }
 
   case TIOCGPGRP: {
-    // Get foreground process group
     int *pgrp = (int *)arg;
-    if (!pgrp)
-      return -14;
-    *pgrp = (int)pty->pgid;
-    return 0;
+    if (!pgrp || !vmm_is_user_addr_range_valid(arg, sizeof(int))) {
+      ret = -14;
+    } else {
+      *pgrp = (int)pty->pgid;
+      ret = 0;
+    }
+    break;
   }
 
   case TIOCSPGRP: {
     // Set foreground process group
     int *pgrp = (int *)arg;
-    if (!pgrp)
-      return -14;
-    pty->pgid = (uint32_t)*pgrp;
-    return 0;
+    if (!pgrp || !vmm_is_user_addr_range_valid(arg, sizeof(int))) {
+      ret = -14;
+    } else {
+      pty->pgid = (uint32_t)*pgrp;
+      ret = 0;
+    }
+    break;
   }
 
+  case 0x540E: // TIOCSCTTY
+    ret = 0;
+    break;
+
   default:
-    return -25; // ENOTTY
+    ret = -25; // ENOTTY
+    break;
   }
+
+  spinlock_release(&pty->lock);
+
+  if (pgid_to_signal != 0) {
+    extern void signal_send_pgid(uint32_t pgid, int sig);
+    signal_send_pgid(pgid_to_signal, signal_to_send);
+  }
+
+  return ret;
 }
 
 int pty_slave_poll(struct vfs_node *node, int events) {
@@ -408,19 +861,119 @@ int pty_slave_poll(struct vfs_node *node, int events) {
   if (!pty)
     return 0;
 
+  spinlock_acquire(&pty->lock);
   int revents = 0;
 
   if (events & POLLIN) {
-    if (pty_slave_can_read(pty)) {
+    // Slave can read if master has written anything
+    if (!ring_empty(pty->m2s_head, pty->m2s_tail)) {
       revents |= POLLIN;
+    } else if (!pty->master_open) {
+      revents |= POLLHUP;
     }
   }
 
   if (events & POLLOUT) {
-    revents |= POLLOUT;
+    // Slave is ready to write if slave->master buffer is not full
+    if (!ring_full(pty->s2m_head, pty->s2m_tail)) {
+      revents |= POLLOUT;
+    }
   }
 
+  spinlock_release(&pty->lock);
   return revents;
+}
+
+void pty_slave_open(struct vfs_node *node) {
+  pty_pair_t *pty = (pty_pair_t *)node->device;
+  if (!pty)
+    return;
+
+  spinlock_acquire(&pty->lock);
+  pty->slave_open_count++;
+  spinlock_release(&pty->lock);
+
+  // Set this as the controlling terminal for the current process
+  struct thread *t = sched_get_current();
+  if (t && !t->ctty) {
+    t->ctty = node;
+    klog_puts("[PTY] Set ctty for tid=");
+    klog_uint64(t->tid);
+    klog_puts("\n");
+  }
+}
+
+void pty_slave_close(struct vfs_node *node) {
+  pty_pair_t *pty = (pty_pair_t *)node->device;
+  if (!pty)
+    return;
+
+  spinlock_acquire(&pty->lock);
+  if (pty->slave_open_count > 0) {
+    pty->slave_open_count--;
+  }
+
+  // Wake up anything waiting on the master side to notify them of hangup
+  if (pty->master_waitq) {
+    wait_queue_wake_all((wait_queue_t *)pty->master_waitq);
+  }
+
+  // If master is already closed and this was the last slave, deallocate
+  if (!pty->master_open && pty->slave_open_count == 0) {
+    pty->allocated = false;
+    klog_puts("[PTY] Deallocated PTY pair ");
+    klog_uint64((uint64_t)pty->index);
+    klog_puts(" (last slave closed)\n");
+  }
+
+  spinlock_release(&pty->lock);
+}
+
+uint64_t ptmx_mmap(struct vfs_node *node, uint64_t addr, uint64_t length,
+                   uint64_t prot, uint64_t flags, uint64_t offset) {
+  (void)offset;
+
+  pty_pair_t *pty = (pty_pair_t *)node->device;
+  if (!pty)
+    return (uint64_t)-1;
+
+  if (length == 0 || length > 4096)
+    return (uint64_t)-1;
+
+  if (!pty->shared_mmap_frame) {
+    pty->shared_mmap_frame = pmm_alloc();
+    if (!pty->shared_mmap_frame)
+      return (uint64_t)-1;
+    memset((void *)((uint64_t)pty->shared_mmap_frame + pmm_get_hhdm_offset()),
+           0, 4096);
+  }
+
+  uint64_t vaddr = addr;
+  if (!(flags & 0x10) || vaddr == 0) { // MAP_FIXED
+    vaddr = mm_alloc_mmap_region(4096);
+  }
+
+  if (vaddr == 0)
+    return (uint64_t)-1;
+
+  uint64_t page_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER;
+  if (prot & 0x02) // PROT_WRITE
+    page_flags |= PAGE_FLAG_RW;
+  if (!(prot & 0x04)) // PROT_EXEC
+    page_flags |= PAGE_FLAG_NX;
+
+  if (!vmm_map_page(vmm_get_active_pml4(), vaddr,
+                    (uint64_t)pty->shared_mmap_frame, page_flags)) {
+    return (uint64_t)-1;
+  }
+
+  return vaddr;
+}
+
+uint64_t pty_slave_mmap(struct vfs_node *node, uint64_t addr, uint64_t length,
+                        uint64_t prot, uint64_t flags, uint64_t offset) {
+  // Master and slave share the same mmap frame logic
+  return ptmx_mmap(node, addr, length, prot, flags, offset);
 }
 
 // ── Device registration ─────────────────────────────────────────────────────
@@ -436,6 +989,9 @@ void pty_register_devices(void) {
     return;
 
   memset(ptmx_node, 0, sizeof(vfs_node_t));
+  klog_puts("[PTY] pty_slave_write addr=0x");
+  klog_hex64((uint64_t)pty_slave_write);
+  klog_puts("\n");
   strcpy(ptmx_node->name, "ptmx");
   ptmx_node->flags = FS_CHARDEV;
   ptmx_node->mask = 0666;

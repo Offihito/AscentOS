@@ -114,6 +114,9 @@ struct thread {
   uint32_t sgid;               // Saved set-group-ID
   uint32_t umask;              // File creation mask
 
+  // Controlling terminal (set when opening PTY slave as session leader)
+  vfs_node_t *ctty;          // Controlling terminal (PTY slave or console)
+
   // Signal state
   struct k_sigaction signal_handlers[64];
   uint64_t pending_signals;

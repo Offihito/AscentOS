@@ -1004,13 +1004,68 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     // Try stack growth: find a GROWSDOWN VMA above cr2 within 8MB
     vma = vma_find_growdown(&current->vmas, cr2, 8 * 1024 * 1024);
     if (vma) {
-      // Expand the stack VMA downward to cover the faulting page
-      vma->start = cr2 & ~0xFFFULL;
+      // Safely expand the stack: remove and re-add to maintain AVL tree
+      // integrity
+      uint64_t old_start = vma->start;
+      uint64_t old_end = vma->end;
+      uint64_t new_start = cr2 & ~0xFFFULL;
+      uint64_t prot = vma->prot;
+      uint64_t flags = vma->flags;
+      int fd = vma->fd;
+      uint64_t offset = vma->offset;
+
+      vma_remove(&current->vmas, old_start, old_end);
+      if (vma_add(&current->vmas, new_start, old_end, prot, flags, fd,
+                  offset) != 0) {
+        klog_puts("[VMM] Stack expansion failed (overlap?) for CR2=");
+        klog_hex64(cr2);
+        klog_puts("\n");
+        vma_add(&current->vmas, old_start, old_end, prot, flags, fd, offset);
+        vma = NULL;
+      } else {
+        // Node replaced, look it up again in the valid tree
+        vma = vma_find(&current->vmas, cr2);
+      }
+    } else {
+      // Log if address is outside the 8MB guard
+      struct vma *potential =
+          vma_find_growdown(&current->vmas, cr2, 1024 * 1024 * 1024);
+      if (potential) {
+        klog_puts("[VMM] Rejected stack growth: CR2=");
+        klog_hex64(cr2);
+        klog_puts(" is too far below VMA ");
+        klog_hex64(potential->start);
+        klog_puts("\n");
+      }
     }
   }
 
   if (!vma) {
+    // No VMA covers this address → genuine segfault.
+    // If this happened in kernel mode while accessing a user address,
+    // it's a kernel-side bug (likely missing validation in a syscall).
+    if (!user_mode && cr2 <= USER_SPACE_LIMIT) {
+      klog_puts("\n[VMM] KERNEL-MODE FAULT on user address CR2=");
+      klog_hex64(cr2);
+      klog_puts(" RIP=");
+      klog_hex64(regs->rip);
+      klog_puts(" thread=");
+      klog_uint64(current->tid);
+      klog_puts("\n[VMM] This usually indicates a missing "
+                "vmm_is_user_addr_range_valid() check in a syscall.\n");
+
+      // Instead of panicking the whole system, we kill the current process.
+      // Although the process didn't fault in ring 3, its bad inputs caused
+      // the kernel to fault on its behalf.
+      process_do_exit(11); // SIGSEGV
+    }
+
     // No VMA covers this address → genuine segfault
+    klog_puts("[VMM] No VMA for CR2=");
+    klog_hex64(cr2);
+    klog_puts(" in thread ");
+    klog_uint64(current->tid);
+    klog_puts("\n");
     return -1;
   }
 
@@ -1075,4 +1130,51 @@ void vmm_map_signal_trampoline(uint64_t *pml4) {
   // Map the trampoline page as USER accessible and executable (no NX)
   vmm_map_page(pml4, 0x00007FFFFFFFF000ULL, signal_trampoline_phys,
                PAGE_FLAG_USER);
+}
+
+bool vmm_is_user_addr_range_valid(uint64_t addr, size_t size) {
+  if (addr > USER_SPACE_LIMIT || (addr + size) > 0x800000000000ULL) {
+    klog_puts("[VMM] Range validation failed: out of bounds\n");
+    return false;
+  }
+
+  struct thread *current = sched_get_current();
+  if (!current)
+    return false;
+
+  uint64_t start_page = addr & ~0xFFFULL;
+  uint64_t end_page = (addr + size + 0xFFF) & ~0xFFFULL;
+
+  for (uint64_t page = start_page; page < end_page; page += 0x1000) {
+    struct vma *v = vma_find(&current->vmas, page);
+    if (!v) {
+      v = vma_find_growdown(&current->vmas, page, 8 * 1024 * 1024);
+    }
+
+    if (v) {
+      if (v->prot == PROT_NONE) {
+        klog_puts("[VMM] Range validation failed (PROT_NONE) at 0x");
+        klog_uint64(page);
+        klog_puts("\n");
+        return false;
+      }
+
+      /* klog_puts("[VMM] Page ");
+      klog_hex64(page);
+      klog_puts(" matched VMA ");
+      klog_hex64(v->start);
+      klog_puts("-");
+      klog_hex64(v->end);
+      klog_puts("\n"); */
+    } else {
+      klog_puts("[VMM] Range validation failed (No VMA) at ");
+      klog_hex64(page);
+      klog_puts(" in thread ");
+      klog_uint64(current->tid);
+      klog_puts("\n");
+      return false;
+    }
+  }
+
+  return true;
 }

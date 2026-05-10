@@ -52,8 +52,8 @@ typedef int (*rename_type_t)(struct vfs_node *, char *old_name, char *new_name);
 typedef int (*chmod_type_t)(struct vfs_node *, uint16_t permission);
 typedef int (*chown_type_t)(struct vfs_node *, uint32_t uid, uint32_t gid);
 typedef int (*truncate_type_t)(struct vfs_node *, uint32_t);
-typedef uint64_t (*mmap_type_t)(struct vfs_node *, uint64_t length,
-                                uint64_t prot, uint64_t flags);
+typedef uint64_t (*mmap_type_t)(struct vfs_node *, uint64_t addr, uint64_t length,
+                                uint64_t prot, uint64_t flags, uint64_t offset);
 typedef int (*poll_type_t)(struct vfs_node *, int events);
 
 typedef struct vfs_node {

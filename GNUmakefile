@@ -287,7 +287,7 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf us
 		debugfs -w -R "write toolchain/musl-sysroot/opt/bash/bin/bash bin/sh" /tmp/part.img >/dev/null 2>&1 || true; \
 		echo "root:x:0:0:root:/root:/bin/bash" > /tmp/passwd; \
 		echo "PS1='\033[0;32mRoot@AscentOS\033[0m:\w\\$$ '" > /tmp/bashrc; \
-		echo "PATH=/opt/coreutils/bin:/bin:/opt/bash/bin:/opt/tcc/bin" >> /tmp/bashrc; \
+		echo "PATH=/usr/bin:/usr/local/bin:/opt/coreutils/bin:/bin:/opt/bash/bin:/opt/tcc/bin" >> /tmp/bashrc; \
 		echo "HOME=/root" >> /tmp/bashrc; \
 		echo "TERM=vt100" >> /tmp/bashrc; \
 		echo "export TERM" >> /tmp/bashrc; \

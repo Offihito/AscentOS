@@ -31,11 +31,15 @@ static uint64_t sys_rt_sigaction(uint64_t signum, uint64_t act_ptr,
   uint64_t idx = signum - 1;
 
   if (oldact_ptr) {
+    if (!vmm_is_user_addr_range_valid(oldact_ptr, sizeof(struct k_sigaction)))
+      return (uint64_t)-14; // EFAULT
     struct k_sigaction *old = (struct k_sigaction *)oldact_ptr;
     *old = current->signal_handlers[idx];
   }
 
   if (act_ptr) {
+    if (!vmm_is_user_addr_range_valid(act_ptr, sizeof(struct k_sigaction)))
+      return (uint64_t)-14;
     struct k_sigaction *new = (struct k_sigaction *)act_ptr;
     if (signum == SIGKILL || signum == SIGSTOP)
       return (uint64_t)-22;
@@ -57,10 +61,14 @@ static uint64_t sys_rt_sigprocmask(uint64_t how, uint64_t set_ptr,
     return (uint64_t)-1;
 
   if (oldset_ptr) {
+    if (!vmm_is_user_addr_range_valid(oldset_ptr, sizeof(uint64_t)))
+      return (uint64_t)-14;
     *(uint64_t *)oldset_ptr = current->signal_mask;
   }
 
   if (set_ptr) {
+    if (!vmm_is_user_addr_range_valid(set_ptr, sizeof(uint64_t)))
+      return (uint64_t)-14;
     uint64_t newset = *(uint64_t *)set_ptr;
     newset &= ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
 
@@ -86,6 +94,10 @@ static uint64_t sys_rt_sigreturn(struct syscall_regs *sregs) {
   struct thread *current = sched_get_current();
   // Frame is on user stack.
   struct sigframe *frame = (struct sigframe *)sregs->rsp;
+  if (!vmm_is_user_addr_range_valid((uint64_t)frame, sizeof(struct sigframe))) {
+    klog_puts("[SIGNAL] sigreturn: invalid frame pointer\n");
+    process_do_exit(11); // SIGSEGV
+  }
 
   current->signal_mask = frame->mask;
 
@@ -152,6 +164,11 @@ void signal_deliver(struct registers *regs) {
   rsp -= sizeof(struct sigframe);
   rsp &= ~0xFULL;
 
+  if (!vmm_is_user_addr_range_valid(rsp, sizeof(struct sigframe))) {
+    klog_puts("[SIGNAL] Stack overflow/invalid during delivery\n");
+    process_do_exit(11); // SIGSEGV
+  }
+
   struct sigframe *frame = (struct sigframe *)rsp;
   frame->regs = *regs;
   frame->mask = current->signal_mask;
@@ -161,6 +178,11 @@ void signal_deliver(struct registers *regs) {
 
   // Set up return
   rsp -= 8;
+  if (!vmm_is_user_addr_range_valid(rsp, 8)) {
+    klog_puts("[SIGNAL] Stack overflow during return setup\n");
+    process_do_exit(11);
+  }
+
   if (sa->sa_flags & 0x04000000) { // SA_RESTORER
     *(uint64_t *)rsp = (uint64_t)sa->sa_restorer;
   } else {
@@ -303,9 +325,22 @@ static uint64_t sys_kill(uint64_t pid_val, uint64_t sig, uint64_t a2, uint64_t a
 
   struct thread *current = sched_get_current();
   if (sig == 0) {
-    if (pid == 0) return 0;
-    if (pid == -1) return 0;
-    // ... existence check logic ...
+    if (pid == 0 || pid == -1) return 0;
+    
+    bool found = false;
+    extern struct thread *global_thread_list;
+    extern spinlock_t tid_lock;
+    spinlock_acquire(&tid_lock);
+    struct thread *t = global_thread_list;
+    while (t) {
+      if (t->tid == (uint32_t)(pid > 0 ? pid : -pid)) {
+        found = true;
+        break;
+      }
+      t = t->global_next;
+    }
+    spinlock_release(&tid_lock);
+    return found ? 0 : (uint64_t)-3; // -ESRCH
   }
 
   if (pid == 0) {

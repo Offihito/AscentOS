@@ -1,6 +1,7 @@
-#include "fs/vfs.h"
-#include "lib/string.h"
-#include "mm/heap.h"
+#include "vfs.h"
+#include "../console/klog.h"
+#include "../lib/string.h"
+#include "../mm/heap.h"
 
 vfs_node_t *fs_root = 0;
 
@@ -15,7 +16,12 @@ uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
 uint32_t vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
                    uint8_t *buffer) {
   if (node && node->write) {
-    return node->write(node, offset, size, buffer);
+    uint32_t written = node->write(node, offset, size, buffer);
+    if (written > 0 && node->flags != FS_PIPE) {
+       // Filter out common high-volume writes if needed, but for now log
+       // klog_puts("[VFS] node write successful\n");
+    }
+    return written;
   }
   return 0;
 }

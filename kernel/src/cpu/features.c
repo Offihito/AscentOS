@@ -8,7 +8,7 @@ void cpu_features_init(void) {
   uint64_t cr0;
   __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
   cr0 &= ~(1ULL << 2); // EM — no x87 emulation
-  cr0 |= (1ULL << 1);  // MP — monitor coprocessor (with TS, matches PC behavior)
+  cr0 |= (1ULL << 1); // MP — monitor coprocessor (with TS, matches PC behavior)
   __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
 
   uint64_t cr4;

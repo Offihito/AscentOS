@@ -320,6 +320,17 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
         has_matching_children = true;
         if (t->state == THREAD_ZOMBIE) {
           zombie = t;
+          
+          // Unlink from parent's children list while holding lock
+          if (current->children == zombie) {
+            current->children = zombie->sibling_next;
+          } else {
+            struct thread *p = current->children;
+            while (p && p->sibling_next != zombie)
+              p = p->sibling_next;
+            if (p)
+              p->sibling_next = zombie->sibling_next;
+          }
           break;
         }
       }
@@ -334,22 +345,7 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
       }
       uint32_t reaped_pid = zombie->tid;
 
-      // Unlink from parent's children list while holding lock
-      // (This prevents other threads in the same parent from reaping it)
-      if (current->children == zombie) {
-        current->children = zombie->sibling_next;
-      } else {
-        struct thread *p = current->children;
-        while (p && p->sibling_next != zombie)
-          p = p->sibling_next;
-        if (p)
-          p->sibling_next = zombie->sibling_next;
-      }
-
-      spinlock_release(&tid_lock);
-
-      // Fully reap the zombie (already unlinked from parent, will be unlinked
-      // from global list)
+      // Fully reap the zombie 
       sched_reap_thread(zombie);
 
       return (uint64_t)reaped_pid;
@@ -589,6 +585,7 @@ uint64_t sys_fork(struct syscall_regs *regs) {
     // 7. Copy VMA list, cwd, and TLS base from parent to child
     vma_list_clone(&child->vmas, &parent->vmas);
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
+    child->mmap_next_addr = parent->mmap_next_addr;
     child->fs_base = parent->fs_base;
     child->umask = parent->umask;
     child->uid = parent->uid;
@@ -597,6 +594,7 @@ uint64_t sys_fork(struct syscall_regs *regs) {
     child->egid = parent->egid;
     child->suid = parent->suid;
     child->sgid = parent->sgid;
+    child->ctty = parent->ctty;  // Inherit controlling terminal
   }
 
   klog_puts("[FORK] Child created with PID ");
@@ -738,12 +736,21 @@ static uint64_t sys_getresuid(struct syscall_regs *regs) {
   if (!t)
     return (uint64_t)-1;
 
-  if (ruid_ptr)
+  if (ruid_ptr) {
+    if (!vmm_is_user_addr_range_valid((uint64_t)ruid_ptr, sizeof(uint32_t)))
+      return (uint64_t)-14;
     *ruid_ptr = t->uid;
-  if (euid_ptr)
+  }
+  if (euid_ptr) {
+    if (!vmm_is_user_addr_range_valid((uint64_t)euid_ptr, sizeof(uint32_t)))
+      return (uint64_t)-14;
     *euid_ptr = t->euid;
-  if (suid_ptr)
+  }
+  if (suid_ptr) {
+    if (!vmm_is_user_addr_range_valid((uint64_t)suid_ptr, sizeof(uint32_t)))
+      return (uint64_t)-14;
     *suid_ptr = t->suid;
+  }
 
   return 0;
 }
@@ -758,12 +765,21 @@ static uint64_t sys_getresgid(struct syscall_regs *regs) {
   if (!t)
     return (uint64_t)-1;
 
-  if (rgid_ptr)
+  if (rgid_ptr) {
+    if (!vmm_is_user_addr_range_valid((uint64_t)rgid_ptr, sizeof(uint32_t)))
+      return (uint64_t)-14;
     *rgid_ptr = t->gid;
-  if (egid_ptr)
+  }
+  if (egid_ptr) {
+    if (!vmm_is_user_addr_range_valid((uint64_t)egid_ptr, sizeof(uint32_t)))
+      return (uint64_t)-14;
     *egid_ptr = t->egid;
-  if (sgid_ptr)
+  }
+  if (sgid_ptr) {
+    if (!vmm_is_user_addr_range_valid((uint64_t)sgid_ptr, sizeof(uint32_t)))
+      return (uint64_t)-14;
     *sgid_ptr = t->sgid;
+  }
 
   return 0;
 }

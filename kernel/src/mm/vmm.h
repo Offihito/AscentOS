@@ -104,4 +104,8 @@ struct registers;
 int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
                           struct registers *regs);
 
+// Checks if a user address range is valid (within the user address space
+// and covered by one or more VMAs).
+bool vmm_is_user_addr_range_valid(uint64_t addr, size_t size);
+
 #endif

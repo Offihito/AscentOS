@@ -399,7 +399,8 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
             epi->on_ready_list = false;
             ep->rdllist_count--;
             // Track events for next edge
-            epi->last_events = current_events & (EPOLLIN | EPOLLOUT | EPOLLRDNORM | EPOLLWRNORM);
+            epi->last_events = current_events &
+                               (EPOLLIN | EPOLLOUT | EPOLLRDNORM | EPOLLWRNORM);
           }
 
           // Handle oneshot mode
@@ -445,11 +446,11 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
 
     wait_queue_remove(&ep->wq, &entry);
 
-    // If timeout was positive, we should technically decrement it, but 
+    // If timeout was positive, we should technically decrement it, but
     // for this phase we just loop.
     if (timeout_ms > 0) {
-        // Simplified timeout handling - if we were woken but still nothing, 
-        // we check again. Real timeout would check ticks.
+      // Simplified timeout handling - if we were woken but still nothing,
+      // we check again. Real timeout would check ticks.
     }
   }
 
@@ -618,6 +619,9 @@ void epoll_notify_event(struct vfs_node *node, uint32_t events) {
   if (node->ep_watchers.next == NULL)
     return;
 
+  // Track if we've woken an exclusive waiter for THIS node.
+  // EPOLLEXCLUSIVE prevents thundering herd: only one exclusive waiter
+  // per event source should be woken. Non-exclusive waiters are unaffected.
   bool exclusive_woken = false;
 
   spinlock_acquire(&node->ep_lock);
@@ -630,19 +634,24 @@ void epoll_notify_event(struct vfs_node *node, uint32_t events) {
     if (epi->oneshot && epi->oneshot_disabled)
       continue;
 
-    uint32_t mask = events & (epi->registered_events | EPOLLERR | EPOLLHUP | EPOLLRDHUP);
+    uint32_t mask =
+        events & (epi->registered_events | EPOLLERR | EPOLLHUP | EPOLLRDHUP);
     if (!mask)
       continue;
 
     // Add to ready list
     ep_add_to_ready_list(ep, epi);
 
+    // Wake up waiters
     if (epi->exclusive) {
+      // EPOLLEXCLUSIVE: only wake one thread across all exclusive waiters
+      // to prevent thundering herd. Skip if we already woke one.
       if (!exclusive_woken) {
         wait_queue_wake_one(&ep->wq);
         exclusive_woken = true;
       }
     } else {
+      // Non-exclusive: always wake all threads waiting on this epoll
       wait_queue_wake_all(&ep->wq);
     }
   }
@@ -659,9 +668,6 @@ void epoll_notify_socket(int fd, uint32_t events) {
   klog_puts(" events=");
   klog_uint64(events);
   klog_puts("\n");
-
-  // Track if any exclusive waiter was woken (for EPOLLEXCLUSIVE)
-  bool exclusive_woken = false;
 
   // Find all epoll instances watching this FD
   for (int i = 0; i < EPOLL_MAX_INSTANCES; i++) {
@@ -682,30 +688,17 @@ void epoll_notify_socket(int fd, uint32_t events) {
         events & (epi->registered_events | EPOLLERR | EPOLLHUP | EPOLLRDHUP);
 
     if (mask) {
-      // Edge-triggered: add to ready list
-      if (epi->event.events & EPOLLET) {
-        ep_add_to_ready_list(ep, epi);
+      // Add to ready list
+      ep_add_to_ready_list(ep, epi);
 
-        if (epi->exclusive) {
-          if (!exclusive_woken) {
-            wait_queue_wake_one(&ep->wq);
-            exclusive_woken = true;
-          }
-        } else {
-          wait_queue_wake_all(&ep->wq);
-        }
+      // Wake up waiters - EPOLLEXCLUSIVE only affects THIS epoll instance,
+      // not others. Each epoll instance should be woken independently.
+      if (epi->exclusive) {
+        // For exclusive mode, only wake one thread waiting on this epoll
+        wait_queue_wake_one(&ep->wq);
       } else {
-        // Level-triggered
-        ep_add_to_ready_list(ep, epi);
-
-        if (epi->exclusive) {
-          if (!exclusive_woken) {
-            wait_queue_wake_one(&ep->wq);
-            exclusive_woken = true;
-          }
-        } else {
-          wait_queue_wake_all(&ep->wq);
-        }
+        // Non-exclusive: wake all threads waiting on this epoll
+        wait_queue_wake_all(&ep->wq);
       }
     }
   }

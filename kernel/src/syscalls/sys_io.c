@@ -10,6 +10,7 @@
 #include "../fs/vfs.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
+#include "../mm/vmm.h"
 #include "../net/net.h"
 #include "../sched/sched.h"
 #include "../sched/wait.h"
@@ -181,9 +182,24 @@ struct statx {
 struct termios console_termios;
 
 int alloc_fd(struct thread *t) {
+  klog_puts("[SYSCALL] alloc_fd: t=");
+  klog_uint64((uint64_t)t);
+  klog_puts(" tid=");
+  klog_uint64(t->tid);
+  klog_puts(" fds_array=");
+  klog_uint64((uint64_t)&t->fds[0]);
+  klog_puts(" fds[4]_addr=");
+  klog_uint64((uint64_t)&t->fds[4]);
+  klog_puts("\n");
   for (int i = 0; i < MAX_FDS; i++) {
-    if (t->fds[i] == NULL)
+    if (t->fds[i] == NULL) {
+      klog_puts("[SYSCALL] alloc_fd: found empty fd=");
+      klog_uint64(i);
+      klog_puts(" fds[4]=");
+      klog_uint64((uint64_t)t->fds[4]);
+      klog_puts("\n");
       return i;
+    }
   }
   return -1; // ENFILE
 }
@@ -194,6 +210,9 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
   if (!path)
     return (uint64_t)-14; // EFAULT
 
+  (void)flags;
+  (void)mode;
+
   struct thread *t = sched_get_current();
   if (!t)
     return (uint64_t)-1;
@@ -201,6 +220,14 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
   int fd = alloc_fd(t);
   if (fd < 0)
     return (uint64_t)-24; // EMFILE
+
+  klog_puts("[SYSCALL] open: path=");
+  klog_puts(path);
+  klog_puts(" fd=");
+  klog_uint64(fd);
+  klog_puts(" tid=");
+  klog_uint64(t->tid);
+  klog_puts("\n");
 
   vfs_node_t *base_dir = fs_root;
   if (path[0] != '/') {
@@ -251,7 +278,10 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       node->write = ptmx_write;
       node->ioctl = ptmx_ioctl;
       node->poll = ptmx_poll;
+      node->close = ptmx_close;
+      node->mmap = ptmx_mmap;
       node->device = pty;
+      node->wait_queue = pty->master_waitq;
 
       goto open_done;
     }
@@ -287,9 +317,28 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       node->write = pty_slave_write;
       node->ioctl = pty_slave_ioctl;
       node->poll = pty_slave_poll;
+      node->open = pty_slave_open;
+      node->close = pty_slave_close;
+      node->mmap = pty_slave_mmap;
       node->device = pty;
+      node->wait_queue = pty->slave_waitq;
 
       goto open_done;
+    }
+
+    // Special handling for /dev/tty - return controlling terminal
+    if (strcmp(dev_path, "tty") == 0) {
+      struct thread *t = sched_get_current();
+      if (t && t->ctty) {
+        // Return the controlling terminal (PTY slave)
+        node = t->ctty;
+        vfs_open(node);  // Increment reference count
+        klog_puts("[SYSCALL] /dev/tty -> ctty for tid=");
+        klog_uint64(t->tid);
+        klog_puts("\n");
+        goto open_done;
+      }
+      // Fall through to console if no ctty set
     }
 
     // Try to get from device registry first
@@ -397,11 +446,33 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
     node->length = 0;
 
 open_done:
+  klog_puts("[SYSCALL] open_done BEFORE: fd=");
+  klog_uint64(fd);
+  klog_puts(" fds[4]=");
+  klog_uint64((uint64_t)t->fds[4]);
+  klog_puts("\n");
   vfs_open(node);
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
+  klog_puts("[SYSCALL] open_done AFTER: fd=");
+  klog_uint64(fd);
+  klog_puts(" node=");
+  klog_uint64((uint64_t)node);
+  klog_puts(" fds[fd]=");
+  klog_uint64((uint64_t)t->fds[fd]);
+  klog_puts(" fds[4]=");
+  klog_uint64((uint64_t)t->fds[4]);
+  klog_puts("\n");
 
   return fd;
+}
+
+static uint64_t sys_openat(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
+                           uint64_t mode, uint64_t a4, uint64_t a5) {
+  (void)a4;
+  (void)a5;
+  return (uint64_t)(int)do_sys_open((int)dirfd, (const char *)path_ptr, flags,
+                                    mode);
 }
 
 static uint64_t sys_open(uint64_t path_ptr, uint64_t flags, uint64_t mode,
@@ -409,7 +480,50 @@ static uint64_t sys_open(uint64_t path_ptr, uint64_t flags, uint64_t mode,
   (void)a3;
   (void)a4;
   (void)a5;
-  return do_sys_open(AT_FDCWD, (const char *)path_ptr, flags, mode);
+  return sys_openat(AT_FDCWD, path_ptr, flags, mode, 0, 0);
+}
+
+static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2,
+                         uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  klog_puts("[SYSCALL] dup2: oldfd=");
+  klog_uint64(oldfd);
+  klog_puts(" newfd=");
+  klog_uint64(newfd);
+  klog_puts("\n");
+  struct thread *t = sched_get_current();
+  if (!t || oldfd >= MAX_FDS || newfd >= MAX_FDS || !t->fds[oldfd])
+    return (uint64_t)-9;
+
+  t->fds[newfd] = t->fds[oldfd];
+  t->fd_offsets[newfd] = t->fd_offsets[oldfd];
+  vfs_open(t->fds[newfd]);
+
+  return newfd;
+}
+
+static uint64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
+                          uint64_t a4, uint64_t a5) {
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct thread *t = sched_get_current();
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9;
+
+  klog_puts("[SYSCALL] close: fd=");
+  klog_uint64(fd);
+  klog_puts(" tid=");
+  klog_uint64(t->tid);
+  klog_puts("\n");
+  vfs_close(t->fds[fd]);
+  t->fds[fd] = NULL;
+  return 0;
 }
 
 static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a3,
@@ -418,9 +532,20 @@ static uint64_t sys_read(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a3,
   (void)a4;
   (void)a5;
 
-  if (!is_user_ptr(buf))
-    return (uint64_t)-14; // EFAULT
   struct thread *t = sched_get_current();
+  klog_puts("[SYSCALL] read ENTER tid=");
+  klog_uint64(t->tid);
+  klog_puts(" fd=");
+  klog_uint64(fd);
+  klog_puts(" count=");
+  klog_uint64(count);
+  klog_puts(" fds[0]=");
+  klog_uint64((uint64_t)(t ? t->fds[0] : 0));
+  klog_puts("\n");
+
+  if (!is_user_ptr(buf) || !vmm_is_user_addr_range_valid(buf, count))
+    return (uint64_t)-14; // EFAULT
+
   if (!t || fd >= MAX_FDS || !t->fds[fd])
     return (uint64_t)-9; // EBADF
 
@@ -460,17 +585,12 @@ static uint64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2,
 // write() syscall results in exactly ONE framebuffer blit.  This kills the
 // per-character flicker that kilo was triggering.
 static int64_t fd_write(int fd, const void *buf, size_t count) {
-  if (fd == 1 || fd == 2) {
-    // Batch the whole buffer, swap framebuffer once at the end.
-    console_write_batch((const char *)buf, count);
-    return (int64_t)count;
-  }
-
   struct thread *t = sched_get_current();
-  if (!t || fd >= MAX_FDS || !t->fds[fd])
+  if (!t || fd < 0 || fd >= MAX_FDS || !t->fds[fd])
     return -9; // EBADF
 
   vfs_node_t *node = t->fds[fd];
+
   int32_t bytes_written =
       (int32_t)vfs_write(node, t->fd_offsets[fd], count, (uint8_t *)buf);
 
@@ -487,9 +607,23 @@ static uint64_t sys_write(uint64_t fd, uint64_t buf, uint64_t count,
   (void)a4;
   (void)a5;
 
-  if (!is_user_ptr(buf))
+  if (!is_user_ptr(buf) || !vmm_is_user_addr_range_valid(buf, count))
     return (uint64_t)-14; // EFAULT
+
+  /*
+  {
+    klog_puts("[SYSCALL] write tid=");
+    klog_uint64(sched_get_current()->tid);
+    klog_puts(" fd=");
+    klog_uint64(fd);
+    klog_puts(" count=");
+    klog_uint64(count);
+    klog_puts("\n");
+  }
+  */
+
   int64_t r = fd_write((int)fd, (const void *)buf, (size_t)count);
+
   return (uint64_t)r;
 }
 
@@ -509,6 +643,16 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
     return (uint64_t)-22; // EINVAL
 
   struct user_iovec *iov = (struct user_iovec *)iov_u;
+
+  struct thread *t = sched_get_current();
+  if (t && t->tid == 13) {
+    klog_puts("[SYSCALL] writev tid=13 fd=");
+    klog_uint64(fd);
+    klog_puts(" iovcnt=");
+    klog_uint64(iovcnt);
+    klog_puts("\n");
+  }
+
   size_t total = 0;
 
   for (uint64_t i = 0; i < iovcnt; i++) {
@@ -517,11 +661,22 @@ static uint64_t sys_writev(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
     if (len == 0)
       continue;
     int64_t w = fd_write((int)fd, (const void *)base, (size_t)len);
-    if (w < 0)
+    if (w < 0) {
+      if (t && t->tid == 13) {
+        klog_puts("[SYSCALL] writev tid=13 RETURN ERROR=");
+        klog_uint64((uint64_t)(-w));
+        klog_puts("\n");
+      }
       return (uint64_t)w;
+    }
     total += (size_t)w;
     if ((size_t)w != len)
       break;
+  }
+  if (t && t->tid == 13) {
+    klog_puts("[SYSCALL] writev tid=13 RETURN=");
+    klog_uint64(total);
+    klog_puts("\n");
   }
   return total;
 }
@@ -532,11 +687,15 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
   (void)a4;
   (void)a5;
 
-  klog_puts("[SYSCALL] sys_ioctl fd=");
-  klog_uint64(fd);
-  klog_puts(" request=");
-  klog_hex64(request);
-  klog_puts("\n");
+  /*
+    klog_puts("[SYSCALL] sys_ioctl fd=");
+    klog_uint64(fd);
+    klog_puts(" request=");
+    klog_hex64(request);
+    klog_puts(" arg=");
+    klog_hex64(arg);
+    klog_puts("\n");
+  */
 
   // Most ioctls take pointers. A few take ints. However, no valid integer
   // argument or user pointer should ever be in the kernel/HHDM address range.
@@ -550,6 +709,18 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
   if (fd < MAX_FDS && t->fds[fd]) {
     vfs_node_t *node = t->fds[fd];
     if (node->ioctl) {
+      // Generic validation for Linux-encoded ioctls (bits 31:30 determine R/W)
+      // IOC_WRITE (0x40000000) -> kernel reads from user
+      // IOC_READ (0x80000000) -> kernel writes to user
+      if (request & 0xC0000000) {
+        size_t sz = (request >> 16) & 0x3FFF;
+        if (sz > 0 && !vmm_is_user_addr_range_valid(arg, sz)) {
+          klog_puts(
+              "[SYSCALL] ioctl: invalid arg pointer for encoded request\n");
+          return (uint64_t)-14; // EFAULT
+        }
+      }
+
       uint64_t res = (uint64_t)node->ioctl(node, (uint32_t)request, arg);
       if (res != (uint64_t)-25) {
         return res;
@@ -560,27 +731,18 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
   switch ((uint32_t)request) {
   case TIOCGWINSZ: {
     struct winsize *ws = (struct winsize *)arg;
-    if (!ws)
+    if (!ws || !vmm_is_user_addr_range_valid(arg, sizeof(struct winsize)))
       return (uint64_t)-14; // EFAULT
     ws->ws_row = (unsigned short)(fb_get_height() / FONT_HEIGHT);
     ws->ws_col = (unsigned short)(fb_get_width() / FONT_WIDTH);
     ws->ws_xpixel = (unsigned short)fb_get_width();
     ws->ws_ypixel = (unsigned short)fb_get_height();
-    
-    klog_puts("[IOCTL] TIOCGWINSZ: ");
-    klog_uint64(ws->ws_row);
-    klog_puts("x");
-    klog_uint64(ws->ws_col);
-    klog_puts(" (pixels: ");
-    klog_uint64(ws->ws_xpixel);
-    klog_puts("x");
-    klog_uint64(ws->ws_ypixel);
-    klog_puts(")\n");
+
     return 0;
   }
   case TCGETS: {
     struct termios *t = (struct termios *)arg;
-    if (!t)
+    if (!t || !vmm_is_user_addr_range_valid(arg, sizeof(struct termios)))
       return -14;
     extern struct termios console_termios;
     *t = console_termios;
@@ -590,7 +752,7 @@ static uint64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg,
   case TCSETSW:
   case TCSETSF: {
     const struct termios *term = (const struct termios *)arg;
-    if (!term)
+    if (!term || !vmm_is_user_addr_range_valid(arg, sizeof(struct termios)))
       return (uint64_t)-14;
     console_termios = *term;
     return 0;
@@ -705,24 +867,6 @@ static uint64_t sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence,
 
   t->fd_offsets[fd] = (uint32_t)new_offset;
   return (uint64_t)new_offset;
-}
-static uint64_t sys_close(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3,
-                          uint64_t a4, uint64_t a5) {
-  (void)a1;
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-
-  struct thread *t = sched_get_current();
-  if (!t || fd >= MAX_FDS || !t->fds[fd])
-    return (uint64_t)-9; // EBADF
-
-  vfs_close(t->fds[fd]);
-  t->fds[fd] = NULL;
-  t->fd_offsets[fd] = 0;
-
-  return 0;
 }
 
 static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
@@ -856,6 +1000,17 @@ static void fill_kstat(struct kstat *ks, vfs_node_t *node) {
 }
 
 // ── sys_stat: stat(path, statbuf) ────────────────────────────────────────────
+static uint64_t sys_fadvise64(uint64_t fd, uint64_t offset, uint64_t len,
+                             uint64_t advice, uint64_t a4, uint64_t a5) {
+  (void)fd;
+  (void)offset;
+  (void)len;
+  (void)advice;
+  (void)a4;
+  (void)a5;
+  return 0;
+}
+
 static uint64_t sys_stat(uint64_t path_ptr, uint64_t statbuf_ptr, uint64_t a2,
                          uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a2;
@@ -1129,6 +1284,51 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
   return written;
 }
 
+struct linux_dirent {
+  uint64_t d_ino;
+  uint64_t d_off;
+  uint16_t d_reclen;
+  char d_name[];
+};
+
+static uint64_t sys_getdents(uint64_t fd, uint64_t dirp, uint64_t count,
+                             uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct thread *t = sched_get_current();
+  if (!t || fd >= MAX_FDS || !t->fds[fd])
+    return (uint64_t)-9;
+  vfs_node_t *node = t->fds[fd];
+  if ((node->flags & 0xFF) != FS_DIRECTORY)
+    return (uint64_t)-20;
+  uint8_t *buf = (uint8_t *)dirp;
+  if (!buf || !vmm_is_user_addr_range_valid(dirp, count))
+    return (uint64_t)-14;
+  size_t written = 0;
+  uint32_t index = t->fd_offsets[fd];
+  while (1) {
+    struct dirent *de = vfs_readdir(node, index);
+    if (!de)
+      break;
+    size_t name_len = strlen(de->name);
+    size_t entry_size = 8 + 8 + 2 + name_len + 2;
+    entry_size = (entry_size + 7) & ~7;
+    if (written + entry_size > count)
+      break;
+    struct linux_dirent *entry = (struct linux_dirent *)(buf + written);
+    entry->d_ino = de->ino;
+    entry->d_off = (uint64_t)(index + 1);
+    entry->d_reclen = (uint16_t)entry_size;
+    strcpy(entry->d_name, de->name);
+    buf[written + entry_size - 1] = 0; // DT_UNKNOWN
+    written += entry_size;
+    index++;
+  }
+  t->fd_offsets[fd] = index;
+  return written;
+}
+
 // Simple xorshift64 PRNG state
 static uint64_t prng_state = 0;
 
@@ -1141,7 +1341,7 @@ static void prng_seed(void) {
   __asm__ volatile("rdtsc" : "=A"(tsc));
 
   // Mix with PIT ticks if available
-  uint64_t ticks = pit_get_ticks();
+  uint64_t ticks = lapic_timer_get_ticks();
 
   // Combine sources
   prng_state = tsc ^ (ticks << 32) ^ 0xDEADBEEFCAFEBABEULL;
@@ -1427,6 +1627,16 @@ static uint64_t sys_readv(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
   (void)a3;
   (void)a4;
   (void)a5;
+
+  struct thread *t = sched_get_current();
+  klog_puts("[SYSCALL] readv ENTER tid=");
+  klog_uint64(t->tid);
+  klog_puts(" fd=");
+  klog_uint64(fd);
+  klog_puts(" iovcnt=");
+  klog_uint64(iovcnt);
+  klog_puts("\n");
+
   if (iovcnt == 0)
     return 0;
   if (iovcnt > 1024)
@@ -1724,7 +1934,7 @@ static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
           base_dir = fs_root;
       }
     } else {
-      if ((int)dirfd < 0 || dirfd >= MAX_FDS || !t->fds[dirfd])
+      if ((int)dirfd < 0 || (int)dirfd >= MAX_FDS || !t->fds[dirfd])
         return (uint64_t)-9; // EBADF
       base_dir = t->fds[dirfd];
       if ((base_dir->flags & 0xFF) != FS_DIRECTORY)
@@ -1749,22 +1959,9 @@ static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
   fill_kstat(ks, node);
   return 0;
 }
-
-// ── sys_openat: openat(dirfd, pathname, flags, mode) — syscall 257 ──────────
-static uint64_t sys_openat(uint64_t dirfd, uint64_t pathname_ptr,
-                           uint64_t flags, uint64_t mode, uint64_t a4,
-                           uint64_t a5) {
-  (void)a4;
-  (void)a5;
-  return do_sys_open((int)dirfd, (const char *)pathname_ptr, flags, mode);
-}
-
-// ── Helper: split path into parent dir + basename ───────────────────────────
-// Returns the parent VFS node and writes the basename into 'name_out'.
-// Returns NULL on failure.
 static vfs_node_t *resolve_parent_and_name(const char *path, char *name_out,
                                            size_t name_size) {
-  if (!path || !name_out || name_size == 0)
+  if (!path)
     return NULL;
 
   size_t len = strlen(path);
@@ -2103,36 +2300,6 @@ static uint64_t sys_dup(uint64_t oldfd, uint64_t a1, uint64_t a2, uint64_t a3,
   return newfd;
 }
 
-// ── sys_dup2: dup2(oldfd, newfd) — syscall 33 ────────────────────────────────
-static uint64_t sys_dup2(uint64_t oldfd, uint64_t newfd, uint64_t a2,
-                         uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a2;
-  (void)a3;
-  (void)a4;
-  (void)a5;
-  struct thread *t = sched_get_current();
-  if (!t || oldfd >= MAX_FDS || !t->fds[oldfd])
-    return (uint64_t)-9; // EBADF
-
-  if (newfd >= MAX_FDS)
-    return (uint64_t)-9; // EBADF
-
-  if (oldfd == newfd)
-    return newfd;
-
-  // If newfd is already open, close it
-  if (t->fds[newfd]) {
-    vfs_close(t->fds[newfd]);
-    t->fds[newfd] = NULL;
-    t->fd_offsets[newfd] = 0;
-  }
-
-  t->fds[newfd] = t->fds[oldfd];
-  t->fd_offsets[newfd] = t->fd_offsets[oldfd];
-
-  return newfd;
-}
-
 static uint64_t sys_utimensat(uint64_t dirfd, uint64_t pathname, uint64_t times,
                               uint64_t flags, uint64_t a4, uint64_t a5) {
   (void)dirfd;
@@ -2182,10 +2349,6 @@ static uint64_t sys_fchmod(uint64_t fd, uint64_t mode, uint64_t a2, uint64_t a3,
   return 0;
 }
 
-// ── sys_link: link(oldpath, newpath) — syscall 86 ────────────────────────────
-// Minimal implementation: since ramfs/ext2 don't support hard links natively,
-// we create a new file at newpath with the same content as oldpath.
-// This is sufficient for Xorg's lock file mechanism.
 static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
                          uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)a2;
@@ -2194,24 +2357,18 @@ static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
   (void)a5;
   const char *oldpath = (const char *)oldpath_ptr;
   const char *newpath = (const char *)newpath_ptr;
-
   if (!oldpath || !newpath)
-    return (uint64_t)-14; // EFAULT
-
-  // Resolve the source file
+    return (uint64_t)-14;
   vfs_node_t *src = vfs_resolve_path(oldpath);
   if (!src)
-    return (uint64_t)-2; // ENOENT
-
+    return (uint64_t)-2;
   if ((src->flags & 0xFF) != FS_FILE)
-    return (uint64_t)-1; // EPERM - can only link regular files
+    return (uint64_t)-1;
 
-  // Parse newpath to find parent directory and filename
-  char parent_path[128];
-  char file_name[128];
+  char parent_path[128], file_name[128];
   size_t len = strlen(newpath);
   if (len == 0 || len >= sizeof(file_name))
-    return (uint64_t)-36; // ENAMETOOLONG
+    return (uint64_t)-36;
 
   const char *slash = 0;
   for (const char *p = newpath; *p; p++)
@@ -2221,9 +2378,7 @@ static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
   vfs_node_t *parent = fs_root;
   if (slash) {
     size_t parent_len = (size_t)(slash - newpath);
-    if (parent_len == 0) {
-      parent = fs_root;
-    } else {
+    if (parent_len > 0) {
       if (parent_len >= sizeof(parent_path))
         return (uint64_t)-36;
       memcpy(parent_path, newpath, parent_len);
@@ -2236,22 +2391,14 @@ static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
   }
 
   if (!parent || (parent->flags & 0xFF) != FS_DIRECTORY)
-    return (uint64_t)-20; // ENOTDIR
-
-  // Check if target already exists
+    return (uint64_t)-20;
   if (vfs_finddir(parent, file_name))
-    return (uint64_t)-17; // EEXIST
-
-  // Create the new file
+    return (uint64_t)-17;
   if (vfs_create(parent, file_name, src->mask & 0777) != 0)
     return (uint64_t)-1;
 
-  // Copy content from source to destination
   vfs_node_t *dst = vfs_finddir(parent, file_name);
-  if (!dst)
-    return (uint64_t)-1;
-
-  if (src->length > 0) {
+  if (dst && src->length > 0) {
     uint8_t buf[512];
     uint32_t offset = 0;
     while (offset < src->length) {
@@ -2265,75 +2412,34 @@ static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
       offset += rd;
     }
   }
-
   return 0;
 }
 
-// ── sys_poll: poll(fds, nfds, timeout) — syscall 7
-// ────────────────────────────
 struct pollfd {
   int fd;
   short events;
   short revents;
 };
 
-static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
-                         uint64_t a3, uint64_t a4, uint64_t a5) {
-  (void)a3;
-  (void)a4;
-  (void)a5;
-
+static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
+                        uint64_t timeout_ms) {
   struct thread *t = sched_get_current();
   if (!t)
     return (uint64_t)-1;
 
-  // poll(NULL, 0, timeout) is valid - just sleep
-  if (nfds == 0) {
-    if (timeout_ms > 0) {
-      // Simple delay by yielding multiple times
-      uint64_t iterations = timeout_ms / 10; // Approximate 10ms per yield
-      for (uint64_t i = 0; i < iterations; i++) {
-        sched_yield();
-      }
-    }
-    return 0;
-  }
-
-  // Validate fds pointer
-  if (!is_user_ptr(fds_ptr)) {
-    return (uint64_t)-14; // EFAULT
-  }
-
-  if (nfds > 1024) {
-    return (uint64_t)-22; // EINVAL
-  }
-
-  struct pollfd *fds = (struct pollfd *)fds_ptr;
   int ready = 0;
-
-  // Simple polling implementation (no blocking for now)
-  // For each fd, check if any requested events are ready
   for (uint64_t i = 0; i < nfds; i++) {
     int fd = fds[i].fd;
-    short events = fds[i].events;
-    short revents = 0;
-
-    // Negative fd is ignored per POSIX (revents stays 0)
     if (fd < 0) {
       fds[i].revents = 0;
       continue;
     }
-
-    // Invalid fd (out of range or not open)
     if (fd >= MAX_FDS || !t->fds[fd]) {
       fds[i].revents = POLLNVAL;
       ready++;
       continue;
     }
-
-    // Call VFS poll handler
-    vfs_node_t *node = t->fds[fd];
-    int ret = vfs_poll(node, events);
+    int ret = vfs_poll(t->fds[fd], fds[i].events);
     if (ret < 0) {
       fds[i].revents = POLLNVAL;
       ready++;
@@ -2345,29 +2451,23 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
     }
   }
 
-  // If nothing ready and timeout_ms != 0, yield and try again
   if (ready == 0 && timeout_ms != 0) {
     uint64_t start_ms = lapic_timer_get_ms();
     while (ready == 0) {
-      // Check if we've exceeded the timeout
-      if (timeout_ms != (uint64_t)-1) {
-        if (lapic_timer_get_ms() - start_ms >= timeout_ms) {
-          break;
-        }
-      }
-
+      if (timeout_ms != (uint64_t)-1 &&
+          lapic_timer_get_ms() - start_ms >= timeout_ms)
+        break;
+      // Optimize: sleep for 1 tick (1ms) then check again.
+      // This prevents the CPU from being pegged at 100% while
+      // allowing I/O to be processed with very low latency.
+      t->state = THREAD_SLEEPING;
+      t->wakeup_ticks = lapic_timer_get_ticks() + 1;
       sched_yield();
-
       for (uint64_t i = 0; i < nfds; i++) {
         int fd = fds[i].fd;
-        short events = fds[i].events;
-
-        if (fd < 0 || fd >= MAX_FDS || !t->fds[fd]) {
+        if (fd < 0 || fd >= MAX_FDS || !t->fds[fd])
           continue;
-        }
-
-        vfs_node_t *node = t->fds[fd];
-        int ret = vfs_poll(node, events);
+        int ret = vfs_poll(t->fds[fd], fds[i].events);
         if (ret > 0) {
           fds[i].revents = (short)ret;
           ready++;
@@ -2375,8 +2475,125 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
       }
     }
   }
-
   return (uint64_t)ready;
+}
+
+static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
+                         uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a3;
+  (void)a4;
+  (void)a5;
+
+  struct thread *t = sched_get_current();
+  if (nfds == 0) {
+    if (timeout_ms > 0 && timeout_ms != (uint64_t)-1) {
+      t->state = THREAD_SLEEPING;
+      uint64_t wait = (timeout_ms == (uint64_t)-1) ? 10 : timeout_ms;
+      if (wait == 0)
+        wait = 1;
+      t->wakeup_ticks = lapic_timer_get_ticks() + wait;
+      sched_yield();
+    }
+    return 0;
+  }
+  if (!is_user_ptr(fds_ptr) ||
+      !vmm_is_user_addr_range_valid(fds_ptr, nfds * sizeof(struct pollfd)))
+    return (uint64_t)-14;
+
+  return do_poll((struct pollfd *)fds_ptr, nfds, timeout_ms);
+}
+
+static uint64_t sys_pselect6(uint64_t nfds, uint64_t readfds, uint64_t writefds,
+                             uint64_t exceptfds, uint64_t timeout,
+                             uint64_t sigmask) {
+  (void)sigmask;
+  if (nfds > 1024)
+    return (uint64_t)-22;
+  size_t set_size = (nfds + 7) / 8;
+  if (readfds && (!is_user_ptr(readfds) ||
+                  !vmm_is_user_addr_range_valid(readfds, set_size)))
+    return (uint64_t)-14;
+  if (writefds && (!is_user_ptr(writefds) ||
+                   !vmm_is_user_addr_range_valid(writefds, set_size)))
+    return (uint64_t)-14;
+  if (exceptfds && (!is_user_ptr(exceptfds) ||
+                    !vmm_is_user_addr_range_valid(exceptfds, set_size)))
+    return (uint64_t)-14;
+
+  uint64_t timeout_ms = (uint64_t)-1;
+  if (timeout && is_user_ptr(timeout)) {
+    if (!vmm_is_user_addr_range_valid(timeout, 16))
+      return (uint64_t)-14;
+    struct {
+      int64_t tv_sec;
+      int64_t tv_nsec;
+    } *ts = (void *)timeout;
+    timeout_ms = (uint64_t)(ts->tv_sec * 1000 + ts->tv_nsec / 1000000);
+  }
+
+  struct pollfd pfds[128];
+  uint64_t p_count = 0;
+  for (int fd = 0; fd < (int)nfds && p_count < 128; fd++) {
+    short events = 0;
+    if (readfds && (((uint64_t *)readfds)[fd / 64] & (1ULL << (fd % 64))))
+      events |= 0x0001;
+    if (writefds && (((uint64_t *)writefds)[fd / 64] & (1ULL << (fd % 64))))
+      events |= 0x0004;
+    if (events) {
+      pfds[p_count].fd = fd;
+      pfds[p_count].events = events;
+      pfds[p_count].revents = 0;
+      p_count++;
+    }
+  }
+
+  if (p_count == 0) {
+    if (timeout_ms != (uint64_t)-1 && timeout_ms > 0) {
+      struct thread *t = sched_get_current();
+      t->state = THREAD_SLEEPING;
+      uint64_t wait = (timeout_ms == (uint64_t)-1) ? 10 : timeout_ms;
+      if (wait == 0)
+        wait = 1;
+      t->wakeup_ticks = lapic_timer_get_ticks() + wait;
+      sched_yield();
+    }
+    if (readfds)
+      memset((void *)readfds, 0, set_size);
+    if (writefds)
+      memset((void *)writefds, 0, set_size);
+    if (exceptfds)
+      memset((void *)exceptfds, 0, set_size);
+    return 0;
+  }
+
+  uint64_t ready = do_poll(pfds, p_count, timeout_ms);
+  if ((int64_t)ready < 0)
+    return ready;
+
+  if (readfds)
+    memset((void *)readfds, 0, set_size);
+  if (writefds)
+    memset((void *)writefds, 0, set_size);
+  if (exceptfds)
+    memset((void *)exceptfds, 0, set_size);
+
+  uint64_t res_count = 0;
+  for (uint64_t i = 0; i < p_count; i++) {
+    if (pfds[i].revents == 0)
+      continue;
+    int fd = pfds[i].fd;
+    if (pfds[i].revents & (0x0001 | 0x0010 | 0x0008)) {
+      if (readfds)
+        ((uint64_t *)readfds)[fd / 64] |= (1ULL << (fd % 64));
+      res_count++;
+    }
+    if (pfds[i].revents & 0x0004) {
+      if (writefds)
+        ((uint64_t *)writefds)[fd / 64] |= (1ULL << (fd % 64));
+      res_count++;
+    }
+  }
+  return res_count;
 }
 
 void syscall_register_io(void) {
@@ -2398,6 +2615,8 @@ void syscall_register_io(void) {
   syscall_register(SYS_FSTAT, sys_fstat);
   syscall_register(SYS_LSTAT, sys_lstat);
   syscall_register(SYS_GETDENTS64, sys_getdents64);
+  syscall_register(SYS_GETDENTS, sys_getdents);
+  syscall_register(SYS_PSELECT6, sys_pselect6);
   syscall_register(SYS_PIPE, sys_pipe);
   syscall_register(SYS_PIPE2, sys_pipe2);
   syscall_register(SYS_GETRANDOM, sys_getrandom);
@@ -2422,9 +2641,9 @@ void syscall_register_io(void) {
   syscall_register(SYS_UTIMES, sys_utimes);
   syscall_register(SYS_FCHMOD, sys_fchmod);
   syscall_register(SYS_LINK, sys_link);
+  syscall_register(SYS_FADVISE64, sys_fadvise64);
 
-  // Initialize console termios with standard defaults:
-  console_termios.c_lflag = 0x0000000b; // ISIG | ICANON | ECHO
-  console_termios.c_iflag = 0x00000100; // ICRNL (0x100)
-  console_termios.c_oflag = 0x00000005; // OPOST (1) | ONLCR (4)
+  console_termios.c_lflag = 0x0000000b;
+  console_termios.c_iflag = 0x00000100;
+  console_termios.c_oflag = 0x00000005;
 }

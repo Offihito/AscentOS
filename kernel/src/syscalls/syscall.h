@@ -100,10 +100,14 @@
 #define SYS_UTIMES 280
 #define SYS_FACCESSAT2 439
 #define SYS_STATX 332
+#define SYS_GETDENTS 138
+#define SYS_PSELECT6 270
+
 #define SYS_SETRESUID 117
 #define SYS_SETRESGID 119
 #define SYS_FCHMOD 91
 #define SYS_LINK 86
+#define SYS_FADVISE64 221
 #define SYS_UPTIME 399
 
 // Socket syscalls
