@@ -97,7 +97,7 @@ int fat32_read_cluster(fat32_mount_t *mnt, uint32_t cluster, void *buffer) {
 
 // Write a FAT entry (set next cluster in chain)
 static int fat32_set_fat_entry(fat32_mount_t *mnt, uint32_t cluster, uint32_t value) {
-    if (!FAT32_IS_VALID(cluster)) return -1;
+    if (!FAT32_IS_VALID(cluster) || cluster >= mnt->total_clusters + 2) return -1;
     
     uint32_t fat_offset = cluster * 4;
     uint32_t fat_sector = mnt->fat_start_sector + (fat_offset / mnt->bytes_per_sector);
@@ -250,7 +250,7 @@ static int fat32_unlink_impl(vfs_node_t *parent, char *name) {
             if (entry->attr == 0x0F) continue;
             
             // Compare name (SFN comparison)
-            char sfn[12];
+            char sfn[13];
             int j = 0;
             for (int k = 0; k < 8 && entry->name[k] != ' '; k++) {
                 sfn[j++] = entry->name[k];
@@ -528,7 +528,7 @@ static uint32_t fat32_write_impl(vfs_node_t *node, uint32_t offset,
                         if (entry->attr == 0x0F) continue;
                         
                         // Build SFN from entry and compare
-                        char sfn[12];
+                        char sfn[13];
                         int j = 0;
                         for (int k = 0; k < 8 && entry->name[k] != ' '; k++) {
                             sfn[j++] = entry->name[k];
@@ -745,7 +745,10 @@ static vfs_node_t *fat32_make_vfs_node(fat32_mount_t *mnt, fat32_dir_entry_t *en
     
     // Set name - use LFN if available, otherwise SFN
     if (lfn_name && lfn_name[0]) {
-        strncpy(node->name, lfn_name, 127);
+        int _lfn_len = strlen(lfn_name);
+        if (_lfn_len > 127) _lfn_len = 127;
+        memcpy(node->name, lfn_name, _lfn_len);
+        node->name[_lfn_len] = '\0';
     } else {
         // Convert 8.3 name to null-terminated string
         int j = 0;
@@ -971,7 +974,10 @@ static struct dirent *fat32_readdir_impl(vfs_node_t *node, uint32_t index) {
                 
                 // Set name
                 if (lfn_name[0]) {
-                    strncpy(dirent->name, lfn_name, 127);
+                    int _lfn_len = strlen(lfn_name);
+                    if (_lfn_len > 127) _lfn_len = 127;
+                    memcpy(dirent->name, lfn_name, _lfn_len);
+                    dirent->name[_lfn_len] = '\0';
                 } else {
                     // Convert 8.3 name
                     int j = 0;
@@ -1198,7 +1204,7 @@ int fat32_mount(struct block_device *dev, vfs_node_t *mountpoint) {
     }
     memset(root_vfs, 0, sizeof(vfs_node_t));
     
-    strcpy(root_vfs->name, "mnt");
+    memcpy(root_vfs->name, "mnt", 4);
     root_vfs->flags = FS_DIRECTORY;
     root_vfs->impl = mnt->root_cluster;
     root_vfs->device = mnt;
@@ -1234,7 +1240,7 @@ int fat32_mount_root(struct block_device *dev) {
     if (!root) return -1;
     memset(root, 0, sizeof(vfs_node_t));
     
-    strcpy(root->name, "/");
+    memcpy(root->name, "/", 2);
     root->flags = FS_DIRECTORY;
     
     // Mount FAT32 onto this node
@@ -1276,7 +1282,7 @@ void fat32_self_test(void) {
         return;
     }
     memset(mountpoint, 0, sizeof(vfs_node_t));
-    strcpy(mountpoint->name, "test");
+    memcpy(mountpoint->name, "test", 5);
     
     int mount_result = fat32_mount(dev, mountpoint);
     if (mount_result == 0) {
