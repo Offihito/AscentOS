@@ -40,40 +40,70 @@ bootstrap_toolchain() {
 			"$MUSL_CROSS_MAKE_DIR"
 	fi
 	cd "$MUSL_CROSS_MAKE_DIR"
-	# Copy config.mak with C++ support if available
+	# Copy or generate config.mak with C++ support
 	CONFIG_MAK="$ROOT_DIR/toolchain/musl-cross-make-config.mak"
 	if [ -f "$CONFIG_MAK" ]; then
 		cp "$CONFIG_MAK" config.mak
-		echo "Using config.mak with C++ support"
+		echo "Using provided config.mak"
+	else
+		echo "Generating default config.mak with C++ support..."
+		cat > config.mak << EOF
+TARGET = $TARGET
+OUTPUT = $OUTPUT
+GCC_VER = 13.3.0
+BINUTILS_VER = 2.44
+LANGUAGES = c c++
+COMMON_CONFIG += --disable-nls
+GCC_CONFIG += --disable-libquadmath --disable-decimal-float
+GCC_CONFIG += --disable-libitm --disable-fixed-point
+EOF
 	fi
 	echo "Building $TARGET -> $OUTPUT (this can take a long time) ..."
-	make -j"$JOBS" TARGET="$TARGET" OUTPUT="$OUTPUT" install
+	make -j"$JOBS" CC=gcc install
 	cd "$ROOT_DIR"
 }
 
 pick_compiler() {
 	CC=${CC:-}
+	CXX=${CXX:-}
 	CC_BIN=""
+	
+	# If we have a local cross-compiler, prefer it
 	if [ -z "$CC" ] && [ -x "$LOCAL_CROSS_GCC" ]; then
-		CC=$LOCAL_CROSS_GCC
+		CC="$LOCAL_CROSS_GCC"
 	fi
+	if [ -z "$CXX" ] && [ -x "${LOCAL_CROSS_GCC%gcc}g++" ]; then
+		CXX="${LOCAL_CROSS_GCC%gcc}g++"
+	fi
+
+	# Otherwise check for system cross-compiler
 	if [ -z "$CC" ] && command -v x86_64-linux-musl-gcc >/dev/null 2>&1; then
 		CC=x86_64-linux-musl-gcc
 	fi
+	if [ -z "$CXX" ] && command -v x86_64-linux-musl-g++ >/dev/null 2>&1; then
+		CXX=x86_64-linux-musl-g++
+	fi
+	
+	# Fallback to musl-gcc wrapper (C only, will cause fail later if C++ needed)
 	if [ -z "$CC" ] && command -v musl-gcc >/dev/null 2>&1; then
 		CC=musl-gcc
 	fi
-	if [ -z "$CC" ]; then
+
+	if [ -z "$CC" ] || [ -z "$CXX" ]; then
 		return 1
 	fi
+
 	CC_BIN=$(printf '%s\n' "$CC" | awk '{print $1}')
-	if [ -x "$CC_BIN" ]; then
-		return 0
+	if [ ! -x "$CC_BIN" ] && ! command -v "$CC_BIN" >/dev/null 2>&1; then
+		return 1
 	fi
-	if command -v "$CC_BIN" >/dev/null 2>&1; then
-		return 0
+	
+	CXX_BIN=$(printf '%s\n' "$CXX" | awk '{print $1}')
+	if [ ! -x "$CXX_BIN" ] && ! command -v "$CXX_BIN" >/dev/null 2>&1; then
+		return 1
 	fi
-	return 1
+
+	return 0
 }
 
 ensure_compiler() {
