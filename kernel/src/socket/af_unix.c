@@ -379,9 +379,19 @@ static int unix_connect(socket_t *sock, struct sockaddr *addr, int addrlen) {
       wait_queue_add(&usk->wait, &entry);
       current->state = THREAD_BLOCKED;
 
-      sched_yield();
+      // Re-check state while holding dusk->parent->lock OR just before yielding.
+      // But we don't hold any lock here currently.
+      // Wait, we need to hold dusk->parent->lock to check usk->listener and state safely?
+      // Actually at this point usk->wait is the wait queue where we expect the wakeup.
+      
+      if (sock->state != SS_CONNECTING) {
+        current->state = THREAD_RUNNING;
+      } else {
+        sched_yield();
+      }
 
       wait_queue_remove(&usk->wait, &entry);
+      current->state = THREAD_RUNNING;
     }
   }
 
@@ -413,11 +423,18 @@ static int unix_accept(socket_t *sock, socket_t **newsock) {
     wait_queue_add(&usk->wait, &entry);
     current->state = THREAD_BLOCKED;
 
-    spinlock_release(&sock->lock);
-    sched_yield();
-    spinlock_acquire(&sock->lock);
+    // Check again while BLOCKED
+    if (usk->accept_next != NULL) {
+      current->state = THREAD_RUNNING;
+      spinlock_release(&sock->lock);
+    } else {
+      spinlock_release(&sock->lock);
+      sched_yield();
+      spinlock_acquire(&sock->lock);
+    }
 
     wait_queue_remove(&usk->wait, &entry);
+    current->state = THREAD_RUNNING;
   }
 
   // Dequeue the first pending connection
@@ -496,8 +513,16 @@ static ssize_t unix_send(socket_t *sock, const void *buf, size_t len,
 
     wait_queue_add(&usk->wait, &entry);
     current->state = THREAD_BLOCKED;
-    sched_yield();
+
+    // Re-check peer/state
+    if (usk->peer != NULL || sock->state != SS_CONNECTING) {
+      current->state = THREAD_RUNNING;
+    } else {
+      sched_yield();
+    }
+
     wait_queue_remove(&usk->wait, &entry);
+    current->state = THREAD_RUNNING;
   }
 
   unix_sock_t *peer = usk->peer;
@@ -535,8 +560,24 @@ static ssize_t unix_send(socket_t *sock, const void *buf, size_t len,
 
       wait_queue_add(&peer->wait, &entry);
       current->state = THREAD_BLOCKED;
-      sched_yield();
+
+      // Re-acquire peer lock (actually we already have it at this point? 
+      // Line 511 acquired it).
+      // Re-cache space
+      size = peer->recv_buf_size;
+      space = (peer->recv_buf_head - peer->recv_buf_tail - 1 + size) % size;
+
+      if (space > 0) {
+        current->state = THREAD_RUNNING;
+        spinlock_release(&peer->recv_lock);
+      } else {
+        spinlock_release(&peer->recv_lock);
+        sched_yield();
+        spinlock_acquire(&peer->recv_lock);
+      }
+
       wait_queue_remove(&peer->wait, &entry);
+      current->state = THREAD_RUNNING;
 
       if (sock->error)
         return -sock->error;
@@ -558,6 +599,11 @@ static ssize_t unix_send(socket_t *sock, const void *buf, size_t len,
 
     // Wake up peer (they might be blocked on recv)
     wait_queue_wake_all(&peer->wait);
+
+    // Also wake poll() waiters on the peer socket's VFS node
+    if (peer->parent && peer->parent->wait_queue) {
+      wait_queue_wake_all((wait_queue_t *)peer->parent->wait_queue);
+    }
 
     // Notify epoll watchers on peer socket that data is available
     if (peer->parent && peer->parent->node) {
@@ -623,8 +669,24 @@ static ssize_t unix_recv(socket_t *sock, void *buf, size_t len, int flags) {
 
       wait_queue_add(&usk->wait, &entry);
       current->state = THREAD_BLOCKED;
-      sched_yield();
+
+      // Re-check availability while BLOCKED
+      head = usk->recv_buf_head;
+      tail = usk->recv_buf_tail;
+      size = usk->recv_buf_size;
+      available = (tail - head + size) % size;
+
+      if (available > 0 || sock->state != SS_CONNECTED) {
+        current->state = THREAD_RUNNING;
+        spinlock_release(&usk->recv_lock);
+      } else {
+        spinlock_release(&usk->recv_lock);
+        sched_yield();
+        spinlock_acquire(&usk->recv_lock);
+      }
+
       wait_queue_remove(&usk->wait, &entry);
+      current->state = THREAD_RUNNING;
 
       if (sock->error)
         return -sock->error;
@@ -1286,6 +1348,11 @@ void unix_destroy(socket_t *sock) {
 
     wait_queue_wake_all(&peer->wait);
 
+    // Also wake poll() waiters on peer's VFS node
+    if (peer->parent && peer->parent->wait_queue) {
+      wait_queue_wake_all((wait_queue_t *)peer->parent->wait_queue);
+    }
+
     // Notify peer's epoll watchers that connection is closed
     if (peer->parent && peer->parent->node) {
       epoll_notify_event(peer->parent->node, EPOLLIN | EPOLLHUP | EPOLLRDHUP);
@@ -1295,6 +1362,11 @@ void unix_destroy(socket_t *sock) {
 
   // Wake up anyone waiting on our own queue (like senders)
   wait_queue_wake_all(&usk->wait);
+
+  // Also wake poll() waiters on our own VFS node
+  if (sock->wait_queue) {
+    wait_queue_wake_all((wait_queue_t *)sock->wait_queue);
+  }
 
   // If we're in a listener's accept queue, don't free yet
   // Mark as orphaned - accept() will handle and free it

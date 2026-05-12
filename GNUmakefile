@@ -17,7 +17,10 @@ MUSL_SYSROOT := $(CURDIR)/toolchain/musl-sysroot
 MUSL_LIBC := $(MUSL_SYSROOT)/lib/libc.a
 WOLFSSL_LIB := $(MUSL_SYSROOT)/lib/libwolfssl.a
 MUSL_CC ?= x86_64-linux-musl-gcc
+MUSL_CXX ?= x86_64-linux-musl-g++
 MUSL_USER_CFLAGS := -static -O2 -Wall -Wextra -fno-stack-protector \
+	-I$(MUSL_SYSROOT)/include -L$(MUSL_SYSROOT)/lib
+MUSL_USER_CXXFLAGS := -static -O2 -Wall -Wextra -fno-stack-protector -fno-exceptions -fno-rtti \
 	-I$(MUSL_SYSROOT)/include -L$(MUSL_SYSROOT)/lib
 
 .PHONY: all
@@ -109,7 +112,7 @@ run-fat32: edk2-ovmf $(IMAGE_NAME).iso fat32_test.img
 		$(QEMUFLAGS)
 
 # Create a 64MB ext2 disk image with sample files for testing
-disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/lua.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xkbcomp.elf userland/test_shared_irq.elf initrd/startx.sh
+disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cpp.elf userland/test_cow.elf userland/test_syscalls.elf userland/test_kilo_syscalls.elf userland/test_wait4_complex.elf userland/kilo.elf userland/test_args.elf userland/test_stat.elf userland/ls.elf userland/readelf.elf userland/pong.elf userland/raycast.elf userland/test_mmap_shared_private.elf userland/playwav.elf userland/showbmp.elf userland/test_uname_pipe.elf userland/test_pipe_fork.elf userland/test_sys_access.elf userland/test_sys_cwd.elf userland/test_newfstatat.elf userland/test_unlink_rename.elf userland/wget.elf userland/kria.elf userland/doom.elf userland/poll_test.elf userland/pty_test.elf userland/test_tcc_libc.c userland/test_mm.c userland/test_dynamic.elf userland/test_dup.elf userland/test_attrib.elf userland/test_symlink.elf userland/test_cred.elf userland/test_time.elf userland/test_tsc_manual.elf userland/lua.elf userland/test_unix_sock.elf userland/test_unix_fdpass.elf userland/test_fb.elf userland/test_events.elf userland/test_socket_phase3.elf userland/test_socket_phase3_advanced.elf userland/test_socket_phase3_megastress.elf userland/test_socket_phase4.elf userland/test_socket_phase5.elf userland/test_socket_phase6.elf userland/test_socket_phase7.elf userland/test_socket_phase7_advanced.elf userland/test_socket_phase8.elf userland/test_socket_phase9.elf userland/test_socket_phase10.elf userland/test_socket_phase11.elf userland/xeyes.elf userland/test_x11_simple.elf userland/xkbcomp.elf userland/test_shared_irq.elf userland/jwm.elf userland/doom_x11.elf initrd/startx.sh
 	@echo "Creating root filesystem (ext3)..."
 	rm -f /tmp/part.img
 	dd if=/dev/zero of=/tmp/part.img bs=1M count=511
@@ -145,6 +148,8 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf us
 		echo "write userland/test_args.elf bin/test_args"; \
 		echo "rm bin/hello"; \
 		echo "write userland/hello.elf bin/hello"; \
+		echo "rm bin/test_cpp"; \
+		echo "write userland/test_cpp.elf bin/test_cpp"; \
 		echo "rm bin/test_cow"; \
 		echo "write userland/test_cow.elf bin/test_cow"; \
 		echo "rm bin/test_stat"; \
@@ -352,6 +357,16 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cow.elf us
 		debugfs -w -R "rm twm" /tmp/part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write userland/twm.elf twm" /tmp/part.img >/dev/null 2>&1 || true; \
 	fi
+	@if [ -f userland/jwm.elf ]; then \
+		echo "Installing jwm into disk image..."; \
+		debugfs -w -R "rm bin/jwm" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/jwm.elf bin/jwm" /tmp/part.img >/dev/null 2>&1 || true; \
+	fi
+	@if [ -f userland/doom_x11.elf ]; then \
+		echo "Installing doom_x11 into disk image..."; \
+		debugfs -w -R "rm bin/doom_x11" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/doom_x11.elf bin/doom_x11" /tmp/part.img >/dev/null 2>&1 || true; \
+	fi
 
 	@if [ -f userland/xeyes.elf ] || [ -f userland/twm.elf ]; then \
 		debugfs -w -R "rm bin/test_x11_simple" /tmp/part.img >/dev/null 2>&1 || true; \
@@ -462,6 +477,10 @@ musl-toolchain: $(MUSL_LIBC)
 userland/hello.elf: userland/hello.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/hello.c -o userland/hello.elf
+
+userland/test_cpp.elf: userland/test_cpp.cpp $(MUSL_LIBC)
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CXX) $(MUSL_USER_CXXFLAGS) \
+		userland/test_cpp.cpp -o userland/test_cpp.elf
 
 userland/test_cow.elf: userland/test_cow.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
@@ -712,5 +731,8 @@ userland/test_shared_irq.elf: userland/test_shared_irq.c $(MUSL_LIBC)
 userland/pty_test.elf: userland/pty_test.c $(MUSL_LIBC)
 	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MUSL_CC) $(MUSL_USER_CFLAGS) \
 		userland/pty_test.c -o userland/pty_test.elf
+
+userland/jwm.elf: scripts/build-jwm.sh
+	./scripts/build-jwm.sh
 
 .PHONY: all qemu clean

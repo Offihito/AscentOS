@@ -224,11 +224,18 @@ uint32_t ptmx_read(struct vfs_node *node, uint32_t offset, uint32_t size,
     wait_queue_add((wait_queue_t *)pty->master_waitq, &entry);
     entry.thread->state = THREAD_BLOCKED;
 
-    spinlock_release(&pty->lock);
-    sched_yield();
-    spinlock_acquire(&pty->lock);
+    // Last second check while BLOCKED
+    if (!ring_empty(pty->s2m_head, pty->s2m_tail) || pty->slave_open_count == 0) {
+      entry.thread->state = THREAD_RUNNING;
+      spinlock_release(&pty->lock);
+    } else {
+      spinlock_release(&pty->lock);
+      sched_yield();
+    }
 
+    spinlock_acquire(&pty->lock);
     wait_queue_remove((wait_queue_t *)pty->master_waitq, &entry);
+    entry.thread->state = THREAD_RUNNING;
   }
 
   uint32_t read = ring_read(pty->slave_to_master, pty->s2m_head, &pty->s2m_tail,
@@ -502,7 +509,7 @@ void ptmx_close(struct vfs_node *node) {
     return;
 
   spinlock_acquire(&pty->lock);
-  
+
   // Only mark master as closed if no slaves are open
   // This prevents breaking the slave when the terminal emulator
   // accidentally closes the master fd (e.g., by reusing fd for other files)
@@ -515,7 +522,8 @@ void ptmx_close(struct vfs_node *node) {
   } else {
     // Keep master_open = true so slave can still write
     // The buffer will accumulate data until master is reopened
-    klog_puts("[PTY] Master fd closed but slaves still open, keeping PTY alive\n");
+    klog_puts(
+        "[PTY] Master fd closed but slaves still open, keeping PTY alive\n");
   }
 
   // Wake up anything waiting on the slave side to notify them of hangup
@@ -580,11 +588,25 @@ uint32_t pty_slave_read(struct vfs_node *node, uint32_t offset, uint32_t size,
     wait_queue_add((wait_queue_t *)pty->slave_waitq, &entry);
     entry.thread->state = THREAD_BLOCKED;
 
-    spinlock_release(&pty->lock);
-    sched_yield();
-    spinlock_acquire(&pty->lock);
+    // Check availability again while BLOCKED
+    bool recheck_can_read = false;
+    if (!ring_empty(pty->m2s_head, pty->m2s_tail)) {
+      if (!(pty->termios.c_lflag & ICANON) || pty->m2s_newline_count > 0) {
+        recheck_can_read = true;
+      }
+    }
 
+    if (recheck_can_read || !pty->master_open) {
+      entry.thread->state = THREAD_RUNNING;
+      spinlock_release(&pty->lock);
+    } else {
+      spinlock_release(&pty->lock);
+      sched_yield();
+    }
+
+    spinlock_acquire(&pty->lock);
     wait_queue_remove((wait_queue_t *)pty->slave_waitq, &entry);
+    entry.thread->state = THREAD_RUNNING;
     klog_puts("[PTY] slave_read: woke up\n");
   }
 
@@ -640,7 +662,7 @@ uint32_t pty_slave_write(struct vfs_node *node, uint32_t offset, uint32_t size,
 
   while (total_written < size) {
     spinlock_acquire(&pty->lock);
-    
+
     if (!pty->master_open) {
       klog_puts("[PTY] slave_write: master not open\n");
       spinlock_release(&pty->lock);
@@ -649,32 +671,40 @@ uint32_t pty_slave_write(struct vfs_node *node, uint32_t offset, uint32_t size,
 
     // Check if there's space in the buffer
     uint32_t free_space = ring_free(pty->s2m_head, pty->s2m_tail);
-    
+
     if (free_space == 0) {
       // Buffer full - block until master reads
       // Wake up master in case it's waiting
-      if (pty->master_waitq && ((wait_queue_t *)pty->master_waitq)->head != NULL) {
+      if (pty->master_waitq &&
+          ((wait_queue_t *)pty->master_waitq)->head != NULL) {
         wait_queue_wake_all(pty->master_waitq);
       }
-      
+
       // Wait for space
       wait_queue_entry_t entry = {0};
       entry.thread = sched_get_current();
       wait_queue_add((wait_queue_t *)pty->slave_write_waitq, &entry);
       entry.thread->state = THREAD_BLOCKED;
-      
-      spinlock_release(&pty->lock);
-      sched_yield();
+
+      // Re-check space while BLOCKED
+      if (ring_free(pty->s2m_head, pty->s2m_tail) > 0 || !pty->master_open) {
+        entry.thread->state = THREAD_RUNNING;
+        spinlock_release(&pty->lock);
+      } else {
+        spinlock_release(&pty->lock);
+        sched_yield();
+      }
+
       spinlock_acquire(&pty->lock);
-      
       wait_queue_remove((wait_queue_t *)pty->slave_write_waitq, &entry);
-      
+      entry.thread->state = THREAD_RUNNING;
+
       // Re-check master status after waking
       if (!pty->master_open) {
         spinlock_release(&pty->lock);
         break;
       }
-      
+
       free_space = ring_free(pty->s2m_head, pty->s2m_tail);
       if (free_space == 0) {
         // Still no space - try again
@@ -682,7 +712,7 @@ uint32_t pty_slave_write(struct vfs_node *node, uint32_t offset, uint32_t size,
         continue;
       }
     }
-    
+
     if (do_opost && do_onlcr) {
       // Output processing: convert \n to \r\n
       while (total_written < size) {
@@ -696,11 +726,11 @@ uint32_t pty_slave_write(struct vfs_node *node, uint32_t offset, uint32_t size,
           if (free_space < 2)
             break;
           uint8_t crlf[2] = {'\r', '\n'};
-          ring_write(pty->slave_to_master, &pty->s2m_head,
-                     pty->s2m_tail, crlf, 2);
+          ring_write(pty->slave_to_master, &pty->s2m_head, pty->s2m_tail, crlf,
+                     2);
         } else {
-          ring_write(pty->slave_to_master, &pty->s2m_head,
-                     pty->s2m_tail, &c, 1);
+          ring_write(pty->slave_to_master, &pty->s2m_head, pty->s2m_tail, &c,
+                     1);
         }
         total_written++;
       }
@@ -709,15 +739,16 @@ uint32_t pty_slave_write(struct vfs_node *node, uint32_t offset, uint32_t size,
       uint32_t to_write = size - total_written;
       if (to_write > free_space)
         to_write = free_space;
-      uint32_t written_now = ring_write(pty->slave_to_master, &pty->s2m_head, 
-                                          pty->s2m_tail, buffer + total_written, to_write);
+      uint32_t written_now =
+          ring_write(pty->slave_to_master, &pty->s2m_head, pty->s2m_tail,
+                     buffer + total_written, to_write);
       total_written += written_now;
     }
-    
+
     spinlock_release(&pty->lock);
-    
+
     // Wake up master if we wrote something
-    if (pty->master_waitq && 
+    if (pty->master_waitq &&
         ((wait_queue_t *)pty->master_waitq)->head != NULL) {
       wait_queue_wake_all(pty->master_waitq);
     }

@@ -18,6 +18,7 @@ static void console_clear_line_from_cursor(void);
 static void draw_char_colored(char c, uint32_t col, uint32_t row, uint32_t fg,
                               uint32_t bg);
 static void draw_history_char(uint32_t col, uint32_t row);
+static void console_wipe_history_unlocked(void);
 
 static bool terminal_escape = false;
 static char terminal_escape_buffer[32];
@@ -202,6 +203,19 @@ static void console_clear_line_from_cursor(void) {
   }
 }
 
+static void console_wipe_history_unlocked(void) {
+  fb_clear(BG_COLOR);
+  memset(history, 0, sizeof(history));
+  cursor_x = 0;
+  cursor_y = 0;
+  view_scroll_offset = 0;
+  history_write_row = 0;
+  cursor_logical_visible = false;
+  cursor_phys_on = false;
+  current_fg = FG_COLOR;
+  current_bg = BG_COLOR;
+}
+
 // ── SGR escape sequence handler ─────────────────────────────────────────────
 static void console_process_escape_sequence(void) {
   if (terminal_escape_len == 0)
@@ -267,19 +281,95 @@ static void console_process_escape_sequence(void) {
 
   // ── Erase ─────────────────────────────────────────────────────────────────
   case 'J':
-    if (value == 2) {
-      fb_clear(BG_COLOR);
-      memset(history, 0, sizeof(history));
+    if (value == 0) {
+      // Erase from cursor to end of screen
+      console_clear_line_from_cursor();
+      for (uint32_t y = cursor_y + 1; y < max_rows; y++) {
+        uint32_t row = console_history_row(y);
+        for (uint32_t x = 0; x < max_cols; x++) {
+          history[row][x].c = 0;
+          history[row][x].fg = FG_COLOR;
+          history[row][x].bg = BG_COLOR;
+        }
+        if (view_scroll_offset == 0) {
+          fb_fill_rect(0, y * FONT_HEIGHT, fb_get_width(), FONT_HEIGHT,
+                       BG_COLOR);
+        }
+      }
+    } else if (value == 1) {
+      // Erase from beginning of screen to cursor
+      for (uint32_t y = 0; y < cursor_y; y++) {
+        uint32_t row = console_history_row(y);
+        for (uint32_t x = 0; x < max_cols; x++) {
+          history[row][x].c = 0;
+          history[row][x].fg = FG_COLOR;
+          history[row][x].bg = BG_COLOR;
+        }
+        if (view_scroll_offset == 0) {
+          fb_fill_rect(0, y * FONT_HEIGHT, fb_get_width(), FONT_HEIGHT,
+                       BG_COLOR);
+        }
+      }
+      uint32_t row = console_history_row(cursor_y);
+      for (uint32_t x = 0; x <= cursor_x && x < max_cols; x++) {
+        history[row][x].c = 0;
+        history[row][x].fg = FG_COLOR;
+        history[row][x].bg = BG_COLOR;
+        if (view_scroll_offset == 0) {
+          fb_fill_rect(x * FONT_WIDTH, cursor_y * FONT_HEIGHT, FONT_WIDTH,
+                       FONT_HEIGHT, BG_COLOR);
+        }
+      }
+    } else if (value == 2) {
+      // Erase entire viewport but keep scrollback
+      for (uint32_t y = 0; y < max_rows; y++) {
+        uint32_t row = console_history_row(y);
+        for (uint32_t x = 0; x < max_cols; x++) {
+          history[row][x].c = 0;
+          history[row][x].fg = FG_COLOR;
+          history[row][x].bg = BG_COLOR;
+        }
+        if (view_scroll_offset == 0) {
+          fb_fill_rect(0, y * FONT_HEIGHT, fb_get_width(), FONT_HEIGHT,
+                       BG_COLOR);
+        }
+      }
       cursor_x = 0;
       cursor_y = 0;
-      view_scroll_offset = 0;
-      history_write_row = 0;
-      cursor_logical_visible = false;
-      cursor_phys_on = false;
+    } else if (value == 3) {
+      // Erase entire screen AND scrollback (history)
+      console_wipe_history_unlocked();
     }
     break;
   case 'K':
-    console_clear_line_from_cursor();
+    if (value == 0) {
+      // Erase from cursor to end of line
+      console_clear_line_from_cursor();
+    } else if (value == 1) {
+      // Erase from beginning of line to cursor
+      uint32_t row = console_history_row(cursor_y);
+      for (uint32_t x = 0; x <= cursor_x && x < max_cols; x++) {
+        history[row][x].c = 0;
+        history[row][x].fg = FG_COLOR;
+        history[row][x].bg = BG_COLOR;
+        if (view_scroll_offset == 0) {
+          fb_fill_rect(x * FONT_WIDTH, cursor_y * FONT_HEIGHT, FONT_WIDTH,
+                       FONT_HEIGHT, BG_COLOR);
+        }
+      }
+    } else if (value == 2) {
+      // Erase entire line
+      uint32_t row = console_history_row(cursor_y);
+      for (uint32_t x = 0; x < max_cols; x++) {
+        history[row][x].c = 0;
+        history[row][x].fg = FG_COLOR;
+        history[row][x].bg = BG_COLOR;
+        if (view_scroll_offset == 0) {
+          fb_fill_rect(x * FONT_WIDTH, cursor_y * FONT_HEIGHT, FONT_WIDTH,
+                       FONT_HEIGHT, BG_COLOR);
+        }
+      }
+    }
     break;
 
   // ── Cursor visibility ──────────────────────────────────────────────────────

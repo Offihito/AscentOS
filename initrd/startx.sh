@@ -19,15 +19,15 @@ echo "X server hazır, uygulamalar başlatılıyor..."
 # DISPLAY ortam değişkenini ayarla
 export DISPLAY=:0
 
-# twm (Pencere yöneticisi önce başlatılmalı)
-if [ -x /twm ]; then
-    echo "twm başlatılıyor..."
-    /twm &
-elif command -v twm >/dev/null 2>&1; then
-    echo "twm (sistem yolu ile) başlatılıyor..."
-    twm &
+# JWM (Pencere yöneticisi önce başlatılmalı)
+if [ -x /bin/jwm ]; then
+    echo "JWM başlatılıyor..."
+    /bin/jwm &
+elif command -v jwm >/dev/null 2>&1; then
+    echo "JWM (sistem yolu ile) başlatılıyor..."
+    jwm &
 else
-    echo "Uyarı: twm bulunamadı!"
+    echo "Uyarı: JWM bulunamadı!"
 fi
 
 # xeyes

@@ -30,13 +30,6 @@ struct termios {
   unsigned int __c_ospeed;
 };
 
-struct winsize {
-  unsigned short ws_row;
-  unsigned short ws_col;
-  unsigned short ws_xpixel;
-  unsigned short ws_ypixel;
-};
-
 int main(void) {
   int master_fd, slave_fd;
   int pty_num;

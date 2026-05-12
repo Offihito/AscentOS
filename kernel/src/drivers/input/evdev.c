@@ -111,12 +111,21 @@ static uint32_t evdev_vfs_read(struct vfs_node *node, uint32_t offset,
     // No data, must block.
     wait_queue_add(&dev->wait, entry);
     t->state = THREAD_BLOCKED;
-    spinlock_release(&dev->lock);
 
-    sched_yield();
+    // Check one last time while state is BLOCKED and we still hold the lock.
+    // If an event comes now, it's either already here (seen by this check)
+    // or it's waiting for the lock and will see us as BLOCKED.
+    if (dev->head != dev->tail) {
+      t->state = THREAD_RUNNING;
+      spinlock_release(&dev->lock);
+    } else {
+      spinlock_release(&dev->lock);
+      sched_yield();
+    }
 
     // After waking up, remove from queue and try again
     wait_queue_remove(&dev->wait, entry);
+    t->state = THREAD_RUNNING;
   }
 }
 

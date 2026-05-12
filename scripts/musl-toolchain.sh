@@ -40,6 +40,12 @@ bootstrap_toolchain() {
 			"$MUSL_CROSS_MAKE_DIR"
 	fi
 	cd "$MUSL_CROSS_MAKE_DIR"
+	# Copy config.mak with C++ support if available
+	CONFIG_MAK="$ROOT_DIR/toolchain/musl-cross-make-config.mak"
+	if [ -f "$CONFIG_MAK" ]; then
+		cp "$CONFIG_MAK" config.mak
+		echo "Using config.mak with C++ support"
+	fi
 	echo "Building $TARGET -> $OUTPUT (this can take a long time) ..."
 	make -j"$JOBS" TARGET="$TARGET" OUTPUT="$OUTPUT" install
 	cd "$ROOT_DIR"

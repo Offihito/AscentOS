@@ -34,6 +34,7 @@
 #define SYS_WRITEV 20
 #define SYS_ACCESS 21
 #define SYS_PIPE 22
+#define SYS_SELECT 23
 #define SYS_DUP 32
 #define SYS_DUP2 33
 #define SYS_NANOSLEEP 35

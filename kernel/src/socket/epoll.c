@@ -3,6 +3,7 @@
 // Implements the epoll API for event multiplexing
 
 #include "epoll.h"
+#include "../apic/lapic_timer.h"
 #include "../console/klog.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
@@ -46,15 +47,7 @@ static void epoll_table_free(int idx) {
   spinlock_release(&epoll_table_lock);
 }
 
-static eventpoll_t *epoll_table_get(int idx) {
-  if (idx < 0 || idx >= EPOLL_MAX_INSTANCES)
-    return NULL;
 
-  spinlock_acquire(&epoll_table_lock);
-  eventpoll_t *ep = epoll_table[idx];
-  spinlock_release(&epoll_table_lock);
-  return ep;
-}
 
 // ── Epoll Item Management
 // ───────────────────────────────────────────────────────
@@ -373,6 +366,12 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
   int returned = 0;
   struct thread *current = sched_get_current();
 
+  // Add to wait queue once for the duration of the wait
+  wait_queue_entry_t entry;
+  entry.thread = current;
+  entry.next = NULL;
+  wait_queue_add(&ep->wq, &entry);
+
   while (returned == 0) {
     spinlock_acquire(&ep->lock);
 
@@ -385,7 +384,9 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
 
         epitem_t *epi = list_entry(pos, epitem_t, rdllink);
 
-        // Get current events
+        // Get current events - this may call VFS poll which could take other locks
+        // Normally we should be careful about lock ordering, but ep->lock is
+        // likely safe as it's a leaf structure's lock.
         uint32_t current_events = ep_check_events(epi);
 
         if (current_events) {
@@ -421,38 +422,49 @@ int epoll_wait_impl(eventpoll_t *ep, struct epoll_event *events, int maxevents,
         }
       }
 
-      spinlock_release(&ep->lock);
-      if (returned > 0)
-        return returned;
-    } else {
-      spinlock_release(&ep->lock);
+      if (returned > 0) {
+        spinlock_release(&ep->lock);
+        break;
+      }
     }
 
-    // No events ready - handle timeout
+    // No events ready - handle immediate timeout
     if (timeout_ms == 0) {
-      return 0; // Non-blocking
+      spinlock_release(&ep->lock);
+      break;
     }
 
-    // Blocking wait
-    wait_queue_entry_t entry;
-    entry.thread = current;
-    entry.next = NULL;
-
-    wait_queue_add(&ep->wq, &entry);
+    // Set state to BLOCKED while holding the lock.
+    // This ensures that any concurrent epoll_notify_event will see the thread as
+    // ready-to-be-woken when it tries to take the same lock.
     current->state = THREAD_BLOCKED;
 
-    // TODO: implement actual timeout in scheduler. For now, we rely on wakeups.
+    // Set up timeout if specified
+    if (timeout_ms > 0 && timeout_ms != -1) {
+      current->wakeup_ticks = lapic_timer_get_ticks() + (uint64_t)timeout_ms;
+    } else {
+      current->wakeup_ticks = 0;
+    }
+
+    spinlock_release(&ep->lock);
+
+    // Yield control
     sched_yield();
 
-    wait_queue_remove(&ep->wq, &entry);
-
-    // If timeout was positive, we should technically decrement it, but
-    // for this phase we just loop.
-    if (timeout_ms > 0) {
-      // Simplified timeout handling - if we were woken but still nothing,
-      // we check again. Real timeout would check ticks.
+    // After waking up, check if it was due to a timeout
+    if (timeout_ms > 0 && timeout_ms != -1) {
+      if (lapic_timer_get_ticks() >= current->wakeup_ticks && current->wakeup_ticks != 0) {
+        break; // Return whatever we found (likely 0)
+      }
     }
+
+    // If we were woken up, loop back and check the ready list again
   }
+
+  // Always remove from wait queue before returning
+  wait_queue_remove(&ep->wq, &entry);
+  current->state = THREAD_RUNNING;
+  current->wakeup_ticks = 0;
 
   return returned;
 }

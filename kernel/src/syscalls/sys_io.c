@@ -332,7 +332,7 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       if (t && t->ctty) {
         // Return the controlling terminal (PTY slave)
         node = t->ctty;
-        vfs_open(node);  // Increment reference count
+        vfs_open(node); // Increment reference count
         klog_puts("[SYSCALL] /dev/tty -> ctty for tid=");
         klog_uint64(t->tid);
         klog_puts("\n");
@@ -1001,7 +1001,7 @@ static void fill_kstat(struct kstat *ks, vfs_node_t *node) {
 
 // ── sys_stat: stat(path, statbuf) ────────────────────────────────────────────
 static uint64_t sys_fadvise64(uint64_t fd, uint64_t offset, uint64_t len,
-                             uint64_t advice, uint64_t a4, uint64_t a5) {
+                              uint64_t advice, uint64_t a4, uint64_t a5) {
   (void)fd;
   (void)offset;
   (void)len;
@@ -2452,26 +2452,69 @@ static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
   }
 
   if (ready == 0 && timeout_ms != 0) {
-    uint64_t start_ms = lapic_timer_get_ms();
-    while (ready == 0) {
-      if (timeout_ms != (uint64_t)-1 &&
-          lapic_timer_get_ms() - start_ms >= timeout_ms)
-        break;
-      // Optimize: sleep for 1 tick (1ms) then check again.
-      // This prevents the CPU from being pegged at 100% while
-      // allowing I/O to be processed with very low latency.
-      t->state = THREAD_SLEEPING;
-      t->wakeup_ticks = lapic_timer_get_ticks() + 1;
-      sched_yield();
-      for (uint64_t i = 0; i < nfds; i++) {
+    // Create wait queue entries for each fd we're polling
+    // Each fd needs its own entry to avoid list corruption
+    wait_queue_entry_t entries[128]; // Max 128 fds per poll
+    int entry_fds[128];              // Track which fd each entry belongs to
+    int entry_count = 0;
+
+    // Add to all fd wait queues so we get woken when any has events
+    for (uint64_t i = 0; i < nfds && entry_count < 128; i++) {
+      int fd = fds[i].fd;
+      if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
+        entries[entry_count].thread = t;
+        entries[entry_count].next = NULL;
+        entry_fds[entry_count] = fd;
+        wait_queue_add((wait_queue_t *)t->fds[fd]->wait_queue,
+                       &entries[entry_count]);
+        entry_count++;
+      }
+    }
+
+    // Set up timeout if specified
+    if (timeout_ms != (uint64_t)-1) {
+      t->wakeup_ticks = lapic_timer_get_ticks() + timeout_ms;
+    } else {
+      t->wakeup_ticks = 0; // No timeout
+    }
+
+    // Set state to BLOCKED BEFORE the final check to avoid lost wakeups
+    t->state = THREAD_BLOCKED;
+
+    // Final check for ready fds after setting state
+    for (uint64_t i = 0; i < nfds; i++) {
         int fd = fds[i].fd;
-        if (fd < 0 || fd >= MAX_FDS || !t->fds[fd])
-          continue;
-        int ret = vfs_poll(t->fds[fd], fds[i].events);
-        if (ret > 0) {
-          fds[i].revents = (short)ret;
-          ready++;
+        if (fd >= 0 && fd < MAX_FDS && t->fds[fd]) {
+            if (vfs_poll(t->fds[fd], fds[i].events) > 0) {
+                t->state = THREAD_READY;
+                ready = 1; // Mark as ready so we don't block
+                break;
+            }
         }
+    }
+
+    // Only yield if we're still blocked
+    if (t->state == THREAD_BLOCKED) {
+      sched_yield();
+    }
+
+    // Remove from all wait queues
+    for (int i = 0; i < entry_count; i++) {
+      int fd = entry_fds[i];
+      if (fd >= 0 && fd < MAX_FDS && t->fds[fd] && t->fds[fd]->wait_queue) {
+        wait_queue_remove((wait_queue_t *)t->fds[fd]->wait_queue, &entries[i]);
+      }
+    }
+
+    // Re-poll to get actual events
+    for (uint64_t i = 0; i < nfds; i++) {
+      int fd = fds[i].fd;
+      if (fd < 0 || fd >= MAX_FDS || !t->fds[fd])
+        continue;
+      int ret = vfs_poll(t->fds[fd], fds[i].events);
+      if (ret > 0) {
+        fds[i].revents = (short)ret;
+        ready++;
       }
     }
   }
@@ -2503,34 +2546,9 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
   return do_poll((struct pollfd *)fds_ptr, nfds, timeout_ms);
 }
 
-static uint64_t sys_pselect6(uint64_t nfds, uint64_t readfds, uint64_t writefds,
-                             uint64_t exceptfds, uint64_t timeout,
-                             uint64_t sigmask) {
-  (void)sigmask;
-  if (nfds > 1024)
-    return (uint64_t)-22;
+static uint64_t do_pselect6(uint64_t nfds, uint64_t readfds, uint64_t writefds,
+                           uint64_t exceptfds, uint64_t timeout_ms) {
   size_t set_size = (nfds + 7) / 8;
-  if (readfds && (!is_user_ptr(readfds) ||
-                  !vmm_is_user_addr_range_valid(readfds, set_size)))
-    return (uint64_t)-14;
-  if (writefds && (!is_user_ptr(writefds) ||
-                   !vmm_is_user_addr_range_valid(writefds, set_size)))
-    return (uint64_t)-14;
-  if (exceptfds && (!is_user_ptr(exceptfds) ||
-                    !vmm_is_user_addr_range_valid(exceptfds, set_size)))
-    return (uint64_t)-14;
-
-  uint64_t timeout_ms = (uint64_t)-1;
-  if (timeout && is_user_ptr(timeout)) {
-    if (!vmm_is_user_addr_range_valid(timeout, 16))
-      return (uint64_t)-14;
-    struct {
-      int64_t tv_sec;
-      int64_t tv_nsec;
-    } *ts = (void *)timeout;
-    timeout_ms = (uint64_t)(ts->tv_sec * 1000 + ts->tv_nsec / 1000000);
-  }
-
   struct pollfd pfds[128];
   uint64_t p_count = 0;
   for (int fd = 0; fd < (int)nfds && p_count < 128; fd++) {
@@ -2596,6 +2614,55 @@ static uint64_t sys_pselect6(uint64_t nfds, uint64_t readfds, uint64_t writefds,
   return res_count;
 }
 
+static uint64_t sys_pselect6(uint64_t nfds, uint64_t readfds, uint64_t writefds,
+                             uint64_t exceptfds, uint64_t timeout,
+                             uint64_t sigmask) {
+  (void)sigmask;
+  if (nfds > 1024)
+    return (uint64_t)-22;
+  size_t set_size = (nfds + 7) / 8;
+  if (readfds && (!is_user_ptr(readfds) ||
+                  !vmm_is_user_addr_range_valid(readfds, set_size)))
+    return (uint64_t)-14;
+  if (writefds && (!is_user_ptr(writefds) ||
+                   !vmm_is_user_addr_range_valid(writefds, set_size)))
+    return (uint64_t)-14;
+  if (exceptfds && (!is_user_ptr(exceptfds) ||
+                    !vmm_is_user_addr_range_valid(exceptfds, set_size)))
+    return (uint64_t)-14;
+
+  uint64_t timeout_ms = (uint64_t)-1;
+  if (timeout && is_user_ptr(timeout)) {
+    if (!vmm_is_user_addr_range_valid(timeout, 16))
+      return (uint64_t)-14;
+    struct {
+      int64_t tv_sec;
+      int64_t tv_nsec;
+    } *ts = (void *)timeout;
+    timeout_ms = (uint64_t)(ts->tv_sec * 1000 + ts->tv_nsec / 1000000);
+  }
+
+  return do_pselect6(nfds, readfds, writefds, exceptfds, timeout_ms);
+}
+
+static uint64_t sys_select(uint64_t nfds, uint64_t readfds, uint64_t writefds,
+                           uint64_t exceptfds, uint64_t timeout, uint64_t a5) {
+  (void)a5;
+  uint64_t timeout_ms = (uint64_t)-1;
+
+  if (timeout && is_user_ptr(timeout)) {
+    struct {
+      int64_t tv_sec;
+      int64_t tv_usec;
+    } *tv = (void *)timeout;
+    if (!vmm_is_user_addr_range_valid(timeout, 16))
+      return (uint64_t)-14;
+    timeout_ms = (uint64_t)(tv->tv_sec * 1000 + tv->tv_usec / 1000);
+  }
+
+  return do_pselect6(nfds, readfds, writefds, exceptfds, timeout_ms);
+}
+
 void syscall_register_io(void) {
   syscall_register(SYS_READ, sys_read);
   syscall_register(SYS_WRITE, sys_write);
@@ -2617,6 +2684,7 @@ void syscall_register_io(void) {
   syscall_register(SYS_GETDENTS64, sys_getdents64);
   syscall_register(SYS_GETDENTS, sys_getdents);
   syscall_register(SYS_PSELECT6, sys_pselect6);
+  syscall_register(SYS_SELECT, sys_select);
   syscall_register(SYS_PIPE, sys_pipe);
   syscall_register(SYS_PIPE2, sys_pipe2);
   syscall_register(SYS_GETRANDOM, sys_getrandom);
