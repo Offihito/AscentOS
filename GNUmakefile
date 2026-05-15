@@ -307,10 +307,27 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cpp.elf us
 		debugfs -w -R "mkdir etc/ssl/certs" /tmp/part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm etc/passwd" /tmp/part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write /tmp/passwd etc/passwd" /tmp/part.img >/dev/null 2>&1 || true; \
+		echo "NAME=\"AscentOS\"" > /tmp/os-release; \
+		echo "PRETTY_NAME=\"AscentOS 0.1.0-alpha x86_64\"" >> /tmp/os-release; \
+		echo "ID=ascentos" >> /tmp/os-release; \
+		echo "VERSION_ID=0.1.0" >> /tmp/os-release; \
+		echo "HOME_URL=\"https://github.com/AscentOS\"" >> /tmp/os-release; \
+		debugfs -w -R "rm etc/os-release" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write /tmp/os-release etc/os-release" /tmp/part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "mkdir root" /tmp/part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "rm root/.bashrc" /tmp/part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write /tmp/bashrc root/.bashrc" /tmp/part.img >/dev/null 2>&1 || true; \
-		rm -f /tmp/passwd /tmp/bashrc /tmp/resolv.conf /tmp/hosts; \
+		debugfs -w -R "mkdir root/.config" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "mkdir root/.config/fastfetch" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "mkdir root/fastfetch" /tmp/part.img >/dev/null 2>&1 || true; \
+		echo '{"logo": {"source": "/root/fastfetch/logo.txt", "type": "auto", "color": {"1": "blue", "2": "magenta"}}, "modules": ["title", "separator", "os", "host", "kernel", "uptime", "packages", "shell", "display", "de", "wm", "wmtheme", "theme", "icons", "font", "cursor", "terminal", "terminalfont", "cpu", "gpu", "memory", "swap", "disk", "battery", "poweradapter", "locale", "break", "colors"]}' > /tmp/ff_config.jsonc; \
+		debugfs -w -R "rm root/.config/fastfetch/config.jsonc" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write /tmp/ff_config.jsonc root/.config/fastfetch/config.jsonc" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm root/fastfetch/config.jsonc" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write /tmp/ff_config.jsonc root/fastfetch/config.jsonc" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm root/fastfetch/logo.txt" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write ascii-art.txt root/fastfetch/logo.txt" /tmp/part.img >/dev/null 2>&1 || true; \
+		rm -f /tmp/passwd /tmp/bashrc /tmp/resolv.conf /tmp/hosts /tmp/ff_config.jsonc /tmp/os-release; \
 	fi
 	@if [ -f toolchain/musl-sysroot/bin/tar ]; then \
 		echo "Installing tar into disk image..."; \
@@ -361,6 +378,11 @@ disk.img: test.wav test.bmp test.tar userland/hello.elf userland/test_cpp.elf us
 		echo "Installing jwm into disk image..."; \
 		debugfs -w -R "rm bin/jwm" /tmp/part.img >/dev/null 2>&1 || true; \
 		debugfs -w -R "write userland/jwm.elf bin/jwm" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "mkdir root" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm root/.jwmrc" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write userland/jwmrc root/.jwmrc" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "rm root/bg.png" /tmp/part.img >/dev/null 2>&1 || true; \
+		debugfs -w -R "write room.png root/bg.png" /tmp/part.img >/dev/null 2>&1 || true; \
 	fi
 	@if [ -f userland/doom_x11.elf ]; then \
 		echo "Installing doom_x11 into disk image..."; \

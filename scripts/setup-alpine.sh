@@ -78,6 +78,8 @@ install_apk "libxcursor" "main"
 install_apk "libxfixes" "main"
 install_apk "libxrender" "main"
 install_apk "libxft" "main"
+install_apk "fastfetch" "community"
+install_apk "hwdata-pci" "main"
 
 # 4. Inject into disk.img
 if [ ! -f "${DISK_IMG}" ]; then

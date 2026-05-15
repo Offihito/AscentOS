@@ -15,7 +15,7 @@ static void console_refresh_cursor_unlocked(void);
 static uint32_t console_history_row(uint32_t screen_row);
 static void console_process_escape_sequence(void);
 static void console_clear_line_from_cursor(void);
-static void draw_char_colored(char c, uint32_t col, uint32_t row, uint32_t fg,
+static void draw_char_colored(uint32_t c, uint32_t col, uint32_t row, uint32_t fg,
                               uint32_t bg);
 static void draw_history_char(uint32_t col, uint32_t row);
 static void console_wipe_history_unlocked(void);
@@ -23,6 +23,11 @@ static void console_wipe_history_unlocked(void);
 static bool terminal_escape = false;
 static char terminal_escape_buffer[32];
 static size_t terminal_escape_len = 0;
+
+// ── UTF-8 multi-byte decoder state ───────────────────────────────────────────
+static uint32_t utf8_codepoint = 0;
+static int utf8_bytes_remaining = 0;
+static void console_render_char(uint32_t cp);
 
 #define BG_COLOR 0x00000000
 #define FG_COLOR 0x00CDD6F4
@@ -55,7 +60,7 @@ static uint32_t current_fg = FG_COLOR;
 static uint32_t current_bg = BG_COLOR;
 
 typedef struct {
-  char c;
+  uint32_t c;
   uint32_t fg;
   uint32_t bg;
 } console_char_t;
@@ -163,6 +168,7 @@ static void scroll_up(void) {
   uint8_t *src = (uint8_t *)base + (FONT_HEIGHT * pitch);
 
   memcpy(dst, src, bytes_to_copy);
+  fb_mark_dirty(0, 0, fb_w, move_height);
 
   fb_fill_rect(0, fb_h - FONT_HEIGHT, fb_w, FONT_HEIGHT, BG_COLOR);
 
@@ -268,6 +274,23 @@ static void console_process_escape_sequence(void) {
     if (value == 0)
       value = 1;
     cursor_x = (cursor_x >= (uint32_t)value) ? cursor_x - value : 0;
+    break;
+  case 'E': // Cursor Next Line — move down N lines, cursor to column 1
+    cursor_y += value ? value : 1;
+    if (cursor_y >= max_rows)
+      cursor_y = max_rows - 1;
+    cursor_x = 0;
+    break;
+  case 'F': // Cursor Previous Line — move up N lines, cursor to column 1
+    if (value == 0)
+      value = 1;
+    cursor_y = (cursor_y >= (uint32_t)value) ? cursor_y - value : 0;
+    cursor_x = 0;
+    break;
+  case 'G': // Cursor Horizontal Absolute — move cursor to column N
+    cursor_x = (value > 0) ? (uint32_t)(value - 1) : 0;
+    if (cursor_x >= max_cols)
+      cursor_x = max_cols - 1;
     break;
   case 'H':
   case 'f':
@@ -512,6 +535,12 @@ static void console_process_escape_sequence(void) {
     break;
   }
 
+  case 'd': // Cursor Vertical Absolute — move cursor to row N
+    cursor_y = (value > 0) ? (uint32_t)(value - 1) : 0;
+    if (cursor_y >= max_rows)
+      cursor_y = max_rows - 1;
+    break;
+
   default:
     break;
   }
@@ -519,7 +548,7 @@ static void console_process_escape_sequence(void) {
 
 // ── Character drawing helpers ────────────────────────────────────────────────
 
-static void draw_char_colored(char c, uint32_t col, uint32_t row, uint32_t fg,
+static void draw_char_colored(uint32_t c, uint32_t col, uint32_t row, uint32_t fg,
                               uint32_t bg) {
   const uint8_t *glyph = font_get_glyph(c);
   uint32_t px = col * FONT_WIDTH;
@@ -546,52 +575,33 @@ static void draw_history_char(uint32_t col, uint32_t row) {
   draw_char_colored(ch->c, col, row, ch->fg, ch->bg);
 }
 
-// ── Core putchar (must be called with console_lock held) ─────────────────────
-static void console_putchar_unlocked(char c) {
-  if (terminal_escape) {
-    if (terminal_escape_len < sizeof(terminal_escape_buffer) - 1) {
-      terminal_escape_buffer[terminal_escape_len++] = c;
-    }
-    // Finalise on any character in the range @-~ except '[' (which is the
-    // introducer for CSI sequences that still need more chars).
-    if (c >= '@' && c <= '~' && !(terminal_escape_len == 1 && c == '[')) {
-      console_process_escape_sequence();
-      terminal_escape = false;
-      terminal_escape_len = 0;
-    }
-    return;
-  }
-
-  if (c == 0x1B) {
-    terminal_escape = true;
-    terminal_escape_len = 0;
-    return;
-  }
-
-  serial_putchar(c);
-
-  // Scroll to bottom on any new output if we were viewing history,
-  // or at least reset the offset if desired.
-  // Standard terminal behavior is usually to scroll on output only if
-  // we weren't scrolled far back, but for simplicity we can just reset it
-  // if it's user input (echoed).
-  // For now, let's just ensure manual scrolling works first.
-
-  if (c == '\n') {
+// ── Render a single decoded codepoint on the framebuffer console ─────────────
+static void console_render_char(uint32_t cp) {
+  if (cp == '\n') {
     cursor_x = 0;
-    cursor_y++;
-    history_write_row++;
-    // Clear the new history line
-    uint32_t row = console_history_row(cursor_y);
-    for (uint32_t i = 0; i < COLS_MAX; i++) {
-      history[row][i].c = 0;
-      history[row][i].fg = FG_COLOR;
-      history[row][i].bg = BG_COLOR;
-    }
 
-    if (view_scroll_offset == 0 && cursor_y < max_rows) {
-      fb_fill_rect(0, cursor_y * FONT_HEIGHT, fb_get_width(), FONT_HEIGHT,
-                   BG_COLOR);
+    // Determine if we're at the natural bottom of written content.
+    // If the cursor was repositioned above via ESC[H, we must NOT
+    // clear the next row (it already has content like fastfetch's logo).
+    uint32_t bottom_screen =
+        (history_write_row >= max_rows - 1) ? max_rows - 1 : history_write_row;
+    bool at_bottom = (cursor_y >= bottom_screen);
+
+    cursor_y++;
+
+    if (at_bottom) {
+      history_write_row++;
+      uint32_t row = console_history_row(cursor_y);
+      for (uint32_t i = 0; i < COLS_MAX; i++) {
+        history[row][i].c = 0;
+        history[row][i].fg = FG_COLOR;
+        history[row][i].bg = BG_COLOR;
+      }
+
+      if (view_scroll_offset == 0 && cursor_y < max_rows) {
+        fb_fill_rect(0, cursor_y * FONT_HEIGHT, fb_get_width(), FONT_HEIGHT,
+                     BG_COLOR);
+      }
     }
 
     if (cursor_y >= max_rows) {
@@ -613,12 +623,12 @@ static void console_putchar_unlocked(char c) {
     return;
   }
 
-  if (c == '\r') {
+  if (cp == '\r') {
     cursor_x = 0;
     return;
   }
 
-  if (c == '\b') {
+  if (cp == '\b') {
     if (cursor_x > 0) {
       cursor_x--;
     } else if (cursor_y > 0) {
@@ -638,22 +648,22 @@ static void console_putchar_unlocked(char c) {
     return;
   }
 
-  if (c == '\t') {
+  if (cp == '\t') {
     for (int i = 0; i < 4; i++)
-      console_putchar_unlocked(' ');
+      console_render_char(' ');
     return;
   }
 
-  // Standard printable character — store with current SGR colors
+  // Store codepoint with current SGR colors
   if (cursor_x < COLS_MAX) {
     uint32_t row = console_history_row(cursor_y);
-    history[row][cursor_x].c = c;
+    history[row][cursor_x].c = cp;
     history[row][cursor_x].fg = current_fg;
     history[row][cursor_x].bg = current_bg;
   }
 
   if (view_scroll_offset == 0) {
-    draw_char_colored(c, cursor_x, cursor_y, current_fg, current_bg);
+    draw_char_colored(cp, cursor_x, cursor_y, current_fg, current_bg);
   }
 
   cursor_x++;
@@ -682,6 +692,72 @@ static void console_putchar_unlocked(char c) {
       }
     }
   }
+}
+
+// ── Core putchar with UTF-8 decoding (must be called with console_lock held) ─
+static void console_putchar_unlocked(char c) {
+  unsigned char uc = (unsigned char)c;
+
+  // ── ANSI escape sequences (all ASCII, no UTF-8 conflict) ──────────────────
+  if (terminal_escape) {
+    if (terminal_escape_len < sizeof(terminal_escape_buffer) - 1) {
+      terminal_escape_buffer[terminal_escape_len++] = c;
+    }
+    if (c >= '@' && c <= '~' && !(terminal_escape_len == 1 && c == '[')) {
+      console_process_escape_sequence();
+      terminal_escape = false;
+      terminal_escape_len = 0;
+    }
+    return;
+  }
+
+  if (c == 0x1B) {
+    terminal_escape = true;
+    terminal_escape_len = 0;
+    return;
+  }
+
+  // Always forward raw bytes to serial (serial terminals handle UTF-8 natively)
+  serial_putchar(c);
+
+  // ── UTF-8 multi-byte decoding ─────────────────────────────────────────────
+  // Continuation byte (10xxxxxx)
+  if ((uc & 0xC0) == 0x80) {
+    if (utf8_bytes_remaining > 0) {
+      utf8_codepoint = (utf8_codepoint << 6) | (uc & 0x3F);
+      utf8_bytes_remaining--;
+      if (utf8_bytes_remaining == 0) {
+        console_render_char(utf8_codepoint);
+      }
+    }
+    // Stray continuation bytes are silently dropped
+    return;
+  }
+
+  // If we were mid-sequence, the sequence was broken — reset
+  utf8_bytes_remaining = 0;
+
+  // 2-byte lead (110xxxxx)
+  if (uc >= 0xC0 && uc < 0xE0) {
+    utf8_codepoint = uc & 0x1F;
+    utf8_bytes_remaining = 1;
+    return;
+  }
+  // 3-byte lead (1110xxxx)
+  if (uc >= 0xE0 && uc < 0xF0) {
+    utf8_codepoint = uc & 0x0F;
+    utf8_bytes_remaining = 2;
+    return;
+  }
+  // 4-byte lead (11110xxx)
+  if (uc >= 0xF0 && uc < 0xF8) {
+    utf8_codepoint = uc & 0x07;
+    utf8_bytes_remaining = 3;
+    return;
+  }
+
+  // Plain ASCII byte — render directly on framebuffer
+  console_render_char((uint32_t)uc);
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

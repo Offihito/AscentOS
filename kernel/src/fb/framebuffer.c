@@ -73,8 +73,7 @@ static uint32_t dirty_x2 = 0;
 static uint32_t dirty_y2 = 0;
 static bool dirty_valid = false;
 
-static inline void fb_mark_dirty(uint32_t x, uint32_t y, uint32_t w,
-                                 uint32_t h) {
+void fb_mark_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
   if (!backbuffer_enabled)
     return;
 

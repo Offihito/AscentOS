@@ -87,8 +87,8 @@ void fb_set_backbuffer_mode(bool enabled);
 bool fb_is_backbuffer_enabled(void);
 void *fb_get_backbuffer(void);
 void fb_swap_buffer(void);
-void fb_copy_to_backbuffer(
-    void); // For keeping backbuffer in sync when drawing directly
+void fb_copy_to_backbuffer(void);
+void fb_mark_dirty(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 
 void fb_register_vfs(void);
 void fb_register_device_node(const char *name, vfs_node_t *node);

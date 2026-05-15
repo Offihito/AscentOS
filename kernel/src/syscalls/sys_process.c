@@ -1,7 +1,9 @@
 // ── Process Syscalls: fork, getpid, exit ────────────────────────────────────
+#include "../apic/lapic_timer.h"
 #include "../console/klog.h"
 #include "../cpu/gdt.h"
 #include "../cpu/msr.h"
+#include "../drivers/timer/rtc.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
@@ -10,8 +12,6 @@
 #include "../sched/sched.h"
 #include "../smp/cpu.h"
 #include "syscall.h"
-#include "../apic/lapic_timer.h"
-#include "../drivers/timer/rtc.h"
 #include <stdint.h>
 
 extern void mm_reset_mmap_state(struct thread *t);
@@ -320,7 +320,7 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
         has_matching_children = true;
         if (t->state == THREAD_ZOMBIE) {
           zombie = t;
-          
+
           // Unlink from parent's children list while holding lock
           if (current->children == zombie) {
             current->children = zombie->sibling_next;
@@ -345,7 +345,7 @@ static uint64_t sys_wait4(uint64_t pid, uint64_t wstatus_ptr, uint64_t options,
       }
       uint32_t reaped_pid = zombie->tid;
 
-      // Fully reap the zombie 
+      // Fully reap the zombie
       sched_reap_thread(zombie);
 
       return (uint64_t)reaped_pid;
@@ -594,7 +594,7 @@ uint64_t sys_fork(struct syscall_regs *regs) {
     child->egid = parent->egid;
     child->suid = parent->suid;
     child->sgid = parent->sgid;
-    child->ctty = parent->ctty;  // Inherit controlling terminal
+    child->ctty = parent->ctty; // Inherit controlling terminal
   }
 
   klog_puts("[FORK] Child created with PID ");
@@ -639,16 +639,16 @@ static uint64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2,
   strcpy(buf->sysname, "AscentOS");
   strcpy(buf->nodename, "ascentos");
   strcpy(buf->release, "0.1.0-alpha");
-  
+
   // Dynamic date/time from RTC
   char datetime[32];
   rtc_format_datetime(rtc_get_timestamp(), datetime, sizeof(datetime));
-  
+
   char version[80];
   strcpy(version, "#1 SMP PREEMPT ");
   strcat(version, datetime);
   strcpy(buf->version, version);
-  
+
   strcpy(buf->machine, "x86_64");
   strcpy(buf->domainname, "ascent-os.org");
 
@@ -656,8 +656,8 @@ static uint64_t sys_uname(uint64_t buf_ptr, uint64_t a1, uint64_t a2,
 }
 
 // ── sys_uptime ─────────────────────────────────────────────────────────────
-static uint64_t sys_uptime(uint64_t a0, uint64_t a1, uint64_t a2,
-                           uint64_t a3, uint64_t a4, uint64_t a5) {
+static uint64_t sys_uptime(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                           uint64_t a4, uint64_t a5) {
   (void)a0;
   (void)a1;
   (void)a2;

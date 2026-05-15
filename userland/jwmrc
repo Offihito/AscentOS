@@ -1,0 +1,152 @@
+<?xml version="1.0"?>
+<JWM>
+    <!-- The root menu. -->
+    <RootMenu onroot="12">
+        <Program icon="utilities-terminal" label="Terminal">st</Program>
+        <Program icon="applications-games" label="Doom">doom_x11</Program>
+        <Program icon="eyes" label="xeyes">xeyes</Program>
+        <Separator/>
+        <Restart label="Restart JWM" icon="reload"/>
+        <Exit label="Exit JWM" confirm="true" icon="exit"/>
+    </RootMenu>
+
+    <Desktops width="2" height="1">
+        <Background type="image">/root/bg.png</Background>
+    </Desktops>
+
+    <!-- Tray at the bottom. -->
+    <Tray x="0" y="-1" autohide="off" delay="1000" height="32">
+        <TrayButton label="AscentOS">root:1</TrayButton>
+        <Spacer width="2"/>
+        <TrayButton label="_">showdesktop</TrayButton>
+        <Spacer width="2"/>
+        <Pager labeled="true"/>
+        <TaskList maxwidth="256"/>
+        <Dock/>
+        <Clock format="%H:%M"><Button mask="123">exec:xclock</Button></Clock>
+    </Tray>
+
+    <!-- Visual Styles (Clean Flat UI) -->
+    <WindowStyle decorations="flat">
+        <Font>Sans-12:bold</Font>
+        <Width>4</Width>
+        <Corner>0</Corner>
+        <Foreground>#ffffff</Foreground>
+        <Background>#2a2a2a</Background>
+        <Opacity>1</Opacity>
+        <Active>
+            <Foreground>#ffffff</Foreground>
+            <Background>#007acc</Background>
+            <Opacity>1.0</Opacity>
+        </Active>
+    </WindowStyle>
+    
+    <TrayStyle decorations="flat">
+        <Font>Sans-12</Font>
+        <Background>#1e1e1e</Background>
+        <Foreground>#cccccc</Foreground>
+        <Opacity>1</Opacity>
+    </TrayStyle>
+    
+    <TaskListStyle list="all" group="true">
+      <Font>Sans-12</Font>
+      <Active>
+        <Foreground>#ffffff</Foreground>
+        <Background>#444444</Background>
+      </Active>
+      <Foreground>#aaaaaa</Foreground>
+      <Background>#2a2a2a</Background>
+    </TaskListStyle>
+    
+    <PagerStyle>
+        <Foreground>#444444</Foreground>
+        <Background>#1e1e1e</Background>
+        <Text>#ffffff</Text>
+        <Active>
+            <Foreground>#007acc</Foreground>
+            <Background>#004488</Background>
+        </Active>
+    </PagerStyle>
+    
+    <MenuStyle decorations="flat">
+        <Font>Sans-12</Font>
+        <Foreground>#cccccc</Foreground>
+        <Background>#1e1e1e</Background>
+        <Active>
+            <Foreground>#ffffff</Foreground>
+            <Background>#007acc</Background>
+        </Active>
+        <Opacity>1</Opacity>
+    </MenuStyle>
+    
+    <PopupStyle>
+        <Font>Sans-12</Font>
+        <Foreground>#000000</Foreground>
+        <Background>#dddddd</Background>
+    </PopupStyle>
+
+    <IconPath>/usr/share/icons</IconPath>
+    <IconPath>/usr/share/pixmaps</IconPath>
+
+    <DoubleClickSpeed>400</DoubleClickSpeed>
+    <DoubleClickDelta>2</DoubleClickDelta>
+    <FocusModel>sloppy</FocusModel>
+    <SnapMode distance="10">border</SnapMode>
+    <MoveMode>opaque</MoveMode>
+    <ResizeMode>opaque</ResizeMode>
+
+    <Key key="Up">up</Key>
+    <Key key="Down">down</Key>
+    <Key key="Right">right</Key>
+    <Key key="Left">left</Key>
+    <Key key="h">left</Key>
+    <Key key="j">down</Key>
+    <Key key="k">up</Key>
+    <Key key="l">right</Key>
+    <Key key="Return">select</Key>
+    <Key key="Escape">escape</Key>
+
+    <Key mask="A" key="Tab">nextstacked</Key>
+    <Key mask="A" key="F4">close</Key>
+    <Key mask="A" key="#">desktop#</Key>
+    <Key mask="A" key="F1">root:1</Key>
+    <Key mask="A" key="F2">window</Key>
+    <Key mask="A" key="F10">maximize</Key>
+    <Key mask="A" key="Right">rdesktop</Key>
+    <Key mask="A" key="Left">ldesktop</Key>
+    <Key mask="A" key="Up">udesktop</Key>
+    <Key mask="A" key="Down">ddesktop</Key>
+
+    <!-- Mouse bindings -->
+    <Mouse context="root" button="4">ldesktop</Mouse>
+    <Mouse context="root" button="5">rdesktop</Mouse>
+
+    <Mouse context="title" button="1">move</Mouse>
+    <Mouse context="title" button="2">move</Mouse>
+    <Mouse context="title" button="3">window</Mouse>
+    <Mouse context="title" button="4">shade</Mouse>
+    <Mouse context="title" button="5">shade</Mouse>
+    <Mouse context="title" button="11">maximize</Mouse>
+
+    <Mouse context="icon" button="1">window</Mouse>
+    <Mouse context="icon" button="2">move</Mouse>
+    <Mouse context="icon" button="3">window</Mouse>
+    <Mouse context="icon" button="4">shade</Mouse>
+    <Mouse context="icon" button="5">shade</Mouse>
+
+    <Mouse context="border" button="1">resize</Mouse>
+    <Mouse context="border" button="2">move</Mouse>
+    <Mouse context="border" button="3">window</Mouse>
+
+    <Mouse context="close" button="-1">close</Mouse>
+    <Mouse context="close" button="2">move</Mouse>
+    <Mouse context="close" button="-3">close</Mouse>
+
+    <Mouse context="maximize" button="-1">maximize</Mouse>
+    <Mouse context="maximize" button="-2">maxv</Mouse>
+    <Mouse context="maximize" button="-3">maxh</Mouse>
+
+    <Mouse context="minimize" button="-1">minimize</Mouse>
+    <Mouse context="minimize" button="2">move</Mouse>
+    <Mouse context="minimize" button="-3">shade</Mouse>
+</JWM>
