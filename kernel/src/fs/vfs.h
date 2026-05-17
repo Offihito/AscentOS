@@ -16,6 +16,8 @@
 #define FS_SOCKET 0x07
 #define FS_MOUNTPOINT 0x08
 #define FS_EPOLL 0x09
+#define FS_PERSISTENT 0x10
+#define FS_TYPE_MASK 0x0F
 
 // Poll Events
 #define POLLIN 0x0001
@@ -52,8 +54,9 @@ typedef int (*rename_type_t)(struct vfs_node *, char *old_name, char *new_name);
 typedef int (*chmod_type_t)(struct vfs_node *, uint16_t permission);
 typedef int (*chown_type_t)(struct vfs_node *, uint32_t uid, uint32_t gid);
 typedef int (*truncate_type_t)(struct vfs_node *, uint32_t);
-typedef uint64_t (*mmap_type_t)(struct vfs_node *, uint64_t addr, uint64_t length,
-                                uint64_t prot, uint64_t flags, uint64_t offset);
+typedef uint64_t (*mmap_type_t)(struct vfs_node *, uint64_t addr,
+                                uint64_t length, uint64_t prot, uint64_t flags,
+                                uint64_t offset);
 typedef int (*poll_type_t)(struct vfs_node *, int events);
 
 typedef struct vfs_node {
@@ -127,5 +130,6 @@ int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags,
               void *device);
 int vfs_poll(vfs_node_t *node, int events);
 void vfs_node_init(vfs_node_t *node);
+int vfs_mount(vfs_node_t *mountpoint, vfs_node_t *target);
 
 #endif

@@ -30,11 +30,17 @@ static int device_count = 0;
 
 // Register a device node in the registry
 void fb_register_device_node(const char *name, vfs_node_t *node) {
+  if (!node)
+    return;
+
+  // Mark node as persistent so it doesn't get kfree'd during path resolution
+  node->flags |= FS_PERSISTENT;
+
   // Check if device already exists and update it
   for (int i = 0; i < device_count; i++) {
     if (strcmp(device_registry[i].name, name) == 0) {
       device_registry[i].node = node;
-      return;
+      goto mount_vfs;
     }
   }
   // Add new entry
@@ -44,6 +50,22 @@ void fb_register_device_node(const char *name, vfs_node_t *node) {
   device_registry[device_count].name[63] = '\0';
   device_registry[device_count].node = node;
   device_count++;
+
+mount_vfs:
+  // Also mount it in /dev so it appears in ls
+  if (fs_root) {
+    vfs_node_t *dev_dir = vfs_resolve_path("/dev");
+    if (dev_dir) {
+      klog_puts("[VFS] Registering '");
+      klog_puts((char *)name);
+      klog_puts("' in /dev\n");
+      ramfs_mount_node(dev_dir, node);
+    } else {
+      klog_puts("[VFS] Warning: /dev not found during registration of '");
+      klog_puts((char *)name);
+      klog_puts("'\n");
+    }
+  }
 }
 
 // Look up a device in the registry
@@ -137,20 +159,20 @@ void fb_init(struct limine_framebuffer *framebuffer) {
     uint64_t *pml4 = vmm_get_active_pml4();
     uint64_t num_pages = (fb_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
-    uint64_t flags =
-        PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_PWT;
+    uint64_t flags = PAGE_FLAG_PRESENT | PAGE_FLAG_RW | PAGE_FLAG_PWT |
+                     PAGE_FLAG_PCD | PAGE_FLAG_PAT;
 
     for (uint64_t i = 0; i < num_pages; i++) {
       vmm_map_page(pml4, virt + i * PAGE_SIZE, phys + i * PAGE_SIZE, flags);
     }
 
-    __asm__ volatile("wbinvd" ::: "memory");
-    klog_puts("[FB] PAT synchronized (PCD|PWT) and cache flushed.\n");
-
-    // Flush TLB
+    // TLB flush is already handled by vmm_map_page, but we do a full CR3 reload
+    // for safety.
     uint64_t cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
     __asm__ volatile("mov %0, %%cr3" ::"r"(cr3) : "memory");
+
+    klog_puts("[FB] Write-Combining (WC) enabled via PAT.\n");
 
     // Clear hardware framebuffer
     if (fb->address) {
@@ -274,8 +296,9 @@ static uint32_t fb_vfs_write(struct vfs_node *node, uint32_t offset,
 #define FBIOGET_FSCREENINFO 0x4602
 #define FBIOPAN_DISPLAY 0x4606
 
-static uint64_t fb_vfs_mmap(struct vfs_node *node, uint64_t addr, uint64_t length,
-                            uint64_t prot, uint64_t flags, uint64_t offset) {
+static uint64_t fb_vfs_mmap(struct vfs_node *node, uint64_t addr,
+                            uint64_t length, uint64_t prot, uint64_t flags,
+                            uint64_t offset) {
   (void)offset;
   (void)node;
   (void)addr;
@@ -330,8 +353,8 @@ static uint64_t fb_vfs_mmap(struct vfs_node *node, uint64_t addr, uint64_t lengt
   // For X11 backbuffer (heap memory), use WB (write-back) caching for speed
   uint64_t page_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER;
   if (buffer_to_map == fb->address) {
-    // Hardware framebuffer - use write-through
-    page_flags |= PAGE_FLAG_PWT;
+    // Hardware framebuffer - use Write-Combining (WC) via PAT
+    page_flags |= (PAGE_FLAG_PWT | PAGE_FLAG_PCD | PAGE_FLAG_PAT);
   }
   if (prot & FB_MMAP_PROT_WRITE)
     page_flags |= PAGE_FLAG_RW;
@@ -541,6 +564,7 @@ static uint32_t console_vfs_write(struct vfs_node *node, uint32_t offset,
   (void)offset;
 
   if (console_termios.c_oflag & ONLCR) {
+    fb_set_backbuffer_mode(true);
     // ONLCR: Map NL to CR-NL on output
     for (uint32_t i = 0; i < size; i++) {
       if (buffer[i] == '\n') {
@@ -548,6 +572,8 @@ static uint32_t console_vfs_write(struct vfs_node *node, uint32_t offset,
       }
       console_putchar(buffer[i]);
     }
+    fb_swap_buffer();
+    fb_set_backbuffer_mode(false);
   } else {
     console_write_batch((const char *)buffer, size);
   }
@@ -599,9 +625,9 @@ static void setup_chardev(
     void (*open_fn)(struct vfs_node *), void (*close_fn)(struct vfs_node *),
     int (*poll_fn)(struct vfs_node *, int),
     int (*ioctl_fn)(struct vfs_node *, uint32_t, uint64_t),
-    uint64_t (*mmap_fn)(struct vfs_node *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t),
+    uint64_t (*mmap_fn)(struct vfs_node *, uint64_t, uint64_t, uint64_t,
+                        uint64_t, uint64_t),
     void *device, uint32_t length) {
-  (void)dev_dir; // Not needed - we use the device registry
 
   // Create virtual device node
   vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
@@ -609,8 +635,8 @@ static void setup_chardev(
     return;
 
   memset(node, 0, sizeof(vfs_node_t));
-  strcpy(node->name, name);
-  node->flags = FS_CHARDEV;
+  strncpy(node->name, name, 127);
+  node->flags = FS_CHARDEV | FS_PERSISTENT;
   node->mask = 0666;
   node->length = length;
   node->device = device;
@@ -623,9 +649,12 @@ static void setup_chardev(
   node->mmap = mmap_fn;
 
   // Register in device registry for persistent lookups
-  // This ensures device callbacks are always available,
-  // avoiding issues with filesystem lookups
   fb_register_device_node(name, node);
+
+  // Also mount it in the VFS directory so it appears in ls
+  if (dev_dir) {
+    ramfs_mount_node(dev_dir, node);
+  }
 }
 
 uint16_t fb_get_bpp(void) { return fb ? fb->bpp : 0; }
@@ -635,11 +664,11 @@ static int fb_ioctl(struct vfs_node *node, uint32_t request, uint64_t arg) {
   if (!fb)
     return -1;
 
-/*
-  klog_puts("[FB_IOCTL] request=0x");
-  klog_hex32(request);
-  klog_puts("\n");
-*/
+  /*
+    klog_puts("[FB_IOCTL] request=0x");
+    klog_hex32(request);
+    klog_puts("\n");
+  */
 
   switch (request) {
   case FBIOGET_VSCREENINFO: {

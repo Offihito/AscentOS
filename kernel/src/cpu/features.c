@@ -1,5 +1,19 @@
 #include "features.h"
+#include "msr.h"
 #include <stdint.h>
+
+#define IA32_PAT_MSR 0x277
+
+// Set up PAT (Page Attribute Table) to define memory types.
+// We configure PA7 to be Write-Combining (01h).
+static void cpu_pat_init(void) {
+  uint64_t pat = rdmsr(IA32_PAT_MSR);
+  // Default PAT: 0x0007040600070406 (PA0:WB, PA1:WT, PA2:UC-, PA3:UC, PA4:WB, PA5:WT, PA6:UC-, PA7:UC)
+  // We want to set PA7 (bits 56-63) to 0x01 (WC).
+  pat &= ~(0xFFULL << 56);
+  pat |= (0x01ULL << 56);
+  wrmsr(IA32_PAT_MSR, pat);
+}
 
 // Enable SSE/SSE2 for ring 3 (musl/gcc use XMM for string/memory ops). Without
 // CR4.OSFXSR, executing those instructions raises #UD (Invalid Opcode).
@@ -18,4 +32,5 @@ void cpu_features_init(void) {
   __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
 
   __asm__ volatile("fninit");
+  cpu_pat_init();
 }

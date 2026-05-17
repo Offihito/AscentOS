@@ -213,11 +213,15 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
       if (current_thread) {
         // Derive PROT flags from ELF phdr flags
         uint64_t prot = 0;
-        if (phdr.p_flags & 0x4) prot |= 0x1; // PF_R -> PROT_READ
-        if (phdr.p_flags & 0x2) prot |= 0x2; // PF_W -> PROT_WRITE
-        if (phdr.p_flags & 0x1) prot |= 0x4; // PF_X -> PROT_EXEC
-        
-        vma_add(&current_thread->vmas, start_page, end_page, prot, MAP_PRIVATE, -1, 0);
+        if (phdr.p_flags & 0x4)
+          prot |= 0x1; // PF_R -> PROT_READ
+        if (phdr.p_flags & 0x2)
+          prot |= 0x2; // PF_W -> PROT_WRITE
+        if (phdr.p_flags & 0x1)
+          prot |= 0x4; // PF_X -> PROT_EXEC
+
+        vma_add(&current_thread->vmas, start_page, end_page, prot, MAP_PRIVATE,
+                -1, 0);
       }
 
       if (filesz > 0) {

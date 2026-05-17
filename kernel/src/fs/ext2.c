@@ -1,7 +1,7 @@
-#include "fs/ext2.h"
-#include "fs/ext3.h"
+#include "ext2.h"
 #include "apic/lapic_timer.h"
 #include "console/klog.h"
+#include "ext3.h"
 #include "lib/string.h"
 #include "mm/heap.h"
 #include "mm/pmm.h"
@@ -26,8 +26,10 @@ static int ext2_symlink_impl(vfs_node_t *node, char *name, char *target);
 static int ext2_rename_impl(vfs_node_t *node, char *old_name, char *new_name);
 static int ext2_chmod_impl(vfs_node_t *node, uint16_t permission);
 static int ext2_chown_impl(vfs_node_t *node, uint32_t uid, uint32_t gid);
-static int ext2_mknod_impl(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags, void *device);
-static uint64_t ext2_mmap_impl(vfs_node_t *node, uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags, uint64_t offset);
+static int ext2_mknod_impl(vfs_node_t *node, char *name, uint16_t permission,
+                           uint32_t flags, void *device);
+static uint64_t ext2_mmap_impl(vfs_node_t *node, uint64_t addr, uint64_t length,
+                               uint64_t prot, uint64_t flags, uint64_t offset);
 
 // ── Timestamp helper ────────────────────────────────────────────────────────
 
@@ -39,8 +41,7 @@ static uint32_t ext2_current_time(void) {
 // ── Block I/O ───────────────────────────────────────────────────────────────
 
 // Read a single ext2 block into buffer.
-int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num,
-                           void *buffer) {
+int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num, void *buffer) {
   if (block_num == 0) {
     memset(buffer, 0, mnt->block_size);
     return 0;
@@ -53,7 +54,7 @@ int ext2_read_block(ext2_mount_t *mnt, uint32_t block_num,
 
 // Write a single ext2 block from buffer.
 int ext2_write_block(ext2_mount_t *mnt, uint32_t block_num,
-                            const void *buffer) {
+                     const void *buffer) {
   if (block_num == 0)
     return -1;
   uint64_t byte_offset = (uint64_t)block_num * mnt->block_size;
@@ -72,7 +73,8 @@ static int ext2_write_superblock(ext2_mount_t *mnt) {
   if (err)
     return -1;
   memcpy(buf, &mnt->sb, sizeof(ext2_superblock_t));
-  return ext3_journal_block(mnt, 1, buf); // Superblock is at logical block 1 (offset 1024)
+  return ext3_journal_block(
+      mnt, 1, buf); // Superblock is at logical block 1 (offset 1024)
 }
 
 static int ext2_write_bgdt(ext2_mount_t *mnt) {
@@ -85,7 +87,8 @@ static int ext2_write_bgdt(ext2_mount_t *mnt) {
   memset(tmp, 0, blocks_needed * mnt->block_size);
   memcpy(tmp, mnt->bgdt, bgdt_size);
   for (uint32_t i = 0; i < blocks_needed; i++) {
-    int err = ext3_journal_block(mnt, bgdt_block + i, tmp + i * mnt->block_size);
+    int err =
+        ext3_journal_block(mnt, bgdt_block + i, tmp + i * mnt->block_size);
     if (err) {
       kfree(tmp);
       return -1;
@@ -97,8 +100,7 @@ static int ext2_write_bgdt(ext2_mount_t *mnt) {
 
 // ── Inode I/O ───────────────────────────────────────────────────────────────
 
-int ext2_read_inode(ext2_mount_t *mnt, uint32_t inode_num,
-                           ext2_inode_t *out) {
+int ext2_read_inode(ext2_mount_t *mnt, uint32_t inode_num, ext2_inode_t *out) {
   if (inode_num == 0)
     return -1;
   uint32_t group = (inode_num - 1) / mnt->inodes_per_group;
@@ -316,7 +318,7 @@ static int ext2_free_inode(ext2_mount_t *mnt, uint32_t inode_num) {
 // Get the disk block number for a given logical block index in an inode.
 // Supports direct, singly-indirect, and doubly-indirect blocks.
 uint32_t ext2_get_block_num(ext2_mount_t *mnt, ext2_inode_t *inode,
-                                   uint32_t logical_block) {
+                            uint32_t logical_block) {
   uint32_t ptrs_per_block = mnt->block_size / 4;
 
   // Direct blocks (0..11)
@@ -618,7 +620,8 @@ static vfs_node_t *ext2_make_vfs_node(ext2_mount_t *mnt, uint32_t inode_num,
     node->flags = FS_SOCKET;
     node->chmod = ext2_chmod_impl;
     node->chown = ext2_chown_impl;
-    // We don't set read/write/poll here because rendezvous sockets are distinct from data sockets
+    // We don't set read/write/poll here because rendezvous sockets are distinct
+    // from data sockets
   }
 
   return node;
@@ -683,7 +686,7 @@ static int ext2_truncate_impl(vfs_node_t *node, uint32_t new_len) {
   inode.i_size = new_len;
   node->length = new_len;
 
-  // We just update the size and rewrite the inode. 
+  // We just update the size and rewrite the inode.
   // Blocks are intentionally not freed here for simplicity,
   // they will be naturally reused if the file grows again.
   return ext2_write_inode(mnt, node->inode, &inode);
@@ -1209,11 +1212,12 @@ static int ext2_rename_impl(vfs_node_t *node, char *old_name, char *new_name) {
   if (!src_node)
     return -1;
 
-  // Check if new_name already exists — POSIX requires overwrite for regular files
+  // Check if new_name already exists — POSIX requires overwrite for regular
+  // files
   vfs_node_t *dst_node = ext2_finddir_impl(node, new_name);
   if (dst_node) {
     // Only allow overwriting regular files, not directories
-    if ((dst_node->flags & 0x07) == FS_DIRECTORY) {
+    if ((dst_node->flags & FS_TYPE_MASK) == FS_DIRECTORY) {
       kfree(dst_node);
       kfree(src_node);
       return -1; // Can't overwrite a directory
@@ -1228,7 +1232,7 @@ static int ext2_rename_impl(vfs_node_t *node, char *old_name, char *new_name) {
 
   uint32_t target_inode_num = src_node->inode;
   uint32_t file_type = EXT2_FT_UNKNOWN;
-  uint32_t ftype = src_node->flags & 0x07;
+  uint32_t ftype = src_node->flags & FS_TYPE_MASK;
   if (ftype == FS_FILE)
     file_type = EXT2_FT_REG_FILE;
   else if (ftype == FS_DIRECTORY)
@@ -1853,53 +1857,58 @@ int ext2_mount_root(struct block_device *dev) {
   return 0;
 }
 
-static int ext2_mknod_impl(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags, void *device) {
-    if (flags != FS_SOCKET) return -1;
-    
-    int err = ext2_create_impl(node, name, permission);
-    if (err < 0) return err;
-    
-    vfs_node_t *new_node = ext2_finddir_impl(node, name);
-    if (!new_node) return -1;
-    
-    ext2_mount_t *mnt = (ext2_mount_t *)node->device;
-    ext2_inode_t inode;
-    if (ext2_read_inode(mnt, new_node->inode, &inode) != 0) {
-        kfree(new_node);
-        return -1;
-    }
-    
-    inode.i_mode = (inode.i_mode & 0x0FFF) | EXT2_S_IFSOCK;
-    ext2_write_inode(mnt, new_node->inode, &inode);
-    
-    new_node->flags = FS_SOCKET;
-    new_node->device = device;
-    kfree(new_node); 
-    return 0;
+static int ext2_mknod_impl(vfs_node_t *node, char *name, uint16_t permission,
+                           uint32_t flags, void *device) {
+  if (flags != FS_SOCKET)
+    return -1;
+
+  int err = ext2_create_impl(node, name, permission);
+  if (err < 0)
+    return err;
+
+  vfs_node_t *new_node = ext2_finddir_impl(node, name);
+  if (!new_node)
+    return -1;
+
+  ext2_mount_t *mnt = (ext2_mount_t *)node->device;
+  ext2_inode_t inode;
+  if (ext2_read_inode(mnt, new_node->inode, &inode) != 0) {
+    kfree(new_node);
+    return -1;
+  }
+
+  inode.i_mode = (inode.i_mode & 0x0FFF) | EXT2_S_IFSOCK;
+  ext2_write_inode(mnt, new_node->inode, &inode);
+
+  new_node->flags = FS_SOCKET;
+  new_node->device = device;
+  kfree(new_node);
+  return 0;
 }
-#define EXT2_MMAP_PROT_READ  0x1
+#define EXT2_MMAP_PROT_READ 0x1
 #define EXT2_MMAP_PROT_WRITE 0x2
-#define EXT2_MMAP_PROT_EXEC  0x4
+#define EXT2_MMAP_PROT_EXEC 0x4
 
 #define EXT2_MAP_FIXED 0x10
 
-static uint64_t ext2_mmap_impl(vfs_node_t *node, uint64_t addr, uint64_t length, uint64_t prot,
-                               uint64_t flags, uint64_t offset) {
-  if (length == 0) return (uint64_t)-1;
-  if ((node->flags & 0xFF) != FS_FILE) {
-      klog_puts("[EXT2_MMAP] Error: not a regular file\n");
-      return (uint64_t)-1;
+static uint64_t ext2_mmap_impl(vfs_node_t *node, uint64_t addr, uint64_t length,
+                               uint64_t prot, uint64_t flags, uint64_t offset) {
+  if (length == 0)
+    return (uint64_t)-1;
+  if ((node->flags & FS_TYPE_MASK) != FS_FILE) {
+    klog_puts("[EXT2_MMAP] Error: not a regular file\n");
+    return (uint64_t)-1;
   }
 
   uint64_t aligned_len = (length + 4095) & ~4095ULL;
   uint64_t vaddr = addr;
   if (!(flags & EXT2_MAP_FIXED) || vaddr == 0) {
-      vaddr = mm_alloc_mmap_region(aligned_len);
+    vaddr = mm_alloc_mmap_region(aligned_len);
   }
 
   if (vaddr == 0) {
-      klog_puts("[EXT2_MMAP] Error: mmap region exhausted\n");
-      return (uint64_t)-1;
+    klog_puts("[EXT2_MMAP] Error: mmap region exhausted\n");
+    return (uint64_t)-1;
   }
 
   uint64_t num_pages = aligned_len / 4096;
@@ -1907,37 +1916,40 @@ static uint64_t ext2_mmap_impl(vfs_node_t *node, uint64_t addr, uint64_t length,
   uint64_t hhdm = pmm_get_hhdm_offset();
 
   uint64_t page_flags = PAGE_FLAG_PRESENT | PAGE_FLAG_USER;
-  if (prot & EXT2_MMAP_PROT_WRITE) page_flags |= PAGE_FLAG_RW;
-  if (!(prot & EXT2_MMAP_PROT_EXEC)) page_flags |= PAGE_FLAG_NX;
+  if (prot & EXT2_MMAP_PROT_WRITE)
+    page_flags |= PAGE_FLAG_RW;
+  if (!(prot & EXT2_MMAP_PROT_EXEC))
+    page_flags |= PAGE_FLAG_NX;
 
   for (uint64_t i = 0; i < num_pages; i++) {
-      void *phys = pmm_alloc();
-      if (!phys) {
-          klog_puts("[EXT2_MMAP] Error: physical allocation failed\n");
-          return (uint64_t)-1;
+    void *phys = pmm_alloc();
+    if (!phys) {
+      klog_puts("[EXT2_MMAP] Error: physical allocation failed\n");
+      return (uint64_t)-1;
+    }
+
+    uint64_t virt_page = vaddr + i * 4096;
+    uint64_t phys_page = (uint64_t)phys;
+
+    // Zero the page first
+    memset((void *)(phys_page + hhdm), 0, 4096);
+
+    // Read from file into the physical page
+    uint64_t file_off = offset + i * 4096;
+    if (file_off < node->length) {
+      uint32_t to_read = 4096;
+      if (file_off + to_read > node->length) {
+        to_read = node->length - file_off;
       }
+      ext2_read_impl(node, (uint32_t)file_off, to_read,
+                     (uint8_t *)(phys_page + hhdm));
+    }
 
-      uint64_t virt_page = vaddr + i * 4096;
-      uint64_t phys_page = (uint64_t)phys;
-
-      // Zero the page first
-      memset((void *)(phys_page + hhdm), 0, 4096);
-
-      // Read from file into the physical page
-      uint64_t file_off = offset + i * 4096;
-      if (file_off < node->length) {
-          uint32_t to_read = 4096;
-          if (file_off + to_read > node->length) {
-              to_read = node->length - file_off;
-          }
-          ext2_read_impl(node, (uint32_t)file_off, to_read, (uint8_t *)(phys_page + hhdm));
-      }
-
-      if (!vmm_map_page(pml4, virt_page, phys_page, page_flags)) {
-          klog_puts("[EXT2_MMAP] Error: vmm_map_page failed\n");
-          return (uint64_t)-1;
-      }
-      vmm_flush_tlb(virt_page);
+    if (!vmm_map_page(pml4, virt_page, phys_page, page_flags)) {
+      klog_puts("[EXT2_MMAP] Error: vmm_map_page failed\n");
+      return (uint64_t)-1;
+    }
+    vmm_flush_tlb(virt_page);
   }
 
   return vaddr;

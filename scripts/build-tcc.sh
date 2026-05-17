@@ -18,6 +18,7 @@
 
 set -e
 
+
 TCC_VERSION=${TCC_VERSION:-0.9.27}
 TCC_TARBALL="tcc-${TCC_VERSION}.tar.bz2"
 TCC_URL="https://download.savannah.gnu.org/releases/tinycc/${TCC_TARBALL}"
@@ -78,6 +79,9 @@ build_tcc() {
     fi
     
     cd "tcc-${TCC_VERSION}"
+    
+    # Patch tcc.c to show AscentOS instead of Linux in the version string
+    sed -i 's/" Linux"/" AscentOS"/g' tcc.c
     
     # Configure for AscentOS (x86_64-linux-musl target)
     # TCC will be a native compiler running on AscentOS

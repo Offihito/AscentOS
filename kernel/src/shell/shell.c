@@ -1431,7 +1431,7 @@ static void execute_command(char *cmd) {
       console_puts("ls: cannot access '");
       console_puts(path);
       console_puts("': No such file or directory\n");
-    } else if ((dir->flags & 0x07) != FS_DIRECTORY) {
+    } else if ((dir->flags & FS_TYPE_MASK) != FS_DIRECTORY) {
       console_puts("ls: '");
       console_puts(path);
       console_puts("': Not a directory\n");
@@ -1452,11 +1452,11 @@ static void execute_command(char *cmd) {
       console_puts("cat: ");
       console_puts(path);
       console_puts(": No such file\n");
-    } else if ((file->flags & 0x07) == FS_DIRECTORY) {
+    } else if ((file->flags & FS_TYPE_MASK) == FS_DIRECTORY) {
       console_puts("cat: ");
       console_puts(path);
       console_puts(": Is a directory\n");
-    } else if ((file->flags & 0x07) == FS_SYMLINK) {
+    } else if ((file->flags & FS_TYPE_MASK) == FS_SYMLINK) {
       console_puts("cat: ");
       console_puts(path);
       console_puts(": Is a symbolic link (use readlink)\n");
@@ -1736,7 +1736,7 @@ static void execute_command(char *cmd) {
       shell_print_uint64(file->mtime);
       console_puts(" secs since boot\n");
       console_puts("  Type: ");
-      uint32_t ftype = file->flags & 0x07;
+      uint32_t ftype = file->flags & FS_TYPE_MASK;
       if (ftype == FS_FILE)
         console_puts("regular file\n");
       else if (ftype == FS_DIRECTORY)

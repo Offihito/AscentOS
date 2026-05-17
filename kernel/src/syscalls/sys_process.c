@@ -271,7 +271,7 @@ static uint64_t sys_chdir(uint64_t path_ptr, uint64_t a1, uint64_t a2,
   if (!node)
     return (uint64_t)-2; // ENOENT
 
-  if ((node->flags & 0xFF) != FS_DIRECTORY)
+  if ((node->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return (uint64_t)-20; // ENOTDIR
 
   // If validation passes, update thread

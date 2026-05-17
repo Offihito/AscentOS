@@ -6,6 +6,7 @@
 #include "../drivers/timer/pit.h"
 #include "../fb/framebuffer.h"
 #include "../font/font.h"
+#include "../fs/procfs.h"
 #include "../fs/ramfs.h"
 #include "../fs/vfs.h"
 #include "../lib/string.h"
@@ -239,7 +240,7 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       if (dirfd < 0 || dirfd >= MAX_FDS || !t->fds[dirfd])
         return (uint64_t)-9; // EBADF
       base_dir = t->fds[dirfd];
-      if ((base_dir->flags & 0xFF) != FS_DIRECTORY)
+      if ((base_dir->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-20; // ENOTDIR
     }
   }
@@ -381,6 +382,69 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
             kfree(proc_node);
           }
         }
+      } else if (strcmp(p, "meminfo") == 0) {
+        vfs_node_t *proc_node = kmalloc(sizeof(vfs_node_t));
+        if (proc_node) {
+          memset(proc_node, 0, sizeof(vfs_node_t));
+          strncpy(proc_node->name, "meminfo", 127);
+          proc_node->flags = FS_FILE;
+          proc_node->mask = 0444; // Read-only
+          proc_node->read = procfs_meminfo_read;
+          proc_node->length = 512; // Dummy size, redefined on read
+          node = proc_node;
+        }
+      } else if (strcmp(p, "cpuinfo") == 0) {
+        vfs_node_t *proc_node = kmalloc(sizeof(vfs_node_t));
+        if (proc_node) {
+          memset(proc_node, 0, sizeof(vfs_node_t));
+          strncpy(proc_node->name, "cpuinfo", 127);
+          proc_node->flags = FS_FILE;
+          proc_node->mask = 0444; // Read-only
+          proc_node->read = procfs_cpuinfo_read;
+          proc_node->length = 2048; // Dummy size
+          node = proc_node;
+        }
+      } else if (strcmp(p, "partitions") == 0) {
+        vfs_node_t *proc_node = kmalloc(sizeof(vfs_node_t));
+        if (proc_node) {
+          memset(proc_node, 0, sizeof(vfs_node_t));
+          strncpy(proc_node->name, "partitions", 127);
+          proc_node->flags = FS_FILE;
+          proc_node->mask = 0444; // Read-only
+          proc_node->read = procfs_partitions_read;
+          proc_node->length = 1024; // Dummy size
+          node = proc_node;
+        }
+      } else if (strcmp(p, "uptime") == 0) {
+        vfs_node_t *proc_node = kmalloc(sizeof(vfs_node_t));
+        if (proc_node) {
+          memset(proc_node, 0, sizeof(vfs_node_t));
+          strncpy(proc_node->name, "uptime", 127);
+          proc_node->flags = FS_FILE;
+          proc_node->mask = 0444;
+          proc_node->read = procfs_uptime_read;
+          node = proc_node;
+        }
+      } else if (strcmp(p, "mounts") == 0) {
+        vfs_node_t *proc_node = kmalloc(sizeof(vfs_node_t));
+        if (proc_node) {
+          memset(proc_node, 0, sizeof(vfs_node_t));
+          strncpy(proc_node->name, "mounts", 127);
+          proc_node->flags = FS_FILE;
+          proc_node->mask = 0444;
+          proc_node->read = procfs_mounts_read;
+          node = proc_node;
+        }
+      } else if (strcmp(p, "stat") == 0) {
+        vfs_node_t *proc_node = kmalloc(sizeof(vfs_node_t));
+        if (proc_node) {
+          memset(proc_node, 0, sizeof(vfs_node_t));
+          strncpy(proc_node->name, "stat", 127);
+          proc_node->flags = FS_FILE;
+          proc_node->mask = 0444;
+          proc_node->read = procfs_stat_read;
+          node = proc_node;
+        }
       }
     }
 
@@ -425,7 +489,7 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
         strcpy(file_name, path);
       }
 
-      if (!parent || (parent->flags & 0x07) != FS_DIRECTORY)
+      if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-20; // ENOTDIR
 
       // Umask equivalent (simplified)
@@ -571,7 +635,7 @@ static uint64_t sys_ftruncate(uint64_t fd, uint64_t length, uint64_t a2,
     return (uint64_t)-9; // EBADF
 
   vfs_node_t *node = t->fds[fd];
-  if (!node || (node->flags & 0xFF) != FS_FILE)
+  if (!node || (node->flags & FS_TYPE_MASK) != FS_FILE)
     return (uint64_t)-1; // EPERM
 
   if (vfs_truncate(node, (uint32_t)length) == 0) {
@@ -916,7 +980,7 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
   case F_GETFL: {
     uint64_t flags = O_RDWR;
     vfs_node_t *node = t->fds[fd];
-    if ((node->flags & 0xFF) == FS_SOCKET) {
+    if ((node->flags & FS_TYPE_MASK) == FS_SOCKET) {
       socket_t *sock = (socket_t *)node->device;
       if (sock && (sock->flags & SOCK_NONBLOCK)) {
         flags |= O_NONBLOCK;
@@ -926,7 +990,7 @@ static uint64_t sys_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg, uint64_t a3,
   }
   case F_SETFL: {
     vfs_node_t *node = t->fds[fd];
-    if ((node->flags & 0xFF) == FS_SOCKET) {
+    if ((node->flags & FS_TYPE_MASK) == FS_SOCKET) {
       socket_t *sock = (socket_t *)node->device;
       if (sock) {
         if (arg & O_NONBLOCK) {
@@ -956,7 +1020,7 @@ static void fill_kstat(struct kstat *ks, vfs_node_t *node) {
 
   // Convert vfs flags to mode
   uint32_t mode = node->mask & 0777; // Permission bits
-  switch (node->flags & 0xFF) {
+  switch (node->flags & FS_TYPE_MASK) {
   case FS_FILE:
     mode |= 0100000;
     break; // S_IFREG
@@ -1152,7 +1216,7 @@ static uint64_t sys_statx(uint64_t dirfd, uint64_t path_ptr, uint64_t flags,
   stx->stx_gid = node->gid;
 
   uint32_t mode = node->mask & 0777;
-  switch (node->flags & 0xFF) {
+  switch (node->flags & FS_TYPE_MASK) {
   case FS_FILE:
     mode |= 0100000;
     break;
@@ -1215,7 +1279,7 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
     return (uint64_t)-9; // EBADF
 
   vfs_node_t *node = t->fds[fd];
-  if ((node->flags & 0xFF) != FS_DIRECTORY)
+  if ((node->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return (uint64_t)-20; // ENOTDIR
 
   uint8_t *buf = (uint8_t *)dirp;
@@ -1249,7 +1313,7 @@ static uint64_t sys_getdents64(uint64_t fd, uint64_t dirp, uint64_t count,
     // Determine file type from VFS node
     vfs_node_t *child = vfs_finddir(node, de->name);
     if (child) {
-      switch (child->flags & 0xFF) {
+      switch (child->flags & FS_TYPE_MASK) {
       case FS_FILE:
         entry->d_type = DT_REG;
         break;
@@ -1300,7 +1364,7 @@ static uint64_t sys_getdents(uint64_t fd, uint64_t dirp, uint64_t count,
   if (!t || fd >= MAX_FDS || !t->fds[fd])
     return (uint64_t)-9;
   vfs_node_t *node = t->fds[fd];
-  if ((node->flags & 0xFF) != FS_DIRECTORY)
+  if ((node->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return (uint64_t)-20;
   uint8_t *buf = (uint8_t *)dirp;
   if (!buf || !vmm_is_user_addr_range_valid(dirp, count))
@@ -1445,7 +1509,7 @@ static uint64_t sys_mkdir(uint64_t pathname, uint64_t mode, uint64_t a2,
     strcpy(dir_name, path);
   }
 
-  if (!parent || (parent->flags & 0x07) != FS_DIRECTORY)
+  if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return (uint64_t)-20; // ENOTDIR
 
   if (vfs_mkdir(parent, dir_name, (uint16_t)mode) != 0)
@@ -1477,7 +1541,7 @@ static uint64_t sys_mkdirat(uint64_t dirfd, uint64_t pathname, uint64_t mode,
         base_dir = fs_root;
     } else if (dirfd < MAX_FDS && t->fds[dirfd]) {
       base_dir = t->fds[dirfd];
-      if ((base_dir->flags & 0xFF) != FS_DIRECTORY)
+      if ((base_dir->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-20; // ENOTDIR
     } else {
       return (uint64_t)-9; // EBADF
@@ -1517,7 +1581,7 @@ static uint64_t sys_mkdirat(uint64_t dirfd, uint64_t pathname, uint64_t mode,
     strcpy(dir_name, path);
   }
 
-  if (!parent || (parent->flags & 0x07) != FS_DIRECTORY)
+  if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return (uint64_t)-20; // ENOTDIR
 
   if (vfs_mkdir(parent, dir_name, (uint16_t)mode) != 0)
@@ -1550,7 +1614,7 @@ static uint64_t sys_unlinkat(uint64_t dirfd, uint64_t pathname, uint64_t flags,
         base_dir = fs_root;
     } else if (dirfd < MAX_FDS && t->fds[dirfd]) {
       base_dir = t->fds[dirfd];
-      if ((base_dir->flags & 0xFF) != FS_DIRECTORY)
+      if ((base_dir->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-20; // ENOTDIR
     } else {
       return (uint64_t)-9; // EBADF
@@ -1590,7 +1654,7 @@ static uint64_t sys_unlinkat(uint64_t dirfd, uint64_t pathname, uint64_t flags,
     strcpy(file_name, path);
   }
 
-  if (!parent || (parent->flags & 0x07) != FS_DIRECTORY)
+  if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return (uint64_t)-20; // ENOTDIR
 
   // Build full path for socket unbinding
@@ -1778,7 +1842,7 @@ static uint64_t do_sys_access(int dirfd, const char *path, uint64_t mode,
       if (dirfd < 0 || dirfd >= MAX_FDS || !t->fds[dirfd])
         return (uint64_t)-9; // EBADF
       base_dir = t->fds[dirfd];
-      if ((base_dir->flags & 0xFF) != FS_DIRECTORY)
+      if ((base_dir->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-20; // ENOTDIR
     }
     node = vfs_resolve_path_at(base_dir, path);
@@ -1937,7 +2001,7 @@ static uint64_t sys_newfstatat(uint64_t dirfd, uint64_t pathname_ptr,
       if ((int)dirfd < 0 || (int)dirfd >= MAX_FDS || !t->fds[dirfd])
         return (uint64_t)-9; // EBADF
       base_dir = t->fds[dirfd];
-      if ((base_dir->flags & 0xFF) != FS_DIRECTORY)
+      if ((base_dir->flags & FS_TYPE_MASK) != FS_DIRECTORY)
         return (uint64_t)-20; // ENOTDIR
     }
   }
@@ -2003,7 +2067,7 @@ static vfs_node_t *resolve_parent_and_name(const char *path, char *name_out,
     basename = path;
   }
 
-  if (!parent || (parent->flags & 0x07) != FS_DIRECTORY)
+  if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return NULL;
 
   size_t blen = strlen(basename);
@@ -2073,7 +2137,7 @@ static uint64_t sys_unlink(uint64_t pathname_ptr, uint64_t a1, uint64_t a2,
   vfs_node_t *target = vfs_finddir(parent, name);
   if (!target)
     return (uint64_t)-2; // ENOENT
-  if ((target->flags & 0x07) == FS_DIRECTORY)
+  if ((target->flags & FS_TYPE_MASK) == FS_DIRECTORY)
     return (uint64_t)-21; // EISDIR
 
   // Invalidate any open fds pointing to this node
@@ -2117,7 +2181,7 @@ static uint64_t sys_rmdir(uint64_t pathname_ptr, uint64_t a1, uint64_t a2,
   vfs_node_t *target = vfs_finddir(parent, name);
   if (!target)
     return (uint64_t)-2; // ENOENT
-  if ((target->flags & 0x07) != FS_DIRECTORY)
+  if ((target->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return (uint64_t)-20; // ENOTDIR
 
   int ret = vfs_rmdir(parent, name);
@@ -2267,7 +2331,7 @@ static uint64_t sys_readlink(uint64_t pathname_ptr, uint64_t buf_ptr,
     return (uint64_t)-2; // ENOENT
 
   // Must be a symlink
-  if ((node->flags & 0xFF) != FS_SYMLINK)
+  if ((node->flags & FS_TYPE_MASK) != FS_SYMLINK)
     return (uint64_t)-22; // EINVAL — not a symlink
 
   int ret = vfs_readlink(node, buf, (uint32_t)bufsiz);
@@ -2362,7 +2426,7 @@ static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
   vfs_node_t *src = vfs_resolve_path(oldpath);
   if (!src)
     return (uint64_t)-2;
-  if ((src->flags & 0xFF) != FS_FILE)
+  if ((src->flags & FS_TYPE_MASK) != FS_FILE)
     return (uint64_t)-1;
 
   char parent_path[128], file_name[128];
@@ -2390,7 +2454,7 @@ static uint64_t sys_link(uint64_t oldpath_ptr, uint64_t newpath_ptr,
     strcpy(file_name, newpath);
   }
 
-  if (!parent || (parent->flags & 0xFF) != FS_DIRECTORY)
+  if (!parent || (parent->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return (uint64_t)-20;
   if (vfs_finddir(parent, file_name))
     return (uint64_t)-17;
@@ -2483,14 +2547,14 @@ static uint64_t do_poll(struct pollfd *fds, uint64_t nfds,
 
     // Final check for ready fds after setting state
     for (uint64_t i = 0; i < nfds; i++) {
-        int fd = fds[i].fd;
-        if (fd >= 0 && fd < MAX_FDS && t->fds[fd]) {
-            if (vfs_poll(t->fds[fd], fds[i].events) > 0) {
-                t->state = THREAD_READY;
-                ready = 1; // Mark as ready so we don't block
-                break;
-            }
+      int fd = fds[i].fd;
+      if (fd >= 0 && fd < MAX_FDS && t->fds[fd]) {
+        if (vfs_poll(t->fds[fd], fds[i].events) > 0) {
+          t->state = THREAD_READY;
+          ready = 1; // Mark as ready so we don't block
+          break;
         }
+      }
     }
 
     // Only yield if we're still blocked
@@ -2547,7 +2611,7 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
 }
 
 static uint64_t do_pselect6(uint64_t nfds, uint64_t readfds, uint64_t writefds,
-                           uint64_t exceptfds, uint64_t timeout_ms) {
+                            uint64_t exceptfds, uint64_t timeout_ms) {
   size_t set_size = (nfds + 7) / 8;
   struct pollfd pfds[128];
   uint64_t p_count = 0;

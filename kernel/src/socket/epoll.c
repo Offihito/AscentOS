@@ -519,7 +519,7 @@ eventpoll_t *epoll_from_fd(int fd) {
   if (!node)
     return NULL;
 
-  if ((node->flags & 0xFF) != FS_EPOLL)
+  if ((node->flags & FS_TYPE_MASK) != FS_EPOLL)
     return NULL;
 
   return (eventpoll_t *)node->device;
@@ -537,7 +537,7 @@ int epoll_close_fd(int fd) {
   if (!node)
     return -9; // EBADF
 
-  if ((node->flags & 0xFF) != FS_EPOLL)
+  if ((node->flags & FS_TYPE_MASK) != FS_EPOLL)
     return -22; // EINVAL
 
   eventpoll_t *ep = (eventpoll_t *)node->device;

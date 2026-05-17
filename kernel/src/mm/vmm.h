@@ -13,6 +13,7 @@
 #define PAGE_FLAG_PCD ((uint64_t)1 << 4)
 #define PAGE_FLAG_A ((uint64_t)1 << 5)
 #define PAGE_FLAG_D ((uint64_t)1 << 6)
+#define PAGE_FLAG_PAT ((uint64_t)1 << 7)
 #define PAGE_FLAG_PS ((uint64_t)1 << 7)
 #define PAGE_FLAG_COW ((uint64_t)1 << 9)
 #define PAGE_FLAG_NX ((uint64_t)1 << 63)

@@ -1,4 +1,4 @@
-#include "fs/ramfs.h"
+#include "ramfs.h"
 #include "lib/string.h"
 #include "mm/heap.h"
 
@@ -181,7 +181,7 @@ static vfs_node_t *ramfs_make_node(char *name, uint16_t perm, uint32_t type) {
   n->mask = perm;
   n->uid = 0;
   n->gid = 0;
-  n->flags = type;
+  n->flags = type | FS_PERSISTENT;
   n->inode = next_inode++;
   n->length = 0;
   n->impl = 0;
@@ -217,7 +217,7 @@ static void ramfs_add_child(vfs_node_t *parent, vfs_node_t *child) {
 }
 
 static int ramfs_create(vfs_node_t *node, char *name, uint16_t permission) {
-  if (!node || (node->flags & 0x7) != FS_DIRECTORY)
+  if (!node || (node->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return -1;
   if (ramfs_finddir(node, name) != 0)
     return -1; // File exists
@@ -232,7 +232,7 @@ static int ramfs_create(vfs_node_t *node, char *name, uint16_t permission) {
 
 static int ramfs_mknod(vfs_node_t *node, char *name, uint16_t permission,
                        uint32_t flags, void *device) {
-  if (!node || (node->flags & 0x7) != FS_DIRECTORY)
+  if (!node || (node->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return -1;
   if (ramfs_finddir(node, name) != 0)
     return -1; // Node exists
@@ -250,7 +250,7 @@ static int ramfs_unlink(vfs_node_t *node, char *name);
 static int ramfs_rename(vfs_node_t *node, char *old_name, char *new_name);
 
 static int ramfs_mkdir(vfs_node_t *node, char *name, uint16_t permission) {
-  if (!node || (node->flags & 0x7) != FS_DIRECTORY)
+  if (!node || (node->flags & FS_TYPE_MASK) != FS_DIRECTORY)
     return -1;
   if (ramfs_finddir(node, name) != 0)
     return -1; // Directory exists
@@ -272,7 +272,7 @@ static int ramfs_mkdir(vfs_node_t *node, char *name, uint16_t permission) {
 
 // ── ramfs_unlink: Remove a file from a directory ────────────────────────────
 static int ramfs_unlink(vfs_node_t *node, char *name) {
-  if (!node || (node->flags & 0x7) != FS_DIRECTORY || !node->device)
+  if (!node || (node->flags & FS_TYPE_MASK) != FS_DIRECTORY || !node->device)
     return -1;
 
   ramfs_dir_t *dir = (ramfs_dir_t *)node->device;
@@ -282,7 +282,7 @@ static int ramfs_unlink(vfs_node_t *node, char *name) {
   while (curr) {
     if (strcmp(curr->node->name, name) == 0) {
       // Don't allow unlinking directories via unlink
-      if ((curr->node->flags & 0x7) == FS_DIRECTORY)
+      if ((curr->node->flags & FS_TYPE_MASK) == FS_DIRECTORY)
         return -1; // EISDIR
 
       // Unlink from the list
@@ -292,7 +292,7 @@ static int ramfs_unlink(vfs_node_t *node, char *name) {
         dir->children = curr->next;
 
       // Free the file data if it's a ramfs file
-      if (curr->node->device && (curr->node->flags & 0x7) == FS_FILE) {
+      if (curr->node->device && (curr->node->flags & FS_TYPE_MASK) == FS_FILE) {
         ramfs_file_t *file = (ramfs_file_t *)curr->node->device;
         if (file->data)
           kfree(file->data);
@@ -310,14 +310,14 @@ static int ramfs_unlink(vfs_node_t *node, char *name) {
 
 // ── ramfs_rename: Rename a file within the same directory ────────────────────
 static int ramfs_rename(vfs_node_t *node, char *old_name, char *new_name) {
-  if (!node || (node->flags & 0x7) != FS_DIRECTORY || !node->device)
+  if (!node || (node->flags & FS_TYPE_MASK) != FS_DIRECTORY || !node->device)
     return -1;
 
   // Check that new_name doesn't already exist
   if (ramfs_finddir(node, new_name) != 0) {
     // If target exists, unlink it first (overwrite semantics per POSIX)
     vfs_node_t *target = ramfs_finddir(node, new_name);
-    if ((target->flags & 0x7) != FS_DIRECTORY) {
+    if ((target->flags & FS_TYPE_MASK) != FS_DIRECTORY) {
       ramfs_unlink(node, new_name);
     } else {
       return -1; // Can't overwrite a directory
@@ -357,7 +357,10 @@ void ramfs_init(void) {
 void ramfs_mount_node(vfs_node_t *root, vfs_node_t *node) {
   if (!root || !node)
     return;
-  if ((root->flags & 0x07) != FS_DIRECTORY)
+  if ((root->flags & FS_TYPE_MASK) != FS_DIRECTORY)
+    return;
+
+  if (ramfs_finddir(root, node->name) != NULL)
     return;
 
   ramfs_add_child(root, node);
@@ -374,7 +377,7 @@ void ramfs_mount_on(vfs_node_t *node) {
 
   // Transform the existing node into a ramfs directory
   node->device = dir;
-  node->flags = (node->flags & ~0x07) | FS_DIRECTORY;
+  node->flags = (node->flags & ~0x07) | FS_DIRECTORY | FS_PERSISTENT;
 
   node->read = 0;
   node->write = 0;
@@ -385,4 +388,31 @@ void ramfs_mount_on(vfs_node_t *node) {
   node->unlink = ramfs_unlink;
   node->rename = ramfs_rename;
   node->mknod = ramfs_mknod;
+}
+
+void ramfs_mount_at(char *path) {
+  vfs_node_t *mountpoint = vfs_resolve_path(path);
+  if (!mountpoint) {
+    // If it doesn't exist, try to create it in the root (legacy fallback)
+    if (fs_root && fs_root->mkdir) {
+      fs_root->mkdir(fs_root, path + (path[0] == '/' ? 1 : 0), 0755);
+      mountpoint = vfs_resolve_path(path);
+    }
+  }
+
+  if (mountpoint) {
+    vfs_node_t *ram_root = kmalloc(sizeof(vfs_node_t));
+    vfs_node_init(ram_root);
+    char *name = path;
+    char *last_slash = 0;
+    for (char *p = path; *p; p++)
+      if (*p == '/')
+        last_slash = p;
+    if (last_slash)
+      name = last_slash + 1;
+    strncpy(ram_root->name, name, 127);
+
+    ramfs_mount_on(ram_root);
+    vfs_mount(mountpoint, ram_root);
+  }
 }

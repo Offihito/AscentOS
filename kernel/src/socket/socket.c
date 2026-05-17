@@ -458,7 +458,7 @@ socket_t *socket_from_fd(int fd) {
   if (!node)
     return NULL;
 
-  if ((node->flags & 0xFF) != FS_SOCKET)
+  if ((node->flags & FS_TYPE_MASK) != FS_SOCKET)
     return NULL;
 
   return (socket_t *)node->device;
@@ -476,7 +476,7 @@ int socket_close_fd(int fd) {
   if (!node)
     return -9; // EBADF
 
-  if ((node->flags & 0xFF) != FS_SOCKET)
+  if ((node->flags & FS_TYPE_MASK) != FS_SOCKET)
     return -22; // EINVAL
 
   socket_t *sock = (socket_t *)node->device;

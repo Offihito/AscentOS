@@ -40,6 +40,27 @@ bootstrap_toolchain() {
 			"$MUSL_CROSS_MAKE_DIR"
 	fi
 	cd "$MUSL_CROSS_MAKE_DIR"
+
+	# Add patch for GCC 16 compatibility with safe-ctype.h
+	mkdir -p patches/gcc-13.3.0
+	cat > patches/gcc-13.3.0/0010-gcc16-locale-collision.diff << 'EOF'
+--- a/gcc/system.h
++++ b/gcc/system.h
+@@ -218,10 +218,11 @@
+ #ifdef INCLUDE_ARRAY
+ # include <array>
+ #endif
+ #ifdef INCLUDE_FUNCTIONAL
+ # include <functional>
+ #endif
++# include <locale>
+ # include <cstring>
+ # include <initializer_list>
+ # include <new>
+ # include <utility>
+ # include <type_traits>
+EOF
+
 	# Copy or generate config.mak with C++ support
 	CONFIG_MAK="$ROOT_DIR/toolchain/musl-cross-make-config.mak"
 	if [ -f "$CONFIG_MAK" ]; then
@@ -54,6 +75,10 @@ GCC_VER = 13.3.0
 BINUTILS_VER = 2.44
 LANGUAGES = c c++
 COMMON_CONFIG += --disable-nls
+export CFLAGS += -fno-char8_t
+export CXXFLAGS += -fno-char8_t -include locale
+export CFLAGS_FOR_BUILD += -fno-char8_t
+export CXXFLAGS_FOR_BUILD += -fno-char8_t -include locale
 GCC_CONFIG += --disable-libquadmath --disable-decimal-float
 GCC_CONFIG += --disable-libitm --disable-fixed-point
 EOF

@@ -15,8 +15,8 @@ static void console_refresh_cursor_unlocked(void);
 static uint32_t console_history_row(uint32_t screen_row);
 static void console_process_escape_sequence(void);
 static void console_clear_line_from_cursor(void);
-static void draw_char_colored(uint32_t c, uint32_t col, uint32_t row, uint32_t fg,
-                              uint32_t bg);
+static void draw_char_colored(uint32_t c, uint32_t col, uint32_t row,
+                              uint32_t fg, uint32_t bg);
 static void draw_history_char(uint32_t col, uint32_t row);
 static void console_wipe_history_unlocked(void);
 
@@ -548,8 +548,8 @@ static void console_process_escape_sequence(void) {
 
 // ── Character drawing helpers ────────────────────────────────────────────────
 
-static void draw_char_colored(uint32_t c, uint32_t col, uint32_t row, uint32_t fg,
-                              uint32_t bg) {
+static void draw_char_colored(uint32_t c, uint32_t col, uint32_t row,
+                              uint32_t fg, uint32_t bg) {
   const uint8_t *glyph = font_get_glyph(c);
   uint32_t px = col * FONT_WIDTH;
   uint32_t py = row * FONT_HEIGHT;
@@ -775,6 +775,7 @@ void console_putchar(char c) {
 // so everything lands in one swap.
 void console_puts(const char *s) {
   spinlock_acquire(&console_lock);
+  fb_set_backbuffer_mode(true);
 
   bool was_visible = cursor_logical_visible;
   if (was_visible && view_scroll_offset == 0)
@@ -786,6 +787,8 @@ void console_puts(const char *s) {
   if (was_visible && view_scroll_offset == 0)
     console_set_cursor_visible_unlocked(true);
 
+  fb_swap_buffer();
+  fb_set_backbuffer_mode(false);
   spinlock_release(&console_lock);
 }
 

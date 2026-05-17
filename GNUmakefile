@@ -46,7 +46,6 @@ run-x86_64: edk2-ovmf $(IMAGE_NAME).iso disk.img nvme.img
 		-netdev user,id=net0 \
 		-device usb-ehci,id=ehci \
 		-device usb-tablet,bus=ehci.0 \
-		-device usb-kbd,bus=ehci.0 \
 		-drive file=nvme.img,if=none,id=nvm0 \
 		-device nvme,drive=nvm0,serial=ascentos-nvme-0 \
 		$(QEMUFLAGS)
@@ -719,7 +718,7 @@ doomgeneric:
 	git clone https://github.com/ozkl/doomgeneric.git --depth=1
 
 userland/doom.elf: doomgeneric $(MUSL_LIBC)
-	$(MAKE) -C userland -f Makefile.ascentos \
+	PATH="$(MUSL_TOOLCHAIN_BIN):$(PATH)" $(MAKE) -C userland -f Makefile.ascentos \
 		MUSL_CC="$(MUSL_CC)" \
 		MUSL_SYSROOT="$(MUSL_SYSROOT)"
 

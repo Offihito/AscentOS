@@ -229,16 +229,20 @@ void pci_enable_bus_mastering(struct pci_device *dev) {
 }
 
 uint8_t pci_find_capability(struct pci_device *dev, uint8_t cap_id) {
-    uint16_t status = pci_config_read16(dev->bus, dev->slot, dev->func, 0x06);
-    if (!(status & (1 << 4))) return 0; // Capabilities bit not set
+  uint16_t status = pci_config_read16(dev->bus, dev->slot, dev->func, 0x06);
+  if (!(status & (1 << 4)))
+    return 0; // Capabilities bit not set
 
-    uint8_t cap_ptr = pci_config_read32(dev->bus, dev->slot, dev->func, 0x34) & 0xFF;
-    while (cap_ptr != 0) {
-        uint32_t cap_reg = pci_config_read32(dev->bus, dev->slot, dev->func, cap_ptr);
-        if ((cap_reg & 0xFF) == cap_id) return cap_ptr;
-        cap_ptr = (cap_reg >> 8) & 0xFF;
-    }
-    return 0;
+  uint8_t cap_ptr =
+      pci_config_read32(dev->bus, dev->slot, dev->func, 0x34) & 0xFF;
+  while (cap_ptr != 0) {
+    uint32_t cap_reg =
+        pci_config_read32(dev->bus, dev->slot, dev->func, cap_ptr);
+    if ((cap_reg & 0xFF) == cap_id)
+      return cap_ptr;
+    cap_ptr = (cap_reg >> 8) & 0xFF;
+  }
+  return 0;
 }
 
 uint32_t pci_get_device_count(void) { return device_count; }

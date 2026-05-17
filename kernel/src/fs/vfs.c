@@ -1,9 +1,16 @@
 #include "vfs.h"
-#include "../console/klog.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
 
 vfs_node_t *fs_root = 0;
+
+typedef struct vfs_mount_entry {
+  vfs_node_t *mountpoint;
+  vfs_node_t *target;
+  struct vfs_mount_entry *next;
+} vfs_mount_entry_t;
+
+static vfs_mount_entry_t *vfs_mount_list = NULL;
 
 uint32_t vfs_read(vfs_node_t *node, uint32_t offset, uint32_t size,
                   uint8_t *buffer) {
@@ -18,8 +25,8 @@ uint32_t vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
   if (node && node->write) {
     uint32_t written = node->write(node, offset, size, buffer);
     if (written > 0 && node->flags != FS_PIPE) {
-       // Filter out common high-volume writes if needed, but for now log
-       // klog_puts("[VFS] node write successful\n");
+      // Filter out common high-volume writes if needed, but for now log
+      // klog_puts("[VFS] node write successful\n");
     }
     return written;
   }
@@ -39,42 +46,63 @@ void vfs_close(vfs_node_t *node) {
 }
 
 struct dirent *vfs_readdir(vfs_node_t *node, uint32_t index) {
-  if ((node->flags & 0x07) == FS_DIRECTORY && node->readdir) {
+  if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->readdir) {
     return node->readdir(node, index);
   }
   return 0;
 }
 
 vfs_node_t *vfs_finddir(vfs_node_t *node, char *name) {
-  if ((node->flags & 0x07) == FS_DIRECTORY && node->finddir) {
-    return node->finddir(node, name);
+  if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->finddir) {
+    vfs_node_t *res = node->finddir(node, name);
+    if (!res)
+      return 0;
+
+    // Check if this inode/dev combo or path is a mountpoint
+    // For simplicity, we check if the returned node matches any mountpoint
+    // in the global list. Since lookups return new nodes (like in ext2),
+    // we should match by inode (and eventually device id).
+    vfs_mount_entry_t *curr = vfs_mount_list;
+    while (curr) {
+      if (curr->mountpoint->inode == res->inode &&
+          curr->mountpoint->device == res->device) {
+        // If it's the root directory of the same mount, don't recurse
+        if (curr->target != res) {
+          // kfree(res); // Discarding the 'covered' node is risky without
+          // refcounts
+          return curr->target;
+        }
+      }
+      curr = curr->next;
+    }
+    return res;
   }
   return 0;
 }
 
 int vfs_create(vfs_node_t *node, char *name, uint16_t permission) {
-  if ((node->flags & 0x07) == FS_DIRECTORY && node->create) {
+  if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->create) {
     return node->create(node, name, permission);
   }
   return -1;
 }
 
 int vfs_mkdir(vfs_node_t *node, char *name, uint16_t permission) {
-  if ((node->flags & 0x07) == FS_DIRECTORY && node->mkdir) {
+  if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->mkdir) {
     return node->mkdir(node, name, permission);
   }
   return -1;
 }
 
 int vfs_unlink(vfs_node_t *node, char *name) {
-  if ((node->flags & 0x07) == FS_DIRECTORY && node->unlink) {
+  if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->unlink) {
     return node->unlink(node, name);
   }
   return -1;
 }
 
 int vfs_rmdir(vfs_node_t *node, char *name) {
-  if ((node->flags & 0x07) == FS_DIRECTORY && node->rmdir) {
+  if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->rmdir) {
     return node->rmdir(node, name);
   }
   return -1;
@@ -88,14 +116,14 @@ int vfs_readlink(vfs_node_t *node, char *buf, uint32_t size) {
 }
 
 int vfs_symlink(vfs_node_t *node, char *name, char *target) {
-  if ((node->flags & 0x07) == FS_DIRECTORY && node->symlink) {
+  if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->symlink) {
     return node->symlink(node, name, target);
   }
   return -1;
 }
 
 int vfs_rename(vfs_node_t *node, char *old_name, char *new_name) {
-  if ((node->flags & 0x07) == FS_DIRECTORY && node->rename) {
+  if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->rename) {
     return node->rename(node, old_name, new_name);
   }
   return -1;
@@ -117,7 +145,7 @@ int vfs_chown(vfs_node_t *node, uint32_t uid, uint32_t gid) {
 
 int vfs_mknod(vfs_node_t *node, char *name, uint16_t permission, uint32_t flags,
               void *device) {
-  if ((node->flags & 0x7) == FS_DIRECTORY && node->mknod) {
+  if ((node->flags & FS_TYPE_MASK) == FS_DIRECTORY && node->mknod) {
     return node->mknod(node, name, permission, flags, device);
   }
   return -1;
@@ -135,7 +163,7 @@ int vfs_poll(vfs_node_t *node, int events) {
     return node->poll(node, events);
   }
   // Default: if no poll handler, assume ready for regular files
-  uint32_t type = (node->flags & 0xFF);
+  uint32_t type = (node->flags & FS_TYPE_MASK);
   if (type == FS_FILE || type == FS_DIRECTORY) {
     return events & (POLLIN | POLLOUT);
   }
@@ -183,17 +211,19 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
     vfs_node_t *next = vfs_finddir(current, comp);
     if (!next) {
       if (current != fs_root && current != dir)
-        kfree(current);
+        if (!(current->flags & FS_PERSISTENT))
+          kfree(current);
       kfree(path_buf);
       return 0;
     }
 
     // Handle symlinks
-    if ((next->flags & 0x7) == FS_SYMLINK) {
+    if ((next->flags & FS_TYPE_MASK) == FS_SYMLINK) {
       if (++symlink_depth > MAX_SYMLINK_DEPTH) {
         kfree(next);
         if (current != fs_root && current != dir)
-          kfree(current);
+          if (!(current->flags & FS_PERSISTENT))
+            kfree(current);
         kfree(path_buf);
         return 0;
       }
@@ -204,7 +234,8 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
 
       if (len < 0) {
         if (current != fs_root && current != dir)
-          kfree(current);
+          if (!(current->flags & FS_PERSISTENT))
+            kfree(current);
         kfree(path_buf);
         return 0;
       }
@@ -213,7 +244,8 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
       char *next_path = kmalloc(512);
       if (!next_path) {
         if (current != fs_root && current != dir)
-          kfree(current);
+          if (!(current->flags & FS_PERSISTENT))
+            kfree(current);
         kfree(path_buf);
         return 0;
       }
@@ -238,7 +270,8 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
 
       if (path_buf[0] == '/') {
         if (current != fs_root && current != dir)
-          kfree(current);
+          if (!(current->flags & FS_PERSISTENT))
+            kfree(current);
         current = fs_root;
         while (*p == '/')
           p++;
@@ -249,7 +282,8 @@ vfs_node_t *vfs_resolve_path_at(vfs_node_t *dir, const char *path) {
     }
 
     // Move to next directory component
-    if (current != fs_root && current != dir) {
+    if (current != fs_root && current != dir &&
+        !(current->flags & FS_PERSISTENT)) {
       kfree(current);
     }
     current = next;
@@ -269,4 +303,20 @@ void vfs_node_init(vfs_node_t *node) {
   memset(node, 0, sizeof(vfs_node_t));
   INIT_LIST_HEAD(&node->ep_watchers);
   spinlock_init(&node->ep_lock);
+}
+
+int vfs_mount(vfs_node_t *mountpoint, vfs_node_t *target) {
+  if (!mountpoint || !target)
+    return -1;
+
+  vfs_mount_entry_t *entry = kmalloc(sizeof(vfs_mount_entry_t));
+  entry->mountpoint = mountpoint;
+  entry->target = target;
+  entry->next = vfs_mount_list;
+  vfs_mount_list = entry;
+
+  mountpoint->flags |= FS_MOUNTPOINT | FS_PERSISTENT;
+  mountpoint->ptr = target;
+
+  return 0;
 }

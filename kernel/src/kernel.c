@@ -39,6 +39,7 @@
 #include "fb/framebuffer.h"
 #include "fs/ext2.h"
 #include "fs/fat32.h"
+#include "fs/procfs.h"
 #include "fs/ramfs.h"
 #include "fs/random.h"
 #include "fs/vfs.h"
@@ -417,11 +418,7 @@ void kmain_high_half(void) {
 
   // Initialize shared memory subsystem
   shm_init();
-
-  fb_register_vfs();
-  mouse_register_vfs();
   evdev_init();
-  random_register_vfs();
 
   pci_init();
   usb_init();
@@ -477,11 +474,16 @@ void kmain_high_half(void) {
 
 mount_success:
   klog_puts("[OK] Root filesystem mounted successfully.\n");
+  // Mount /dev and /tmp as in-memory filesystems
+  ramfs_mount_at("/dev");
+  ramfs_mount_at("/tmp");
+
   // Re-populate /dev in the new root
   block_repopulate_devices();
   fb_register_vfs();
   mouse_register_vfs();
   random_register_vfs();
+  procfs_init();
 
 mount_fail:
 
