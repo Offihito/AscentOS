@@ -1743,6 +1743,134 @@ static uint64_t sys_readv(uint64_t fd, uint64_t iov_u, uint64_t iovcnt,
   return total;
 }
 
+// ── sys_eventfd2: eventfd2(initval, flags) — syscall 290 ─────────────────────
+#define EFD_SEMAPHORE 1
+#define EFD_CLOEXEC 02000000
+#define EFD_NONBLOCK 04000
+
+typedef struct {
+  uint64_t counter;
+  uint32_t flags;
+  wait_queue_t wq;
+  spinlock_t lock;
+} eventfd_ctx_t;
+
+static uint32_t eventfd_read(vfs_node_t *node, uint32_t offset, uint32_t size,
+                             uint8_t *buffer) {
+  (void)offset;
+  if (size < 8)
+    return (uint32_t)-22; // EINVAL
+  eventfd_ctx_t *ctx = (eventfd_ctx_t *)node->device;
+  if (!ctx)
+    return (uint32_t)-22;
+
+  spinlock_acquire(&ctx->lock);
+  if (ctx->counter == 0) {
+    spinlock_release(&ctx->lock);
+    return (uint32_t)-11; // EAGAIN
+  }
+  uint64_t val;
+  if (ctx->flags & EFD_SEMAPHORE) {
+    val = 1;
+    ctx->counter -= 1;
+  } else {
+    val = ctx->counter;
+    ctx->counter = 0;
+  }
+  spinlock_release(&ctx->lock);
+
+  memcpy(buffer, &val, 8);
+  return 8;
+}
+
+static uint32_t eventfd_write(vfs_node_t *node, uint32_t offset, uint32_t size,
+                              uint8_t *buffer) {
+  (void)offset;
+  if (size < 8)
+    return (uint32_t)-22; // EINVAL
+  eventfd_ctx_t *ctx = (eventfd_ctx_t *)node->device;
+  if (!ctx)
+    return (uint32_t)-22;
+
+  uint64_t val;
+  memcpy(&val, buffer, 8);
+  if (val == 0)
+    return (uint32_t)-22;
+
+  spinlock_acquire(&ctx->lock);
+  ctx->counter += val;
+  spinlock_release(&ctx->lock);
+
+  wait_queue_wake_all(&ctx->wq);
+  return 8;
+}
+
+static int eventfd_poll(vfs_node_t *node, int events) {
+  eventfd_ctx_t *ctx = (eventfd_ctx_t *)node->device;
+  if (!ctx)
+    return 0;
+
+  int revents = 0;
+  spinlock_acquire(&ctx->lock);
+  if (ctx->counter > 0)
+    revents |= POLLIN;
+  if (ctx->counter < 0xfffffffffffffffeULL)
+    revents |= POLLOUT;
+  spinlock_release(&ctx->lock);
+  return revents & events;
+}
+
+static void eventfd_close(vfs_node_t *node) {
+  if (node && node->device) {
+    kfree(node->device);
+  }
+  kfree(node);
+}
+
+static uint64_t sys_eventfd2(uint64_t initval, uint64_t flags, uint64_t a2,
+                             uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
+  struct thread *t = sched_get_current();
+  if (!t)
+    return (uint64_t)-1;
+
+  int fd = alloc_fd(t);
+  if (fd < 0)
+    return (uint64_t)-24; // EMFILE
+
+  vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
+  if (!node)
+    return (uint64_t)-12; // ENOMEM
+  memset(node, 0, sizeof(vfs_node_t));
+
+  eventfd_ctx_t *ctx = kmalloc(sizeof(eventfd_ctx_t));
+  if (!ctx) {
+    kfree(node);
+    return (uint64_t)-12; // ENOMEM
+  }
+  memset(ctx, 0, sizeof(eventfd_ctx_t));
+  ctx->counter = initval;
+  ctx->flags = flags;
+  spinlock_init(&ctx->lock);
+  wait_queue_init(&ctx->wq);
+
+  node->flags = FS_FILE;
+  node->device = ctx;
+  node->read = eventfd_read;
+  node->write = eventfd_write;
+  node->poll = eventfd_poll;
+  node->close = eventfd_close;
+  node->wait_queue = &ctx->wq; // Link wait queue for epoll/poll
+
+  t->fds[fd] = node;
+  t->fd_offsets[fd] = 0;
+
+  return fd;
+}
+
 // ── sys_pipe2: pipe2(pipefd, flags) — syscall 293 ────────────────────────────
 static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
@@ -2751,6 +2879,7 @@ void syscall_register_io(void) {
   syscall_register(SYS_SELECT, sys_select);
   syscall_register(SYS_PIPE, sys_pipe);
   syscall_register(SYS_PIPE2, sys_pipe2);
+  syscall_register(SYS_EVENTFD2, sys_eventfd2);
   syscall_register(SYS_GETRANDOM, sys_getrandom);
   syscall_register(SYS_ACCESS, sys_access);
   syscall_register(SYS_FACCESSAT2, sys_faccessat2);

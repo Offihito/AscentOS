@@ -184,6 +184,8 @@ void console_init(struct limine_framebuffer *framebuffer) {
   max_rows = fb_get_height() / FONT_HEIGHT;
   cursor_x = 0;
   cursor_y = 0;
+  terminal_escape = false;
+  terminal_escape_len = 0;
 
   fb_clear(BG_COLOR);
 }
@@ -669,18 +671,26 @@ static void console_render_char(uint32_t cp) {
   cursor_x++;
   if (cursor_x >= max_cols) {
     cursor_x = 0;
-    cursor_y++;
-    history_write_row++;
-    uint32_t new_row = history_write_row % HISTORY_MAX;
-    for (uint32_t i = 0; i < COLS_MAX; i++) {
-      history[new_row][i].c = 0;
-      history[new_row][i].fg = FG_COLOR;
-      history[new_row][i].bg = BG_COLOR;
-    }
 
-    if (view_scroll_offset == 0 && cursor_y < max_rows) {
-      fb_fill_rect(0, cursor_y * FONT_HEIGHT, fb_get_width(), FONT_HEIGHT,
-                   BG_COLOR);
+    uint32_t bottom_screen =
+        (history_write_row >= max_rows - 1) ? max_rows - 1 : history_write_row;
+    bool at_bottom = (cursor_y >= bottom_screen);
+
+    cursor_y++;
+
+    if (at_bottom) {
+      history_write_row++;
+      uint32_t new_row = history_write_row % HISTORY_MAX;
+      for (uint32_t i = 0; i < COLS_MAX; i++) {
+        history[new_row][i].c = 0;
+        history[new_row][i].fg = FG_COLOR;
+        history[new_row][i].bg = BG_COLOR;
+      }
+
+      if (view_scroll_offset == 0 && cursor_y < max_rows) {
+        fb_fill_rect(0, cursor_y * FONT_HEIGHT, fb_get_width(), FONT_HEIGHT,
+                     BG_COLOR);
+      }
     }
 
     if (cursor_y >= max_rows) {
@@ -766,7 +776,15 @@ void console_putchar(char c) {
   if (fb_get_kd_mode() == KD_GRAPHICS)
     return;
   spinlock_acquire(&console_lock);
+
+  // Use backbuffer even for single putchar to keep it in sync with puts
+  // and prevent stale backbuffer data from overwriting frontbuffer during
+  // swaps.
+  fb_set_backbuffer_mode(true);
   console_putchar_unlocked(c);
+  fb_swap_buffer();
+  fb_set_backbuffer_mode(false);
+
   spinlock_release(&console_lock);
 }
 
@@ -879,19 +897,6 @@ void console_refresh_cursor(void) {
 
 void console_clear(void) {
   spinlock_acquire(&console_lock);
-  fb_clear(BG_COLOR);
-  // To simulate a clear while keeping history, we just "scroll" the current
-  // output out of view by incrementing history_write_row.
-  if (history_write_row > 0 || cursor_y > 0) {
-    history_write_row += (max_rows - cursor_y);
-  }
-
-  cursor_x = 0;
-  cursor_y = 0;
-  view_scroll_offset = 0;
-  cursor_logical_visible = false;
-  cursor_phys_on = false;
-  current_fg = FG_COLOR;
-  current_bg = BG_COLOR;
+  console_wipe_history_unlocked();
   spinlock_release(&console_lock);
 }

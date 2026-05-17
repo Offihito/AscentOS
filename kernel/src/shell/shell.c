@@ -995,16 +995,17 @@ static void execute_command(char *cmd) {
       console_puts("\n=== SLAB TEST FAILED ===\n");
     }
 
-  // ════════════════════════════════════════════════════════════════════════
-  // Named Slab Cache Stress Test (kmem_cache API)
-  // ════════════════════════════════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════════════
+    // Named Slab Cache Stress Test (kmem_cache API)
+    // ════════════════════════════════════════════════════════════════════════
   } else if (strcmp(cmd, "slabstress") == 0) {
     console_puts("Starting Named Slab Cache Stress Test...\n");
     int pass = 1;
 
     // ── Phase 1: Custom cache create/alloc/free cycle ───────────────────
     console_puts("[1/6] Creating custom test cache (obj_size=96)...\n");
-    kmem_cache_t *test_cache = kmem_cache_create("stress_test", 96, 8, NULL, NULL);
+    kmem_cache_t *test_cache =
+        kmem_cache_create("stress_test", 96, 8, NULL, NULL);
     if (!test_cache) {
       console_puts("  -> FAIL: kmem_cache_create returned NULL!\n");
       pass = 0;
@@ -1156,9 +1157,9 @@ static void execute_command(char *cmd) {
       console_puts("\n=== NAMED SLAB CACHE STRESS TEST FAILED ===\n");
     }
 
-  // ════════════════════════════════════════════════════════════════════════
-  // Shared Memory (SHM) Stress Test
-  // ════════════════════════════════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════════════
+    // Shared Memory (SHM) Stress Test
+    // ════════════════════════════════════════════════════════════════════════
   } else if (strcmp(cmd, "shmtest") == 0) {
     console_puts("Starting Shared Memory (SHM) Stress Test...\n");
     int pass = 1;
@@ -1221,7 +1222,8 @@ static void execute_command(char *cmd) {
       console_puts("[4/5] Querying segment info (shmctl IPC_STAT)...\n");
       struct shmid_ds info;
       memset(&info, 0, sizeof(info));
-      int64_t rc = sys_shmctl((uint64_t)shmid, IPC_STAT, (uint64_t)&info, 0, 0, 0);
+      int64_t rc =
+          sys_shmctl((uint64_t)shmid, IPC_STAT, (uint64_t)&info, 0, 0, 0);
       if (rc == 0 && info.shm_segsz == 8192 && info.shm_nattch == 1) {
         console_puts("  -> PASS: size=");
         shell_print_uint64(info.shm_segsz);

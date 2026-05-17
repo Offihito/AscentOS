@@ -83,6 +83,7 @@ void syscall_init(void) {
   syscall_register_socket();
   syscall_register_epoll();
   syscall_register_shm();
+  syscall_register_futex();
 
   // 1. Enable System Call Extensions and No-Execute
   uint64_t efer = rdmsr(IA32_EFER);

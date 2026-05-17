@@ -213,7 +213,8 @@ static void keyboard_callback(struct registers *regs) {
       // so /dev/stdin works in scancode mode
       if (!release && scancode < sizeof(scancode_to_char)) {
         bool use_shift = left_shift || right_shift;
-        char c = use_shift ? scancode_to_char_shift[scancode] : scancode_to_char[scancode];
+        char c = use_shift ? scancode_to_char_shift[scancode]
+                           : scancode_to_char[scancode];
         if (left_ctrl || right_ctrl) {
           if (c >= 'a' && c <= 'z') {
             c = c - 'a' + 1;
@@ -469,9 +470,9 @@ void keyboard_init(void) {
   while ((inb(0x64) & 1) && timeout--) {
     uint8_t dummy = inb(0x60);
     if (dummy == 0xFF && timeout < 9990) {
-        // Floating bus - likely no PS/2 controller present
-        klog_puts("[KBD] PS/2 controller not found or floating bus.\n");
-        return;
+      // Floating bus - likely no PS/2 controller present
+      klog_puts("[KBD] PS/2 controller not found or floating bus.\n");
+      return;
     }
   }
 

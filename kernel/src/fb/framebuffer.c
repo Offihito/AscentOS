@@ -1058,13 +1058,25 @@ void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
   if (y + h > fb->height)
     h = fb->height - y;
 
-  void *target = backbuffer_enabled ? backbuffer : fb->address;
-
-  for (uint32_t row = y; row < y + h; row++) {
-    uint32_t *line = (uint32_t *)((uint8_t *)target + row * fb->pitch + x * 4);
-    fill_scanline32(line, w, color);
+  // Always update backbuffer if it exists to keep it in sync
+  if (backbuffer) {
+    for (uint32_t row = y; row < y + h; row++) {
+      uint32_t *line =
+          (uint32_t *)((uint8_t *)backbuffer + row * fb->pitch + x * 4);
+      fill_scanline32(line, w, color);
+    }
   }
-  fb_mark_dirty(x, y, w, h);
+
+  // Draw to hardware if backbuffer is disabled or not present
+  if (!backbuffer_enabled) {
+    for (uint32_t row = y; row < y + h; row++) {
+      uint32_t *line =
+          (uint32_t *)((uint8_t *)fb->address + row * fb->pitch + x * 4);
+      fill_scanline32(line, w, color);
+    }
+  } else {
+    fb_mark_dirty(x, y, w, h);
+  }
 }
 
 void fb_clear(uint32_t color) {
@@ -1082,15 +1094,25 @@ void fb_draw_glyph_scanline(uint32_t x, uint32_t y, uint8_t bits, uint32_t fg,
   if (x >= fb->width || y >= fb->height)
     return;
 
-  void *target = backbuffer_enabled ? backbuffer : fb->address;
-  uint32_t *line = (uint32_t *)((uint8_t *)target + y * fb->pitch + x * 4);
-
-  // Process all 8 pixels in one pass
-  for (int i = 0; i < 8; i++) {
-    line[i] = (bits & (0x80 >> i)) ? fg : bg;
+  // Always update backbuffer if it exists to keep it in sync
+  if (backbuffer) {
+    uint32_t *line =
+        (uint32_t *)((uint8_t *)backbuffer + y * fb->pitch + x * 4);
+    for (int i = 0; i < 8; i++) {
+      line[i] = (bits & (0x80 >> i)) ? fg : bg;
+    }
   }
-  // Mark 8x1 region dirty (caller will batch multiple scanlines for full char)
-  fb_mark_dirty(x, y, 8, 1);
+
+  if (!backbuffer_enabled) {
+    uint32_t *line =
+        (uint32_t *)((uint8_t *)fb->address + y * fb->pitch + x * 4);
+    for (int i = 0; i < 8; i++) {
+      line[i] = (bits & (0x80 >> i)) ? fg : bg;
+    }
+  } else {
+    // Mark dirty only when backbuffering is active
+    fb_mark_dirty(x, y, 8, 1);
+  }
 }
 
 uint32_t fb_get_width(void) { return fb->width; }

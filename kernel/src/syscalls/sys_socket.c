@@ -306,19 +306,19 @@ struct iovec {
 };
 
 struct msghdr {
-  void *msg_name;         // Source address (for recvmsg)
-  size_t msg_namelen;     // Address length
-  struct iovec *msg_iov;  // Scatter/gather array
-  size_t msg_iovlen;      // Number of iovec elements
-  void *msg_control;      // Ancillary data
-  size_t msg_controllen;  // Ancillary data length
-  int msg_flags;          // Flags on received message
+  void *msg_name;        // Source address (for recvmsg)
+  size_t msg_namelen;    // Address length
+  struct iovec *msg_iov; // Scatter/gather array
+  size_t msg_iovlen;     // Number of iovec elements
+  void *msg_control;     // Ancillary data
+  size_t msg_controllen; // Ancillary data length
+  int msg_flags;         // Flags on received message
 };
 
 // ── Syscall: sendmsg(int sockfd, struct msghdr *msg, int flags)
 // ───────────────────────────────────────────────────────────────────
 static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
-                           uint64_t _arg3, uint64_t _arg4, uint64_t _arg5) {
+                            uint64_t _arg3, uint64_t _arg4, uint64_t _arg5) {
   (void)_arg3;
   (void)_arg4;
   (void)_arg5;
@@ -378,7 +378,7 @@ static uint64_t sys_sendmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
 // ── Syscall: recvmsg(int sockfd, struct msghdr *msg, int flags)
 // ───────────────────────────────────────────────────────────────────
 static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
-                           uint64_t _arg3, uint64_t _arg4, uint64_t _arg5) {
+                            uint64_t _arg3, uint64_t _arg4, uint64_t _arg5) {
   (void)_arg3;
   (void)_arg4;
   (void)_arg5;
@@ -407,7 +407,7 @@ static uint64_t sys_recvmsg(uint64_t sockfd, uint64_t msg_ptr, uint64_t flags,
   ssize_t total_received = 0;
   for (size_t i = 0; i < msg->msg_iovlen; i++) {
     struct iovec *iov = &msg->msg_iov[i];
-    
+
     if (!is_user_ptr((uint64_t)iov->iov_base)) {
       return (uint64_t)-14; // EFAULT
     }
@@ -573,15 +573,19 @@ static uint64_t sys_setsockopt(uint64_t sockfd, uint64_t level,
     switch ((int)optname) {
     case SO_RCVBUF: {
       int v = *val;
-      if (v < 256) v = 256;
-      if (v > 1024 * 1024) v = 1024 * 1024; // 1MB max
+      if (v < 256)
+        v = 256;
+      if (v > 1024 * 1024)
+        v = 1024 * 1024; // 1MB max
       sock->rcvbuf = v;
       return 0;
     }
     case SO_SNDBUF: {
       int v = *val;
-      if (v < 256) v = 256;
-      if (v > 1024 * 1024) v = 1024 * 1024; // 1MB max
+      if (v < 256)
+        v = 256;
+      if (v > 1024 * 1024)
+        v = 1024 * 1024; // 1MB max
       sock->sndbuf = v;
       return 0;
     }
@@ -624,7 +628,7 @@ static uint64_t sys_getsockname(uint64_t sockfd, uint64_t addr_ptr,
   if (!is_user_ptr(addr_ptr)) {
     return (uint64_t)-14; // EFAULT
   }
-  
+
   if (!is_user_ptr(addrlen_ptr)) {
     return (uint64_t)-14; // EFAULT
   }
@@ -638,25 +642,25 @@ static uint64_t sys_getsockname(uint64_t sockfd, uint64_t addr_ptr,
 
     int *addrlen = (int *)addrlen_ptr;
     int user_len = *addrlen;
-    
+
     // Calculate actual address length
     int actual_len = usock->addr_len;
     if (actual_len == 0) {
       // Socket not bound, return empty address
       actual_len = sizeof(sa_family_t);
     }
-    
+
     // Copy as much as fits
     int copy_len = user_len < actual_len ? user_len : actual_len;
-    
+
     // Copy address to user space
     if (copy_len > 0) {
       memcpy((void *)addr_ptr, &usock->addr, copy_len);
     }
-    
+
     // Update addrlen to actual size
     *addrlen = actual_len;
-    
+
     return 0;
   }
 
@@ -684,7 +688,7 @@ static uint64_t sys_getpeername(uint64_t sockfd, uint64_t addr_ptr,
   if (!is_user_ptr(addr_ptr)) {
     return (uint64_t)-14; // EFAULT
   }
-  
+
   if (!is_user_ptr(addrlen_ptr)) {
     return (uint64_t)-14; // EFAULT
   }
@@ -703,31 +707,31 @@ static uint64_t sys_getpeername(uint64_t sockfd, uint64_t addr_ptr,
 
     int *addrlen = (int *)addrlen_ptr;
     int user_len = *addrlen;
-    
+
     // Get peer's address
     unix_sock_t *peer = usock->peer;
     if (!peer) {
       return (uint64_t)-107; // ENOTCONN
     }
-    
+
     // Calculate actual address length
     int actual_len = peer->addr_len;
     if (actual_len == 0) {
       // Peer not bound, return empty address
       actual_len = sizeof(sa_family_t);
     }
-    
+
     // Copy as much as fits
     int copy_len = user_len < actual_len ? user_len : actual_len;
-    
+
     // Copy peer address to user space
     if (copy_len > 0) {
       memcpy((void *)addr_ptr, &peer->addr, copy_len);
     }
-    
+
     // Update addrlen to actual size
     *addrlen = actual_len;
-    
+
     return 0;
   }
 

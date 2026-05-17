@@ -86,6 +86,7 @@
 #define SYS_PRCTL 157
 #define SYS_SIGPROCMASK 186
 #define SYS_TGKILL 200
+#define SYS_FUTEX 202
 #define SYS_CLOCK_GETTIME 228
 #define SYS_CLOCK_GETRES 229
 #define SYS_GETDENTS64 217
@@ -93,10 +94,11 @@
 #define SYS_EXIT_GROUP 231
 #define SYS_PIPE2 293
 #define SYS_GETRANDOM 318
-#define SYS_MEMBARRIER 302
+#define SYS_MEMBARRIER 324
 #define SYS_OPENAT 257
 #define SYS_FUTIMESAT 261
 #define SYS_NEWFSTATAT 262
+#define SYS_EVENTFD2 290
 #define SYS_UTIMENSAT 235
 #define SYS_UTIMES 280
 #define SYS_FACCESSAT2 439
@@ -175,6 +177,7 @@ void syscall_register_media(void);
 void syscall_register_socket(void);
 void syscall_register_epoll(void);
 void syscall_register_shm(void);
+void syscall_register_futex(void);
 
 // ── Core init (MSRs + calls subsystem registrations) ────────────────────────
 void syscall_init(void);

@@ -225,7 +225,8 @@ uint32_t ptmx_read(struct vfs_node *node, uint32_t offset, uint32_t size,
     entry.thread->state = THREAD_BLOCKED;
 
     // Last second check while BLOCKED
-    if (!ring_empty(pty->s2m_head, pty->s2m_tail) || pty->slave_open_count == 0) {
+    if (!ring_empty(pty->s2m_head, pty->s2m_tail) ||
+        pty->slave_open_count == 0) {
       entry.thread->state = THREAD_RUNNING;
       spinlock_release(&pty->lock);
     } else {

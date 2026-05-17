@@ -4,8 +4,8 @@
 #include "../../apic/lapic.h"
 #include "../../console/console.h"
 #include "../../console/klog.h"
-#include "../../cpu/isr.h"
 #include "../../cpu/irq.h"
+#include "../../cpu/isr.h"
 #include "../../dma/dma.h"
 #include "../../fb/framebuffer.h"
 #include "../../fs/vfs.h"
@@ -44,6 +44,7 @@ static uint8_t dsp_bits = 8;
 // ── DMA buffer (64KB-aligned within ISA 16MB) ───────────────────────────────
 static uint8_t *sb16_dma_buf = 0;
 static uint64_t sb16_dma_phys = 0;
+static bool sb16_dma_failed = false;
 
 // ── DSP low-level I/O ───────────────────────────────────────────────────────
 
@@ -88,29 +89,71 @@ static void sb16_isr(struct registers *regs) {
 }
 
 // ── DMA buffer allocation ───────────────────────────────────────────────────
+//
+// ISA DMA constraints:
+//   - Buffer must reside below 16 MB (24-bit addressing)
+//   - Transfer must not cross a 64 KB boundary  (8-bit channels)
+//   - Transfer must not cross a 128 KB boundary (16-bit channels)
+//
+// Since sb16_pump_audio() caps each DMA transfer at 2048 bytes,
+// a single 4 KB page (page-aligned) can never cross either boundary.
+// We therefore only need ONE page instead of the previous 32 (128 KB).
+//
+// Fallback: the first 1 MB of RAM is real memory that the PMM
+// intentionally skips.  Address 0x8000 (32 KB) sits safely in
+// conventional memory — above the IVT/BDA and below the VGA hole —
+// and is guaranteed to exist on every PC.
+
+#define SB16_DMA_FALLBACK_PHYS 0x8000 // 32 KB — conventional memory
 
 static int ensure_dma_buffer(void) {
   if (sb16_dma_buf)
     return 0;
-  // Allocate 32 pages (128KB) within first 16MB for ISA legacy DMA
-  uint64_t raw_phys = (uint64_t)pmm_alloc_pages_constrained(32, 0x1000000);
-  if (!raw_phys) {
-    klog_puts(
-        "[SB16] ERROR: Failed to allocate DMA buffer within 16MB range!\n");
+  if (sb16_dma_failed)
     return -1;
+
+  // Try the buddy allocator first (single page, below 16 MB)
+  uint64_t phys = (uint64_t)pmm_alloc_pages_constrained(1, 0x1000000);
+
+  if (!phys) {
+    // Buddy allocator has nothing below 16 MB.
+    // Use a fixed address in conventional memory that the PMM never touches.
+    phys = SB16_DMA_FALLBACK_PHYS;
+    klog_puts("[SB16] Using conventional-memory fallback for DMA buffer\n");
   }
-  sb16_dma_phys = (raw_phys + 65535) & ~65535ULL;
+
+  sb16_dma_phys = phys; // already page-aligned (or 0x8000 = 32 KB aligned)
   sb16_dma_buf = (uint8_t *)(sb16_dma_phys + pmm_get_hhdm_offset());
 
-  klog_puts("[SB16] Allocated DMA buffer: phys=");
+  klog_puts("[SB16] DMA buffer: phys=");
   klog_uint64(sb16_dma_phys);
-  if (sb16_dma_phys >= 0x1000000) {
-    klog_puts(" [WARNING: ABOVE 16MB LIMIT for ISA DMA]\n");
-  } else {
-    klog_puts(" [OK: within 16MB range]\n");
-  }
+  klog_puts(" [OK]\n");
 
   return 0;
+}
+
+// ── Early DMA reservation (called before PCI/storage eat low memory) ────────
+
+void sb16_reserve_dma(void) {
+  // Quick probe: reset DSP and check for 0xAA ready signal.
+  // We don't do full init here — just confirm the card exists and grab DMA RAM.
+  outb(DSP_RESET, 1);
+  for (int i = 0; i < 10; i++)
+    io_wait();
+  outb(DSP_RESET, 0);
+
+  uint32_t timeout = 10000;
+  while (timeout > 0) {
+    if ((inb(DSP_READ_STATUS) & 0x80) && (inb(DSP_READ) == 0xAA))
+      break;
+    io_wait();
+    timeout--;
+  }
+  if (timeout == 0)
+    return; // No SB16 — nothing to reserve
+
+  klog_puts("[SB16] Card detected, reserving ISA DMA buffer early...\n");
+  ensure_dma_buffer();
 }
 
 // ── Hardware initialization ─────────────────────────────────────────────────
@@ -163,6 +206,14 @@ void sb16_init(void) {
   sb16_mixer_write(0x2E, 0x00); // Line-In Mute
 
   sb16_present = true;
+
+  // Eagerly allocate DMA buffer while low memory is still available.
+  // If deferred until the first write(), other subsystems may have consumed
+  // all memory below 16MB (the ISA DMA ceiling).
+  if (ensure_dma_buffer() != 0) {
+    klog_puts("[SB16] WARNING: Could not pre-allocate DMA buffer.\n");
+    klog_puts("       Audio playback will not be available.\n");
+  }
 }
 
 // ── Play a single DMA chunk (internal) ──────────────────────────────────────

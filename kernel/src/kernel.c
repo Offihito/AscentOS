@@ -264,6 +264,7 @@ void kmain(void) {
   vma_cache = kmem_cache_create("vma", sizeof(struct vma), 8, NULL, NULL);
 
   dma_alloc_init();
+  sb16_reserve_dma(); // Grab ISA DMA buffer before PCI/storage eat low memory
   console_init(fb);
   // After console_init, klog should stop drawing manually to the screen
   // and let the full console driver handle it via serial output redirected to

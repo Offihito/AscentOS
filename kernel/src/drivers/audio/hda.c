@@ -23,7 +23,7 @@ static uint8_t hda_dac_node = 2;
 static uint8_t hda_pin_node = 3;
 static uint8_t hda_codec_addr = 0;
 
-#define HDA_RING_SIZE (128 * 1024)
+#define HDA_RING_SIZE (256 * 1024)
 static uint8_t *hda_ring = NULL;
 static volatile uint32_t ring_head = 0;
 static volatile uint32_t ring_tail = 0;
@@ -35,7 +35,9 @@ static struct hda_bdl_entry *hda_vfs_bdl = NULL;
 static uint64_t hda_vfs_bdl_phys = 0;
 static uint8_t *hda_vfs_buf = NULL;
 static uint64_t hda_vfs_buf_phys = 0;
-#define HDA_VFS_BUF_SIZE 4096
+#define HDA_VFS_BUF_SIZE  16384
+#define HDA_VFS_NUM_BDL   4
+#define HDA_VFS_TOTAL_SIZE (HDA_VFS_BUF_SIZE * HDA_VFS_NUM_BDL)
 
 // IOCTLs (Shared with AC97/OSS)
 #define SNDCTL_DSP_SPEED 0xC0045002
@@ -261,24 +263,15 @@ static void hda_flush_cache(void *ptr, size_t size) {
   }
 }
 
-static void hda_pump_audio(void) {
-  if (!hda_vfs_buf)
+// Fill a single BDL buffer slot with audio data from the ring buffer
+static void hda_fill_buffer(int buf_idx) {
+  if (!hda_vfs_buf || buf_idx < 0 || buf_idx >= HDA_VFS_NUM_BDL)
     return;
 
-  uint16_t gcap = hda_read16(HDA_GCAP);
-  int iss = (gcap >> 8) & 0xF;
-  uint32_t sd_off = HDA_SD_BASE + (iss * 0x20);
-
-  // We have 2 buffers in a loop. LPIB tells us where DMA is.
-  uint32_t lpib = hda_read32(sd_off + HDA_SD_LPIB);
-  int active_buffer = (lpib >= HDA_VFS_BUF_SIZE) ? 1 : 0;
-  int buffer_to_fill = (active_buffer + 1) % 2;
-
-  uint8_t *dest = hda_vfs_buf + (buffer_to_fill * HDA_VFS_BUF_SIZE);
+  uint8_t *dest = hda_vfs_buf + (buf_idx * HDA_VFS_BUF_SIZE);
 
   if (ring_count == 0) {
     // No more data in ring, fill with silence but DO NOT stop stream.
-    // This prevents the "machine gun" effect of stopping/restarting.
     memset(dest, 0, HDA_VFS_BUF_SIZE);
   } else {
     uint32_t chunk =
@@ -302,8 +295,27 @@ static void hda_pump_audio(void) {
     ring_count -= chunk;
   }
 
-  // Flush cache for the entire buffer
+  // Flush cache for the buffer
   hda_flush_cache(dest, HDA_VFS_BUF_SIZE);
+}
+
+static void hda_pump_audio(void) {
+  if (!hda_vfs_buf)
+    return;
+
+  uint16_t gcap = hda_read16(HDA_GCAP);
+  int iss = (gcap >> 8) & 0xF;
+  uint32_t sd_off = HDA_SD_BASE + (iss * 0x20);
+
+  // Read current DMA position to determine which buffer the HW is now playing
+  uint32_t lpib = hda_read32(sd_off + HDA_SD_LPIB);
+  int hw_buf = (int)(lpib / HDA_VFS_BUF_SIZE) % HDA_VFS_NUM_BDL;
+
+  // Only refill the buffer that just completed (the one before the current).
+  // Filling all non-active buffers would consume ring data too fast and
+  // overwrite buffers that haven't been played yet, causing sped-up audio.
+  int completed = (hw_buf + HDA_VFS_NUM_BDL - 1) % HDA_VFS_NUM_BDL;
+  hda_fill_buffer(completed);
 }
 
 static void hda_irq_handler(struct registers *regs) {
@@ -312,8 +324,6 @@ static void hda_irq_handler(struct registers *regs) {
   uint32_t intsts = hda_read32(HDA_INTSTS);
   if (!(intsts & (1u << 31)))
     return;
-
-  // klog_puts("[HDA] IRQ!\n");
 
   uint8_t rirbsts = hda_read8(HDA_RIRBSTS);
   if (rirbsts & 0x01) {
@@ -327,9 +337,12 @@ static void hda_irq_handler(struct registers *regs) {
   if (intsts & (1 << iss)) {
     uint32_t sd_off = HDA_SD_BASE + (iss * 0x20);
     uint8_t sd_sts = hda_read8(sd_off + HDA_SD_STS);
-    if (sd_sts & 0x04) {
-      hda_write8(sd_off + HDA_SD_STS, 0x04);
-      hda_pump_audio();
+    // Clear all interrupt status bits (IOC=0x04, FIFOE=0x08, DESE=0x10)
+    if (sd_sts & 0x1C) {
+      hda_write8(sd_off + HDA_SD_STS, sd_sts & 0x1C);
+      if (sd_sts & 0x04) {
+        hda_pump_audio();
+      }
     }
   }
 }
@@ -843,69 +856,88 @@ static uint32_t hda_vfs_write(struct vfs_node *node, uint32_t offset,
   if (!hda_present || !buffer || size == 0)
     return 0;
 
+  // Check for format change before writing any data
+  bool format_changed =
+      (hda_sample_rate != active_rate || hda_channels != active_channels ||
+       hda_bits != active_bits);
+
+  if (hda_is_playing && format_changed) {
+    __asm__ volatile("cli");
+    uint16_t gcap = hda_read16(HDA_GCAP);
+    int iss = (gcap >> 8) & 0xF;
+    uint32_t sd_off = HDA_SD_BASE + (iss * 0x20);
+    hda_write32(sd_off + HDA_SD_CTL,
+                hda_read32(sd_off + HDA_SD_CTL) & ~HDA_SD_CTL_RUN);
+    hda_is_playing = false;
+    ring_head = 0;
+    ring_tail = 0;
+    ring_count = 0;
+    __asm__ volatile("sti");
+  }
+
   uint32_t written = 0;
   while (written < size) {
+    // Calculate available space with interrupts briefly disabled
     __asm__ volatile("cli");
-    if (ring_count >= HDA_RING_SIZE) {
-      __asm__ volatile("sti");
-      break; // Busy wait/blocking NOT implemented here for brevity, usually
-             // we'd sleep
+    uint32_t cur_count = ring_count;
+    __asm__ volatile("sti");
+
+    uint32_t space = HDA_RING_SIZE - cur_count;
+    if (space == 0) {
+      // Ring is full, yield and retry - do NOT drop data
+      __asm__ volatile("pause");
+      continue;
     }
 
-    uint32_t space = HDA_RING_SIZE - ring_count;
-    uint32_t chunk = (size - written > space) ? space : size - written;
+    uint32_t remaining = size - written;
+    uint32_t chunk = (remaining > space) ? space : remaining;
 
+    // For 8-bit audio, each source byte expands to 2 bytes (16-bit)
     if (hda_bits == 8) {
       if (chunk * 2 > space)
         chunk = space / 2;
+      if (chunk == 0) {
+        __asm__ volatile("pause");
+        continue;
+      }
     }
 
-    if (chunk == 0) {
-      __asm__ volatile("sti");
-      break;
-    }
-
-    // Copy to ring
+    // Copy data to ring buffer (no need for cli during memcpy;
+    // the IRQ handler only reads from ring_tail, we only write to ring_head)
     if (hda_bits == 8) {
       for (uint32_t i = 0; i < chunk; i++) {
-        uint16_t s16 = (uint16_t)(buffer[written + i] ^ 0x80) << 8;
-        hda_ring[ring_head] = s16 & 0xFF;
+        int16_t s16 = ((int16_t)(buffer[written + i] ^ 0x80)) << 8;
+        hda_ring[ring_head] = (uint8_t)(s16 & 0xFF);
         ring_head = (ring_head + 1) % HDA_RING_SIZE;
-        hda_ring[ring_head] = s16 >> 8;
+        hda_ring[ring_head] = (uint8_t)((s16 >> 8) & 0xFF);
         ring_head = (ring_head + 1) % HDA_RING_SIZE;
       }
+      // Atomically update count
+      __asm__ volatile("cli");
       ring_count += (chunk * 2);
+      __asm__ volatile("sti");
     } else {
-      uint32_t unread1 = HDA_RING_SIZE - ring_head;
-      if (chunk <= unread1) {
-        memcpy(hda_ring + ring_head, buffer + written, chunk);
-        ring_head = (ring_head + chunk) % HDA_RING_SIZE;
+      uint32_t head_snap = ring_head;
+      uint32_t end1 = HDA_RING_SIZE - head_snap;
+      if (chunk <= end1) {
+        memcpy(hda_ring + head_snap, buffer + written, chunk);
+        ring_head = (head_snap + chunk) % HDA_RING_SIZE;
       } else {
-        memcpy(hda_ring + ring_head, buffer + written, unread1);
-        uint32_t rem = chunk - unread1;
-        memcpy(hda_ring, buffer + written + unread1, rem);
+        memcpy(hda_ring + head_snap, buffer + written, end1);
+        uint32_t rem = chunk - end1;
+        memcpy(hda_ring, buffer + written + end1, rem);
         ring_head = rem;
       }
+      __asm__ volatile("cli");
       ring_count += chunk;
+      __asm__ volatile("sti");
     }
 
     written += chunk;
 
-    bool format_changed =
-        (hda_sample_rate != active_rate || hda_channels != active_channels ||
-         hda_bits != active_bits);
-
-    // If format changed, stop stream so it can be re-initialized
-    if (hda_is_playing && format_changed) {
-      uint16_t gcap = hda_read16(HDA_GCAP);
-      int iss = (gcap >> 8) & 0xF;
-      uint32_t sd_off = HDA_SD_BASE + (iss * 0x20);
-      hda_write32(sd_off + HDA_SD_CTL,
-                  hda_read32(sd_off + HDA_SD_CTL) & ~HDA_SD_CTL_RUN);
-      hda_is_playing = false;
-    }
-
-    if (!hda_is_playing && ring_count >= HDA_VFS_BUF_SIZE) {
+    // Start stream if we have enough buffered data
+    if (!hda_is_playing && ring_count >= HDA_VFS_BUF_SIZE * HDA_VFS_NUM_BDL) {
+      __asm__ volatile("cli");
       active_rate = hda_sample_rate;
       active_channels = hda_channels;
       active_bits = hda_bits;
@@ -930,22 +962,25 @@ static uint32_t hda_vfs_write(struct vfs_node *node, uint32_t offset,
       hda_write32(sd_off + HDA_SD_BDPL, (uint32_t)hda_vfs_bdl_phys);
       hda_write32(sd_off + HDA_SD_BDPU, (uint32_t)(hda_vfs_bdl_phys >> 32));
 
-      hda_write32(sd_off + HDA_SD_CBL, HDA_VFS_BUF_SIZE * 2);
-      hda_write16(sd_off + HDA_SD_LVI, 1);
+      hda_write32(sd_off + HDA_SD_CBL, HDA_VFS_TOTAL_SIZE);
+      hda_write16(sd_off + HDA_SD_LVI, HDA_VFS_NUM_BDL - 1);
 
-      // Initial fill: fill BOTH buffers of the hardware loop if we have enough
-      // data
-      hda_pump_audio(); // Fills one
-      if (ring_count >= HDA_VFS_BUF_SIZE)
-        hda_pump_audio(); // Fills the other
+      // Flush BDL to memory
+      hda_flush_cache(hda_vfs_bdl,
+                      sizeof(struct hda_bdl_entry) * HDA_VFS_NUM_BDL);
+
+      // Pre-fill ALL DMA buffers before starting
+      for (int i = 0; i < HDA_VFS_NUM_BDL; i++) {
+        hda_fill_buffer(i);
+      }
 
       uint16_t hw_fmt =
           hda_format_to_hw(hda_sample_rate, hda_channels, 16); // Always 16-bit
       hda_write16(sd_off + HDA_SD_FMT, hw_fmt);
 
       // Update codec widgets
-      hda_send_verb_immediate(hda_codec_addr, hda_dac_node, HDA_VERB_SET_FORMAT,
-                              hw_fmt);
+      hda_send_verb_immediate(hda_codec_addr, hda_dac_node,
+                              HDA_VERB_SET_FORMAT, hw_fmt);
       hda_send_verb_immediate(hda_codec_addr, hda_dac_node,
                               HDA_VERB_SET_STREAM_ID, (1 << 4));
       hda_send_verb_immediate(hda_codec_addr, hda_dac_node,
@@ -962,8 +997,8 @@ static uint32_t hda_vfs_write(struct vfs_node *node, uint32_t offset,
       // Start stream with Stream ID 1 and IOCE
       hda_write32(sd_off + HDA_SD_CTL,
                   (1 << 20) | HDA_SD_CTL_IOCE | HDA_SD_CTL_RUN);
+      __asm__ volatile("sti");
     }
-    __asm__ volatile("sti");
   }
   return written;
 }
@@ -1018,25 +1053,29 @@ void hda_register_vfs(void) {
   memset(hda_ring, 0, HDA_RING_SIZE);
 
   // Setup VFS DMA resources
+  // BDL needs 1 page (4KB) for the descriptor entries
   uint64_t bdl_phys = (uint64_t)pmm_alloc_pages_constrained(1, 0xFFFFFFFF);
   hda_vfs_bdl_phys = bdl_phys;
   hda_vfs_bdl = (struct hda_bdl_entry *)(bdl_phys + pmm_get_hhdm_offset());
 
-  uint64_t buf_phys = (uint64_t)pmm_alloc_pages_constrained(2, 0xFFFFFFFF);
+  // Audio buffers: HDA_VFS_NUM_BDL * HDA_VFS_BUF_SIZE bytes total
+  // = 4 * 16384 = 65536 bytes = 16 pages
+  uint32_t buf_pages = (HDA_VFS_TOTAL_SIZE + 4095) / 4096;
+  uint64_t buf_phys =
+      (uint64_t)pmm_alloc_pages_constrained(buf_pages, 0xFFFFFFFF);
   hda_vfs_buf_phys = buf_phys;
   hda_vfs_buf = (uint8_t *)(buf_phys + pmm_get_hhdm_offset());
 
-  memset(hda_vfs_buf, 0, HDA_VFS_BUF_SIZE * 2);
+  memset(hda_vfs_buf, 0, HDA_VFS_TOTAL_SIZE);
 
-  hda_vfs_bdl[0].addr_low = (uint32_t)buf_phys;
-  hda_vfs_bdl[0].addr_high = (uint32_t)(buf_phys >> 32);
-  hda_vfs_bdl[0].length = HDA_VFS_BUF_SIZE;
-  hda_vfs_bdl[0].flags = 1;
-
-  hda_vfs_bdl[1].addr_low = (uint32_t)(buf_phys + HDA_VFS_BUF_SIZE);
-  hda_vfs_bdl[1].addr_high = (uint32_t)((buf_phys + HDA_VFS_BUF_SIZE) >> 32);
-  hda_vfs_bdl[1].length = HDA_VFS_BUF_SIZE;
-  hda_vfs_bdl[1].flags = 1;
+  // Setup BDL entries for all buffers
+  for (int i = 0; i < HDA_VFS_NUM_BDL; i++) {
+    uint64_t entry_phys = buf_phys + (i * HDA_VFS_BUF_SIZE);
+    hda_vfs_bdl[i].addr_low = (uint32_t)entry_phys;
+    hda_vfs_bdl[i].addr_high = (uint32_t)(entry_phys >> 32);
+    hda_vfs_bdl[i].length = HDA_VFS_BUF_SIZE;
+    hda_vfs_bdl[i].flags = 1; // IOC on every buffer completion
+  }
 
   // Register node
   vfs_node_t *node = kmalloc(sizeof(vfs_node_t));

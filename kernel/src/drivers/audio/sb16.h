@@ -6,6 +6,7 @@
 
 extern volatile uint32_t sb16_irq_fired;
 
+void sb16_reserve_dma(void); // Reserve ISA DMA buffer early (before PCI/storage)
 void sb16_init(void);
 void sb16_play_chunk(uint32_t phys_addr, uint32_t length, uint16_t sample_rate,
                      uint8_t channels, uint8_t bits);

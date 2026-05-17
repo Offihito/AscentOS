@@ -379,11 +379,12 @@ static int unix_connect(socket_t *sock, struct sockaddr *addr, int addrlen) {
       wait_queue_add(&usk->wait, &entry);
       current->state = THREAD_BLOCKED;
 
-      // Re-check state while holding dusk->parent->lock OR just before yielding.
-      // But we don't hold any lock here currently.
-      // Wait, we need to hold dusk->parent->lock to check usk->listener and state safely?
-      // Actually at this point usk->wait is the wait queue where we expect the wakeup.
-      
+      // Re-check state while holding dusk->parent->lock OR just before
+      // yielding. But we don't hold any lock here currently. Wait, we need to
+      // hold dusk->parent->lock to check usk->listener and state safely?
+      // Actually at this point usk->wait is the wait queue where we expect the
+      // wakeup.
+
       if (sock->state != SS_CONNECTING) {
         current->state = THREAD_RUNNING;
       } else {
@@ -561,7 +562,7 @@ static ssize_t unix_send(socket_t *sock, const void *buf, size_t len,
       wait_queue_add(&peer->wait, &entry);
       current->state = THREAD_BLOCKED;
 
-      // Re-acquire peer lock (actually we already have it at this point? 
+      // Re-acquire peer lock (actually we already have it at this point?
       // Line 511 acquired it).
       // Re-cache space
       size = peer->recv_buf_size;

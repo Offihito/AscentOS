@@ -150,39 +150,39 @@ static unsigned char scancode_to_doom(uint8_t sc, bool extended) {
     case 0x0B: return '0';
     case 0x0C: return '-';
     case 0x0D: return '=';
-    // QWERTY row (uppercase for DOOM key bindings)
-    case 0x10: return 'Q';
-    case 0x11: return 'W';
-    case 0x12: return 'E';
-    case 0x13: return 'R';
-    case 0x14: return 'T';
-    case 0x15: return 'Y';
-    case 0x16: return 'U';
-    case 0x17: return 'I';
-    case 0x18: return 'O';
-    case 0x19: return 'P';
+    // QWERTY row (lowercase for DOOM key bindings)
+    case 0x10: return 'q';
+    case 0x11: return 'w';
+    case 0x12: return 'e';
+    case 0x13: return 'r';
+    case 0x14: return 't';
+    case 0x15: return 'y';
+    case 0x16: return 'u';
+    case 0x17: return 'i';
+    case 0x18: return 'o';
+    case 0x19: return 'p';
     case 0x1A: return '[';
     case 0x1B: return ']';
-    // Home row (uppercase for DOOM key bindings)
-    case 0x1E: return 'A';
-    case 0x1F: return 'S';
-    case 0x20: return 'D';
-    case 0x21: return 'F';
-    case 0x22: return 'G';
-    case 0x23: return 'H';
-    case 0x24: return 'J';
-    case 0x25: return 'K';
-    case 0x26: return 'L';
+    // Home row (lowercase for DOOM key bindings)
+    case 0x1E: return 'a';
+    case 0x1F: return 's';
+    case 0x20: return 'd';
+    case 0x21: return 'f';
+    case 0x22: return 'g';
+    case 0x23: return 'h';
+    case 0x24: return 'j';
+    case 0x25: return 'k';
+    case 0x26: return 'l';
     case 0x27: return ';';
     case 0x28: return '\'';
-    // Bottom row (uppercase for DOOM key bindings)
-    case 0x2C: return 'Z';
-    case 0x2D: return 'X';
-    case 0x2E: return 'C';
-    case 0x2F: return 'V';
-    case 0x30: return 'B';
-    case 0x31: return 'N';
-    case 0x32: return 'M';
+    // Bottom row (lowercase for DOOM key bindings)
+    case 0x2C: return 'z';
+    case 0x2D: return 'x';
+    case 0x2E: return 'c';
+    case 0x2F: return 'v';
+    case 0x30: return 'b';
+    case 0x31: return 'n';
+    case 0x32: return 'm';
     case 0x33: return ',';
     case 0x34: return '.';
     // Special keys
