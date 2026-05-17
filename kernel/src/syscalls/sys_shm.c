@@ -206,8 +206,12 @@ int64_t sys_shmat(uint64_t shmid, uint64_t shmaddr, uint64_t shmflg,
     vaddr = shmaddr;
   } else {
     // Auto-select address from SHM mmap region
-    vaddr = vma_find_gap(&t->vmas, aligned_size, SHM_MMAP_REGION_BASE,
-                         SHM_MMAP_REGION_LIMIT);
+    if (t->mm) {
+      vaddr = vma_find_gap(&t->mm->vmas, aligned_size, SHM_MMAP_REGION_BASE,
+                           SHM_MMAP_REGION_LIMIT);
+    } else {
+      vaddr = 0;
+    }
     if (vaddr == 0) {
       spinlock_release(&shm_lock);
       return -12; // ENOMEM
@@ -235,12 +239,16 @@ int64_t sys_shmat(uint64_t shmid, uint64_t shmaddr, uint64_t shmflg,
     pmm_incref((void *)phys);
   }
 
-  // Register VMA as MAP_SHARED so the VMA-aware free doesn't release pages
+  // Register VMA as MAP_SHARED. We avoid MAP_ANONYMOUS because this is backed 
+  // by an existing physical segment allocated in shmget.
   uint64_t prot = 0x1; // PROT_READ
   if (!(shmflg & SHM_RDONLY))
     prot |= 0x2; // PROT_WRITE
-  vma_add(&t->vmas, vaddr, vaddr + aligned_size, prot,
-          MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+  if (t->mm) {
+    vma_add(&t->mm->vmas, vaddr, vaddr + aligned_size, prot,
+            MAP_SHARED, -1, 0);
+  }
 
   seg->nattch++;
   seg->last_pid = t->tid;
@@ -276,7 +284,11 @@ int64_t sys_shmdt(uint64_t shmaddr, uint64_t a1, uint64_t a2, uint64_t a3,
     return -1;
 
   // Find the VMA for this address
-  struct vma *v = vma_find(&t->vmas, shmaddr);
+  struct vma *v = NULL;
+  if (t->mm) {
+    v = vma_find(&t->mm->vmas, shmaddr);
+  }
+  
   if (!v || !(v->flags & MAP_SHARED))
     return -22; // EINVAL
 
@@ -313,7 +325,9 @@ int64_t sys_shmdt(uint64_t shmaddr, uint64_t a1, uint64_t a2, uint64_t a3,
   }
 
   // Remove VMA
-  vma_remove(&t->vmas, shmaddr, shmaddr + size);
+  if (t->mm) {
+    vma_remove(&t->mm->vmas, shmaddr, shmaddr + size);
+  }
 
   if (seg) {
     if (seg->nattch > 0)
@@ -394,14 +408,18 @@ int64_t sys_shmctl(uint64_t shmid, uint64_t cmd, uint64_t buf, uint64_t a3,
 
   if (cmd == IPC_STAT && buf != 0) {
     struct shmid_ds *ds = (struct shmid_ds *)buf;
-    ds->shm_perm_key = seg->key;
-    ds->shm_perm_uid = 0;
-    ds->shm_perm_gid = 0;
-    ds->shm_perm_mode = seg->perm_mode;
-    ds->shm_segsz = seg->size;
+    memset(ds, 0, sizeof(struct shmid_ds));
+    
+    ds->shm_perm.__key = seg->key;
+    ds->shm_perm.uid = 0;
+    ds->shm_perm.gid = 0;
+    ds->shm_perm.mode = seg->perm_mode;
+    
+    ds->shm_segsz = PAGE_ALIGN_UP(seg->size);
     ds->shm_nattch = seg->nattch;
     ds->shm_cpid = seg->creator_pid;
     ds->shm_lpid = seg->last_pid;
+    
     spinlock_release(&shm_lock);
     return 0;
   }

@@ -139,15 +139,15 @@ struct ehci_qh {
 struct ehci_int_pipe {
   bool active;
   struct ehci_controller *hc;
-  struct ehci_qh *qh;         // The QH in the periodic schedule
+  struct ehci_qh *qh; // The QH in the periodic schedule
   uint32_t qh_phys;
-  struct ehci_qtd *qtd[2];    // Ping-pong qTDs
+  struct ehci_qtd *qtd[2]; // Ping-pong qTDs
   uint32_t qtd_phys[2];
-  int cur_idx;                // Which qTD is currently active (0 or 1)
-  void *data_buf;             // DMA buffer for received data
+  int cur_idx;    // Which qTD is currently active (0 or 1)
+  void *data_buf; // DMA buffer for received data
   uint32_t data_buf_phys;
   uint16_t max_packet;
-  uint8_t interval;           // Polling interval (in microframes, 125us units)
+  uint8_t interval; // Polling interval (in microframes, 125us units)
 };
 
 // ── EHCI controller state ───────────────────────────────────────────────────
@@ -168,13 +168,13 @@ struct ehci_controller {
   uint32_t async_qh_phys;
 
   // Periodic Schedule
-  uint32_t *periodic_list;     // 4KB-aligned array of 1024 frame pointers
+  uint32_t *periodic_list; // 4KB-aligned array of 1024 frame pointers
   uint32_t periodic_list_phys;
 
   // Interrupt pipe QH/qTD pool (dedicated DMA page)
-  struct ehci_qh *int_qh_pool;   // Pool of QHs for interrupt pipes
+  struct ehci_qh *int_qh_pool; // Pool of QHs for interrupt pipes
   uint32_t int_qh_pool_phys;
-  struct ehci_qtd *int_qtd_pool;  // Pool of qTDs for interrupt pipes
+  struct ehci_qtd *int_qtd_pool; // Pool of qTDs for interrupt pipes
   uint32_t int_qtd_pool_phys;
 
   // Pool for control transfers
@@ -207,10 +207,10 @@ int ehci_control_transfer(struct ehci_controller *hc, uint8_t addr,
 
 // Interrupt pipe management (Phase 5 — HID support)
 struct ehci_int_pipe *ehci_setup_int_in(struct ehci_controller *hc,
-                                         uint8_t dev_addr, uint8_t ep_num,
-                                         uint16_t max_packet, uint8_t interval,
-                                         bool low_speed, void *buffer,
-                                         uint32_t buffer_phys);
+                                        uint8_t dev_addr, uint8_t ep_num,
+                                        uint16_t max_packet, uint8_t interval,
+                                        bool low_speed, void *buffer,
+                                        uint32_t buffer_phys);
 bool ehci_int_pipe_completed(struct ehci_int_pipe *pipe);
 void ehci_int_pipe_resubmit(struct ehci_int_pipe *pipe);
 

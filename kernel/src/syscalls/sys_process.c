@@ -131,19 +131,14 @@ void process_do_exit(uint64_t status) {
       }
     }
 
-    // Switch to kernel CR3 and free the user address space.
+    // Switch to kernel CR3. We don't free it here; the scheduler's
+    // reaping logic handles reference counting and reclamation of the
+    // shared mm_struct and page tables once the thread is reaped.
     if (current->cr3) {
       struct cpu_info *cpu = cpu_get_current();
-      uint64_t saved_cr3 = current->cr3;
       __asm__ volatile("mov %0, %%cr3" ::"r"(cpu->kernel_cr3) : "memory");
-      current->cr3 = 0;
-      // Use VMA-aware free to skip MAP_SHARED device pages (e.g. framebuffer)
-      vmm_free_user_pages_vma(saved_cr3, &current->vmas);
     }
 
-    // Free VMA tree nodes (AFTER vmm_free_user_pages_vma which reads them)
-    vma_list_destroy(&current->vmas);
-    mm_reset_mmap_state(current);
   }
 
   if (current && current->is_forked_child) {
@@ -425,8 +420,8 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
 
   // Save the old VMA list before destroying it — we need it to
   // identify MAP_SHARED pages when freeing the old address space.
-  struct vma_list old_vmas = current->vmas;
-  vma_list_init(&current->vmas); // Reset to empty for the new program
+  struct vma_list old_vmas = current->mm->vmas;
+  vma_list_init(&current->mm->vmas); // Reset to empty for the new program
 
   current->cr3 = (uint64_t)new_pml4;
   __asm__ volatile("mov %0, %%cr3" ::"r"(current->cr3) : "memory");
@@ -448,7 +443,7 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
     current->cr3 = old_cr3;
     __asm__ volatile("mov %0, %%cr3" ::"r"(current->cr3) : "memory");
     // Restore old VMA list
-    current->vmas = old_vmas;
+    current->mm->vmas = old_vmas;
     kfree(path);
     return (uint64_t)-8; // ENOEXEC
   }
@@ -535,7 +530,7 @@ uint64_t sys_fork(struct syscall_regs *regs) {
   // 2. Clone the user address space with VMA awareness
   //    Shared mappings share physical pages, private mappings get copied
   uint64_t child_cr3 = vmm_clone_user_mappings_vma(
-      parent_pml4_phys, parent ? &parent->vmas : NULL);
+      parent_pml4_phys, (parent && parent->mm) ? &parent->mm->vmas : NULL);
   if (child_cr3 == 0) {
     klog_puts("[FORK] Failed: could not clone address space\n");
     return (uint64_t)(-12); // -ENOMEM
@@ -582,10 +577,18 @@ uint64_t sys_fork(struct syscall_regs *regs) {
         vfs_open(child->fds[i]);
       }
     }
-    // 7. Copy VMA list, cwd, and TLS base from parent to child
-    vma_list_clone(&child->vmas, &parent->vmas);
+    // 7. Clone memory state
+    child->mm = kmalloc(sizeof(struct mm_struct));
+    if (child->mm) {
+      vma_list_init(&child->mm->vmas);
+      vma_list_clone(&child->mm->vmas, &parent->mm->vmas);
+      child->mm->brk_base = parent->mm->brk_base;
+      child->mm->brk_current = parent->mm->brk_current;
+      child->mm->mmap_next_addr = parent->mm->mmap_next_addr;
+      child->mm->ref_count = 1;
+      spinlock_init(&child->mm->lock);
+    }
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
-    child->mmap_next_addr = parent->mmap_next_addr;
     child->fs_base = parent->fs_base;
     child->umask = parent->umask;
     child->uid = parent->uid;
@@ -610,9 +613,149 @@ uint64_t sys_fork(struct syscall_regs *regs) {
 
 // ── sys_clone ───────────────────────────────────────────────────────────────
 static uint64_t sys_clone(struct syscall_regs *regs) {
-  // For now, treat clone as fork (ignores threading flags).
-  // Musl uses clone() to implement fork(), so this is essential.
-  return sys_fork(regs);
+  uint64_t flags = regs->rdi;
+  uint64_t child_stack = regs->rsi;
+  uint64_t ptid = regs->rdx;
+  uint64_t ctid = regs->r10;
+  uint64_t newtls = regs->r8;
+
+  klog_puts("[CLONE] flags=");
+  klog_uint64(flags);
+  klog_puts(" stack=");
+  klog_uint64(child_stack);
+  klog_puts("\n");
+
+  struct thread *parent = sched_get_current();
+  if (!parent)
+    return (uint64_t)-22; // EINVAL
+
+  // 1. Determine address space strategy
+  uint64_t child_cr3;
+  struct mm_struct *child_mm = NULL;
+  
+  if (flags & CLONE_VM) {
+    // Shared address space (threads)
+    child_cr3 = parent->cr3;
+    child_mm = parent->mm;
+    // Shared state: Increment reference count
+    if (child_mm) {
+        spinlock_acquire(&child_mm->lock);
+        child_mm->ref_count++;
+        spinlock_release(&child_mm->lock);
+    }
+  } else {
+    // Private (cloned) address space (process fork via clone)
+    child_cr3 = vmm_clone_user_mappings_vma(
+        (uint64_t *)parent->cr3, parent->mm ? &parent->mm->vmas : NULL);
+    if (child_cr3 == 0) {
+      return (uint64_t)-12; // ENOMEM
+    }
+    // Deep copy MM state
+    child_mm = kmalloc(sizeof(struct mm_struct));
+    if (child_mm) {
+        vma_list_init(&child_mm->vmas);
+        if (parent->mm) {
+            vma_list_clone(&child_mm->vmas, &parent->mm->vmas);
+            child_mm->brk_base = parent->mm->brk_base;
+            child_mm->brk_current = parent->mm->brk_current;
+            child_mm->mmap_next_addr = parent->mm->mmap_next_addr;
+        }
+        child_mm->ref_count = 1;
+        spinlock_init(&child_mm->lock);
+    }
+  }
+
+  // 2. Allocate and populate child registers
+  struct syscall_regs *child_regs = kmalloc(sizeof(struct syscall_regs));
+  if (!child_regs) {
+    if (!(flags & CLONE_VM)) {
+       // Ideally free child_cr3 here
+    }
+    return (uint64_t)-12;
+  }
+  memcpy(child_regs, regs, sizeof(struct syscall_regs));
+  child_regs->rax = 0; // Child return value
+
+  // If a new stack is provided, use it
+  if (child_stack) {
+    child_regs->rsp = child_stack;
+  }
+
+  // 3. Create kernel thread
+  struct thread *child =
+      sched_create_kernel_thread(fork_child_entry, cpu_get_current(), false);
+  if (!child) {
+    kfree(child_regs);
+    return (uint64_t)-12;
+  }
+
+  // 4. Configure child
+  child->cr3 = child_cr3;
+  child->is_forked_child = true;
+  child->fork_ctx = child_regs;
+  child->parent = parent;
+  child->clone_flags = flags;
+
+  // Handle TLS
+  if (flags & CLONE_SETTLS) {
+    child->fs_base = newtls;
+  } else {
+    child->fs_base = parent->fs_base;
+  }
+
+  // Handle TID placement
+  if (flags & CLONE_PARENT_SETTID) {
+    if (ptid && vmm_is_user_addr_range_valid(ptid, sizeof(uint32_t))) {
+      *(uint32_t *)ptid = child->tid;
+    }
+  }
+  if (flags & CLONE_CHILD_SETTID) {
+    // We'd need to write this into the CHILD's memory space.
+    // If CLONE_VM is set, we can do it now.
+    if (flags & CLONE_VM) {
+      if (ctid && vmm_is_user_addr_range_valid(ctid, sizeof(uint32_t))) {
+        *(uint32_t *)ctid = child->tid;
+      }
+    }
+    // Note: if not CLONE_VM, we should do it in fork_child_entry or similar.
+  }
+
+  // File descriptors
+  if (flags & CLONE_FILES) {
+    // Stub: we don't support true shared FD table yet, so just copy
+    for (int i = 0; i < MAX_FDS; i++) {
+      if (parent->fds[i]) {
+        child->fds[i] = parent->fds[i];
+        child->fd_offsets[i] = parent->fd_offsets[i];
+        vfs_open(child->fds[i]);
+      }
+    }
+  } else {
+    for (int i = 0; i < MAX_FDS; i++) {
+      if (parent->fds[i]) {
+        child->fds[i] = parent->fds[i];
+        child->fd_offsets[i] = parent->fd_offsets[i];
+        vfs_open(child->fds[i]);
+      }
+    }
+  }
+
+  // Shared state copies
+  child->mm = child_mm;
+  memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
+  child->uid = parent->uid; child->gid = parent->gid;
+  child->euid = parent->euid; child->egid = parent->egid;
+  child->pgid = parent->pgid;
+
+  // Add to parent's children list
+  spinlock_acquire(&tid_lock);
+  child->sibling_next = parent->children;
+  parent->children = child;
+  spinlock_release(&tid_lock);
+
+  sched_enqueue_thread(child, cpu_get_current());
+
+  return child->tid;
 }
 
 // ── sys_uname ─────────────────────────────────────────────────────────────
@@ -919,6 +1062,13 @@ static uint64_t sys_setitimer(uint64_t which, uint64_t new_val_ptr,
 }
 
 // ── Registration ────────────────────────────────────────────────────────────
+static uint64_t sys_sched_yield(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                                uint64_t a4, uint64_t a5) {
+  (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+  sched_yield();
+  return 0;
+}
+
 void syscall_register_process(void) {
   syscall_register(SYS_EXIT, sys_exit);
   syscall_register(SYS_EXIT_GROUP, sys_exit_group);
@@ -950,4 +1100,5 @@ void syscall_register_process(void) {
   syscall_register_raw(SYS_SETSID, sys_setsid);
   syscall_register_raw(SYS_SETUID, sys_setuid);
   syscall_register_raw(SYS_SETGID, sys_setgid);
+  syscall_register(SYS_SCHED_YIELD, sys_sched_yield);
 }

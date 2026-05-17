@@ -20,6 +20,7 @@ static inline void vma_node_free(struct vma *v) {
 
 // Helper macros
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 static int get_height(struct vma *n) { return n ? n->height : 0; }
 
@@ -266,6 +267,44 @@ bool vma_remove(struct vma_list *list, uint64_t start, uint64_t end) {
   }
 
   return overall_removed;
+}
+
+int vma_mprotect(struct vma_list *list, uint64_t start, uint64_t end,
+                 uint64_t new_prot) {
+  uint64_t curr = start;
+  while (curr < end) {
+    struct vma *v = vma_find(list, curr);
+    if (!v) {
+      // Gap found. standard mprotect returns ENOMEM in this case if it hits a
+      // gap.
+      v = vma_find_overlap(list, curr, end);
+      if (!v)
+        break;
+      curr = v->start;
+      continue;
+    }
+
+    uint64_t m_start = MAX(v->start, start);
+    uint64_t m_end = MIN(v->end, end);
+
+    // Save attributes
+    uint64_t flags = v->flags;
+    int fd = v->fd;
+    uint64_t offset = v->offset;
+    uint64_t original_start = v->start;
+
+    // Remove the overlapping part. vma_remove handles splitting the original
+    // VMA.
+    vma_remove(list, m_start, m_end);
+
+    // Re-insert with new prot. The offset must be adjusted based on where
+    // this segment started relative to the original VMA.
+    vma_add(list, m_start, m_end, new_prot, flags, fd,
+            offset + (m_start - original_start));
+
+    curr = m_end;
+  }
+  return 0;
 }
 
 static struct vma *vma_find_recursive(struct vma *node, uint64_t addr) {

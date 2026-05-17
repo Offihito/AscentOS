@@ -998,11 +998,16 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
   }
 
   // ── VMA-based demand paging ────────────────────────────────────────────
+  if (!current || !current->mm)
+    return -1;
+
+  spinlock_acquire(&current->mm->lock);
+  
   // Look up the faulting address in the process's VMA tree.
-  struct vma *vma = vma_find(&current->vmas, cr2);
+  struct vma *vma = vma_find(&current->mm->vmas, cr2);
   if (!vma) {
     // Try stack growth: find a GROWSDOWN VMA above cr2 within 8MB
-    vma = vma_find_growdown(&current->vmas, cr2, 8 * 1024 * 1024);
+    vma = vma_find_growdown(&current->mm->vmas, cr2, 8 * 1024 * 1024);
     if (vma) {
       // Safely expand the stack: remove and re-add to maintain AVL tree
       // integrity
@@ -1014,22 +1019,22 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       int fd = vma->fd;
       uint64_t offset = vma->offset;
 
-      vma_remove(&current->vmas, old_start, old_end);
-      if (vma_add(&current->vmas, new_start, old_end, prot, flags, fd,
+      vma_remove(&current->mm->vmas, old_start, old_end);
+      if (vma_add(&current->mm->vmas, new_start, old_end, prot, flags, fd,
                   offset) != 0) {
         klog_puts("[VMM] Stack expansion failed (overlap?) for CR2=");
         klog_hex64(cr2);
         klog_puts("\n");
-        vma_add(&current->vmas, old_start, old_end, prot, flags, fd, offset);
+        vma_add(&current->mm->vmas, old_start, old_end, prot, flags, fd, offset);
         vma = NULL;
       } else {
         // Node replaced, look it up again in the valid tree
-        vma = vma_find(&current->vmas, cr2);
+        vma = vma_find(&current->mm->vmas, cr2);
       }
     } else {
       // Log if address is outside the 8MB guard
       struct vma *potential =
-          vma_find_growdown(&current->vmas, cr2, 1024 * 1024 * 1024);
+          vma_find_growdown(&current->mm->vmas, cr2, 1024 * 1024 * 1024);
       if (potential) {
         klog_puts("[VMM] Rejected stack growth: CR2=");
         klog_hex64(cr2);
@@ -1039,6 +1044,20 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       }
     }
   }
+  
+  // If we found a VMA, capture the bits we need and release the lock 
+  // so we don't hold it during physical allocation/mapping.
+  uint64_t vma_prot = 0;
+  int vma_fd = -1;
+  uint64_t vma_offset = 0;
+  uint64_t vma_start = 0;
+  if (vma) {
+      vma_prot = vma->prot;
+      vma_fd = vma->fd;
+      vma_offset = vma->offset;
+      vma_start = vma->start;
+  }
+  spinlock_release(&current->mm->lock);
 
   if (!vma) {
     // No VMA covers this address → genuine segfault.
@@ -1061,32 +1080,26 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     }
 
     // No VMA covers this address → genuine segfault
-    klog_puts("[VMM] No VMA for CR2=");
+    klog_puts("[VMM] Segmentation fault at CR2=");
     klog_hex64(cr2);
-    klog_puts(" in thread ");
-    klog_uint64(current->tid);
     klog_puts("\n");
     return -1;
   }
 
   // ── PROT_NONE enforcement ──────────────────────────────────────────────
   // A VMA with prot == PROT_NONE reserves address space but forbids access.
-  if (vma->prot == PROT_NONE) {
+  if (vma_prot == PROT_NONE) {
     if (user_mode) {
-      klog_puts("[VMM] PROT_NONE access violation at 0x");
-      klog_uint64(cr2);
-      klog_puts("\n");
+      klog_puts("[VMM] PROT_NONE access violation\n");
     }
     return -1;
   }
 
   // ── Permission check ──────────────────────────────────────────────────
   // Validate that the fault type matches the VMA protection.
-  if (write_fault && !(vma->prot & PROT_WRITE)) {
+  if (write_fault && !(vma_prot & PROT_WRITE)) {
     if (user_mode) {
-      klog_puts("[VMM] Write to read-only VMA at 0x");
-      klog_uint64(cr2);
-      klog_puts("\n");
+      klog_puts("[VMM] Write to read-only VMA\n");
     }
     return -1;
   }
@@ -1108,7 +1121,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     frame_virt[i] = 0;
 
   // Derive PTE flags from the VMA's protection bits
-  uint64_t flags = dp_build_flags(vma->prot);
+  uint64_t flags = dp_build_flags(vma_prot);
 
   if (!vmm_map_page((uint64_t *)target_cr3, cr2 & ~0xFFFULL, (uint64_t)frame,
                     flags)) {
@@ -1146,9 +1159,10 @@ bool vmm_is_user_addr_range_valid(uint64_t addr, size_t size) {
   uint64_t end_page = (addr + size + 0xFFF) & ~0xFFFULL;
 
   for (uint64_t page = start_page; page < end_page; page += 0x1000) {
-    struct vma *v = vma_find(&current->vmas, page);
+    spinlock_acquire(&current->mm->lock);
+    struct vma *v = vma_find(&current->mm->vmas, page);
     if (!v) {
-      v = vma_find_growdown(&current->vmas, page, 8 * 1024 * 1024);
+      v = vma_find_growdown(&current->mm->vmas, page, 8 * 1024 * 1024);
     }
 
     if (v) {
@@ -1156,8 +1170,10 @@ bool vmm_is_user_addr_range_valid(uint64_t addr, size_t size) {
         klog_puts("[VMM] Range validation failed (PROT_NONE) at 0x");
         klog_uint64(page);
         klog_puts("\n");
+        spinlock_release(&current->mm->lock);
         return false;
       }
+      spinlock_release(&current->mm->lock);
 
       /* klog_puts("[VMM] Page ");
       klog_hex64(page);
@@ -1172,6 +1188,7 @@ bool vmm_is_user_addr_range_valid(uint64_t addr, size_t size) {
       klog_puts(" in thread ");
       klog_uint64(current->tid);
       klog_puts("\n");
+      spinlock_release(&current->mm->lock);
       return false;
     }
   }

@@ -50,6 +50,15 @@ void sched_init(void) {
     idle_thread->pgid = idle_thread->tid;
     idle_thread->state = THREAD_RUNNING;
     idle_thread->next = idle_thread; // Circular queue
+    
+    // Idle threads don't really use user MM, but give them a stub to avoid NULL derefs
+    idle_thread->mm = kmalloc(sizeof(struct mm_struct));
+    if (idle_thread->mm) {
+      memset(idle_thread->mm, 0, sizeof(struct mm_struct));
+      vma_list_init(&idle_thread->mm->vmas);
+      idle_thread->mm->ref_count = 1;
+      spinlock_init(&idle_thread->mm->lock);
+    }
 
     idle_thread->stack_size = CPU_STACK_SIZE;
     idle_thread->stack_base = cpu->stack_top - CPU_STACK_SIZE;
@@ -131,7 +140,16 @@ struct thread *sched_create_kernel_thread(void (*entry)(void),
   t->cwd_path[0] = '/';
   t->umask = 0022;
   t->uid = t->gid = t->euid = t->egid = t->suid = t->sgid = 0;
-  vma_list_init(&t->vmas);
+
+  // Root kernel threads get their own MM by default.
+  // fork/clone/exec will replace/refcount this later as needed.
+  t->mm = kmalloc(sizeof(struct mm_struct));
+  if (t->mm) {
+    memset(t->mm, 0, sizeof(struct mm_struct));
+    vma_list_init(&t->mm->vmas);
+    t->mm->ref_count = 1;
+    spinlock_init(&t->mm->lock);
+  }
 
   spinlock_acquire(&tid_lock);
   t->tid = next_tid++;
@@ -561,13 +579,25 @@ void sched_reap_thread(struct thread *t) {
   // 3. Free fork_ctx (saved register state)
   klog_puts("[REAP] Step 3: free fork_ctx\n");
 
-  // 4. Free user page tables (CR3) if still set
-  klog_puts("[REAP] Step 4: free CR3=");
-  klog_uint64(t->cr3);
-  klog_puts("\n");
-  if (t->cr3) {
-    vmm_free_user_pages(t->cr3);
-    t->cr3 = 0;
+  // 4. Free user page tables (CR3) and MM if last thread
+  if (t->mm) {
+    spinlock_acquire(&t->mm->lock);
+    t->mm->ref_count--;
+    if (t->mm->ref_count == 0) {
+      spinlock_release(&t->mm->lock);
+      klog_puts("[REAP] Last thread, freeing MM resources\n");
+      if (t->cr3) {
+        vmm_free_user_pages_vma(t->cr3, &t->mm->vmas);
+        t->cr3 = 0;
+      }
+      // vma_list_destroy could be called here if it handles tree walking
+      kfree(t->mm);
+    } else {
+      spinlock_release(&t->mm->lock);
+      klog_puts("[REAP] MM still shared, skipping CR3 free\n");
+      t->cr3 = 0; // Don't free for THIS thread
+    }
+    t->mm = NULL;
   }
 
   // Deferred Free: Free any previously deferred dead threads.

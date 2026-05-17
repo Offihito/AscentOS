@@ -184,11 +184,11 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
     uint32_t file_offset = phdr.p_offset;
 
     // Track uppermost loaded address for brk base.
-    if (load_base == 0 && current_thread) {
+    if (load_base == 0 && current_thread && current_thread->mm) {
       uint64_t seg_end = vaddr + memsz;
-      if (seg_end > current_thread->brk_base) {
-        current_thread->brk_base = seg_end;
-        current_thread->brk_current = seg_end;
+      if (seg_end > current_thread->mm->brk_base) {
+        current_thread->mm->brk_base = seg_end;
+        current_thread->mm->brk_current = seg_end;
       }
     }
 
@@ -210,7 +210,7 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
 
       // ── Register segment in VMA list ──────────────────────────────────
       // This is critical for syscall validation (vmm_is_user_addr_range_valid)
-      if (current_thread) {
+      if (current_thread && current_thread->mm) {
         // Derive PROT flags from ELF phdr flags
         uint64_t prot = 0;
         if (phdr.p_flags & 0x4)
@@ -220,8 +220,8 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
         if (phdr.p_flags & 0x1)
           prot |= 0x4; // PF_X -> PROT_EXEC
 
-        vma_add(&current_thread->vmas, start_page, end_page, prot, MAP_PRIVATE,
-                -1, 0);
+        vma_add(&current_thread->mm->vmas, start_page, end_page, prot,
+                MAP_PRIVATE, -1, 0);
       }
 
       if (filesz > 0) {
@@ -272,9 +272,9 @@ static bool do_elf_load(const char *path, uint64_t *pml4, uint64_t load_base,
 
 bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
   struct thread *current_thread = sched_get_current();
-  if (current_thread) {
-    current_thread->brk_base = 0;
-    current_thread->brk_current = 0;
+  if (current_thread && current_thread->mm) {
+    current_thread->mm->brk_base = 0;
+    current_thread->mm->brk_current = 0;
   }
 
   char interp_path[256];
@@ -316,13 +316,13 @@ bool elf_load(const char *path, uint64_t *pml4, elf_info_t *out_info) {
   }
 
   // Page-align the brk base upward and set current brk.
-  if (current_thread) {
-    vma_add(&current_thread->vmas, stack_bottom, stack_top, 0x3,
+  if (current_thread && current_thread->mm) {
+    vma_add(&current_thread->mm->vmas, stack_bottom, stack_top, 0x3,
             0x22 | MAP_GROWSDOWN, -1, 0);
 
-    current_thread->brk_base =
-        (current_thread->brk_base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    current_thread->brk_current = current_thread->brk_base;
+    current_thread->mm->brk_base =
+        (current_thread->mm->brk_base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    current_thread->mm->brk_current = current_thread->mm->brk_base;
     mm_reset_mmap_state(current_thread);
   }
 
@@ -664,13 +664,13 @@ bool process_exec_argv(const char **argv) {
 
   // Switch to the newly created, clean address space
   struct thread *current = sched_get_current();
-  if (current) {
+  if (current && current->mm) {
     current->cr3 = (uint64_t)pml4;
     __asm__ volatile("mov %0, %%cr3" ::"r"(current->cr3) : "memory");
 
     // Destroy old VMA tree nodes before resetting
     extern void vma_list_destroy(struct vma_list * list);
-    vma_list_destroy(&current->vmas);
+    vma_list_destroy(&current->mm->vmas);
     mm_reset_mmap_state(current);
   }
 

@@ -35,18 +35,29 @@
 #define SHMLBA            4096                 // Segment low boundary alignment
 
 // SHM segment info structure (returned by shmctl IPC_STAT)
+struct ipc_perm {
+    uint32_t __key;
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t cuid;
+    uint32_t cgid;
+    uint32_t mode;
+    uint32_t __seq;
+    uint64_t __unused1;
+    uint64_t __unused2;
+};
+
 struct shmid_ds {
-    uint32_t shm_perm_key;    // IPC key
-    uint32_t shm_perm_uid;    // Owner UID
-    uint32_t shm_perm_gid;    // Owner GID
-    uint32_t shm_perm_mode;   // Permission bits
-    uint64_t shm_segsz;       // Size of segment (bytes)
-    uint32_t shm_nattch;      // Number of current attaches
-    uint64_t shm_atime;       // Last attach time
-    uint64_t shm_dtime;       // Last detach time
-    uint64_t shm_ctime;       // Creation time
-    uint32_t shm_cpid;        // PID of creator
-    uint32_t shm_lpid;        // PID of last shmat/shmdt
+    struct ipc_perm shm_perm;
+    uint64_t shm_segsz;
+    uint64_t shm_atime;
+    uint64_t shm_dtime;
+    uint64_t shm_ctime;
+    uint32_t shm_cpid;
+    uint32_t shm_lpid;
+    uint64_t shm_nattch;
+    uint64_t __unused4;
+    uint64_t __unused5;
 };
 
 // ── Kernel API ──────────────────────────────────────────────────────────

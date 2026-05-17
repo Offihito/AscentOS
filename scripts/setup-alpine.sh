@@ -137,6 +137,18 @@ install_apk "libbz2" "main"
 install_apk "brotli-libs" "main"
 install_apk "zlib" "main"
 
+# GTK 3.0 and its core dependencies
+echo "[*] Installing GTK 3.0 and dependencies..."
+install_apk "gtk+3.0" "community"
+install_apk "at-spi2-core" "main"
+install_apk "dbus-libs" "main"
+install_apk "libepoxy" "main"
+install_apk "adwaita-icon-theme" "community"
+install_apk "iso-codes" "main"
+install_apk "wayland" "main"
+install_apk "libxkbcommon" "main"
+
+
 # GTK2 Development headers (for host compilation)
 echo "[*] Installing GTK 2.0 development packages..."
 install_apk "gtk+2.0-dev" "community"
@@ -156,7 +168,66 @@ install_apk "libxrandr-dev" "main"
 install_apk "libxinerama-dev" "main"
 install_apk "cairo-dev" "main"
 install_apk "libx11-dev" "main"
+install_apk "libxrender-dev" "main"
+install_apk "fontconfig-dev" "main"
+install_apk "freetype-dev" "main"
+install_apk "libpng-dev" "main"
+install_apk "zlib-dev" "main"
+install_apk "libxext-dev" "main"
+install_apk "libxi-dev" "main"
+install_apk "libxcursor-dev" "main"
+install_apk "libxfixes-dev" "main"
 install_apk "xorgproto" "main"
+install_apk "python3" "main"
+install_apk "dbus-dev" "main"
+
+# GTK 3.0 Development headers
+echo "[*] Installing GTK 3.0 development packages..."
+install_apk "gtk+3.0-dev" "community"
+install_apk "at-spi2-core-dev" "main"
+install_apk "libepoxy-dev" "main"
+install_apk "wayland-dev" "main"
+install_apk "libxkbcommon-dev" "main"
+install_apk "mesa-dev" "main"
+
+# Mousepad (Text Editor) + GTK Plumbing
+install_apk "libpng" "main"
+install_apk "librsvg" "community"
+install_apk "shared-mime-info" "main"
+install_apk "adwaita-icon-theme" "main"
+install_apk "gsettings-desktop-schemas" "community"
+install_apk "gettext-libs" "main"
+install_apk "gtksourceview" "main"
+install_apk "mousepad" "community"
+install_apk "gspell" "community"
+install_apk "libxfce4ui" "community"
+
+# 4. Finalize GTK environment
+echo "[*] Compiling GSettings schemas..."
+if [ -d "${ROOTFS_DIR}/usr/share/glib-2.0/schemas" ]; then
+    if command -v glib-compile-schemas >/dev/null 2>&1; then
+        glib-compile-schemas "${ROOTFS_DIR}/usr/share/glib-2.0/schemas"
+    fi
+fi
+
+echo "[*] Injecting gdk-pixbuf loaders cache..."
+# Manually register PNG and SVG loaders since we can't run the query tool
+LOADERS_DIR="/usr/lib/gdk-pixbuf-2.0/2.10.0"
+mkdir -p "${ROOTFS_DIR}${LOADERS_DIR}"
+cat > "${ROOTFS_DIR}${LOADERS_DIR}/loaders.cache" <<EOF
+"${LOADERS_DIR}/loaders/libpixbufloader-png.so"
+"png" 5 "gdk-pixbuf" "PNG" "LGPL"
+"image/png" ""
+"png" ""
+"\211PNG\r\n\032\n" "" 100
+
+"${LOADERS_DIR}/loaders/libpixbufloader-svg.so"
+"svg" 6 "gdk-pixbuf" "Scalable Vector Graphics" "LGPL"
+"image/svg+xml" "image/svg" "image/svg-xml" "image/vnd.adobe.svg+xml" "text/xml-svg" "image/svg+xml-compressed" ""
+"svg" "svgz" "svg.gz" ""
+" <svg" "* " 100
+" <!DOCTYPE svg" "* " 100
+EOF
 
 # 4. Inject custom binaries
 echo "[*] Injecting custom binaries into rootfs..."
@@ -164,6 +235,10 @@ mkdir -p "${ROOTFS_DIR}/bin"
 if [ -f "${ROOT_DIR}/userland/gtk_test.elf" ]; then
     cp "${ROOT_DIR}/userland/gtk_test.elf" "${ROOTFS_DIR}/bin/gtk_test"
     chmod +x "${ROOTFS_DIR}/bin/gtk_test"
+fi
+if [ -f "${ROOT_DIR}/userland/gtk3_test.elf" ]; then
+    cp "${ROOT_DIR}/userland/gtk3_test.elf" "${ROOTFS_DIR}/bin/gtk3_test"
+    chmod +x "${ROOTFS_DIR}/bin/gtk3_test"
 fi
 
 # 5. Inject into disk.img

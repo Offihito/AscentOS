@@ -11,6 +11,18 @@
 struct wait_queue_entry;
 typedef struct wait_queue_entry wait_queue_entry_t;
 
+#include "../lock/spinlock.h"
+
+// Shared memory management structure for 1:1 threads
+struct mm_struct {
+  struct vma_list vmas;    // Virtual memory areas
+  uint64_t brk_base;       // Base of the heap
+  uint64_t brk_current;    // Current end of the heap
+  uint64_t mmap_next_addr; // Bump-pointer for anonymous mmap
+  int ref_count;           // Reference count for sharing across threads
+  spinlock_t lock;         // Lock for thread-safe MM state updates
+};
+
 #define MAX_FDS 256
 
 // Signal constants
@@ -92,6 +104,7 @@ struct thread {
   bool is_idle;                 // True for idle thread (cannot be terminated)
   void *fork_ctx;               // Saved register state for child entry
   bool is_main_session;    // True if this is the primary user session (Bash)
+  uint64_t clone_flags;     // Flags passed to clone()
   struct thread *parent;   // Pointer to parent thread (for wait4)
   struct thread *children; // Head of children list
   struct thread *sibling_next; // Link to next sibling in parent's children list
@@ -101,11 +114,8 @@ struct thread {
   struct thread *global_next;  // Used to link all threads together
   struct thread *next;         // Used for runqueue / blocked queue
   char cwd_path[256];          // Current working directory
-  struct vma_list vmas;        // Virtual memory areas for this process
+  struct mm_struct *mm;        // Shared memory management state
   uint64_t fs_base;            // User FS_BASE (TLS) — inherited across fork
-  uint64_t brk_base;           // Base of the heap (after data/bss)
-  uint64_t brk_current;        // Current end of the heap
-  uint64_t mmap_next_addr;     // Bump-pointer for anonymous mmap
   uint32_t uid;                // User ID
   uint32_t gid;                // Group ID
   uint32_t euid;               // Effective User ID

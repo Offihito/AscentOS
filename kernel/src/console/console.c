@@ -79,6 +79,8 @@ static uint32_t max_rows;
 static bool cursor_logical_visible = false;
 static bool cursor_phys_on = false;
 static uint64_t last_blink_ms = 0;
+static bool cursor_repositioned = false;  // Set when CUP/ESC[H moves cursor above bottom
+static bool wrap_pending = false;  // Deferred line wrap (autowrap pending)
 
 static void console_redraw(void) {
   fb_set_backbuffer_mode(true);
@@ -186,6 +188,8 @@ void console_init(struct limine_framebuffer *framebuffer) {
   cursor_y = 0;
   terminal_escape = false;
   terminal_escape_len = 0;
+  cursor_repositioned = false;
+  wrap_pending = false;
 
   fb_clear(BG_COLOR);
 }
@@ -220,6 +224,8 @@ static void console_wipe_history_unlocked(void) {
   history_write_row = 0;
   cursor_logical_visible = false;
   cursor_phys_on = false;
+  cursor_repositioned = false;
+  wrap_pending = false;
   current_fg = FG_COLOR;
   current_bg = BG_COLOR;
 }
@@ -261,48 +267,64 @@ static void console_process_escape_sequence(void) {
     if (value == 0)
       value = 1;
     cursor_y = (cursor_y >= (uint32_t)value) ? cursor_y - value : 0;
+    wrap_pending = false;
     break;
   case 'B':
     cursor_y += value ? value : 1;
     if (cursor_y >= max_rows)
       cursor_y = max_rows - 1;
+    wrap_pending = false;
     break;
   case 'C':
     cursor_x += value ? value : 1;
     if (cursor_x >= max_cols)
       cursor_x = max_cols - 1;
+    wrap_pending = false;
     break;
   case 'D':
     if (value == 0)
       value = 1;
     cursor_x = (cursor_x >= (uint32_t)value) ? cursor_x - value : 0;
+    wrap_pending = false;
     break;
-  case 'E': // Cursor Next Line — move down N lines, cursor to column 1
+  case 'E': // Cursor Next Line
     cursor_y += value ? value : 1;
     if (cursor_y >= max_rows)
       cursor_y = max_rows - 1;
     cursor_x = 0;
+    wrap_pending = false;
     break;
-  case 'F': // Cursor Previous Line — move up N lines, cursor to column 1
+  case 'F': // Cursor Previous Line
     if (value == 0)
       value = 1;
     cursor_y = (cursor_y >= (uint32_t)value) ? cursor_y - value : 0;
     cursor_x = 0;
+    wrap_pending = false;
     break;
-  case 'G': // Cursor Horizontal Absolute — move cursor to column N
+  case 'G': // Cursor Horizontal Absolute
     cursor_x = (value > 0) ? (uint32_t)(value - 1) : 0;
     if (cursor_x >= max_cols)
       cursor_x = max_cols - 1;
+    wrap_pending = false;
     break;
   case 'H':
-  case 'f':
-    cursor_y = (value > 0) ? (uint32_t)(value - 1) : 0;
+  case 'f': {
+    uint32_t new_y = (value > 0) ? (uint32_t)(value - 1) : 0;
     cursor_x = (value2 > 0) ? (uint32_t)(value2 - 1) : 0;
-    if (cursor_y >= max_rows)
-      cursor_y = max_rows - 1;
+    if (new_y >= max_rows)
+      new_y = max_rows - 1;
     if (cursor_x >= max_cols)
       cursor_x = max_cols - 1;
+    // If cursor is moved above the current content bottom, mark as
+    // repositioned so that subsequent newlines don't advance history.
+    uint32_t bottom = (history_write_row >= max_rows - 1) ? max_rows - 1
+                                                          : history_write_row;
+    if (new_y < bottom)
+      cursor_repositioned = true;
+    cursor_y = new_y;
+    wrap_pending = false;
     break;
+  }
 
   // ── Erase ─────────────────────────────────────────────────────────────────
   case 'J':
@@ -582,9 +604,34 @@ static void console_render_char(uint32_t cp) {
   if (cp == '\n') {
     cursor_x = 0;
 
-    // Determine if we're at the natural bottom of written content.
-    // If the cursor was repositioned above via ESC[H, we must NOT
-    // clear the next row (it already has content like fastfetch's logo).
+    // If the cursor was explicitly repositioned (e.g. ESC[H for a full-screen
+    // app like kilo), just advance cursor_y without touching history_write_row.
+    // This prevents the history mapping from drifting on each redraw frame.
+    if (cursor_repositioned) {
+      cursor_y++;
+      if (cursor_y >= max_rows) {
+        // Cursor overflowed the screen — need a real scroll.
+        cursor_repositioned = false;
+        if (view_scroll_offset == 0) {
+          history_write_row++;
+          scroll_up();
+          uint32_t new_row = history_write_row % HISTORY_MAX;
+          for (uint32_t i = 0; i < COLS_MAX; i++) {
+            history[new_row][i].c = 0;
+            history[new_row][i].fg = FG_COLOR;
+            history[new_row][i].bg = BG_COLOR;
+          }
+        } else {
+          cursor_y--;
+          view_scroll_offset++;
+          if (view_scroll_offset >= HISTORY_MAX - max_rows)
+            view_scroll_offset = HISTORY_MAX - max_rows;
+        }
+      }
+      return;
+    }
+
+    // Normal sequential output — advance history tracking.
     uint32_t bottom_screen =
         (history_write_row >= max_rows - 1) ? max_rows - 1 : history_write_row;
     bool at_bottom = (cursor_y >= bottom_screen);
@@ -627,6 +674,7 @@ static void console_render_char(uint32_t cp) {
 
   if (cp == '\r') {
     cursor_x = 0;
+    wrap_pending = false;  // \r cancels any pending autowrap
     return;
   }
 
@@ -656,6 +704,15 @@ static void console_render_char(uint32_t cp) {
     return;
   }
 
+  // ── Deferred autowrap: if a previous character hit the right margin,
+  // perform the actual line-feed now (before drawing this new character).
+  if (wrap_pending) {
+    wrap_pending = false;
+    cursor_x = 0;
+    // Reuse the newline logic for advancing the row
+    console_render_char('\n');
+  }
+
   // Store codepoint with current SGR colors
   if (cursor_x < COLS_MAX) {
     uint32_t row = console_history_row(cursor_y);
@@ -670,37 +727,11 @@ static void console_render_char(uint32_t cp) {
 
   cursor_x++;
   if (cursor_x >= max_cols) {
-    cursor_x = 0;
-
-    uint32_t bottom_screen =
-        (history_write_row >= max_rows - 1) ? max_rows - 1 : history_write_row;
-    bool at_bottom = (cursor_y >= bottom_screen);
-
-    cursor_y++;
-
-    if (at_bottom) {
-      history_write_row++;
-      uint32_t new_row = history_write_row % HISTORY_MAX;
-      for (uint32_t i = 0; i < COLS_MAX; i++) {
-        history[new_row][i].c = 0;
-        history[new_row][i].fg = FG_COLOR;
-        history[new_row][i].bg = BG_COLOR;
-      }
-
-      if (view_scroll_offset == 0 && cursor_y < max_rows) {
-        fb_fill_rect(0, cursor_y * FONT_HEIGHT, fb_get_width(), FONT_HEIGHT,
-                     BG_COLOR);
-      }
-    }
-
-    if (cursor_y >= max_rows) {
-      if (view_scroll_offset == 0) {
-        scroll_up();
-      } else {
-        cursor_y--;
-        view_scroll_offset++;
-      }
-    }
+    // Don't wrap immediately — defer until the next printable character.
+    // This matches real terminal behavior ("autowrap pending").
+    // A \r or cursor-positioning escape will cancel the pending wrap.
+    wrap_pending = true;
+    cursor_x = max_cols - 1;  // cursor stays at last column
   }
 }
 

@@ -2738,6 +2738,26 @@ static uint64_t sys_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms,
   return do_poll((struct pollfd *)fds_ptr, nfds, timeout_ms);
 }
 
+static uint64_t sys_ppoll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ptr,
+                          uint64_t sigmask, uint64_t sigsetsize, uint64_t a5) {
+  (void)sigmask;
+  (void)sigsetsize;
+  (void)a5;
+
+  uint64_t timeout_ms = (uint64_t)-1;
+  if (timeout_ptr && is_user_ptr(timeout_ptr)) {
+    struct {
+      int64_t tv_sec;
+      int64_t tv_nsec;
+    } *ts = (void *)timeout_ptr;
+    if (!vmm_is_user_addr_range_valid(timeout_ptr, 16))
+      return (uint64_t)-14;
+    timeout_ms = (uint64_t)(ts->tv_sec * 1000 + ts->tv_nsec / 1000000);
+  }
+
+  return sys_poll(fds_ptr, nfds, timeout_ms, 0, 0, 0);
+}
+
 static uint64_t do_pselect6(uint64_t nfds, uint64_t readfds, uint64_t writefds,
                             uint64_t exceptfds, uint64_t timeout_ms) {
   size_t set_size = (nfds + 7) / 8;
@@ -2864,6 +2884,7 @@ void syscall_register_io(void) {
   syscall_register(SYS_OPEN, sys_open);
   syscall_register(SYS_CLOSE, sys_close);
   syscall_register(SYS_POLL, sys_poll);
+  syscall_register(SYS_PPOLL, sys_ppoll);
   syscall_register(SYS_LSEEK, sys_lseek);
   syscall_register(SYS_MKDIR, sys_mkdir);
   syscall_register(SYS_MKDIRAT, sys_mkdirat);

@@ -729,9 +729,9 @@ static void execute_command(char *cmd) {
     uint64_t fault_vaddr = test_vaddr_base + 0x300000000ULL;
 
     struct thread *current = sched_get_current();
-    if (current) {
+    if (current && current->mm) {
       // Wire up dummy permissions map in active tree to prove it resolves
-      if (vma_add(&current->vmas, fault_vaddr, fault_vaddr + 4096, 0x3, 0x22,
+      if (vma_add(&current->mm->vmas, fault_vaddr, fault_vaddr + 4096, 0x3, 0x22,
                   -1, 0) != -1) {
         volatile uint64_t *fault_ptr = (volatile uint64_t *)fault_vaddr;
 
@@ -749,7 +749,7 @@ static void execute_command(char *cmd) {
         }
 
         // Purge testing structure
-        vma_remove(&current->vmas, fault_vaddr, fault_vaddr + 4096);
+        vma_remove(&current->mm->vmas, fault_vaddr, fault_vaddr + 4096);
         vmm_unmap_page(pml4, fault_vaddr);
       } else {
         console_puts("  -> SKIP: VMA list exceeded limits. Could not construct "

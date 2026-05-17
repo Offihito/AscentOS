@@ -47,6 +47,10 @@ int vma_add(struct vma_list *list, uint64_t start, uint64_t end, uint64_t prot,
 // structures) Returns true if any region was removed/split
 bool vma_remove(struct vma_list *list, uint64_t start, uint64_t end);
 
+// Update protection bits for a range, splitting VMAs if necessary.
+int vma_mprotect(struct vma_list *list, uint64_t start, uint64_t end,
+                 uint64_t new_prot);
+
 // Find VMA containing a given address (O(log n))
 struct vma *vma_find(struct vma_list *list, uint64_t addr);
 

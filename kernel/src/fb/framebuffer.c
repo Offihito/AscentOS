@@ -563,7 +563,7 @@ static uint32_t console_vfs_write(struct vfs_node *node, uint32_t offset,
   (void)node;
   (void)offset;
 
-  if (console_termios.c_oflag & ONLCR) {
+  if ((console_termios.c_oflag & OPOST) && (console_termios.c_oflag & ONLCR)) {
     fb_set_backbuffer_mode(true);
     // ONLCR: Map NL to CR-NL on output
     for (uint32_t i = 0; i < size; i++) {
