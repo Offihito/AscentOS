@@ -179,12 +179,13 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     // Non-fixed: allocate dynamically utilizing AVL Interval Gap Finding
     if (current_thread && current_thread->mm) {
       spinlock_acquire(&current_thread->mm->lock);
-      vaddr = vma_find_gap(&current_thread->mm->vmas, aligned_len, MMAP_REGION_BASE,
-                           MMAP_REGION_LIMIT);
+      vaddr = vma_find_gap(&current_thread->mm->vmas, aligned_len,
+                           MMAP_REGION_BASE, MMAP_REGION_LIMIT);
       spinlock_release(&current_thread->mm->lock);
     }
     if (vaddr == 0) {
-      // Fallback to legacy allocator if AVL gap finding fails or thread context missing
+      // Fallback to legacy allocator if AVL gap finding fails or thread context
+      // missing
       vaddr = mm_alloc_mmap_region(aligned_len);
     }
 
@@ -214,8 +215,8 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
 
     if (current_thread && current_thread->mm) {
       spinlock_acquire(&current_thread->mm->lock);
-      int vma_idx = vma_add(&current_thread->mm->vmas, result, result + aligned_len,
-                            prot, flags, (int)fd, offset);
+      int vma_idx = vma_add(&current_thread->mm->vmas, result,
+                            result + aligned_len, prot, flags, (int)fd, offset);
       spinlock_release(&current_thread->mm->lock);
       if (vma_idx < 0) {
         klog_puts("[MMAP] Warning: failed to register VMA for file mapping\n");
@@ -255,8 +256,9 @@ uint64_t sys_mmap(uint64_t addr, uint64_t length, uint64_t prot, uint64_t flags,
     spinlock_acquire(&current_thread->mm->lock);
     int vma_idx = vma_add(&current_thread->mm->vmas, vaddr, vaddr + aligned_len,
                           prot, flags, -1, 0);
-    
-    // Update the mmap bump pointer if we were using the old-style allocator range
+
+    // Update the mmap bump pointer if we were using the old-style allocator
+    // range
     current_thread->mm->mmap_next_addr =
         MAX(current_thread->mm->mmap_next_addr, vaddr + aligned_len);
     spinlock_release(&current_thread->mm->lock);
@@ -431,12 +433,13 @@ static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
 
   uint64_t aligned_len = PAGE_ALIGN_UP(len);
   uint64_t *pml4 = vmm_get_active_pml4();
-  
+
   struct thread *current = sched_get_current();
-  if (!current) return E_INVAL;
+  if (!current)
+    return E_INVAL;
 
   spinlock_acquire(&current->mm->lock);
-  
+
   for (uint64_t va = addr; va < addr + aligned_len; va += PAGE_SIZE) {
     uint64_t phys = vmm_virt_to_phys(pml4, va);
     if (phys == 0)
@@ -449,12 +452,12 @@ static uint64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot,
       return E_NOMEM;
     }
   }
-  
-  // Synchronize the VMA tree so that syscall validation (vmm_is_user_addr_range_valid)
-  // sees the updated protection bits.
+
+  // Synchronize the VMA tree so that syscall validation
+  // (vmm_is_user_addr_range_valid) sees the updated protection bits.
   vma_mprotect(&current->mm->vmas, addr, addr + aligned_len, prot);
   vma_merge_adjacent(&current->mm->vmas);
-  
+
   spinlock_release(&current->mm->lock);
 
   return 0;
@@ -556,8 +559,8 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
     }
     // Extend the VMA to cover the new range.
     vma_remove(&current->mm->vmas, old_addr, old_addr + aligned_old);
-    vma_add(&current->mm->vmas, old_addr, old_addr + aligned_new, prot, vma_flags,
-            -1, 0);
+    vma_add(&current->mm->vmas, old_addr, old_addr + aligned_new, prot,
+            vma_flags, -1, 0);
     spinlock_release(&current->mm->lock);
     return old_addr;
   }
@@ -609,8 +612,8 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
   vma_remove(&current->mm->vmas, old_addr, old_addr + aligned_old);
 
   // Register new VMA.
-  vma_add(&current->mm->vmas, new_addr, new_addr + aligned_new, prot, vma_flags, -1,
-          0);
+  vma_add(&current->mm->vmas, new_addr, new_addr + aligned_new, prot, vma_flags,
+          -1, 0);
 
   current->mm->mmap_next_addr =
       MAX(current->mm->mmap_next_addr, new_addr + aligned_new);
@@ -620,7 +623,7 @@ static uint64_t sys_mremap(uint64_t old_addr, uint64_t old_size,
 }
 
 static uint64_t sys_madvise(uint64_t addr, uint64_t len, uint64_t advice,
-                           uint64_t a3, uint64_t a4, uint64_t a5) {
+                            uint64_t a3, uint64_t a4, uint64_t a5) {
   (void)addr;
   (void)len;
   (void)advice;

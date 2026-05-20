@@ -504,6 +504,11 @@ int epoll_alloc_fd(eventpoll_t *ep) {
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
 
+  vfs_open(node);
+
+  // Release the initial creation reference, as the VFS node now owns it
+  epoll_put(ep);
+
   return fd;
 }
 
@@ -546,10 +551,12 @@ int epoll_close_fd(int fd) {
   t->fds[fd] = NULL;
   t->fd_offsets[fd] = 0;
 
-  // Free VFS node
-  kfree(node);
+  // Release epoll reference through VFS close
+  if (node) {
+    vfs_close(node);
+  }
 
-  // Release epoll reference
+  // Release the initial reference from epoll_create()
   if (ep) {
     epoll_put(ep);
   }

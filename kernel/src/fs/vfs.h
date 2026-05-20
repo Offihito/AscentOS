@@ -101,6 +101,7 @@ typedef struct vfs_node {
   spinlock_t ep_lock;           // Lock for ep_watchers
 
   struct vfs_node *ptr; // Used by mountpoints and symlinks
+  uint32_t refcount;    // Reference count for memory management
 } vfs_node_t;
 
 extern vfs_node_t *fs_root;

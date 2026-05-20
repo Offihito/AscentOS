@@ -222,6 +222,8 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
 
   size_t refcount_table_size = page_count * sizeof(uint16_t);
   size_t total_metadata_size = bitmap_size * 2 + refcount_table_size;
+  // Round up to avoid sharing a page between metadata and buddy-managed memory
+  total_metadata_size = (total_metadata_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
   klog_puts("[PMM] Required Metadata Size: ");
   klog_uint64(total_metadata_size / 1024);
@@ -389,7 +391,8 @@ void *pmm_alloc_pages(size_t count) {
   }
 
   spinlock_release(&b_zone.lock);
-  return (void *)(pfn * PAGE_SIZE);
+  void *res = (void *)(pfn * PAGE_SIZE);
+  return res;
 }
 
 void *pmm_alloc_pages_constrained(size_t count, uint64_t max_phys_addr) {
@@ -504,11 +507,11 @@ void pmm_free_pages(void *ptr, size_t count) {
   uint64_t addr = (uint64_t)ptr;
   uint64_t pfn = addr / PAGE_SIZE;
 
-  if (pfn >= highest_page || !bitmap_test(managed_bitmap, pfn)) {
+  if (pfn < lowest_page || pfn >= highest_page || !bitmap_test(managed_bitmap, pfn - lowest_page)) {
     return; // Not managed by buddy allocator (e.g. MMIO, framebuffer)
   }
 
-  if (!bitmap_test(bitmap, pfn)) {
+  if (!bitmap_test(bitmap, pfn - lowest_page)) {
     return; // Already free (prevents double-free list corruption)
   }
 

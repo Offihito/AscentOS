@@ -1,0 +1,5 @@
+*.elf
+/build
+/doomgeneric
+/limine
+/toolchain

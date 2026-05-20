@@ -50,8 +50,9 @@ void sched_init(void) {
     idle_thread->pgid = idle_thread->tid;
     idle_thread->state = THREAD_RUNNING;
     idle_thread->next = idle_thread; // Circular queue
-    
-    // Idle threads don't really use user MM, but give them a stub to avoid NULL derefs
+
+    // Idle threads don't really use user MM, but give them a stub to avoid NULL
+    // derefs
     idle_thread->mm = kmalloc(sizeof(struct mm_struct));
     if (idle_thread->mm) {
       memset(idle_thread->mm, 0, sizeof(struct mm_struct));
@@ -578,6 +579,10 @@ void sched_reap_thread(struct thread *t) {
 
   // 3. Free fork_ctx (saved register state)
   klog_puts("[REAP] Step 3: free fork_ctx\n");
+  if (t->fork_ctx) {
+    kfree(t->fork_ctx);
+    t->fork_ctx = NULL;
+  }
 
   // 4. Free user page tables (CR3) and MM if last thread
   if (t->mm) {
@@ -590,7 +595,7 @@ void sched_reap_thread(struct thread *t) {
         vmm_free_user_pages_vma(t->cr3, &t->mm->vmas);
         t->cr3 = 0;
       }
-      // vma_list_destroy could be called here if it handles tree walking
+      vma_list_destroy(&t->mm->vmas);
       kfree(t->mm);
     } else {
       spinlock_release(&t->mm->lock);

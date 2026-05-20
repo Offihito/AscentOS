@@ -138,7 +138,6 @@ void process_do_exit(uint64_t status) {
       struct cpu_info *cpu = cpu_get_current();
       __asm__ volatile("mov %0, %%cr3" ::"r"(cpu->kernel_cr3) : "memory");
     }
-
   }
 
   if (current && current->is_forked_child) {
@@ -408,9 +407,13 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
 
   uint64_t *new_pml4 = vmm_create_pml4();
   if (!new_pml4) {
-    // Cleanup skipped for brevity in this first pass, but ideally we'd kfree
-    // everything
     kfree(path);
+    for (int i = 0; i < argc; i++)
+      kfree(k_argv[i]);
+    kfree(k_argv);
+    for (int i = 0; i < envc; i++)
+      kfree(k_envp[i]);
+    kfree(k_envp);
     return (uint64_t)-12;
   }
 
@@ -445,6 +448,14 @@ static uint64_t sys_execve(struct syscall_regs *regs) {
     // Restore old VMA list
     current->mm->vmas = old_vmas;
     kfree(path);
+    for (int i = 0; i < argc; i++)
+      kfree(k_argv[i]);
+    kfree(k_argv);
+    for (int i = 0; i < envc; i++)
+      kfree(k_envp[i]);
+    kfree(k_envp);
+    // Note: new_pml4 is leaked if elf_load fails. Fixing that would require
+    // vmm_destroy_pml4 or similar, but for now we focus on the reported leak.
     return (uint64_t)-8; // ENOEXEC
   }
 
@@ -545,6 +556,10 @@ uint64_t sys_fork(struct syscall_regs *regs) {
   struct syscall_regs *child_regs = kmalloc(sizeof(struct syscall_regs));
   if (!child_regs) {
     klog_puts("[FORK] Failed: OOM for child regs\n");
+    if (child_cr3) {
+      vmm_free_user_pages_vma(
+          child_cr3, (parent && parent->mm) ? &parent->mm->vmas : NULL);
+    }
     return (uint64_t)(-12);
   }
   memcpy(child_regs, regs, sizeof(struct syscall_regs));
@@ -552,14 +567,24 @@ uint64_t sys_fork(struct syscall_regs *regs) {
 
   // 4. Create a kernel thread for the child process.
   //    sched_create_kernel_thread enqueues it on a CPU's run queue.
-  //    We FORCE it to the current CPU for now to ensure visibility and
-  //    scheduling.
   struct thread *child =
       sched_create_kernel_thread(fork_child_entry, cpu_get_current(), false);
   if (!child) {
     kfree(child_regs);
+    if (child_cr3) {
+      vmm_free_user_pages_vma(
+          child_cr3, (parent && parent->mm) ? &parent->mm->vmas : NULL);
+    }
     klog_puts("[FORK] Failed: could not create child thread\n");
     return (uint64_t)(-12);
+  }
+
+  // Clear or free the default MM allocated by sched_create_kernel_thread
+  // as we're about to replace it with a cloned one.
+  if (child->mm) {
+    vma_list_destroy(&child->mm->vmas);
+    kfree(child->mm);
+    child->mm = NULL;
   }
 
   // 5. Configure child thread
@@ -589,6 +614,8 @@ uint64_t sys_fork(struct syscall_regs *regs) {
       spinlock_init(&child->mm->lock);
     }
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
+    memcpy(child->signal_handlers, parent->signal_handlers,
+           sizeof(child->signal_handlers));
     child->fs_base = parent->fs_base;
     child->umask = parent->umask;
     child->uid = parent->uid;
@@ -632,16 +659,16 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
   // 1. Determine address space strategy
   uint64_t child_cr3;
   struct mm_struct *child_mm = NULL;
-  
+
   if (flags & CLONE_VM) {
     // Shared address space (threads)
     child_cr3 = parent->cr3;
     child_mm = parent->mm;
     // Shared state: Increment reference count
     if (child_mm) {
-        spinlock_acquire(&child_mm->lock);
-        child_mm->ref_count++;
-        spinlock_release(&child_mm->lock);
+      spinlock_acquire(&child_mm->lock);
+      child_mm->ref_count++;
+      spinlock_release(&child_mm->lock);
     }
   } else {
     // Private (cloned) address space (process fork via clone)
@@ -653,15 +680,15 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
     // Deep copy MM state
     child_mm = kmalloc(sizeof(struct mm_struct));
     if (child_mm) {
-        vma_list_init(&child_mm->vmas);
-        if (parent->mm) {
-            vma_list_clone(&child_mm->vmas, &parent->mm->vmas);
-            child_mm->brk_base = parent->mm->brk_base;
-            child_mm->brk_current = parent->mm->brk_current;
-            child_mm->mmap_next_addr = parent->mm->mmap_next_addr;
-        }
-        child_mm->ref_count = 1;
-        spinlock_init(&child_mm->lock);
+      vma_list_init(&child_mm->vmas);
+      if (parent->mm) {
+        vma_list_clone(&child_mm->vmas, &parent->mm->vmas);
+        child_mm->brk_base = parent->mm->brk_base;
+        child_mm->brk_current = parent->mm->brk_current;
+        child_mm->mmap_next_addr = parent->mm->mmap_next_addr;
+      }
+      child_mm->ref_count = 1;
+      spinlock_init(&child_mm->lock);
     }
   }
 
@@ -669,7 +696,7 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
   struct syscall_regs *child_regs = kmalloc(sizeof(struct syscall_regs));
   if (!child_regs) {
     if (!(flags & CLONE_VM)) {
-       // Ideally free child_cr3 here
+      // Ideally free child_cr3 here
     }
     return (uint64_t)-12;
   }
@@ -686,7 +713,28 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
       sched_create_kernel_thread(fork_child_entry, cpu_get_current(), false);
   if (!child) {
     kfree(child_regs);
+    if (!(flags & CLONE_VM) && child_cr3) {
+      vmm_free_user_pages_vma(child_cr3,
+                              child_mm ? &child_mm->vmas : &parent->mm->vmas);
+      if (child_mm) {
+        vma_list_destroy(&child_mm->vmas);
+        kfree(child_mm);
+      }
+    }
     return (uint64_t)-12;
+  }
+
+  // Clean up default MM
+  if (child->mm && (flags & CLONE_VM)) {
+    // If we're sharing VM, we definitely don't need the new private MM
+    vma_list_destroy(&child->mm->vmas);
+    kfree(child->mm);
+    child->mm = NULL;
+  } else if (child->mm && !(flags & CLONE_VM)) {
+    // If we're cloning VM, we also replace it
+    vma_list_destroy(&child->mm->vmas);
+    kfree(child->mm);
+    child->mm = NULL;
   }
 
   // 4. Configure child
@@ -743,15 +791,17 @@ static uint64_t sys_clone(struct syscall_regs *regs) {
   // Shared state copies
   child->mm = child_mm;
   memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
-  child->uid = parent->uid; child->gid = parent->gid;
-  child->euid = parent->euid; child->egid = parent->egid;
+  child->uid = parent->uid;
+  child->gid = parent->gid;
+  child->euid = parent->euid;
+  child->egid = parent->egid;
   child->pgid = parent->pgid;
+  memcpy(child->signal_handlers, parent->signal_handlers,
+         sizeof(child->signal_handlers));
 
-  // Add to parent's children list
-  spinlock_acquire(&tid_lock);
-  child->sibling_next = parent->children;
-  parent->children = child;
-  spinlock_release(&tid_lock);
+  // NOTE: sched_create_kernel_thread already added the child to the parent's
+  // children list. Adding it again here would create a circular list and
+  // cause wait4 to hang or double-reap.
 
   sched_enqueue_thread(child, cpu_get_current());
 
@@ -1062,9 +1112,14 @@ static uint64_t sys_setitimer(uint64_t which, uint64_t new_val_ptr,
 }
 
 // ── Registration ────────────────────────────────────────────────────────────
-static uint64_t sys_sched_yield(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
-                                uint64_t a4, uint64_t a5) {
-  (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+static uint64_t sys_sched_yield(uint64_t a0, uint64_t a1, uint64_t a2,
+                                uint64_t a3, uint64_t a4, uint64_t a5) {
+  (void)a0;
+  (void)a1;
+  (void)a2;
+  (void)a3;
+  (void)a4;
+  (void)a5;
   sched_yield();
   return 0;
 }

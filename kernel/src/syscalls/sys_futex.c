@@ -173,13 +173,14 @@ static uint64_t futex_wait(uint32_t *uaddr, uint32_t val,
   // For now, if timeout_ts was provided and we returned, let's just return 0
   // as musl usually handles spurious wakeups.
   // But a 1:1 linux futex should return -110 on timeout.
-  
+
   // If the thread was woken by the timer, the scheduler sets wakeup_ticks to 0.
   // But it also sets it to 0 on FUTEX_WAKE.
   // Let's check if the thread was woken by a timeout.
   // In AscentOS, the scheduler tick handler does:
-  // if (t->wakeup_ticks && current_ticks >= t->wakeup_ticks) { t->state = READY; t->wakeup_ticks = 0; }
-  
+  // if (t->wakeup_ticks && current_ticks >= t->wakeup_ticks) { t->state =
+  // READY; t->wakeup_ticks = 0; }
+
   // We can't easily tell here unless we saved the deadline.
   return 0;
 }

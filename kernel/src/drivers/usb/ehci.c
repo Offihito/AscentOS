@@ -164,12 +164,13 @@ static void ehci_reset_port(struct ehci_controller *hc, uint8_t port) {
 
   // 1. Kick off reset
   // The spec says write 0 to bit 2 (Port Enable) and 1 to bit 8 (Port Reset).
+  // Preserve connect status, clear enable and change bits, set reset.
   status &= ~(EHCI_PORT_ENABLE | EHCI_PORT_EN_CHANGE);
   status |= EHCI_PORT_RESET;
   ehci_write_op(hc, reg, status);
 
-  // 2. Hold reset for 50ms
-  for (int i = 0; i < 50000; i++)
+  // 2. Hold reset for 50ms (USB 2.0 spec requires at least 50ms for root ports)
+  for (int i = 0; i < 100000; i++)
     io_wait();
 
   // 3. Clear reset
@@ -177,26 +178,42 @@ static void ehci_reset_port(struct ehci_controller *hc, uint8_t port) {
   status &= ~EHCI_PORT_RESET;
   ehci_write_op(hc, reg, status);
 
-  // 4. Wait for reset to settle
-  for (int i = 0; i < 10000; i++) {
+  // 4. Wait for reset bit to actually clear (HC may take a few uframes)
+  for (int i = 0; i < 100000; i++) {
     status = ehci_read_op(hc, reg);
     if (!(status & EHCI_PORT_RESET))
       break;
     io_wait();
   }
 
-  // 5. If port is ENABLED, it's High-Speed.
-  // If port is NOT enabled, it's FS/LS.
+  // 5. Post-reset recovery delay (USB 2.0 spec TRSTRCY = 10ms minimum)
+  for (int i = 0; i < 30000; i++)
+    io_wait();
+
+  // 6. Re-read status after recovery
+  status = ehci_read_op(hc, reg);
+
+  // 7. Clear any status change bits that got set during reset
+  uint32_t clear_bits = status & (EHCI_PORT_EN_CHANGE | (1 << 3) | (1 << 5));
+  if (clear_bits) {
+    ehci_write_op(hc, reg, status | clear_bits);
+    status = ehci_read_op(hc, reg);
+  }
+
+  // 8. If port is ENABLED, it's High-Speed (or QEMU FS/LS via built-in TT).
+  // If port is NOT enabled, it's FS/LS requiring companion controller.
   if (!(status & EHCI_PORT_ENABLE)) {
     klog_puts("[EHCI] Port ");
     klog_uint64(port);
-    klog_puts(": Device is FS/LS. Handing over to companion...\n");
+    klog_puts(": Not enabled after reset (FS/LS). Handing to companion...\n");
     status |= EHCI_PORT_OWNER;
     ehci_write_op(hc, reg, status);
   } else {
     klog_puts("[EHCI] Port ");
     klog_uint64(port);
-    klog_puts(": High-Speed device discovered and enabled.\n");
+    klog_puts(": Device enabled (portsc=0x");
+    klog_hex32(status);
+    klog_puts(")\n");
   }
 }
 
@@ -557,16 +574,29 @@ void ehci_init(void) {
                           EHCI_INTR_HSE);
       }
 
+      // Clear segment register (we use 32-bit addresses)
+      ehci_write_op(hc, EHCI_REG_CTRLDSSEGMENT, 0);
+
       uint32_t cmd = ehci_read_op(hc, EHCI_REG_USBCMD);
       cmd |= EHCI_CMD_RS | EHCI_CMD_ASE;
       ehci_write_op(hc, EHCI_REG_USBCMD, cmd);
+
+      // Wait for controller to start running
+      for (int w = 0; w < 100000; w++) {
+        if (!(ehci_read_op(hc, EHCI_REG_USBSTS) & EHCI_STS_HALTED))
+          break;
+        io_wait();
+      }
 
       // Route all ports to EHCI first, then hand low-speed to companion UHCI
       // This MUST happen before UHCI probes ports
       ehci_write_op(hc, EHCI_REG_CONFIGFLAG, 1);
 
-      // Clear segment register (we use 32-bit addresses)
-      ehci_write_op(hc, EHCI_REG_CTRLDSSEGMENT, 0);
+      // Wait 200ms for ports to detect connections after CONFIGFLAG is set.
+      // The USB 2.0 spec requires time for port routing and device detection.
+      // Without this delay, port enumeration may find no connected devices.
+      for (int w = 0; w < 200000; w++)
+        io_wait();
 
       hc->hcd.priv = hc;
       hc->hcd.control_transfer = ehci_hcd_control_transfer;
@@ -578,21 +608,35 @@ void ehci_init(void) {
 
 void ehci_hand_to_companion(void) {
   // Hand low-speed/full-speed ports to companion UHCI/OHCI controllers.
-  // Ports with ENABLED high-speed devices must stay under EHCI ownership.
+  // Ports with ENABLED devices must stay under EHCI ownership.
+  // Ports with NO device connected should also stay under EHCI ownership
+  // (so hot-plug detection still works through EHCI).
+  // Only hand over ports that have a CONNECTED device but failed to ENABLE
+  // (indicating a FS/LS device that EHCI can't handle natively).
   for (int i = 0; i < ehci_count; i++) {
     struct ehci_controller *hc = &controllers[i];
     for (uint8_t p = 0; p < hc->num_ports; p++) {
       uint32_t portsc = ehci_read_op(hc, EHCI_REG_PORTSC + (p * 4));
 
-      // Skip ports that are enabled (high-speed device active)
+      // Skip ports that are already enabled (device is working under EHCI)
       if (portsc & EHCI_PORT_ENABLE)
         continue;
 
-      // Hand over empty or FS/LS ports to companion controller
-      if (!(portsc & EHCI_PORT_OWNER)) {
-        portsc |= EHCI_PORT_OWNER;
-        ehci_write_op(hc, EHCI_REG_PORTSC + (p * 4), portsc);
-      }
+      // Skip ports with no device connected — keep them under EHCI
+      if (!(portsc & EHCI_PORT_CONNECT))
+        continue;
+
+      // Skip ports already owned by companion
+      if (portsc & EHCI_PORT_OWNER)
+        continue;
+
+      // This port has a connected device that didn't enable under EHCI
+      // (FS/LS device). Hand it to the companion controller.
+      klog_puts("[EHCI] Handing port ");
+      klog_uint64(p);
+      klog_puts(" to companion controller\n");
+      portsc |= EHCI_PORT_OWNER;
+      ehci_write_op(hc, EHCI_REG_PORTSC + (p * 4), portsc);
     }
   }
 }
@@ -602,24 +646,39 @@ void ehci_hand_to_companion(void) {
 // which will trigger HID driver probe (keyboard/mouse).
 
 static void ehci_enumerate_ports(struct ehci_controller *hc) {
+  klog_puts("[EHCI] Scanning ");
+  klog_uint64(hc->num_ports);
+  klog_puts(" ports...\n");
+
   for (uint8_t p = 0; p < hc->num_ports; p++) {
     uint32_t portsc = ehci_read_op(hc, EHCI_REG_PORTSC + (p * 4));
-    if (!(portsc & EHCI_PORT_CONNECT))
-      continue;
 
-    klog_puts("       - Device detected on port ");
+    klog_puts("       Port ");
     klog_uint64(p);
-    klog_puts(". Resetting...\n");
+    klog_puts(": PORTSC=0x");
+    klog_hex32(portsc);
 
+    if (!(portsc & EHCI_PORT_CONNECT)) {
+      klog_puts(" [EMPTY]\n");
+      continue;
+    }
+
+    klog_puts(" [CONNECTED] Resetting...\n");
     ehci_reset_port(hc, p);
 
-    // After reset, if it's still EHCI-enabled (high-speed), enumerate it
+    // After reset, if it's still EHCI-enabled, enumerate it
     portsc = ehci_read_op(hc, EHCI_REG_PORTSC + (p * 4));
     if (portsc & EHCI_PORT_ENABLE) {
-      // High-speed device — enumerate through USB core
+      // Device is enabled — enumerate through USB core
       // This will call usb_device_discovered → usb_enumerate_device →
       // usb_kbd_probe / usb_mouse_probe
       usb_device_discovered(&hc->hcd, p, false /* not low speed */);
+    } else {
+      klog_puts("       Port ");
+      klog_uint64(p);
+      klog_puts(": Not enabled after reset (PORTSC=0x");
+      klog_hex32(portsc);
+      klog_puts(")\n");
     }
   }
 }

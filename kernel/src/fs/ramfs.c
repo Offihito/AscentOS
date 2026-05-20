@@ -1,6 +1,6 @@
 #include "ramfs.h"
-#include "lib/string.h"
-#include "mm/heap.h"
+#include "../lib/string.h"
+#include "../mm/heap.h"
 
 // ── Internal Structures ─────────────────────────────────────────────────────
 
@@ -175,7 +175,7 @@ static vfs_node_t *ramfs_make_node(char *name, uint16_t perm, uint32_t type) {
   vfs_node_t *n = kmalloc(sizeof(vfs_node_t));
   if (!n)
     return 0;
-  memset(n, 0, sizeof(vfs_node_t));
+  vfs_node_init(n);
 
   strncpy(n->name, name, 127);
   n->mask = perm;

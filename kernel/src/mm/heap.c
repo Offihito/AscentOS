@@ -371,3 +371,111 @@ void *krealloc(void *ptr, size_t new_size) {
   }
   return new_ptr;
 }
+
+static void heap_u64_to_str(uint64_t val, char *buf) {
+  if (val == 0) {
+    buf[0] = '0';
+    buf[1] = '\0';
+    return;
+  }
+  char temp[32];
+  int i = 0;
+  while (val > 0) {
+    temp[i++] = (val % 10) + '0';
+    val /= 10;
+  }
+  int j = 0;
+  while (i > 0) {
+    buf[j++] = temp[--i];
+  }
+  buf[j] = '\0';
+}
+
+void heap_get_info(char *buf) {
+  spinlock_acquire(&heap_lock);
+  buf[0] = '\0';
+  char num_buf[32];
+
+  strcat(buf, "Slab Statistics:\n");
+  strcat(buf, "  Size | Total Slabs | Total Objs | Free Objs\n");
+  strcat(buf, "-------|-------------|------------|-----------\n");
+
+  for (size_t i = 0; i < CACHE_COUNT; i++) {
+    struct slab_cache *c = &caches[i];
+    uint32_t total_slabs = 0;
+    uint32_t total_objs = 0;
+    uint32_t free_objs = 0;
+
+    // Count in partial list
+    for (struct slab *s = c->partial; s; s = s->next) {
+      total_slabs++;
+      total_objs += s->total_count;
+      free_objs += s->free_count;
+    }
+
+    // Count in full list
+    for (struct slab *s = c->full; s; s = s->next) {
+      total_slabs++;
+      total_objs += s->total_count;
+      free_objs += s->free_count;
+    }
+
+    // Count in free list
+    for (struct slab *s = c->free; s; s = s->next) {
+      total_slabs++;
+      total_objs += s->total_count;
+      free_objs += s->free_count;
+    }
+
+    strcat(buf, "  ");
+    heap_u64_to_str(c->obj_size, num_buf);
+    strcat(buf, num_buf);
+    int pad = 5 - strlen(num_buf);
+    while (pad-- > 0)
+      strcat(buf, " ");
+    strcat(buf, "| ");
+
+    heap_u64_to_str(total_slabs, num_buf);
+    strcat(buf, num_buf);
+    pad = 12 - strlen(num_buf);
+    while (pad-- > 0)
+      strcat(buf, " ");
+    strcat(buf, "| ");
+
+    heap_u64_to_str(total_objs, num_buf);
+    strcat(buf, num_buf);
+    pad = 11 - strlen(num_buf);
+    while (pad-- > 0)
+      strcat(buf, " ");
+    strcat(buf, "| ");
+
+    heap_u64_to_str(free_objs, num_buf);
+    strcat(buf, num_buf);
+    strcat(buf, "\n");
+  }
+
+  strcat(buf, "\nBig Allocations:\n");
+  uint32_t big_count = 0;
+  uint64_t big_pages = 0;
+  for (struct big_alloc *b = big_alloc_head; b; b = b->next) {
+    big_count++;
+    big_pages += b->pages;
+  }
+
+  strcat(buf, "  Count: ");
+  heap_u64_to_str(big_count, num_buf);
+  strcat(buf, num_buf);
+  strcat(buf, "\n");
+
+  strcat(buf, "  Total Pages: ");
+  heap_u64_to_str(big_pages, num_buf);
+  strcat(buf, num_buf);
+  strcat(buf, "\n");
+
+  strcat(buf, "  Total Size: ");
+  heap_u64_to_str(big_pages * PAGE_SIZE / 1024, num_buf);
+  strcat(buf, num_buf);
+  strcat(buf, " kB\n");
+
+  spinlock_release(&heap_lock);
+}

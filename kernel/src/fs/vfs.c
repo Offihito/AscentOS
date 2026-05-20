@@ -34,14 +34,24 @@ uint32_t vfs_write(vfs_node_t *node, uint32_t offset, uint32_t size,
 }
 
 void vfs_open(vfs_node_t *node) {
-  if (node && node->open) {
+  if (!node)
+    return;
+  node->refcount++;
+  if (node->open) {
     node->open(node);
   }
 }
 
 void vfs_close(vfs_node_t *node) {
-  if (node && node->close) {
-    node->close(node);
+  if (!node)
+    return;
+  if (--node->refcount == 0) {
+    if (node->close) {
+      node->close(node);
+    }
+    if (!(node->flags & FS_PERSISTENT)) {
+      kfree(node);
+    }
   }
 }
 

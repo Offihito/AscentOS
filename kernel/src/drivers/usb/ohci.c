@@ -7,6 +7,7 @@
 #include "../../io/io.h"
 #include "../../mm/dma_alloc.h"
 #include "../../mm/pmm.h"
+#include "../../mm/vmm.h"
 #include "../pci/pci.h"
 #include "usb.h"
 #include "usb_kbd.h"
@@ -516,6 +517,14 @@ static bool ohci_probe_pci_device(struct pci_device *pci) {
   hc->vendor_id = pci->vendor_id;
   hc->device_id = pci->device_id;
   hc->present = true;
+
+  // Map MMIO pages into the kernel's page tables.
+  // The HHDM may not have page table entries for MMIO regions above physical
+  // RAM, so we must explicitly map them like the EHCI driver does.
+  vmm_map_page(vmm_get_active_pml4(), hc->mmio_base, mmio_phys,
+               PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
+  vmm_map_page(vmm_get_active_pml4(), hc->mmio_base + 0x1000,
+               mmio_phys + 0x1000, PAGE_FLAG_RW | PAGE_FLAG_PRESENT);
 
   ohci_silence(hc);
 

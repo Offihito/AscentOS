@@ -578,7 +578,7 @@ static vfs_node_t *ext2_make_vfs_node(ext2_mount_t *mnt, uint32_t inode_num,
   vfs_node_t *node = kmalloc(sizeof(vfs_node_t));
   if (!node)
     return NULL;
-  memset(node, 0, sizeof(vfs_node_t));
+  vfs_node_init(node);
 
   node->inode = inode_num;
   node->mask = inode->i_mode & 0x0FFF;

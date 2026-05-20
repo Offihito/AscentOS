@@ -271,7 +271,7 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       if (!node) {
         return (uint64_t)-12; // ENOMEM
       }
-      memset(node, 0, sizeof(vfs_node_t));
+      vfs_node_init(node);
       strcpy(node->name, "ptmx");
       node->flags = FS_CHARDEV;
       node->mask = 0666;
@@ -310,7 +310,7 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
       if (!node) {
         return (uint64_t)-12; // ENOMEM
       }
-      memset(node, 0, sizeof(vfs_node_t));
+      vfs_node_init(node);
       strcpy(node->name, dev_path);
       node->flags = FS_CHARDEV;
       node->mask = 0620; // crw--w---- typical for PTY slaves
@@ -346,110 +346,9 @@ static uint64_t do_sys_open(int dirfd, const char *path, uint64_t flags,
     node = fb_lookup_device((char *)dev_path);
   }
 
-  // Fall back to normal VFS path resolution
+  // Fall back to normal VFS path resolution handles everything else
   if (!node) {
-    // Special hack for /proc
-    if (strncmp(path, "/proc/", 6) == 0) {
-      const char *p = path + 6;
-      if (strncmp(p, "self/", 5) == 0)
-        p += 5;
-      else {
-        // Skip pid if present
-        while (*p >= '0' && *p <= '9')
-          p++;
-        if (*p == '/')
-          p++;
-      }
-
-      if (strcmp(p, "cmdline") == 0) {
-        // Create a temporary ramfs-like node for cmdline
-        vfs_node_t *proc_node = kmalloc(sizeof(vfs_node_t));
-        if (proc_node) {
-          memset(proc_node, 0, sizeof(vfs_node_t));
-          ramfs_file_t *rf = kmalloc(sizeof(ramfs_file_t));
-          if (rf) {
-            rf->data = kmalloc(7);
-            memcpy(rf->data, "Xfbdev", 7); // Mock cmdline
-            rf->capacity = 7;
-            proc_node->flags = FS_FILE;
-            proc_node->device = rf;
-            proc_node->length = 7;
-            proc_node->read = ramfs_read;
-            proc_node->write = NULL;
-            proc_node->close = NULL;
-            node = proc_node;
-          } else {
-            kfree(proc_node);
-          }
-        }
-      } else if (strcmp(p, "meminfo") == 0) {
-        vfs_node_t *proc_node = kmalloc(sizeof(vfs_node_t));
-        if (proc_node) {
-          memset(proc_node, 0, sizeof(vfs_node_t));
-          strncpy(proc_node->name, "meminfo", 127);
-          proc_node->flags = FS_FILE;
-          proc_node->mask = 0444; // Read-only
-          proc_node->read = procfs_meminfo_read;
-          proc_node->length = 512; // Dummy size, redefined on read
-          node = proc_node;
-        }
-      } else if (strcmp(p, "cpuinfo") == 0) {
-        vfs_node_t *proc_node = kmalloc(sizeof(vfs_node_t));
-        if (proc_node) {
-          memset(proc_node, 0, sizeof(vfs_node_t));
-          strncpy(proc_node->name, "cpuinfo", 127);
-          proc_node->flags = FS_FILE;
-          proc_node->mask = 0444; // Read-only
-          proc_node->read = procfs_cpuinfo_read;
-          proc_node->length = 2048; // Dummy size
-          node = proc_node;
-        }
-      } else if (strcmp(p, "partitions") == 0) {
-        vfs_node_t *proc_node = kmalloc(sizeof(vfs_node_t));
-        if (proc_node) {
-          memset(proc_node, 0, sizeof(vfs_node_t));
-          strncpy(proc_node->name, "partitions", 127);
-          proc_node->flags = FS_FILE;
-          proc_node->mask = 0444; // Read-only
-          proc_node->read = procfs_partitions_read;
-          proc_node->length = 1024; // Dummy size
-          node = proc_node;
-        }
-      } else if (strcmp(p, "uptime") == 0) {
-        vfs_node_t *proc_node = kmalloc(sizeof(vfs_node_t));
-        if (proc_node) {
-          memset(proc_node, 0, sizeof(vfs_node_t));
-          strncpy(proc_node->name, "uptime", 127);
-          proc_node->flags = FS_FILE;
-          proc_node->mask = 0444;
-          proc_node->read = procfs_uptime_read;
-          node = proc_node;
-        }
-      } else if (strcmp(p, "mounts") == 0) {
-        vfs_node_t *proc_node = kmalloc(sizeof(vfs_node_t));
-        if (proc_node) {
-          memset(proc_node, 0, sizeof(vfs_node_t));
-          strncpy(proc_node->name, "mounts", 127);
-          proc_node->flags = FS_FILE;
-          proc_node->mask = 0444;
-          proc_node->read = procfs_mounts_read;
-          node = proc_node;
-        }
-      } else if (strcmp(p, "stat") == 0) {
-        vfs_node_t *proc_node = kmalloc(sizeof(vfs_node_t));
-        if (proc_node) {
-          memset(proc_node, 0, sizeof(vfs_node_t));
-          strncpy(proc_node->name, "stat", 127);
-          proc_node->flags = FS_FILE;
-          proc_node->mask = 0444;
-          proc_node->read = procfs_stat_read;
-          node = proc_node;
-        }
-      }
-    }
-
-    if (!node)
-      node = vfs_resolve_path_at(base_dir, path);
+    node = vfs_resolve_path_at(base_dir, path);
   }
 
   if (!node) {
@@ -1871,6 +1770,18 @@ static uint64_t sys_eventfd2(uint64_t initval, uint64_t flags, uint64_t a2,
   return fd;
 }
 
+static void pipe_close(vfs_node_t *node) {
+  if (!node || !node->device)
+    return;
+  ramfs_file_t *file = (ramfs_file_t *)node->device;
+  if (file->data) {
+    kfree(file->data);
+    file->data = NULL;
+  }
+  kfree(file);
+  node->device = NULL;
+}
+
 // ── sys_pipe2: pipe2(pipefd, flags) — syscall 293 ────────────────────────────
 static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
                           uint64_t a3, uint64_t a4, uint64_t a5) {
@@ -1905,7 +1816,7 @@ static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
     t->fds[fd_read] = NULL;
     return (uint64_t)-12; // ENOMEM
   }
-  memset(pipe_node, 0, sizeof(vfs_node_t));
+  vfs_node_init(pipe_node);
 
   ramfs_file_t *pipe_buf = kmalloc(sizeof(ramfs_file_t));
   if (!pipe_buf) {
@@ -1921,9 +1832,12 @@ static uint64_t sys_pipe2(uint64_t pipefd_ptr, uint64_t flags, uint64_t a2,
   pipe_node->length = 0;
   pipe_node->read = ramfs_read;
   pipe_node->write = ramfs_write;
+  pipe_node->close = pipe_close;
 
   // Both fds point to the same node; read offset and write offset tracked
   // separately
+  vfs_open(pipe_node);
+  vfs_open(pipe_node);
   t->fds[fd_read] = pipe_node;
   t->fds[fd_write] = pipe_node;
   t->fd_offsets[fd_read] = 0;
@@ -2488,6 +2402,7 @@ static uint64_t sys_dup(uint64_t oldfd, uint64_t a1, uint64_t a2, uint64_t a3,
 
   t->fds[newfd] = t->fds[oldfd];
   t->fd_offsets[newfd] = t->fd_offsets[oldfd];
+  vfs_open(t->fds[newfd]);
 
   return newfd;
 }

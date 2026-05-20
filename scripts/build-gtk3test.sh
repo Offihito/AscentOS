@@ -35,6 +35,7 @@ LIBS=(
     "-lgtk-3" "-lgdk-3" "-lpangocairo-1.0" "-lpango-1.0" "-latk-1.0" "-latk-bridge-2.0"
     "-lcairo-gobject" "-lcairo" "-lgdk_pixbuf-2.0" "-lgio-2.0" "-lgobject-2.0" "-lglib-2.0"
     "-lepoxy" "-ldbus-1" "-lX11" "-lXext" "-lXrender" "-lXi" "-lXcursor" "-lXfixes"
+    "-lwayland-client" "-lwayland-cursor" "-lwayland-egl"
     "-lXrandr" "-lXinerama" "-lXcomposite" "-lXdamage"
     "-lfontconfig" "-lfreetype" "-lpng16" "-lz" "-lm"
 )
@@ -47,7 +48,7 @@ if $CC -O2 \
     "${LIBS[@]}" \
     -Wl,-dynamic-linker,/lib/ld-musl-x86_64.so.1 \
     -Wl,-rpath,/usr/lib \
-    -Wl,-rpath-link,${SYSROOT}/usr/lib; then
+    -Wl,-rpath-link,${SYSROOT}/usr/lib:${SYSROOT}/lib; then
     echo "[SUCCESS] Built userland/gtk3_test.elf"
 else
     echo "[FAILURE] Compilation failed"

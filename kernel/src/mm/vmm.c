@@ -349,13 +349,13 @@ void vmm_unmap_page(uint64_t *pml4, uint64_t virtual_addr) {
   pt_virt[pt_index] = 0;
   vmm_flush_tlb(virtual_addr);
 
-  // Only free empty intermediate tables for kernel-space addresses that are
-  // NOT in the shared kernel heap region.  Kernel heap page tables (entries
-  // 256-511) are shallow-copied across every process PML4 — freeing a shared
-  // PT / PD / PDPT would corrupt page-table walks in every other process.
-  // The heap uses a bump allocator for virtual addresses, so intermediate
-  // tables are long-lived and recycling them is both unnecessary and dangerous.
-  if (pml4_index >= 256 && virtual_addr < KERNEL_HEAP_BASE) {
+  // Only free empty intermediate tables for user-space OR for kernel-space
+  // addresses that are NOT in the shared kernel heap region. Kernel heap
+  // page tables (entries 256-511) are shallow-copied across every process
+  // PML4 — freeing a shared PT / PD / PDPT would corrupt page-table walks
+  // in every other process.
+  if (pml4_index < 256 ||
+      (pml4_index >= 256 && virtual_addr < KERNEL_HEAP_BASE)) {
     vmm_free_empty_tables(pml4, virtual_addr);
   }
 
@@ -1002,7 +1002,7 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
     return -1;
 
   spinlock_acquire(&current->mm->lock);
-  
+
   // Look up the faulting address in the process's VMA tree.
   struct vma *vma = vma_find(&current->mm->vmas, cr2);
   if (!vma) {
@@ -1025,7 +1025,8 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
         klog_puts("[VMM] Stack expansion failed (overlap?) for CR2=");
         klog_hex64(cr2);
         klog_puts("\n");
-        vma_add(&current->mm->vmas, old_start, old_end, prot, flags, fd, offset);
+        vma_add(&current->mm->vmas, old_start, old_end, prot, flags, fd,
+                offset);
         vma = NULL;
       } else {
         // Node replaced, look it up again in the valid tree
@@ -1044,18 +1045,18 @@ int vmm_handle_page_fault(uint64_t cr2, uint64_t error_code,
       }
     }
   }
-  
-  // If we found a VMA, capture the bits we need and release the lock 
+
+  // If we found a VMA, capture the bits we need and release the lock
   // so we don't hold it during physical allocation/mapping.
   uint64_t vma_prot = 0;
   int vma_fd = -1;
   uint64_t vma_offset = 0;
   uint64_t vma_start = 0;
   if (vma) {
-      vma_prot = vma->prot;
-      vma_fd = vma->fd;
-      vma_offset = vma->offset;
-      vma_start = vma->start;
+    vma_prot = vma->prot;
+    vma_fd = vma->fd;
+    vma_offset = vma->offset;
+    vma_start = vma->start;
   }
   spinlock_release(&current->mm->lock);
 

@@ -440,8 +440,11 @@ int socket_alloc_fd(socket_t *sock) {
   t->fds[fd] = node;
   t->fd_offsets[fd] = 0;
 
-  // Socket already has refcount=1 from socket_create(), which represents FD
-  // ownership
+  // This will call socket_vfs_open() which increments sock->refcount
+  vfs_open(node);
+
+  // Release the initial creation reference, as the VFS node now owns it
+  socket_put(sock);
 
   return fd;
 }
@@ -485,10 +488,12 @@ int socket_close_fd(int fd) {
   t->fds[fd] = NULL;
   t->fd_offsets[fd] = 0;
 
-  // Free VFS node
-  kfree(node);
+  // Release socket reference through VFS close
+  if (node) {
+    vfs_close(node);
+  }
 
-  // Release socket reference
+  // Release the initial reference from socket_create()
   if (sock) {
     socket_put(sock);
   }

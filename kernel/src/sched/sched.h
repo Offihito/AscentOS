@@ -104,7 +104,7 @@ struct thread {
   bool is_idle;                 // True for idle thread (cannot be terminated)
   void *fork_ctx;               // Saved register state for child entry
   bool is_main_session;    // True if this is the primary user session (Bash)
-  uint64_t clone_flags;     // Flags passed to clone()
+  uint64_t clone_flags;    // Flags passed to clone()
   struct thread *parent;   // Pointer to parent thread (for wait4)
   struct thread *children; // Head of children list
   struct thread *sibling_next; // Link to next sibling in parent's children list

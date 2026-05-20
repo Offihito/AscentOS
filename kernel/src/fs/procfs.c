@@ -34,43 +34,41 @@ uint32_t procfs_meminfo_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   char buf[512];
   buf[0] = '\0';
 
-  uint64_t total_mem = pmm_get_total_memory();
-  uint64_t usable_mem = pmm_get_usable_memory();
-  uint64_t free_pages = pmm_get_free_pages();
-  uint64_t free_mem = free_pages * PAGE_SIZE;
+  uint64_t total_mem_val = pmm_get_total_memory();
+  uint64_t usable_mem_val = pmm_get_usable_memory();
+  uint64_t free_pages_val = (uint64_t)pmm_get_free_pages();
+  uint64_t free_mem_val = free_pages_val * 4096; // Use literal if PAGE_SIZE is causing issues
 
   char num_buf[32];
 
-  // In Linux, MemTotal is typically the total usable RAM overseen by the
-  // allocator, excluding reserved hardware, kernel binary, and basic
-  // structures. By using usable_mem, we prevent reserved regions from
-  // artificially inflating "Used Memory".
+  // MemTotal
   strcat(buf, "MemTotal:       ");
-  u64_to_str(usable_mem / 1024, num_buf);
+  u64_to_str(usable_mem_val / 1024, num_buf);
   strcat(buf, num_buf);
   strcat(buf, " kB\n");
 
+  // MemFree
   strcat(buf, "MemFree:        ");
-  u64_to_str(free_mem / 1024, num_buf);
+  u64_to_str(free_mem_val / 1024, num_buf);
   strcat(buf, num_buf);
   strcat(buf, " kB\n");
 
+  // MemAvailable
   strcat(buf, "MemAvailable:   ");
-  u64_to_str(free_mem / 1024, num_buf);
+  u64_to_str(free_mem_val / 1024, num_buf);
   strcat(buf, num_buf);
   strcat(buf, " kB\n");
 
   strcat(buf, "Buffers:        0 kB\n");
   strcat(buf, "Cached:         0 kB\n");
 
+  // MemUsable
   strcat(buf, "MemUsable:      ");
-  u64_to_str(usable_mem / 1024, num_buf);
+  u64_to_str(usable_mem_val / 1024, num_buf);
   strcat(buf, num_buf);
   strcat(buf, " kB\n");
 
-  uint32_t len = strlen(buf);
-
-  // Update node size virtually
+  uint32_t len = (uint32_t)strlen(buf);
   node->length = len;
 
   if (offset >= len)
@@ -318,6 +316,45 @@ uint32_t procfs_stat_read(vfs_node_t *node, uint32_t offset, uint32_t size,
   return size;
 }
 
+uint32_t procfs_heapinfo_read(vfs_node_t *node, uint32_t offset, uint32_t size,
+                              uint8_t *buffer) {
+  // 4KB should be plenty for heap info
+  char *buf = kmalloc(4096);
+  if (!buf)
+    return 0;
+
+  heap_get_info(buf);
+
+  uint32_t len = strlen(buf);
+  node->length = len;
+
+  if (offset >= len) {
+    kfree(buf);
+    return 0;
+  }
+  if (offset + size > len) {
+    size = len - offset;
+  }
+  memcpy(buffer, buf + offset, size);
+  kfree(buf);
+  return size;
+}
+
+uint32_t procfs_cmdline_read(vfs_node_t *node, uint32_t offset, uint32_t size,
+                             uint8_t *buffer) {
+  (void)node;
+  const char *cmd = "Xfbdev\n";
+  uint32_t len = (uint32_t)strlen(cmd);
+
+  if (offset >= len)
+    return 0;
+  if (offset + size > len) {
+    size = len - offset;
+  }
+  memcpy(buffer, cmd + offset, size);
+  return size;
+}
+
 void procfs_init(void) {
   if (!fs_root)
     return;
@@ -343,9 +380,9 @@ void procfs_init(void) {
     // Add /proc/meminfo
     vfs_node_t *meminfo_node = kmalloc(sizeof(vfs_node_t));
     if (meminfo_node) {
-      memset(meminfo_node, 0, sizeof(vfs_node_t));
+      vfs_node_init(meminfo_node);
       strncpy(meminfo_node->name, "meminfo", 127);
-      meminfo_node->flags = FS_FILE;
+      meminfo_node->flags = FS_FILE | FS_PERSISTENT;
       meminfo_node->mask = 0444; // Read-only
       meminfo_node->read = procfs_meminfo_read;
       meminfo_node->length = 512; // Dummy size, redefined on read
@@ -356,9 +393,9 @@ void procfs_init(void) {
     // Add /proc/cpuinfo
     vfs_node_t *cpuinfo_node = kmalloc(sizeof(vfs_node_t));
     if (cpuinfo_node) {
-      memset(cpuinfo_node, 0, sizeof(vfs_node_t));
+      vfs_node_init(cpuinfo_node);
       strncpy(cpuinfo_node->name, "cpuinfo", 127);
-      cpuinfo_node->flags = FS_FILE;
+      cpuinfo_node->flags = FS_FILE | FS_PERSISTENT;
       cpuinfo_node->mask = 0444; // Read-only
       cpuinfo_node->read = procfs_cpuinfo_read;
       cpuinfo_node->length = 2048; // Dummy size
@@ -369,9 +406,9 @@ void procfs_init(void) {
     // Add /proc/partitions
     vfs_node_t *part_node = kmalloc(sizeof(vfs_node_t));
     if (part_node) {
-      memset(part_node, 0, sizeof(vfs_node_t));
+      vfs_node_init(part_node);
       strncpy(part_node->name, "partitions", 127);
-      part_node->flags = FS_FILE;
+      part_node->flags = FS_FILE | FS_PERSISTENT;
       part_node->mask = 0444; // Read-only
       part_node->read = procfs_partitions_read;
       part_node->length = 1024; // Dummy size
@@ -382,9 +419,9 @@ void procfs_init(void) {
     // Add /proc/mounts
     vfs_node_t *mounts_node = kmalloc(sizeof(vfs_node_t));
     if (mounts_node) {
-      memset(mounts_node, 0, sizeof(vfs_node_t));
+      vfs_node_init(mounts_node);
       strncpy(mounts_node->name, "mounts", 127);
-      mounts_node->flags = FS_FILE;
+      mounts_node->flags = FS_FILE | FS_PERSISTENT;
       mounts_node->mask = 0444;
       mounts_node->read = procfs_mounts_read;
       ramfs_mount_node(procfs_root, mounts_node);
@@ -393,9 +430,9 @@ void procfs_init(void) {
     // Add /proc/uptime
     vfs_node_t *uptime_node = kmalloc(sizeof(vfs_node_t));
     if (uptime_node) {
-      memset(uptime_node, 0, sizeof(vfs_node_t));
+      vfs_node_init(uptime_node);
       strncpy(uptime_node->name, "uptime", 127);
-      uptime_node->flags = FS_FILE;
+      uptime_node->flags = FS_FILE | FS_PERSISTENT;
       uptime_node->mask = 0444;
       uptime_node->read = procfs_uptime_read;
       ramfs_mount_node(procfs_root, uptime_node);
@@ -404,12 +441,56 @@ void procfs_init(void) {
     // Add /proc/stat
     vfs_node_t *static_node = kmalloc(sizeof(vfs_node_t));
     if (static_node) {
-      memset(static_node, 0, sizeof(vfs_node_t));
+      vfs_node_init(static_node);
       strncpy(static_node->name, "stat", 127);
-      static_node->flags = FS_FILE;
+      static_node->flags = FS_FILE | FS_PERSISTENT;
       static_node->mask = 0444;
       static_node->read = procfs_stat_read;
       ramfs_mount_node(procfs_root, static_node);
+    }
+
+    // Add /proc/heapinfo
+    vfs_node_t *heapinfo_node = kmalloc(sizeof(vfs_node_t));
+    if (heapinfo_node) {
+      vfs_node_init(heapinfo_node);
+      strncpy(heapinfo_node->name, "heapinfo", 127);
+      heapinfo_node->flags = FS_FILE | FS_PERSISTENT;
+      heapinfo_node->mask = 0444;
+      heapinfo_node->read = procfs_heapinfo_read;
+      ramfs_mount_node(procfs_root, heapinfo_node);
+    }
+
+    // Add /proc/cmdline
+    vfs_node_t *cmdline_node = kmalloc(sizeof(vfs_node_t));
+    if (cmdline_node) {
+      vfs_node_init(cmdline_node);
+      strncpy(cmdline_node->name, "cmdline", 127);
+      cmdline_node->flags = FS_FILE | FS_PERSISTENT;
+      cmdline_node->mask = 0444;
+      cmdline_node->read = procfs_cmdline_read;
+      ramfs_mount_node(procfs_root, cmdline_node);
+    }
+
+    // Add /proc/self directory
+    vfs_node_t *self_dir = kmalloc(sizeof(vfs_node_t));
+    if (self_dir) {
+      vfs_node_init(self_dir);
+      strncpy(self_dir->name, "self", 127);
+      self_dir->flags = FS_DIRECTORY | FS_PERSISTENT;
+      self_dir->mask = 0555;
+      ramfs_mount_on(self_dir); // Crucial: Initialize directory structure!
+      ramfs_mount_node(procfs_root, self_dir);
+
+      // Add /proc/self/cmdline
+      vfs_node_t *self_cmdline = kmalloc(sizeof(vfs_node_t));
+      if (self_cmdline) {
+        vfs_node_init(self_cmdline);
+        strncpy(self_cmdline->name, "cmdline", 127);
+        self_cmdline->flags = FS_FILE | FS_PERSISTENT;
+        self_cmdline->mask = 0444;
+        self_cmdline->read = procfs_cmdline_read;
+        ramfs_mount_node(self_dir, self_cmdline);
+      }
     }
   }
 }
